@@ -31,6 +31,13 @@ var ErrUnparseableOutput = errors.New("model output did not parse as JSON")
 // round-trip — sending the precise error back and asking for valid JSON only —
 // before failing.
 //
+// Every call reseeds the conversation from scratch (task becomes the sole
+// seed message) — this is the right default for the single-shot callers
+// that dominate real usage. A caller driving a multi-round
+// revision loop that wants round N+1 to remember round N's investigation
+// should use [Runner.RunJSONContinue] instead; RunJSON's behavior and cost
+// profile are unchanged by that method's existence.
+//
 // schema is a JSON Schema (raw JSON) describing the expected shape. It is
 // threaded natively as llm.Request.ResponseSchema (capability-gated: when the
 // client reports StructuredOutput==true the schema is sent on the wire, so
@@ -46,6 +53,37 @@ var ErrUnparseableOutput = errors.New("model output did not parse as JSON")
 // repair round-trip still fails, err is non-nil but the Outcome is still
 // returned for inspection.
 func (r *Runner) RunJSON(ctx context.Context, task string, schema json.RawMessage, out any) (*Outcome, error) {
+	return r.runJSON(ctx, nil, task, schema, out)
+}
+
+// RunJSONContinue behaves exactly like [Runner.RunJSON] except it CONTINUES a
+// prior conversation instead of reseeding one: prev.Messages (the Messages
+// field of an earlier RunJSON/RunJSONContinue call's Outcome, on this same
+// Runner) becomes the starting history, and task is appended as a NEW
+// user turn rather than becoming the conversation's sole seed message. A nil
+// prev, or a prev with no Messages, degrades to plain reseeding — identical
+// to RunJSON — so a first-round caller can use this method unconditionally
+// without a nil check.
+//
+// This is the opt-in continuation entry point: it exists so a multi-round
+// revision loop (see internal/repro/repro.go Attempt) can have round N+1's
+// feedback land in the SAME conversation as round N's tool-driven
+// investigation, instead of discarding that investigation and asking the
+// model to re-orient from a truncated summary alone. maybeCompact still
+// bounds the continued history exactly as it does within a single run — no
+// separate summarizer is introduced here.
+func (r *Runner) RunJSONContinue(ctx context.Context, prev *Outcome, task string, schema json.RawMessage, out any) (*Outcome, error) {
+	var seed []llm.Message
+	if prev != nil {
+		seed = prev.Messages
+	}
+	return r.runJSON(ctx, seed, task, schema, out)
+}
+
+// runJSON is the shared implementation behind RunJSON and RunJSONContinue.
+// seed is nil for RunJSON (reseed) or a prior Outcome's Messages for
+// RunJSONContinue (continue).
+func (r *Runner) runJSON(ctx context.Context, seed []llm.Message, task string, schema json.RawMessage, out any) (*Outcome, error) {
 	prompt := task + "\n\n" + jsonInstruction(schema)
 
 	// Reserve the last iteration for a forced finalization turn: if the model is
@@ -54,36 +92,43 @@ func (r *Runner) RunJSON(ctx context.Context, task string, schema json.RawMessag
 	// dangling exploration prose that can never parse. The schema is threaded
 	// natively so the finalization turn also benefits from grammar-constrained
 	// output on capable adapters.
-	outcome, err := r.run(ctx, prompt, finalizationPrompt(schema), schema)
+	outcome, err := r.run(ctx, seed, prompt, finalizationPrompt(schema), schema)
 	if err != nil {
 		return outcome, err
 	}
 
 	// Strip + deep schema validation first (cheap, schema-aware): this catches
 	// valid-JSON-but-contract-violating output that a typed unmarshal silently
-	// tolerates — a bad enum value, a missing nested required field, an empty
-	// required string, an empty required map. Only after the body satisfies the
-	// full schema do we attempt the typed unmarshal: an early unmarshal of a
-	// wrong-shaped body yields a misleading "cannot unmarshal …" error, where
-	// the schema violation is the actionable one and is what the repair
-	// round-trip echoes back to the model.
-	var perr error
-	body, berr := stripBody(outcome.FinalText)
-	if berr != nil {
-		perr = berr
-	} else if v := validateSchema(schema, []byte(body)); v != nil {
-		perr = v
-	} else if p := json.Unmarshal([]byte(body), out); p != nil {
-		perr = p
-	} else {
+	// tolerates — a bad enum (severity "blocker"), a candidate missing its
+	// nested "evidence", an empty required string, an empty repro "files" map.
+	// Only after the body satisfies the full schema do we attempt the typed
+	// unmarshal: an early unmarshal of a wrong-shaped body yields a misleading
+	// "cannot unmarshal …" error, where the schema violation is the actionable
+	// one and is what the repair round-trip echoes back to the model.
+	perr := parseJSONInto(outcome.FinalText, schema, out)
+	if perr == nil {
 		return outcome, nil
+	}
+
+	// Schema-guided rescue: weak models frequently prefix the
+	// final JSON with prose ("Based on my investigation… {…}") or leave a
+	// mangled head, both of which fail the leading-value parse above. Before
+	// burning the repair round-trip — a tools-less, HISTORY-LESS single
+	// completion that must reproduce the whole answer blind and often
+	// fabricates — scan the cleaned output for the first embedded JSON value
+	// that ALREADY satisfies the schema. The schema is the arbiter, so an
+	// incidental json-ish fragment in the prose cannot hijack the answer.
+	if body, ok := rescueBody(outcome.FinalText, schema); ok {
+		if uerr := json.Unmarshal([]byte(body), out); uerr == nil {
+			return outcome, nil
+		}
 	}
 
 	// A run cut short by the budget pool or its own per-run token budget has no
 	// headroom for a repair completion, and a budget-stopped empty/unparseable
-	// output must keep its budget TruncationReason so callers can classify it as
-	// a budget stop, not a parse failure. Skipping the repair here also preserves
-	// the budget overshoot bound (no extra post-exhaustion call).
+	// output must keep its budget TruncationReason so the caller classifies it as
+	// a budget stop, not a parse failure. Skipping the repair here
+	// also preserves the budget overshoot bound (no extra post-exhaustion call).
 	if outcome.Truncated &&
 		(outcome.TruncationReason == TruncTokenBudget || outcome.TruncationReason == TruncBudgetPool) {
 		return outcome, fmt.Errorf("agent: %w%s: %w",
@@ -103,23 +148,90 @@ func (r *Runner) RunJSON(ctx context.Context, task string, schema json.RawMessag
 	}
 
 	repairOutcome, rerr := r.repair(ctx, outcome.Transcript, repair, schema)
+	// repair() reopened the streamed transcript (O_APPEND) to record its
+	// turn; close that fd here so it does not outlive the call. Over a long
+	// backlog run every repaired finding would otherwise leak one fd until a
+	// GC finalizer happened to run. Deferred so it fires on all paths below.
+	if repairOutcome.Transcript != nil {
+		defer repairOutcome.Transcript.closeStream()
+	}
+	// The repair completion runs against its own throwaway single-turn history
+	// (see [Runner.repair]), not outcome.messages, so it never sees — and
+	// therefore repairOutcome.Messages never carries — the run's investigation.
+	// Propagate the pre-repair conversation onto repairOutcome regardless of
+	// how repair turns out, so a caller chaining RunJSONContinue after a round
+	// that needed repair still continues from the real investigation instead
+	// of an empty history.
+	repairOutcome.Messages = outcome.Messages
 	if rerr != nil {
 		return repairOutcome, rerr
 	}
-	repairBody, berr2 := stripBody(repairOutcome.FinalText)
-	if berr2 != nil {
-		return repairOutcome, fmt.Errorf("agent: %w after one repair%s: %w",
-			ErrUnparseableOutput, truncationNote(repairOutcome), berr2)
-	}
-	if verr := validateSchema(schema, []byte(repairBody)); verr != nil {
-		return repairOutcome, fmt.Errorf("agent: %w after one repair%s: %w",
-			ErrUnparseableOutput, truncationNote(repairOutcome), verr)
-	}
-	if perr2 := json.Unmarshal([]byte(repairBody), out); perr2 != nil {
+	if perr2 := parseJSONInto(repairOutcome.FinalText, schema, out); perr2 != nil {
+		// Same rescue as the pre-repair path: a repair completion that
+		// wrapped a schema-valid answer in prose still counts.
+		if body, ok := rescueBody(repairOutcome.FinalText, schema); ok {
+			if uerr := json.Unmarshal([]byte(body), out); uerr == nil {
+				return repairOutcome, nil
+			}
+		}
 		return repairOutcome, fmt.Errorf("agent: %w after one repair%s: %w",
 			ErrUnparseableOutput, truncationNote(repairOutcome), perr2)
 	}
 	return repairOutcome, nil
+}
+
+// parseJSONInto strips text to its JSON body (think blocks and fences
+// removed, leading complete value extracted — see [stripBody]), deep-validates
+// it against schema (see [validateSchema]), and unmarshals it into out. The
+// first failure is returned in that precedence order, so the actionable
+// schema violation — not a misleading typed-unmarshal error — is what the
+// repair round-trip echoes back to the model.
+func parseJSONInto(text string, schema json.RawMessage, out any) error {
+	body, err := stripBody(text)
+	if err != nil {
+		return err
+	}
+	if verr := validateSchema(schema, []byte(body)); verr != nil {
+		return verr
+	}
+	return json.Unmarshal([]byte(body), out)
+}
+
+// rescueBody scans the cleaned model output for the first embedded JSON
+// value that satisfies schema, tolerating prose or mangled bytes BEFORE the
+// value — the case [stripBody] deliberately does not handle (it only
+// extracts a LEADING complete value). Returns ("", false) when schema is
+// empty (no arbiter, no safe way to pick a candidate) or when no candidate
+// both decodes as a complete JSON value and passes deep validation.
+//
+// Candidate starts are '{' / '[' bytes in the cleaned text; each is decoded
+// with encoding/json's Decoder (which respects string/escape boundaries and
+// rejects incomplete values, so a truncated tail is never rescued). The scan
+// is bounded to keep pathological outputs (brace-dense code dumps) cheap;
+// decode failures on non-JSON braces cost one token read each.
+func rescueBody(text string, schema json.RawMessage) (string, bool) {
+	if len(schema) == 0 {
+		return "", false
+	}
+	body := stripFences(llm.StripThinkBlocks(text))
+	const maxCandidates = 64
+	tried := 0
+	for i := 0; i < len(body) && tried < maxCandidates; i++ {
+		if body[i] != '{' && body[i] != '[' {
+			continue
+		}
+		tried++
+		dec := json.NewDecoder(strings.NewReader(body[i:]))
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil || len(raw) == 0 {
+			continue
+		}
+		if validateSchema(schema, []byte(raw)) != nil {
+			continue
+		}
+		return string(raw), true
+	}
+	return "", false
 }
 
 // truncationNote returns a short parenthetical when the run's final completion
@@ -195,25 +307,31 @@ func stripBody(text string) (string, error) {
 
 // validateSchema deeply validates body against schema. Unlike a shallow
 // root-only check, it walks the schema and the parsed instance together and
-// enforces the following JSON-Schema subset:
+// enforces the JSON-Schema subset production caller schemas actually use:
 //
 //   - type — object/array/string/integer/number/boolean/null (integer accepts
 //     only integral numbers; number accepts any).
-//   - required — at EVERY object level, not just the root.
+//   - required — at EVERY object level, not just the root (a candidate missing
+//     its "evidence", a plan missing "cmd").
 //   - properties — recursively.
 //   - additionalProperties — false rejects unknown keys; a subschema validates
-//     the values of free-form maps.
+//     the values of free-form maps (the repro/patch "files" object keyed by
+//     path with string values).
 //   - items — recursively, for every array element.
-//   - enum — exact membership.
+//   - enum — exact membership (a severity of "blocker", a confidence of
+//     "Medium").
 //   - minItems / minProperties / minLength / maxLength / minimum / maximum.
 //
 // Errors are path-qualified (e.g. candidates[0].severity) so the RunJSON
-// repair round-trip can tell the model exactly what to fix. An empty/nil
-// schema is a no-op.
+// repair round-trip can tell the model exactly what to fix. This is the
+// harness-side guarantee that every agent->phase JSON boundary is bounded by
+// its declared schema even when the provider's StructuredOutput capability is
+// off and no grammar-constrained decoding happened on the wire (the dominant
+// weak-model path). An empty/nil schema is a no-op.
 //
 // The validator is a deliberately closed subset: it does NOT implement $ref,
-// allOf/anyOf/oneOf, pattern, format, or multipleOf. Unknown keywords are
-// ignored, not rejected.
+// allOf/anyOf/oneOf, pattern, format, or multipleOf, because no known caller
+// schema uses them. Unknown keywords are ignored, not rejected.
 func validateSchema(schema json.RawMessage, body []byte) error {
 	if len(schema) == 0 {
 		return nil
@@ -321,7 +439,7 @@ func matchesType(want string, val any) bool {
 }
 
 // checkEnum enforces "enum" membership. Values are compared by canonical-JSON
-// equality, which is exact for the scalar enums these schemas use.
+// equality, which is exact for the scalar enums the phase schemas use.
 func checkEnum(path string, schema map[string]any, val any) error {
 	raw, ok := schema["enum"]
 	if !ok {

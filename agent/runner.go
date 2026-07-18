@@ -13,9 +13,9 @@ import (
 )
 
 // Runner drives an [llm.Client] through a tool-call loop. Construct one per
-// role with that role's system prompt and tool set, then call [Runner.Run] (or
-// [Runner.RunJSON]) per task. A Runner is safe for sequential reuse across
-// tasks; it holds no per-run mutable state.
+// agent role with that role's system prompt and tool set, then call
+// [Runner.Run] (or [Runner.RunJSON]) per task. A Runner is
+// safe for sequential reuse across tasks; it holds no per-run mutable state.
 type Runner struct {
 	client       llm.Client
 	tools        toolSet
@@ -23,8 +23,16 @@ type Runner struct {
 	limits       Limits
 
 	// transcriptDir, when non-empty, receives an auto-saved JSONL transcript per
-	// run, named "<timestamp>-<slug>.jsonl".
+	// run, named "<timestamp>-<slug>.jsonl" (or "<timestamp>-<key>-<slug>.jsonl"
+	// when transcriptKey is set — see WithTranscriptKey).
 	transcriptDir string
+	// transcriptKey, when non-empty, is embedded in the autosave filename so a
+	// caller that knows a stable identifier for this run BEFORE constructing the
+	// Runner (e.g. a store row's primary key, generated up front) can recover
+	// the exact transcript file later by filename match instead of guessing from
+	// a timestamp window. See WithTranscriptKey and
+	// internal/tui/transcript.go's discoverTranscript.
+	transcriptKey string
 	// maxTokens caps output tokens per completion (passed through to the client).
 	// Zero lets the adapter apply its own default.
 	maxTokens int
@@ -50,10 +58,25 @@ func WithLimits(l Limits) Option {
 }
 
 // WithTranscriptDir makes each run auto-save its transcript to a JSONL file
-// under dir, named "<RFC3339-timestamp>-<task-slug>.jsonl". The directory is
-// created on demand.
+// under dir, named "<RFC3339-timestamp>-<task-slug>.jsonl" (or
+// "<RFC3339-timestamp>-<key>-<task-slug>.jsonl" when WithTranscriptKey is also
+// set). The directory is created on demand.
 func WithTranscriptDir(dir string) Option {
 	return func(r *Runner) { r.transcriptDir = dir }
+}
+
+// WithTranscriptKey embeds key in the autosave filename between the timestamp
+// and the task slug, giving a caller that mints a stable identifier for this
+// run BEFORE constructing the Runner (typically a store row's primary key,
+// generated up front so it can be threaded through both the runner and the
+// eventual row insert) an EXACT way to recover the transcript file later, by
+// filename match, instead of a timestamp-window guess. A no-op unless
+// WithTranscriptDir is also set. Empty key is a no-op (preserves the plain
+// "<timestamp>-<slug>.jsonl" naming used by callers with no stable key —
+// e.g. callers that only learn a run's stable ID from their own store after
+// the run completes, and so have nothing to key by up front).
+func WithTranscriptKey(key string) Option {
+	return func(r *Runner) { r.transcriptKey = key }
 }
 
 // WithMaxTokens caps output tokens per completion. Zero uses the adapter
@@ -115,36 +138,79 @@ func NewRunner(client llm.Client, tools []Tool, systemPrompt string, opts ...Opt
 // rather than returned half-written. It costs at most one additional completion
 // per truncated turn and is reflected in the Outcome's Iterations and Usage.
 func (r *Runner) Run(ctx context.Context, task string) (*Outcome, error) {
-	return r.run(ctx, task, "", nil)
+	return r.run(ctx, nil, task, "", nil)
 }
 
-// run is the shared loop body. finalizePrompt, when non-empty, enables forced
-// finalization: when a stop condition fires (iteration cap, per-run token
-// budget, or shared budget pool) the loop injects this user-role message and
-// takes a single final tool-less completion so the model can emit its answer
-// instead of dangling exploration prose or a silently empty output. RunJSON
-// passes a JSON-demanding prompt; the public Run passes "" and therefore never
-// pays the extra turn.
+// run is the shared loop body. seed, when non-nil, is a prior conversation to
+// continue: task is appended as a NEW user turn onto seed instead of becoming
+// the conversation's sole seed message. The public Run and the default
+// RunJSON path pass seed == nil (reseed every call, today's behavior);
+// [Runner.RunJSONContinue] passes a prior Outcome's Messages so a revision
+// round lands in the SAME conversation as the investigation that produced it.
+//
+// finalizePrompt, when non-empty, enables forced finalization: when a stop
+// condition fires (iteration cap, per-run token budget, or shared budget
+// pool) the loop injects this user-role message and takes a single final
+// tool-less completion so the model can emit its answer instead of dangling
+// exploration prose or a silently empty output. RunJSON passes a
+// JSON-demanding prompt; the public Run passes "" and therefore never pays
+// the extra turn.
 //
 // responseSchema, when non-nil, is the JSON Schema for the final answer. It is
 // attached to every completion in the run (capability-gated; see [complete]),
 // so adapters that support structured output can apply grammar-constrained
 // decoding. The public Run passes nil; RunJSON passes its schema.
-func (r *Runner) run(ctx context.Context, task, finalizePrompt string, responseSchema json.RawMessage) (*Outcome, error) {
+//
+// maxEmptyTurnNudges bounds how many times run() will nudge a model that
+// produced neither a tool call nor visible text (after stripping reasoning
+// <think> blocks) back into the loop before giving up and treating the turn
+// as finished. Real reasoning models (MiniMax-M3 observed in production)
+// sometimes emit an assistant turn that is ONLY an inline think
+// block — stop=end_turn, zero tool calls — which the old code treated as
+// "model finished its turn", handing RunJSON unparseable empty text and
+// burning its single repair for nothing. The cap keeps a persistently silent
+// model from looping forever: after maxEmptyTurnNudges nudges go unanswered,
+// run() falls through to today's break.
+const maxEmptyTurnNudges = 2
+
+// emptyTurnNudge is appended as a user turn when a completion produced no
+// tool call and no visible text, to give the model another chance to either
+// call a tool or emit its final answer. See [maxEmptyTurnNudges].
+const emptyTurnNudge = "You made no tool call and produced no final answer. Continue: call a tool or emit your final answer now."
+
+func (r *Runner) run(ctx context.Context, seed []llm.Message, task, finalizePrompt string, responseSchema json.RawMessage) (*Outcome, error) {
 	tr := NewTranscript()
 	if r.transcriptDir != "" {
 		tr.enableStreaming(r.transcriptPath(tr, task))
 	}
 
-	messages := []llm.Message{{Role: llm.RoleUser, Content: task}}
+	var messages []llm.Message
+	if len(seed) > 0 {
+		messages = make([]llm.Message, 0, len(seed)+1)
+		messages = append(messages, seed...)
+		messages = append(messages, llm.Message{Role: llm.RoleUser, Content: task})
+	} else {
+		messages = []llm.Message{{Role: llm.RoleUser, Content: task}}
+	}
 
 	outcome := &Outcome{Transcript: tr}
+	// Snapshot the conversation into the Outcome on every return path (clean
+	// finish, truncation, or error) so a caller that wants to continue this
+	// conversation (RunJSONContinue) always has the latest history available,
+	// even from a truncated or erroring run. messages is reassigned (not just
+	// mutated) throughout the loop below; the deferred closure reads it by
+	// reference at return time, not at defer-registration time.
+	defer func() { outcome.Messages = messages }()
 
 	// History-compaction state. toolNameByID lets a tool-result stub name the
 	// tool it answered; compactThreshold re-arms upward after each firing so
 	// compaction is bounded and never thrashes the prompt cache turn-over-turn.
 	toolNameByID := map[string]string{}
 	compactThreshold := r.limits.HistoryTokenBudget
+
+	// emptyTurnNudges counts how many empty/think-only turns have already
+	// been nudged this run (see [maxEmptyTurnNudges]).
+	emptyTurnNudges := 0
 
 	for {
 		// Stop before the next turn if we've hit the iteration cap. The
@@ -161,8 +227,8 @@ func (r *Runner) run(ctx context.Context, task, finalizePrompt string, responseS
 		}
 		// Stop before the next turn if we're already over budget. The budget
 		// stop gets the same one reserved finalization turn the iteration cap
-		// gets (RunJSON only), so a near-budget model can emit its answer
-		// instead of returning a silently empty result.
+		// gets (RunJSON only), so a near-budget agent can emit its answer
+		// instead of returning a silently empty result to the caller.
 		if r.overBudget(outcome.Usage) {
 			if err := r.finalizeAndTruncate(ctx, tr, &messages, outcome, finalizePrompt, responseSchema, compactThreshold, toolNameByID, task); err != nil {
 				return outcome, err
@@ -184,7 +250,7 @@ func (r *Runner) run(ctx context.Context, task, finalizePrompt string, responseS
 					return outcome, fmt.Errorf("agent: budget check: %w", err)
 				}
 				// Shared pool exhausted: give the model one reserved finalization
-				// turn (RunJSON only) so a near-budget model can still emit its
+				// turn (RunJSON only) so a near-budget agent can still emit its
 				// answer before we classify the stop as TruncBudgetPool.
 				if err := r.finalizeAndTruncate(ctx, tr, &messages, outcome, finalizePrompt, responseSchema, compactThreshold, toolNameByID, task); err != nil {
 					return outcome, err
@@ -221,6 +287,22 @@ func (r *Runner) run(ctx context.Context, task, finalizePrompt string, responseS
 			if resp.StopReason == llm.StopError {
 				tr.closeStream()
 				return outcome, &ErrStopReason{StopReason: resp.StopReason, Text: resp.Text, Outcome: outcome}
+			}
+			// A turn with no tool call and no visible text once reasoning
+			// <think> blocks are stripped is not a real answer — it's an
+			// empty/think-only turn (MiniMax-M3 observed emitting
+			// exactly this in production, sometimes narrating a tool call it
+			// never actually made). Nudge the model to continue instead of
+			// treating the turn as finished, up to maxEmptyTurnNudges times;
+			// the nudge turn goes through the normal loop top (iteration cap,
+			// budget checks, compaction all still apply) so it bills and
+			// counts like any other turn. This also covers a truncated,
+			// unclosed think block: StripThinkBlocks strips it to empty too,
+			// and nudging gives the model a chance to re-emit cleanly.
+			if strings.TrimSpace(llm.StripThinkBlocks(resp.Text)) == "" && emptyTurnNudges < maxEmptyTurnNudges {
+				emptyTurnNudges++
+				messages = append(messages, llm.Message{Role: llm.RoleUser, Content: emptyTurnNudge})
+				continue
 			}
 			break
 		}
@@ -264,7 +346,7 @@ func (r *Runner) run(ctx context.Context, task, finalizePrompt string, responseS
 		// After executing tools, check the budget again before looping so we
 		// truncate promptly rather than issuing one more expensive completion.
 		// A budget hit post-tool still gets the one reserved finalization turn
-		// (RunJSON only) so a near-budget model can emit its answer.
+		// (RunJSON only) so a near-budget agent can emit its answer.
 		if r.overBudget(outcome.Usage) {
 			if err := r.finalizeAndTruncate(ctx, tr, &messages, outcome, finalizePrompt, responseSchema, compactThreshold, toolNameByID, task); err != nil {
 				return outcome, err
@@ -289,8 +371,8 @@ func (r *Runner) run(ctx context.Context, task, finalizePrompt string, responseS
 //   - compacts once so the prompt that is sent is the smallest it can be;
 //   - takes ONE tool-less completion via completeOnce (which itself handles
 //     the StopMaxTokens continuation retry), giving the model a cheap final
-//     shot at emitting its answer instead of leaving it with a silently empty
-//     output.
+//     shot at emitting its answer instead of leaving the caller with a
+//     silently empty output.
 //
 // responseSchema, when non-nil, is attached to the finalization completion so a
 // schema-aware adapter applies grammar-constrained decoding on the final turn
@@ -367,9 +449,9 @@ func (r *Runner) maybeCompact(messages []llm.Message, threshold int64, toolNameB
 // repair prompt. It replaces the previous "fresh tool loop" repair path with
 // the constrained shape: a single completion where adapters that support
 // structured output apply grammar-constrained decoding natively, so the
-// answer is shape-correct on the wire. Tools are dropped so providers that
-// refuse to combine tool use with native structured output also get the schema
-// honored.
+// answer is shape-correct on the wire. Tools are dropped so Google and
+// Anthropic (which refuse to combine tool use with native structured output)
+// also get the schema honored.
 //
 // responseSchema, when non-nil, is attached capability-gated; when the
 // adapter's StructuredOutput capability is off, the schema is dropped
@@ -580,13 +662,20 @@ func (r *Runner) finishTruncated(o *Outcome, reason string) {
 }
 
 // transcriptPath computes the JSONL path for a run's transcript under
-// r.transcriptDir, named "<timestamp>-<task-slug>.jsonl". Streaming (see
+// r.transcriptDir, named "<timestamp>-<task-slug>.jsonl", or
+// "<timestamp>-<r.transcriptKey>-<task-slug>.jsonl" when WithTranscriptKey was
+// set (see its doc for why the key must be exact enough for a caller to
+// recover this file later by filename match). Streaming (see
 // Transcript.enableStreaming) opens this path lazily on the first recorded
 // event; a run that never records anything never creates the file or its
 // parent directory.
 func (r *Runner) transcriptPath(tr *Transcript, task string) string {
 	ts := tr.now().UTC().Format("20060102T150405.000Z")
-	name := ts + "-" + slug(task) + ".jsonl"
+	name := ts
+	if r.transcriptKey != "" {
+		name += "-" + r.transcriptKey
+	}
+	name += "-" + slug(task) + ".jsonl"
 	return filepath.Join(r.transcriptDir, name)
 }
 

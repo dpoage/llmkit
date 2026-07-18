@@ -2,9 +2,10 @@
 // drives an [llm.Client] through a bounded set of tools until the model
 // produces a final answer, runs out of iterations, or exhausts a token budget.
 //
-// The harness itself is provider-agnostic: it speaks only the normalized [llm]
-// vocabulary. Instantiate a [Runner] with a client, system prompt, and tool
-// set, then call [Runner.Run] (or [Runner.RunJSON]) per task.
+// Callers with different roles (e.g. a bug finder, a verifier, a reproducer)
+// all instantiate the same [Runner] with different system prompts and tool
+// sets. The harness itself is provider-agnostic: it speaks only the
+// normalized [llm] vocabulary.
 //
 // # Tools
 //
@@ -14,6 +15,11 @@
 // with different arguments, try another tool, or give up gracefully). Only
 // infrastructure-level failures (a failed [llm.Client.Complete], context
 // cancellation) abort the loop.
+//
+// The built-in read-only code tools ([NewReadFile], [NewListDir], [NewGrep])
+// are rooted at a single repository directory and enforce path-traversal
+// protection: absolute paths and "../" escapes are rejected, and symlinks may
+// not resolve outside the root.
 //
 // # Limits and partial results
 //
@@ -62,8 +68,9 @@ type Limits struct {
 	// negative value disables the budget.
 	TokenBudget int64
 	// CacheReadWeight discounts cache-read input tokens in the per-run budget
-	// check. Valid range is (0,1]; a zero/negative value is resolved to 1.0
-	// (no discount) by resolve().
+	// check. Valid range is (0,1]; the caller always passes an already-resolved
+	// non-zero weight (config 0 -> DefaultCacheReadBudgetWeight upstream). A
+	// zero/negative value is resolved to 1.0 (no discount) by resolve().
 	CacheReadWeight float64
 	// HistoryTokenBudget enables threshold-triggered history compaction. When the
 	// estimated size of the growing message history (bytes/4 over message content
@@ -121,9 +128,9 @@ const (
 	TruncTokenBudget = "token_budget"
 	// TruncBudgetPool means a shared budget pool (via Limits.BudgetCheck) was
 	// exhausted before this run's own per-run budget, so the run stopped
-	// pre-turn. It is distinct from TruncTokenBudget so callers can tell a
-	// run that was stopped by the run-spanning ceiling from one that merely
-	// exhausted its own allowance.
+	// pre-turn. It is distinct from TruncTokenBudget so the caller can tell a
+	// run that was stopped by the run-spanning ceiling ("budget-stopped") from
+	// one that merely exhausted its own allowance.
 	TruncBudgetPool = "budget_pool"
 )
 
@@ -167,6 +174,15 @@ type Outcome struct {
 	LastStopReason llm.StopReason
 	// Transcript is the full ordered record of the run. Never nil.
 	Transcript *Transcript
+	// Messages is the full conversation state (system-less: user/assistant/
+	// tool-result turns only) at the point the run returned, including the
+	// seed task, every tool call/result, and the final assistant turn. It is
+	// opaque plumbing for [Runner.RunJSONContinue]: a caller driving a
+	// multi-round revision loop threads a round's Outcome back in as the next
+	// round's starting history so the model keeps its prior investigation
+	// instead of re-orienting from scratch. Callers that don't continue a
+	// conversation (the common case) can ignore this field entirely.
+	Messages []llm.Message
 }
 
 // Validate checks the Outcome's internal invariants. It returns a non-nil error
@@ -182,9 +198,9 @@ func (o *Outcome) Validate() error {
 // ErrStopReason is returned by [Runner.Run] when the model's final turn ended
 // with [llm.StopError] (refusal, safety filter, recitation) and no tool calls.
 // Before this error existed the loop treated such turns as clean completions,
-// recording refusal prose — or stale text from an earlier turn — as the answer.
-// The partial Outcome is attached so callers can still inspect usage and the
-// transcript.
+// recording refusal prose — or stale text from an earlier turn — as the answer
+// (observed in production). The partial Outcome is attached so callers can
+// still inspect usage and the transcript.
 type ErrStopReason struct {
 	// StopReason is the provider stop reason that ended the run.
 	StopReason llm.StopReason
