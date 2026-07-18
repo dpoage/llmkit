@@ -35,3 +35,8 @@ Shared LLM tooling extracted from `bugbot`, `known`, and `go-research`.
   synchronous until a consumer needs otherwise.
 - Official vendor SDKs (anthropic-sdk-go, openai-go, google genai) rather than
   hand-rolled wire types.
+
+## License
+
+AGPL-3.0 (matching bugbot, the primary donor). The `embed` package derives
+from MIT-licensed `known`; relicensed here by the copyright holder.
