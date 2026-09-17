@@ -49,7 +49,7 @@ func SimulateCompaction(msgs []llmkit.Message, budget, threshold int64, recentK 
 		return msgs, threshold
 	}
 	compacted, pruned := compactHistory(msgs, recentK, toolNameByID)
-	if !pruned {
+	if pruned == 0 {
 		return msgs, threshold
 	}
 	return compacted, threshold * compactRearmFactor
@@ -131,8 +131,9 @@ func compactStub(toolName string, origBytes int, isErr bool) string {
 }
 
 // compactHistory replaces the Content of tool-result messages OLDER than the
-// most recent recent-K with short stubs, IN PLACE on a fresh copy, returning the
-// compacted slice and whether anything was actually pruned.
+// most recent recent-K with short stubs, IN PLACE on a fresh copy, returning
+// the compacted slice and the number of tool results actually stubbed (0
+// means nothing was pruned).
 //
 // It preserves, untouched:
 //   - the task message (index 0) and every user/system message,
@@ -151,7 +152,7 @@ func compactStub(toolName string, origBytes int, isErr bool) string {
 // The returned slice is always a fresh allocation when pruning occurs (the
 // caller must swap it in so the prior, longer prefix is not aliased), and the
 // original is returned unchanged when there is nothing to prune.
-func compactHistory(msgs []llmkit.Message, recentK int, toolNameFor map[string]string) ([]llmkit.Message, bool) {
+func compactHistory(msgs []llmkit.Message, recentK int, toolNameFor map[string]string) ([]llmkit.Message, int) {
 	if recentK < 0 {
 		recentK = 0
 	}
@@ -166,7 +167,7 @@ func compactHistory(msgs []llmkit.Message, recentK int, toolNameFor map[string]s
 	if len(toolIdx) <= recentK {
 		// Everything is within the recent window (or there are none); nothing to
 		// reclaim without touching results the next turn likely needs.
-		return msgs, false
+		return msgs, 0
 	}
 	// The last recentK tool results are kept verbatim; the rest are prunable.
 	keepFrom := len(toolIdx) - recentK
@@ -177,7 +178,7 @@ func compactHistory(msgs []llmkit.Message, recentK int, toolNameFor map[string]s
 
 	out := make([]llmkit.Message, len(msgs))
 	copy(out, msgs)
-	pruned := false
+	pruned := 0
 	for _, idx := range toolIdx[:keepFrom] {
 		m := out[idx]
 		// Never re-stub an already-pruned result: re-mutating it would invalidate
@@ -194,7 +195,7 @@ func compactHistory(msgs []llmkit.Message, recentK int, toolNameFor map[string]s
 		}
 		m.Content = []llmkit.Block{{Kind: llmkit.BlockText, Text: stub}}
 		out[idx] = m
-		pruned = true
+		pruned++
 	}
 	return out, pruned
 }

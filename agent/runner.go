@@ -5,17 +5,27 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/dpoage/llmkit"
 	"path/filepath"
 	"regexp"
 	"strings"
-
-	"github.com/dpoage/llmkit"
+	"sync"
+	"time"
 )
 
 // Runner drives an [llmkit.Client] through a tool-call loop. Construct one per
 // agent role with that role's system prompt and tool set, then call
-// [Runner.Run] (or [Runner.RunJSON]) per task. A Runner is
-// safe for sequential reuse across tasks; it holds no per-run mutable state.
+// [Runner.Run] (or [Runner.RunJSON]) per task.
+//
+// A Runner is safe for concurrent use: every field is fixed at construction,
+// and all mutable state (conversation, transcript, budget accounting,
+// compaction thresholds, nudge counters) is local to a single Run call.
+// Tools inherit an obligation from this: a [Tool] passed to one Runner may be
+// invoked concurrently (see [Tool.Run] and [WithParallelTools]), so it must
+// be safe for concurrent calls. Observability hooks (WithHooks) fire from
+// whichever goroutine reaches the event — concurrently under
+// WithParallelTools or concurrent Run calls — so hook functions must
+// synchronize their own state.
 type Runner struct {
 	client       llmkit.Client
 	tools        toolSet
@@ -30,22 +40,20 @@ type Runner struct {
 	// caller that knows a stable identifier for this run BEFORE constructing the
 	// Runner (e.g. a store row's primary key, generated up front) can recover
 	// the exact transcript file later by filename match instead of guessing from
-	// a timestamp window. See WithTranscriptKey and
-	// internal/tui/transcript.go's discoverTranscript.
+	// a timestamp window. See WithTranscriptKey.
 	transcriptKey string
 	// maxTokens caps output tokens per completion (passed through to the client).
 	// Zero lets the adapter apply its own default.
 	maxTokens int
-	// activitySink, when non-nil, is called twice per tool call: once with
-	// Phase="start" immediately before execution and once with Phase="done"
-	// immediately after (Count and Err filled from the result). Nil by default;
-	// zero overhead when unset.
-	activitySink func(act ToolActivity)
-	// toolHealthSink, when non-nil, is called whenever a tool returns a
-	// *ToolHealthError (a genuine harness/infra failure, not an ordinary
-	// model-recoverable error). Plain tool errors do not trigger it. Nil by
-	// default; zero overhead when unset.
-	toolHealthSink func(tool string, he *ToolHealthError)
+	// hooks holds the optional observer callbacks; nil funcs are no-ops with
+	// zero overhead. See [Hooks] for the fire points.
+	hooks Hooks
+	// toolTimeout, when positive, is the per-call deadline applied to every
+	// Tool.Run (see WithToolTimeout).
+	toolTimeout time.Duration
+	// parallelTools, when true, dispatches one turn's tool calls concurrently
+	// (see WithParallelTools).
+	parallelTools bool
 }
 
 // Option configures a [Runner] at construction.
@@ -83,25 +91,6 @@ func WithTranscriptKey(key string) Option {
 // default.
 func WithMaxTokens(n int) Option {
 	return func(r *Runner) { r.maxTokens = n }
-}
-
-// WithActivitySink registers a callback invoked twice per tool call: once with
-// Phase="start" before execution and once with Phase="done" after (Count and
-// Err set from the result). The callback must be safe for concurrent use. A nil
-// fn is a no-op. When unset, the runner emits no activity events and incurs
-// zero overhead.
-func WithActivitySink(fn func(act ToolActivity)) Option {
-	return func(r *Runner) { r.activitySink = fn }
-}
-
-// WithToolHealthSink registers a callback invoked when a tool returns a
-// *ToolHealthError — a genuine harness/infra failure (missing container
-// runtime, crashed language server) rather than an ordinary
-// model-recoverable error (bad args, file-not-found). The callback must be
-// safe for concurrent use. A nil fn is a no-op. When unset, the runner
-// records no health signals and incurs zero overhead.
-func WithToolHealthSink(fn func(tool string, he *ToolHealthError)) Option {
-	return func(r *Runner) { r.toolHealthSink = fn }
 }
 
 // NewRunner builds a Runner bound to client, the given tools, and a system
@@ -181,7 +170,7 @@ const emptyTurnNudge = "You made no tool call and produced no final answer. Cont
 func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task, finalizePrompt string, responseSchema json.RawMessage) (*Outcome, error) {
 	tr := NewTranscript()
 	if r.transcriptDir != "" {
-		tr.enableStreaming(r.transcriptPath(tr, task))
+		tr.enableStreaming(r.transcriptPath(tr, task), r.hooks.TranscriptError)
 	}
 
 	var messages []llmkit.Message
@@ -219,7 +208,7 @@ func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task, finalizeP
 		// public Run (finalizePrompt == "") is a no-op and proceeds straight
 		// to the truncation mark.
 		if r.limits.MaxIterations >= 0 && outcome.Iterations >= r.limits.MaxIterations {
-			if err := r.finalizeAndTruncate(ctx, tr, &messages, outcome, finalizePrompt, responseSchema, compactThreshold, toolNameByID, task); err != nil {
+			if err := r.finalizeAndTruncate(ctx, tr, &messages, outcome, finalizePrompt, responseSchema, compactThreshold, toolNameByID, TruncMaxIterations); err != nil {
 				return outcome, err
 			}
 			r.finishTruncated(outcome, TruncMaxIterations)
@@ -230,7 +219,7 @@ func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task, finalizeP
 		// gets (RunJSON only), so a near-budget agent can emit its answer
 		// instead of returning a silently empty result to the caller.
 		if r.overBudget(outcome.Usage) {
-			if err := r.finalizeAndTruncate(ctx, tr, &messages, outcome, finalizePrompt, responseSchema, compactThreshold, toolNameByID, task); err != nil {
+			if err := r.finalizeAndTruncate(ctx, tr, &messages, outcome, finalizePrompt, responseSchema, compactThreshold, toolNameByID, TruncTokenBudget); err != nil {
 				return outcome, err
 			}
 			r.finishTruncated(outcome, TruncTokenBudget)
@@ -252,7 +241,7 @@ func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task, finalizeP
 				// Shared pool exhausted: give the model one reserved finalization
 				// turn (RunJSON only) so a near-budget agent can still emit its
 				// answer before we classify the stop as TruncBudgetPool.
-				if err := r.finalizeAndTruncate(ctx, tr, &messages, outcome, finalizePrompt, responseSchema, compactThreshold, toolNameByID, task); err != nil {
+				if err := r.finalizeAndTruncate(ctx, tr, &messages, outcome, finalizePrompt, responseSchema, compactThreshold, toolNameByID, TruncBudgetPool); err != nil {
 					return outcome, err
 				}
 				r.finishTruncated(outcome, TruncBudgetPool)
@@ -270,7 +259,7 @@ func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task, finalizeP
 		// gets billed this turn. Re-arming the threshold upward after a firing
 		// keeps compaction bounded and avoids re-paying a prefix cache miss every
 		// subsequent turn (see compactRearmFactor).
-		messages, compactThreshold = r.maybeCompact(messages, compactThreshold, toolNameByID)
+		messages, compactThreshold = r.maybeCompact(ctx, messages, compactThreshold, toolNameByID, outcome.Iterations+1)
 
 		resp, err := r.completeOnce(ctx, tr, &messages, outcome, responseSchema, false)
 		if err != nil {
@@ -310,38 +299,28 @@ func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task, finalizeP
 			break
 		}
 
-		// Execute each requested tool call sequentially and feed results back.
-		// When an activity sink is registered, emit a start notification before
-		// each call so the observer sees what is happening as it happens, then a
-		// done notification after with the result count and any error.
-		for _, call := range resp.ToolCalls {
-			if err := ctx.Err(); err != nil {
-				tr.closeStream()
-				return outcome, err
+		// Execute the requested tool calls and feed results back. By default
+		// the calls run sequentially in the model's order; with
+		// WithParallelTools they run concurrently, but the results below are
+		// appended in the MODEL's original call order either way, so the
+		// wire-visible history is identical.
+		executed := r.executeTools(ctx, outcome, resp.ToolCalls)
+		for i, call := range resp.ToolCalls {
+			if i >= len(executed) {
+				// Context cancelled before this call was dispatched; the
+				// ctx check below returns with the executed prefix kept.
+				break
 			}
-			var startAct ToolActivity
-			if r.activitySink != nil {
-				startAct = extractToolActivity(call)
-				startAct.Phase = "start"
-				r.activitySink(startAct)
-			}
-			result, isErr := r.runTool(ctx, call)
-			if r.activitySink != nil {
-				doneAct := startAct
-				doneAct.Phase = "done"
-				if isErr {
-					doneAct.Err = result
-				} else {
-					doneAct.Count = countFromResult(call.Name, result)
-				}
-				r.activitySink(doneAct)
-			}
-			tr.recordToolResult(outcome.Iterations, call, result, isErr)
+			tr.recordToolResult(outcome.Iterations, call, executed[i].result, executed[i].isErr)
 			toolNameByID[call.ID] = call.Name
-			trMsg := llmkit.TextMessage(llmkit.RoleToolResult, result)
+			trMsg := llmkit.TextMessage(llmkit.RoleToolResult, executed[i].result)
 			trMsg.ToolCallID = call.ID
-			trMsg.IsError = isErr
+			trMsg.IsError = executed[i].isErr
 			messages = append(messages, trMsg)
+		}
+		if err := ctx.Err(); err != nil {
+			tr.closeStream()
+			return outcome, err
 		}
 
 		// After executing tools, check the budget again before looping so we
@@ -349,7 +328,7 @@ func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task, finalizeP
 		// A budget hit post-tool still gets the one reserved finalization turn
 		// (RunJSON only) so a near-budget agent can emit its answer.
 		if r.overBudget(outcome.Usage) {
-			if err := r.finalizeAndTruncate(ctx, tr, &messages, outcome, finalizePrompt, responseSchema, compactThreshold, toolNameByID, task); err != nil {
+			if err := r.finalizeAndTruncate(ctx, tr, &messages, outcome, finalizePrompt, responseSchema, compactThreshold, toolNameByID, TruncTokenBudget); err != nil {
 				return outcome, err
 			}
 			r.finishTruncated(outcome, TruncTokenBudget)
@@ -368,7 +347,8 @@ func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task, finalizeP
 // (finalizePrompt == "") never pays an extra model call. When it does fire it:
 //
 //   - appends finalizePrompt as a user-role message;
-//   - sets outcome.Finalized = true;
+//   - sets outcome.Finalized = true and fires [Hooks.Finalize] with reason
+//     (the Trunc* constant of the stop condition that triggered it);
 //   - compacts once so the prompt that is sent is the smallest it can be;
 //   - takes ONE tool-less completion via completeOnce (which itself handles
 //     the StopMaxTokens continuation retry), giving the model a cheap final
@@ -393,18 +373,21 @@ func (r *Runner) finalizeAndTruncate(
 	responseSchema json.RawMessage,
 	compactThreshold int64,
 	toolNameByID map[string]string,
-	task string,
+	reason string,
 ) error {
 	if finalizePrompt == "" || outcome.Finalized {
 		return nil
 	}
 	*messages = append(*messages, llmkit.TextMessage(llmkit.RoleUser, finalizePrompt))
 	outcome.Finalized = true
+	if r.hooks.Finalize != nil {
+		r.hooks.Finalize(ctx, reason)
+	}
 	// Compact before the finalization turn: it is often the largest history of
 	// the run, and the model needs only its own reasoning chain (preserved) to
 	// emit the answer, not every earlier file dump. The re-armed threshold is
 	// discarded: this is the run's final turn, so no later compaction can fire.
-	*messages, _ = r.maybeCompact(*messages, compactThreshold, toolNameByID)
+	*messages, _ = r.maybeCompact(ctx, *messages, compactThreshold, toolNameByID, outcome.Iterations+1)
 	if _, cerr := r.completeOnce(ctx, tr, messages, outcome, responseSchema, true); cerr != nil {
 		tr.closeStream()
 		return cerr
@@ -420,7 +403,11 @@ func (r *Runner) finalizeAndTruncate(
 // again. When disabled or under threshold — or when there is nothing left to
 // prune — it returns the messages and threshold unchanged, so a normal run pays
 // no allocation and the append-only prefix (and its cache) is preserved.
-func (r *Runner) maybeCompact(messages []llmkit.Message, threshold int64, toolNameByID map[string]string) ([]llmkit.Message, int64) {
+//
+// step is the completion that will consume the (possibly) compacted history;
+// it is reported on [Hooks.Compaction], which fires only when this call
+// actually pruned — a threshold crossing with nothing to reclaim is silent.
+func (r *Runner) maybeCompact(ctx context.Context, messages []llmkit.Message, threshold int64, toolNameByID map[string]string, step int) ([]llmkit.Message, int64) {
 	if threshold <= 0 {
 		return messages, threshold
 	}
@@ -428,7 +415,7 @@ func (r *Runner) maybeCompact(messages []llmkit.Message, threshold int64, toolNa
 		return messages, threshold
 	}
 	compacted, pruned := compactHistory(messages, compactRecentToolResults, toolNameByID)
-	if !pruned {
+	if pruned == 0 {
 		// Over threshold but nothing prunable yet: either history is dominated by
 		// assistant reasoning, or every prunable result is already a stub, or there
 		// simply aren't more than compactRecentToolResults tool results so far. Leave the
@@ -436,6 +423,14 @@ func (r *Runner) maybeCompact(messages []llmkit.Message, threshold int64, toolNa
 		// the recent window — re-arming here would starve real compaction by ratcheting
 		// the threshold above the history before anything was ever reclaimed.
 		return messages, threshold
+	}
+	if r.hooks.Compaction != nil {
+		r.hooks.Compaction(ctx, CompactionEvent{
+			Step:         step,
+			BeforeTokens: estimateTokens(messages),
+			AfterTokens:  estimateTokens(compacted),
+			Pruned:       pruned,
+		})
 	}
 	// Real pruning happened (one prefix cache miss paid). Re-arm upward so the
 	// next firing only comes after history has grown materially again, bounding
@@ -457,10 +452,15 @@ func (r *Runner) maybeCompact(messages []llmkit.Message, threshold int64, toolNa
 // is the only enforcement — same contract as the main run path.
 //
 // The repair uses a fresh outcome but shares the caller's transcript so the
-// assistant turn is recorded there for parity with the main run path. Only
-// ONE completion is issued: no max-tokens continuation, no tool loop. This
-// bounds the repair to exactly the one model call the spec mandates.
+// assistant turn is recorded there for parity with the main run path. No tool
+// loop runs; [Hooks.Repair] fires at entry. The single repair completion is
+// issued via completeOnce, so when it itself stops at the output token cap the
+// ONE max-tokens continuation completion is paid on top — the pass is bounded
+// to at most two schema-bearing, tool-less completions.
 func (r *Runner) repair(ctx context.Context, tr *Transcript, prompt string, responseSchema json.RawMessage) (*Outcome, error) {
+	if r.hooks.Repair != nil {
+		r.hooks.Repair(ctx)
+	}
 	outcome := &Outcome{Transcript: tr}
 	messages := []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, prompt)}
 	if _, err := r.completeOnce(ctx, tr, &messages, outcome, responseSchema, true); err != nil {
@@ -489,7 +489,7 @@ func (r *Runner) completeOnce(ctx context.Context, tr *Transcript, messages *[]l
 	if err != nil {
 		return llmkit.Response{}, err
 	}
-	assistantMsg := llmkit.TextMessage(llmkit.RoleAssistant, resp.Text)
+	assistantMsg := assistantMessage(resp)
 	assistantMsg.ToolCalls = resp.ToolCalls
 	*messages = append(*messages, assistantMsg)
 
@@ -503,7 +503,7 @@ func (r *Runner) completeOnce(ctx context.Context, tr *Transcript, messages *[]l
 		if cerr != nil {
 			return llmkit.Response{}, cerr
 		}
-		contMsg := llmkit.TextMessage(llmkit.RoleAssistant, cont.Text)
+		contMsg := assistantMessage(cont)
 		contMsg.ToolCalls = cont.ToolCalls
 		*messages = append(*messages, contMsg)
 		// Stitch the two halves so the caller (and FinalText) sees one answer.
@@ -518,6 +518,7 @@ func (r *Runner) completeOnce(ctx context.Context, tr *Transcript, messages *[]l
 		resp.Text = joined
 		resp.ToolCalls = cont.ToolCalls
 		resp.StopReason = cont.StopReason
+		resp.Blocks = stitchBlocks(resp.Blocks, cont.Blocks, joined)
 	}
 	return resp, nil
 }
@@ -549,6 +550,44 @@ func stitchContinuation(head, cont string) string {
 		}
 	}
 	return head + cont
+}
+
+// assistantMessage builds the assistant history message for a completion. A
+// response that surfaced content blocks (thinking, multi-part text) is
+// recorded VERBATIM — including thinking blocks, which providers bind to the
+// exact bytes they issued (signed on Anthropic): rebuilding the message from
+// resp.Text alone would drop them and break every later turn of a
+// thinking+tools loop. A response with no blocks degrades to the single-text
+// form.
+func assistantMessage(resp llmkit.Response) llmkit.Message {
+	if len(resp.Blocks) > 0 {
+		return llmkit.Message{Role: llmkit.RoleAssistant, Content: resp.Blocks}
+	}
+	return llmkit.TextMessage(llmkit.RoleAssistant, resp.Text)
+}
+
+// stitchBlocks shapes the Block list of the stitched llmkit.Response that
+// completeOnce returns to ITS caller. It does not touch the conversation
+// history: completeOnce already appended each half verbatim via
+// [assistantMessage], so both halves' thinking blocks are carried in history
+// in order exactly as the provider issued them. Only text blocks are
+// stitched (see [stitchContinuation]); thinking blocks from BOTH halves are
+// carried through untouched — never split, reordered, or re-emitted
+// differently — because the next turn must return them to the provider
+// exactly as they arrived. Assistant turns carry no other block kinds.
+func stitchBlocks(head, cont []llmkit.Block, joinedText string) []llmkit.Block {
+	var out []llmkit.Block
+	for _, b := range head {
+		if b.Kind == llmkit.BlockThinking {
+			out = append(out, b)
+		}
+	}
+	for _, b := range cont {
+		if b.Kind == llmkit.BlockThinking {
+			out = append(out, b)
+		}
+	}
+	return append(out, llmkit.Block{Kind: llmkit.BlockText, Text: joinedText})
 }
 
 // complete issues a single completion, records it, and accumulates its usage and
@@ -583,11 +622,32 @@ func (r *Runner) complete(ctx context.Context, tr *Transcript, messages []llmkit
 	if len(responseSchema) > 0 && r.client.Capabilities().StructuredOutput {
 		req.ResponseSchema = responseSchema
 	}
-	tr.recordRequest(outcome.Iterations+1, messages)
+	// This is the single fire point for [Hooks.BeforeCompletion] and
+	// [Hooks.AfterCompletion]: every client.Complete in the loop (main turn,
+	// max-tokens continuation, forced finalization, repair) goes through here.
+	// step is the 1-based transcript step this completion is recorded under
+	// (outcome.Iterations+1 at fire time): the SAME number every other hook
+	// reports for this turn — ToolEvent.Step, CompactionEvent.Step — and the
+	// Event.Step of the request/assistant transcript events below, so
+	// consumers can join all hook families on Step. Captured before Complete
+	// because outcome.Iterations is incremented only after the call returns,
+	// keeping the hook pair's step identical.
+	step := outcome.Iterations + 1
+	if r.hooks.BeforeCompletion != nil {
+		r.hooks.BeforeCompletion(ctx, step, &req)
+	}
+	tr.recordRequest(step, messages)
 
 	resp, err := r.client.Complete(ctx, req)
+	if r.hooks.AfterCompletion != nil {
+		var respPtr *llmkit.Response
+		if err == nil {
+			respPtr = &resp
+		}
+		r.hooks.AfterCompletion(ctx, step, &req, respPtr, err)
+	}
 	if err != nil {
-		return llmkit.Response{}, fmt.Errorf("agent: completion failed at iteration %d: %w", outcome.Iterations+1, err)
+		return llmkit.Response{}, fmt.Errorf("agent: completion failed at iteration %d: %w", step, err)
 	}
 
 	outcome.Iterations++
@@ -611,23 +671,115 @@ func (r *Runner) complete(ctx context.Context, tr *Transcript, messages []llmkit
 // the model as an "ERROR:"-prefixed result (isErr=true) rather than aborting the
 // loop. Context cancellation surfaced by the tool is still rendered as a tool
 // error here; the loop's own ctx checks handle real cancellation.
-func (r *Runner) runTool(ctx context.Context, call llmkit.ToolCall) (result string, isErr bool) {
+//
+// With WithToolTimeout set, the call runs under a derived deadline: on expiry
+// the model receives "ERROR: tool <name> timed out after <d>" and the loop
+// continues — the run's own context is unaffected. A timeout is not a
+// *ToolHealthError and does not fire [Hooks.ToolHealth].
+//
+// [Hooks.ToolStart] fires immediately before Tool.Run and [Hooks.ToolEnd]
+// immediately after (Result, IsError, Duration set); a missing tool never
+// runs, so neither fires for it. Hooks fire from the goroutine executing the
+// call — concurrently under WithParallelTools.
+func (r *Runner) runTool(ctx context.Context, call llmkit.ToolCall, step int) (result string, isErr bool) {
 	tool, ok := r.tools.lookup(call.Name)
 	if !ok {
 		return toolError(fmt.Errorf("unknown tool %q", call.Name)), true
 	}
-	out, err := tool.Run(ctx, call.Arguments)
+	runCtx := ctx
+	if r.toolTimeout > 0 {
+		var cancel context.CancelFunc
+		runCtx, cancel = context.WithTimeout(ctx, r.toolTimeout)
+		defer cancel()
+	}
+	if r.hooks.ToolStart != nil {
+		r.hooks.ToolStart(ctx, ToolEvent{Step: step, Call: call})
+	}
+	start := time.Now()
+	out, err := tool.Run(runCtx, call.Arguments)
+	duration := time.Since(start)
 	if err != nil {
+		// Deadline expiry: report the timeout as the tool result, leaving the
+		// run's own context untouched. The parent-ctx guard keeps a genuine
+		// run cancellation from being misreported as a tool timeout.
+		if r.toolTimeout > 0 && ctx.Err() == nil && runCtx.Err() == context.DeadlineExceeded {
+			timeoutResult := fmt.Sprintf("ERROR: tool %s timed out after %s", call.Name, r.toolTimeout)
+			if r.hooks.ToolEnd != nil {
+				r.hooks.ToolEnd(ctx, ToolEvent{Step: step, Call: call, Result: timeoutResult, IsError: true, Duration: duration})
+			}
+			return timeoutResult, true
+		}
 		// Record a tool-health signal only for a genuine *ToolHealthError AND
 		// only when ctx is not already cancelled: a failure caused by run
 		// teardown/cancellation must never be counted as a tool-health problem.
 		var he *ToolHealthError
-		if ctx.Err() == nil && errors.As(err, &he) && r.toolHealthSink != nil {
-			r.toolHealthSink(call.Name, he)
+		if ctx.Err() == nil && errors.As(err, &he) && r.hooks.ToolHealth != nil {
+			r.hooks.ToolHealth(ctx, call.Name, he)
 		}
-		return toolError(err), true
+		result = toolError(err)
+		if r.hooks.ToolEnd != nil {
+			r.hooks.ToolEnd(ctx, ToolEvent{Step: step, Call: call, Result: result, IsError: true, Duration: duration})
+		}
+		return result, true
+	}
+	if r.hooks.ToolEnd != nil {
+		r.hooks.ToolEnd(ctx, ToolEvent{Step: step, Call: call, Result: out, IsError: false, Duration: duration})
 	}
 	return out, false
+}
+
+// toolResult is one executed tool call's outcome, as returned by [Runner.executeTools].
+type toolResult struct {
+	result string
+	isErr  bool
+}
+
+// executeTools runs calls and returns one result per executed call, in the
+// model's original order. Sequential mode (the default) runs calls one at a
+// time and stops before dispatching the next call once ctx is cancelled —
+// the returned slice then holds only the already-executed results. Parallel
+// mode (WithParallelTools) runs each call on its own goroutine (bounded by
+// len(calls)) and waits for all of them: per-call failures are isolated (a
+// tool error or panic never fails its siblings — a panic is recovered in the
+// call's goroutine and rendered as that call's error result), and the
+// full-length result slice is always returned. Neither mode mutates the
+// conversation or the transcript; the caller appends the results in call
+// order after executeTools returns.
+func (r *Runner) executeTools(ctx context.Context, outcome *Outcome, calls []llmkit.ToolCall) []toolResult {
+	results := make([]toolResult, len(calls))
+	if !r.parallelTools || len(calls) < 2 {
+		for i, call := range calls {
+			if err := ctx.Err(); err != nil {
+				return results[:i]
+			}
+			results[i].result, results[i].isErr = r.runTool(ctx, call, outcome.Iterations)
+		}
+		return results
+	}
+	var wg sync.WaitGroup
+	for i, call := range calls {
+		wg.Add(1)
+		go func(i int, call llmkit.ToolCall) {
+			// A panicking Tool.Run must not abort the process from this
+			// goroutine (a panic here escapes any caller recover and kills
+			// every concurrent Run): render it as THIS call's error result so
+			// isolation stays literal. Sequential dispatch propagates the
+			// panic to the Runner's caller, unchanged.
+			// Recover FIRST (this defer runs before wg.Done below) so
+			// wg.Wait cannot observe the result slot before the panic
+			// rendering is published.
+			defer wg.Done()
+			defer func() {
+				if v := recover(); v != nil {
+					results[i].result = fmt.Sprintf("ERROR: tool %s panicked: %v", call.Name, v)
+					results[i].isErr = true
+				}
+			}()
+			results[i].result, results[i].isErr = r.runTool(ctx, call, outcome.Iterations)
+		}(i, call)
+	}
+	wg.Wait()
+	return results
 }
 
 // overBudget reports whether cumulative usage has exceeded the token budget. A
@@ -689,117 +841,4 @@ func slug(task string) string {
 		}
 	}
 	return s
-}
-
-// extractToolActivity maps one LLM tool call to a ToolActivity with all
-// structured fields populated from the call's JSON arguments. Phase is NOT set
-// here — the caller stamps "start" or "done" after calling this function.
-//
-// Argument parsing is best-effort: a JSON failure leaves fields at their zero
-// values, which produce a sane (if sparse) ToolActivity. Safe for concurrent
-// use: reads only the call argument bytes.
-func extractToolActivity(call llmkit.ToolCall) ToolActivity {
-	act := ToolActivity{Tool: call.Name}
-
-	// Decode the relevant arguments for each tool. Only the fields this tool
-	// can produce are read; unused JSON keys are silently ignored.
-	var args struct {
-		Path      string   `json:"path"`
-		Dir       string   `json:"dir"`
-		Directory string   `json:"directory"`
-		Pattern   string   `json:"pattern"`
-		Symbol    string   `json:"symbol"`
-		File      string   `json:"file"`
-		Line      int      `json:"line"`
-		StartLine int      `json:"start_line"`
-		EndLine   int      `json:"end_line"`
-		Note      string   `json:"note"`
-		Argv      []string `json:"argv"`
-	}
-	_ = json.Unmarshal(call.Arguments, &args)
-
-	switch call.Name {
-	case "read_file":
-		act.File = args.Path
-		// Honor both start_line/end_line and plain line/end_line naming.
-		if args.StartLine > 0 {
-			act.Line = args.StartLine
-		} else {
-			act.Line = args.Line
-		}
-		act.EndLine = args.EndLine
-	case "read_symbol":
-		act.Symbol = args.Symbol
-		act.File = args.Path
-		if act.File == "" {
-			act.File = args.File
-		}
-	case "grep":
-		act.Pattern = args.Pattern
-		act.File = args.Path
-		if act.File == "" {
-			act.File = args.Dir
-		}
-	case "find_definition", "find_references", "find_implementations",
-		"find_usages":
-		act.Symbol = args.Symbol
-		act.File = args.File
-		if act.File == "" {
-			act.File = args.Path
-		}
-		act.Line = args.Line
-	case "list_dir":
-		act.File = args.Dir
-		if act.File == "" {
-			act.File = args.Directory
-		}
-		if act.File == "" {
-			act.File = "."
-		}
-	case "run_tests":
-		act.File = args.Dir
-		if act.File == "" {
-			act.File = args.Path
-		}
-	case "sandbox_exec":
-		act.Symbol = "sandbox"
-	case "status_note":
-		// Note text is truncated to 120 runes (same as statusNoteTool.Run).
-		note := strings.Join(strings.Fields(args.Note), " ")
-		runes := []rune(note)
-		if len(runes) > 120 {
-			note = string(runes[:119]) + "…"
-		}
-		act.Symbol = note
-	case "write_repro_file", "delete_repro_file":
-		act.File = args.Path
-	case "workspace":
-		// Argv is joined and truncated to 120 runes (same as status_note).
-		cmd := strings.Join(strings.Fields(strings.Join(args.Argv, " ")), " ")
-		runes := []rune(cmd)
-		if len(runes) > 120 {
-			cmd = string(runes[:119]) + "…"
-		}
-		act.Symbol = cmd
-	case "post_lead":
-		// No structured fields; Tool="post_lead" is sufficient.
-	default:
-		// Unknown tool: Tool name is the only useful field.
-	}
-	return act
-}
-
-// countFromResult extracts a result count from a tool's output string.
-// For most tools the count is 0 (line count is expensive to compute and not
-// worth it for observability). For grep we count newline-separated matches.
-// This is best-effort: a failure returns 0.
-func countFromResult(toolName, result string) int {
-	switch toolName {
-	case "grep":
-		if result == "" {
-			return 0
-		}
-		return strings.Count(result, "\n") + 1
-	}
-	return 0
 }
