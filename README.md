@@ -41,7 +41,7 @@ Shared LLM tooling extracted from `bugbot`, `known`, and `go-research`.
 ## Design decisions
 
 - Message model: flat `Message{Role, Content, ToolCalls, ToolCallID, IsError}`
-  (bugbot's), not content-block unions (go-research's). See docs in `llm`.
+  (bugbot's), not content-block unions (go-research's). See the root package docs.
 - No streaming: none of the three donor projects used it; the interface stays
   synchronous until a consumer needs otherwise.
 - Official vendor SDKs (anthropic-sdk-go, openai-go, google genai) rather than
