@@ -4,35 +4,35 @@ import (
 	"context"
 	"sync"
 
-	"github.com/dpoage/llmkit/llm"
+	"github.com/dpoage/llmkit"
 )
 
 // scriptStep is one programmed turn of a fakeClient: the response to return,
 // or an error to surface (an infra failure).
 type scriptStep struct {
-	resp llm.Response
+	resp llmkit.Response
 	err  error
 }
 
-// fakeClient is a scripted llm.Client for testing the loop. It returns each
+// fakeClient is a scripted llmkit.Client for testing the loop. It returns each
 // scripted step in order and records every request it received.
 type fakeClient struct {
 	mu       sync.Mutex
 	steps    []scriptStep
 	idx      int
-	requests []llm.Request
-	caps     llm.Capabilities
+	requests []llmkit.Request
+	caps     llmkit.Capabilities
 }
 
 func newFakeClient(steps ...scriptStep) *fakeClient {
 	return &fakeClient{steps: steps}
 }
 
-func (f *fakeClient) Capabilities() llm.Capabilities { return f.caps }
+func (f *fakeClient) Capabilities() llmkit.Capabilities { return f.caps }
 
-func (f *fakeClient) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
+func (f *fakeClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	if err := ctx.Err(); err != nil {
-		return llm.Response{}, err
+		return llmkit.Response{}, err
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -40,7 +40,7 @@ func (f *fakeClient) Complete(ctx context.Context, req llm.Request) (llm.Respons
 	if f.idx >= len(f.steps) {
 		// Default to a benign end-turn so over-running tests fail on assertions,
 		// not panics.
-		return llm.Response{Text: "(unscripted)", StopReason: llm.StopEndTurn}, nil
+		return llmkit.Response{Text: "(unscripted)", StopReason: llmkit.StopEndTurn}, nil
 	}
 	step := f.steps[f.idx]
 	f.idx++
@@ -57,33 +57,33 @@ func (f *fakeClient) callCount() int {
 
 // textResp builds an end-turn text response with the given usage.
 func textResp(text string, in, out int64) scriptStep {
-	return scriptStep{resp: llm.Response{
+	return scriptStep{resp: llmkit.Response{
 		Text:       text,
-		StopReason: llm.StopEndTurn,
-		Usage:      llm.Usage{InputTokens: in, OutputTokens: out},
+		StopReason: llmkit.StopEndTurn,
+		Usage:      llmkit.Usage{InputTokens: in, OutputTokens: out},
 	}}
 }
 
 // maxTokensResp builds a text response that stopped at the output token cap
 // (StopMaxTokens), e.g. a JSON answer cut off mid-object.
 func maxTokensResp(text string, in, out int64) scriptStep {
-	return scriptStep{resp: llm.Response{
+	return scriptStep{resp: llmkit.Response{
 		Text:       text,
-		StopReason: llm.StopMaxTokens,
-		Usage:      llm.Usage{InputTokens: in, OutputTokens: out},
+		StopReason: llmkit.StopMaxTokens,
+		Usage:      llmkit.Usage{InputTokens: in, OutputTokens: out},
 	}}
 }
 
 // toolResp builds a tool-use response requesting a single tool call.
 func toolResp(id, name, args string, in, out int64) scriptStep {
-	return scriptStep{resp: llm.Response{
-		StopReason: llm.StopToolUse,
-		ToolCalls: []llm.ToolCall{{
+	return scriptStep{resp: llmkit.Response{
+		StopReason: llmkit.StopToolUse,
+		ToolCalls: []llmkit.ToolCall{{
 			ID:        id,
 			Name:      name,
 			Arguments: []byte(args),
 		}},
-		Usage: llm.Usage{InputTokens: in, OutputTokens: out},
+		Usage: llmkit.Usage{InputTokens: in, OutputTokens: out},
 	}}
 }
 
@@ -92,9 +92,9 @@ func toolResp(id, name, args string, in, out int64) scriptStep {
 // failure mode (MiniMax-M3 sometimes narrates a tool call inside the think
 // block it never actually issues).
 func thinkOnlyResp(think string, in, out int64) scriptStep {
-	return scriptStep{resp: llm.Response{
+	return scriptStep{resp: llmkit.Response{
 		Text:       "<think>" + think + "</think>",
-		StopReason: llm.StopEndTurn,
-		Usage:      llm.Usage{InputTokens: in, OutputTokens: out},
+		StopReason: llmkit.StopEndTurn,
+		Usage:      llmkit.Usage{InputTokens: in, OutputTokens: out},
 	}}
 }

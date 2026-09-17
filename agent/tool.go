@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/dpoage/llmkit/llm"
+	"github.com/dpoage/llmkit"
 )
 
 // Tool is a single capability the model may invoke during a run. The harness
-// advertises every tool's [llm.ToolDef] to the model and dispatches matching
+// advertises every tool's [llmkit.ToolDef] to the model and dispatches matching
 // tool calls to [Tool.Run].
 //
 // Run receives the raw JSON arguments the model produced (validate/unmarshal
@@ -26,7 +26,7 @@ import (
 type Tool interface {
 	// Def returns the tool's declaration (name, description, JSON-schema
 	// parameters) as advertised to the model.
-	Def() llm.ToolDef
+	Def() llmkit.ToolDef
 	// Run executes the tool with the model-supplied arguments and returns the
 	// textual result to feed back to the model.
 	Run(ctx context.Context, args json.RawMessage) (string, error)
@@ -39,10 +39,11 @@ func toolError(err error) string {
 	return "ERROR: " + err.Error()
 }
 
-// unmarshalArgs decodes raw JSON tool arguments into dst. It returns a
+// UnmarshalArgs decodes raw JSON tool arguments into dst. It returns a
 // well-formed error the runner will surface as "ERROR: invalid arguments: …"
-// when the model produced malformed JSON.
-func unmarshalArgs(raw json.RawMessage, dst any) error {
+// when the model produced malformed JSON. Tool implementations call this to
+// decode the args passed to Tool.Run.
+func UnmarshalArgs(raw json.RawMessage, dst any) error {
 	if err := json.Unmarshal(raw, dst); err != nil {
 		return fmt.Errorf("invalid arguments: %w", err)
 	}
@@ -72,7 +73,7 @@ func requireLineNumber(n int) error {
 // request.
 type toolSet struct {
 	byName map[string]Tool
-	defs   []llm.ToolDef
+	defs   []llmkit.ToolDef
 }
 
 // newToolSet builds a dispatch table from tools. Later tools with a duplicate

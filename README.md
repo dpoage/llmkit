@@ -4,17 +4,28 @@ Shared LLM tooling extracted from `bugbot`, `known`, and `go-research`.
 
 ## Packages
 
-- **`llm`** — provider-agnostic client abstraction: one synchronous
-  `Complete(ctx, Request) (Response, error)` plus a `Capabilities()` probe.
-  Adapters for Anthropic (API key or OAuth bearer), OpenAI, Google Gemini, and
-  any OpenAI-compatible endpoint (Ollama, vLLM, Groq, ...). Decorator
-  composition: retry (exponential backoff + jitter, Retry-After, per-attempt
-  timeout) → usage recorder → tool-call serializer → adapter. Normalized
-  errors (`APIError` + sentinel kinds), usage accounting with prompt-cache
-  conventions, stop-reason normalization, `<think>`-block stripping.
+- **`llmkit`** (root) — provider-agnostic client abstraction: one synchronous
+  `Complete(ctx, Request) (Response, error)` plus a `Capabilities()` probe;
+  normalized errors (`APIError` + sentinel kinds), usage accounting with
+  prompt-cache conventions, stop-reason normalization, `<think>`-block
+  stripping, and decorator wrappers: retry (exponential backoff + jitter,
+  Retry-After, per-attempt timeout), usage recorder, tool-call serializer.
   Origin: `bugbot/internal/llm`.
 
-- **`agent`** — tool-calling harness over `llm.Client`: `Runner` with
+- **`llmkit/provider`** — client construction: `New` dispatches on
+  `Spec.Type` and decorates the chosen adapter serialize → recorder →
+  retry.
+
+- **`llmkit/provider/anthropic`**, **`llmkit/provider/openai`** (first-party
+  OpenAI and, via `Compatible: true`, any OpenAI-compatible endpoint —
+  Ollama, vLLM, Groq, ...), **`llmkit/provider/google`** — vendor-SDK
+  adapters for Anthropic (API key or OAuth bearer), OpenAI, and Gemini.
+
+- **`llmkit/internal/adapter`** — helpers shared by the three adapters
+  (status classification, error normalization, schema parsing); internal,
+  not public API.
+
+- **`llmkit/agent`** — tool-calling harness over `llmkit.Client`: `Runner` with
   iteration/token budgets, history compaction, forced finalization,
   max-tokens continuation stitching, JSONL transcripts with offline
   `ReplayClient`, schema-constrained `RunJSON`. Tools implement

@@ -9,15 +9,15 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/dpoage/llmkit/llm"
+	"github.com/dpoage/llmkit"
 )
 
-// Runner drives an [llm.Client] through a tool-call loop. Construct one per
+// Runner drives an [llmkit.Client] through a tool-call loop. Construct one per
 // agent role with that role's system prompt and tool set, then call
 // [Runner.Run] (or [Runner.RunJSON]) per task. A Runner is
 // safe for sequential reuse across tasks; it holds no per-run mutable state.
 type Runner struct {
-	client       llm.Client
+	client       llmkit.Client
 	tools        toolSet
 	systemPrompt string
 	limits       Limits
@@ -106,7 +106,7 @@ func WithToolHealthSink(fn func(tool string, he *ToolHealthError)) Option {
 
 // NewRunner builds a Runner bound to client, the given tools, and a system
 // prompt. Options tune limits, transcript persistence, and output token caps.
-func NewRunner(client llm.Client, tools []Tool, systemPrompt string, opts ...Option) *Runner {
+func NewRunner(client llmkit.Client, tools []Tool, systemPrompt string, opts ...Option) *Runner {
 	r := &Runner{
 		client:       client,
 		tools:        newToolSet(tools),
@@ -178,19 +178,19 @@ const maxEmptyTurnNudges = 2
 // call a tool or emit its final answer. See [maxEmptyTurnNudges].
 const emptyTurnNudge = "You made no tool call and produced no final answer. Continue: call a tool or emit your final answer now."
 
-func (r *Runner) run(ctx context.Context, seed []llm.Message, task, finalizePrompt string, responseSchema json.RawMessage) (*Outcome, error) {
+func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task, finalizePrompt string, responseSchema json.RawMessage) (*Outcome, error) {
 	tr := NewTranscript()
 	if r.transcriptDir != "" {
 		tr.enableStreaming(r.transcriptPath(tr, task))
 	}
 
-	var messages []llm.Message
+	var messages []llmkit.Message
 	if len(seed) > 0 {
-		messages = make([]llm.Message, 0, len(seed)+1)
+		messages = make([]llmkit.Message, 0, len(seed)+1)
 		messages = append(messages, seed...)
-		messages = append(messages, llm.Message{Role: llm.RoleUser, Content: task})
+		messages = append(messages, llmkit.Message{Role: llmkit.RoleUser, Content: task})
 	} else {
-		messages = []llm.Message{{Role: llm.RoleUser, Content: task}}
+		messages = []llmkit.Message{{Role: llmkit.RoleUser, Content: task}}
 	}
 
 	outcome := &Outcome{Transcript: tr}
@@ -284,7 +284,7 @@ func (r *Runner) run(ctx context.Context, seed []llm.Message, task, finalizeProm
 			// reason (refusal, safety filter, recitation). Breaking cleanly here
 			// would record refusal prose — or stale FinalText from an earlier
 			// turn — as the answer. Surface a typed error instead.
-			if resp.StopReason == llm.StopError {
+			if resp.StopReason == llmkit.StopError {
 				tr.closeStream()
 				return outcome, &ErrStopReason{StopReason: resp.StopReason, Text: resp.Text, Outcome: outcome}
 			}
@@ -299,9 +299,9 @@ func (r *Runner) run(ctx context.Context, seed []llm.Message, task, finalizeProm
 			// counts like any other turn. This also covers a truncated,
 			// unclosed think block: StripThinkBlocks strips it to empty too,
 			// and nudging gives the model a chance to re-emit cleanly.
-			if strings.TrimSpace(llm.StripThinkBlocks(resp.Text)) == "" && emptyTurnNudges < maxEmptyTurnNudges {
+			if strings.TrimSpace(llmkit.StripThinkBlocks(resp.Text)) == "" && emptyTurnNudges < maxEmptyTurnNudges {
 				emptyTurnNudges++
-				messages = append(messages, llm.Message{Role: llm.RoleUser, Content: emptyTurnNudge})
+				messages = append(messages, llmkit.Message{Role: llmkit.RoleUser, Content: emptyTurnNudge})
 				continue
 			}
 			break
@@ -335,8 +335,8 @@ func (r *Runner) run(ctx context.Context, seed []llm.Message, task, finalizeProm
 			}
 			tr.recordToolResult(outcome.Iterations, call, result, isErr)
 			toolNameByID[call.ID] = call.Name
-			messages = append(messages, llm.Message{
-				Role:       llm.RoleToolResult,
+			messages = append(messages, llmkit.Message{
+				Role:       llmkit.RoleToolResult,
 				ToolCallID: call.ID,
 				Content:    result,
 				IsError:    isErr,
@@ -386,7 +386,7 @@ func (r *Runner) run(ctx context.Context, seed []llm.Message, task, finalizeProm
 func (r *Runner) finalizeAndTruncate(
 	ctx context.Context,
 	tr *Transcript,
-	messages *[]llm.Message,
+	messages *[]llmkit.Message,
 	outcome *Outcome,
 	finalizePrompt string,
 	responseSchema json.RawMessage,
@@ -397,8 +397,8 @@ func (r *Runner) finalizeAndTruncate(
 	if finalizePrompt == "" || outcome.Finalized {
 		return nil
 	}
-	*messages = append(*messages, llm.Message{
-		Role:    llm.RoleUser,
+	*messages = append(*messages, llmkit.Message{
+		Role:    llmkit.RoleUser,
 		Content: finalizePrompt,
 	})
 	outcome.Finalized = true
@@ -422,7 +422,7 @@ func (r *Runner) finalizeAndTruncate(
 // again. When disabled or under threshold — or when there is nothing left to
 // prune — it returns the messages and threshold unchanged, so a normal run pays
 // no allocation and the append-only prefix (and its cache) is preserved.
-func (r *Runner) maybeCompact(messages []llm.Message, threshold int64, toolNameByID map[string]string) ([]llm.Message, int64) {
+func (r *Runner) maybeCompact(messages []llmkit.Message, threshold int64, toolNameByID map[string]string) ([]llmkit.Message, int64) {
 	if threshold <= 0 {
 		return messages, threshold
 	}
@@ -455,7 +455,7 @@ func (r *Runner) maybeCompact(messages []llm.Message, threshold int64, toolNameB
 //
 // responseSchema, when non-nil, is attached capability-gated; when the
 // adapter's StructuredOutput capability is off, the schema is dropped
-// silently (per llm.Request docs) and the prompt-embedded schema instruction
+// silently (per llmkit.Request docs) and the prompt-embedded schema instruction
 // is the only enforcement — same contract as the main run path.
 //
 // The repair uses a fresh outcome but shares the caller's transcript so the
@@ -464,7 +464,7 @@ func (r *Runner) maybeCompact(messages []llm.Message, threshold int64, toolNameB
 // bounds the repair to exactly the one model call the spec mandates.
 func (r *Runner) repair(ctx context.Context, tr *Transcript, prompt string, responseSchema json.RawMessage) (*Outcome, error) {
 	outcome := &Outcome{Transcript: tr}
-	messages := []llm.Message{{Role: llm.RoleUser, Content: prompt}}
+	messages := []llmkit.Message{{Role: llmkit.RoleUser, Content: prompt}}
 	if _, err := r.completeOnce(ctx, tr, &messages, outcome, responseSchema, true); err != nil {
 		return outcome, err
 	}
@@ -486,13 +486,13 @@ func (r *Runner) repair(ctx context.Context, tr *Transcript, prompt string, resp
 // continuation completion — appending a short user nudge — so a JSON answer cut
 // off mid-object has a chance to be completed rather than failing to parse. The
 // outcome's LastStopReason reflects the final completion served here.
-func (r *Runner) completeOnce(ctx context.Context, tr *Transcript, messages *[]llm.Message, outcome *Outcome, responseSchema json.RawMessage, final bool) (llm.Response, error) {
+func (r *Runner) completeOnce(ctx context.Context, tr *Transcript, messages *[]llmkit.Message, outcome *Outcome, responseSchema json.RawMessage, final bool) (llmkit.Response, error) {
 	resp, err := r.complete(ctx, tr, *messages, outcome, responseSchema, final)
 	if err != nil {
-		return llm.Response{}, err
+		return llmkit.Response{}, err
 	}
-	*messages = append(*messages, llm.Message{
-		Role:      llm.RoleAssistant,
+	*messages = append(*messages, llmkit.Message{
+		Role:      llmkit.RoleAssistant,
 		Content:   resp.Text,
 		ToolCalls: resp.ToolCalls,
 	})
@@ -500,17 +500,17 @@ func (r *Runner) completeOnce(ctx context.Context, tr *Transcript, messages *[]l
 	// One continuation retry when output was truncated mid-generation: ask the
 	// model to continue and emit ONLY the remaining answer, then concatenate.
 	// Guarded so it fires at most once per completeOnce call.
-	if resp.StopReason == llm.StopMaxTokens && len(resp.ToolCalls) == 0 {
-		*messages = append(*messages, llm.Message{
-			Role:    llm.RoleUser,
+	if resp.StopReason == llmkit.StopMaxTokens && len(resp.ToolCalls) == 0 {
+		*messages = append(*messages, llmkit.Message{
+			Role:    llmkit.RoleUser,
 			Content: "Your previous message was cut off at the output token limit. Continue from exactly where you stopped and output ONLY the remaining text needed to complete the answer — no preamble, no repetition.",
 		})
 		cont, cerr := r.complete(ctx, tr, *messages, outcome, responseSchema, final)
 		if cerr != nil {
-			return llm.Response{}, cerr
+			return llmkit.Response{}, cerr
 		}
-		*messages = append(*messages, llm.Message{
-			Role:      llm.RoleAssistant,
+		*messages = append(*messages, llmkit.Message{
+			Role:      llmkit.RoleAssistant,
 			Content:   cont.Text,
 			ToolCalls: cont.ToolCalls,
 		})
@@ -568,12 +568,12 @@ func stitchContinuation(head, cont string) string {
 // on, is attached to the request so adapters that support native structured
 // output can apply grammar-constrained decoding. When the capability is off
 // (a conservative openai-compatible endpoint, etc.), the schema is silently
-// dropped on the wire (per [llm.Request.ResponseSchema] docs) and only the
+// dropped on the wire (per [llmkit.Request.ResponseSchema] docs) and only the
 // prompt-embedded schema instruction is in effect. This is the agent-layer
 // gate: the no-cap passthrough path sends NO schema, matching today's
 // behavior, while the with-cap path gets a hard native shape guarantee.
-func (r *Runner) complete(ctx context.Context, tr *Transcript, messages []llm.Message, outcome *Outcome, responseSchema json.RawMessage, final bool) (llm.Response, error) {
-	req := llm.Request{
+func (r *Runner) complete(ctx context.Context, tr *Transcript, messages []llmkit.Message, outcome *Outcome, responseSchema json.RawMessage, final bool) (llmkit.Response, error) {
+	req := llmkit.Request{
 		System:    r.systemPrompt,
 		Messages:  messages,
 		Tools:     r.tools.defs,
@@ -595,7 +595,7 @@ func (r *Runner) complete(ctx context.Context, tr *Transcript, messages []llm.Me
 
 	resp, err := r.client.Complete(ctx, req)
 	if err != nil {
-		return llm.Response{}, fmt.Errorf("agent: completion failed at iteration %d: %w", outcome.Iterations+1, err)
+		return llmkit.Response{}, fmt.Errorf("agent: completion failed at iteration %d: %w", outcome.Iterations+1, err)
 	}
 
 	outcome.Iterations++
@@ -619,7 +619,7 @@ func (r *Runner) complete(ctx context.Context, tr *Transcript, messages []llm.Me
 // the model as an "ERROR:"-prefixed result (isErr=true) rather than aborting the
 // loop. Context cancellation surfaced by the tool is still rendered as a tool
 // error here; the loop's own ctx checks handle real cancellation.
-func (r *Runner) runTool(ctx context.Context, call llm.ToolCall) (result string, isErr bool) {
+func (r *Runner) runTool(ctx context.Context, call llmkit.ToolCall) (result string, isErr bool) {
 	tool, ok := r.tools.lookup(call.Name)
 	if !ok {
 		return toolError(fmt.Errorf("unknown tool %q", call.Name)), true
@@ -642,7 +642,7 @@ func (r *Runner) runTool(ctx context.Context, call llm.ToolCall) (result string,
 // negative budget means unlimited. Cache reads are discounted by
 // CacheReadWeight (resolved to 1.0 by Limits.resolve() when unset) so a
 // cache-heavy run is bounded by its real cost, not raw prompt size.
-func (r *Runner) overBudget(u llm.Usage) bool {
+func (r *Runner) overBudget(u llmkit.Usage) bool {
 	if r.limits.TokenBudget < 0 {
 		return false
 	}
@@ -706,7 +706,7 @@ func slug(task string) string {
 // Argument parsing is best-effort: a JSON failure leaves fields at their zero
 // values, which produce a sane (if sparse) ToolActivity. Safe for concurrent
 // use: reads only the call argument bytes.
-func extractToolActivity(call llm.ToolCall) ToolActivity {
+func extractToolActivity(call llmkit.ToolCall) ToolActivity {
 	act := ToolActivity{Tool: call.Name}
 
 	// Decode the relevant arguments for each tool. Only the fields this tool

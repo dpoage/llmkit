@@ -1,6 +1,6 @@
 module github.com/dpoage/llmkit
 
-go 1.26.5
+go 1.25.0
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.58.0

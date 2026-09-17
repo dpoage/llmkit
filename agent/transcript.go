@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/dpoage/llmkit/llm"
+	"github.com/dpoage/llmkit"
 )
 
 // EventKind tags each [Event] in a [Transcript].
@@ -38,16 +38,16 @@ type Event struct {
 	Time time.Time `json:"time"`
 
 	// Messages is set on EventRequest: the full conversation sent to the model.
-	Messages []llm.Message `json:"messages,omitempty"`
+	Messages []llmkit.Message `json:"messages,omitempty"`
 
 	// Text is set on EventAssistant: the model's text output.
 	Text string `json:"text,omitempty"`
 	// ToolCalls is set on EventAssistant: the model's tool-use requests.
-	ToolCalls []llm.ToolCall `json:"tool_calls,omitempty"`
+	ToolCalls []llmkit.ToolCall `json:"tool_calls,omitempty"`
 	// StopReason is set on EventAssistant.
-	StopReason llm.StopReason `json:"stop_reason,omitempty"`
+	StopReason llmkit.StopReason `json:"stop_reason,omitempty"`
 	// Usage is set on EventAssistant: token usage for that completion.
-	Usage *llm.Usage `json:"usage,omitempty"`
+	Usage *llmkit.Usage `json:"usage,omitempty"`
 
 	// ToolCallID is set on EventToolResult: the call this result answers.
 	ToolCallID string `json:"tool_call_id,omitempty"`
@@ -158,10 +158,10 @@ func (t *Transcript) now() time.Time {
 }
 
 // recordRequest appends an EventRequest capturing the messages sent for step.
-func (t *Transcript) recordRequest(step int, msgs []llm.Message) {
+func (t *Transcript) recordRequest(step int, msgs []llmkit.Message) {
 	// Copy the slice so later mutation of the conversation doesn't alias the
 	// recorded snapshot.
-	snap := make([]llm.Message, len(msgs))
+	snap := make([]llmkit.Message, len(msgs))
 	copy(snap, msgs)
 	t.Events = append(t.Events, Event{
 		Kind:     EventRequest,
@@ -173,7 +173,7 @@ func (t *Transcript) recordRequest(step int, msgs []llm.Message) {
 }
 
 // recordAssistant appends an EventAssistant for the model's response at step.
-func (t *Transcript) recordAssistant(step int, resp llm.Response) {
+func (t *Transcript) recordAssistant(step int, resp llmkit.Response) {
 	u := resp.Usage
 	t.Events = append(t.Events, Event{
 		Kind:       EventAssistant,
@@ -188,7 +188,7 @@ func (t *Transcript) recordAssistant(step int, resp llm.Response) {
 }
 
 // recordToolResult appends an EventToolResult for one executed tool call.
-func (t *Transcript) recordToolResult(step int, call llm.ToolCall, result string, isErr bool) {
+func (t *Transcript) recordToolResult(step int, call llmkit.ToolCall, result string, isErr bool) {
 	t.Events = append(t.Events, Event{
 		Kind:       EventToolResult,
 		Step:       step,

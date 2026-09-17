@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dpoage/llmkit/llm"
+	"github.com/dpoage/llmkit"
 )
 
 // hookClient wraps a fakeClient and calls onComplete after every Complete
@@ -19,7 +19,7 @@ type hookClient struct {
 	onComplete func()
 }
 
-func (h *hookClient) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
+func (h *hookClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	resp, err := h.fakeClient.Complete(ctx, req)
 	if h.onComplete != nil {
 		h.onComplete()
@@ -114,8 +114,8 @@ func TestTranscript_StreamsIncrementally(t *testing.T) {
 // stubReadFileTool is a minimal Tool implementation for TestTranscript_StreamsIncrementally.
 type stubReadFileTool struct{}
 
-func (stubReadFileTool) Def() llm.ToolDef {
-	return llm.ToolDef{Name: "read_file", Description: "reads a file"}
+func (stubReadFileTool) Def() llmkit.ToolDef {
+	return llmkit.ToolDef{Name: "read_file", Description: "reads a file"}
 }
 
 func (stubReadFileTool) Run(ctx context.Context, args json.RawMessage) (string, error) {

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dpoage/llmkit/llm"
+	"github.com/dpoage/llmkit"
 )
 
 // bigEchoTool returns a fixed large blob regardless of input, so each tool turn
@@ -16,8 +16,8 @@ type bigEchoTool struct {
 	blob string
 }
 
-func (b bigEchoTool) Def() llm.ToolDef {
-	return llm.ToolDef{
+func (b bigEchoTool) Def() llmkit.ToolDef {
+	return llmkit.ToolDef{
 		Name:        b.name,
 		Description: "returns a large blob",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"v":{"type":"string"}}}`),
@@ -30,10 +30,10 @@ func (b bigEchoTool) Run(ctx context.Context, args json.RawMessage) (string, err
 
 // toolResultBytes sums tool-result content bytes in a request, the quantity
 // compaction actually reclaims.
-func toolResultBytes(req llm.Request) int {
+func toolResultBytes(req llmkit.Request) int {
 	n := 0
 	for _, m := range req.Messages {
-		if m.Role == llm.RoleToolResult {
+		if m.Role == llmkit.RoleToolResult {
 			n += len(m.Content)
 		}
 	}
@@ -69,7 +69,7 @@ func TestRun_CompactionShrinksRequest(t *testing.T) {
 	// naive append-only run would (which is all 5 blobs ~= 60 KB). With recent-K=4
 	// and compaction, the oldest result(s) are stubbed.
 	fc.mu.Lock()
-	reqs := append([]llm.Request(nil), fc.requests...)
+	reqs := append([]llmkit.Request(nil), fc.requests...)
 	fc.mu.Unlock()
 	if len(reqs) == 0 {
 		t.Fatal("no requests captured")
@@ -88,7 +88,7 @@ func TestRun_CompactionShrinksRequest(t *testing.T) {
 			maxSent = b
 		}
 		for _, m := range req.Messages {
-			if m.Role == llm.RoleToolResult && strings.HasPrefix(m.Content, "[tool result pruned") {
+			if m.Role == llmkit.RoleToolResult && strings.HasPrefix(m.Content, "[tool result pruned") {
 				stubbedAny = true
 			}
 		}
@@ -119,12 +119,12 @@ func TestRun_CompactionDisabledWhenBudgetZero(t *testing.T) {
 	}
 
 	fc.mu.Lock()
-	reqs := append([]llm.Request(nil), fc.requests...)
+	reqs := append([]llmkit.Request(nil), fc.requests...)
 	fc.mu.Unlock()
 	last := reqs[len(reqs)-1]
 	// All three full blobs must be present (no stubbing).
 	for _, m := range last.Messages {
-		if m.Role == llm.RoleToolResult && strings.HasPrefix(m.Content, "[tool result pruned") {
+		if m.Role == llmkit.RoleToolResult && strings.HasPrefix(m.Content, "[tool result pruned") {
 			t.Fatal("compaction fired despite HistoryTokenBudget=0")
 		}
 	}
@@ -153,7 +153,7 @@ func TestRun_CompactionSingleShotPerCrossingThenRearms(t *testing.T) {
 	}
 
 	fc.mu.Lock()
-	reqs := append([]llm.Request(nil), fc.requests...)
+	reqs := append([]llmkit.Request(nil), fc.requests...)
 	fc.mu.Unlock()
 
 	// Find the first request whose message[2] (the first tool result) is a stub,
@@ -164,7 +164,7 @@ func TestRun_CompactionSingleShotPerCrossingThenRearms(t *testing.T) {
 			continue
 		}
 		m := req.Messages[2]
-		if m.Role != llm.RoleToolResult {
+		if m.Role != llmkit.RoleToolResult {
 			continue
 		}
 		if strings.HasPrefix(m.Content, "[tool result pruned") {

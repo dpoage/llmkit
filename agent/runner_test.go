@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dpoage/llmkit/llm"
+	"github.com/dpoage/llmkit"
 )
 
 // echoTool returns whatever it's given, or errors when asked to.
@@ -16,8 +16,8 @@ type echoTool struct {
 	failMsg string // non-empty => Run returns this as an error
 }
 
-func (e echoTool) Def() llm.ToolDef {
-	return llm.ToolDef{
+func (e echoTool) Def() llmkit.ToolDef {
+	return llmkit.ToolDef{
 		Name:        e.name,
 		Description: "echo",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"v":{"type":"string"}}}`),
@@ -58,7 +58,7 @@ func TestRun_CleanFinish(t *testing.T) {
 	// A normal text-only final turn must not trigger the
 	// empty-turn nudge: zero nudges, no nudge message in the conversation.
 	for _, m := range out.Messages {
-		if m.Role == llm.RoleUser && m.Content == emptyTurnNudge {
+		if m.Role == llmkit.RoleUser && m.Content == emptyTurnNudge {
 			t.Error("nudge message present for a normal text-only final turn")
 		}
 	}
@@ -86,7 +86,7 @@ func TestRun_EmptyTurnNudgeThenProse(t *testing.T) {
 	}
 	foundNudge := false
 	for _, m := range out.Messages {
-		if m.Role == llm.RoleUser && m.Content == emptyTurnNudge {
+		if m.Role == llmkit.RoleUser && m.Content == emptyTurnNudge {
 			foundNudge = true
 		}
 	}
@@ -123,7 +123,7 @@ func TestRun_ToolCallThenFinish(t *testing.T) {
 	last := fc.requests[1].Messages
 	foundResult := false
 	for _, m := range last {
-		if m.Role == llm.RoleToolResult && m.ToolCallID == "c1" {
+		if m.Role == llmkit.RoleToolResult && m.ToolCallID == "c1" {
 			foundResult = true
 			if !strings.Contains(m.Content, "echo:") {
 				t.Errorf("tool result content = %q", m.Content)
@@ -225,9 +225,9 @@ func TestRun_ToolErrorFedBackToModel(t *testing.T) {
 	}
 	// The second request must carry the ERROR-prefixed tool result with IsError.
 	last := fc.requests[1].Messages
-	var tr *llm.Message
+	var tr *llmkit.Message
 	for i := range last {
-		if last[i].Role == llm.RoleToolResult {
+		if last[i].Role == llmkit.RoleToolResult {
 			tr = &last[i]
 		}
 	}
@@ -256,7 +256,7 @@ func TestRun_UnknownToolFedBackToModel(t *testing.T) {
 	last := fc.requests[1].Messages
 	found := false
 	for _, m := range last {
-		if m.Role == llm.RoleToolResult && m.IsError && strings.Contains(m.Content, "unknown tool") {
+		if m.Role == llmkit.RoleToolResult && m.IsError && strings.Contains(m.Content, "unknown tool") {
 			found = true
 		}
 	}
@@ -400,107 +400,107 @@ func TestRun_AccumulatesCacheUsage(t *testing.T) {
 func TestExtractToolActivity_Mapping(t *testing.T) {
 	tests := []struct {
 		name string
-		call llm.ToolCall
+		call llmkit.ToolCall
 		want ToolActivity
 	}{
 		{
 			name: "read_file with path and range",
-			call: llm.ToolCall{Name: "read_file", Arguments: []byte(`{"path":"cmd/main.go","start_line":10,"end_line":40}`)},
+			call: llmkit.ToolCall{Name: "read_file", Arguments: []byte(`{"path":"cmd/main.go","start_line":10,"end_line":40}`)},
 			want: ToolActivity{Tool: "read_file", File: "cmd/main.go", Line: 10, EndLine: 40},
 		},
 		{
 			name: "read_file no path",
-			call: llm.ToolCall{Name: "read_file", Arguments: []byte(`{}`)},
+			call: llmkit.ToolCall{Name: "read_file", Arguments: []byte(`{}`)},
 			want: ToolActivity{Tool: "read_file"},
 		},
 		{
 			name: "read_symbol",
-			call: llm.ToolCall{Name: "read_symbol", Arguments: []byte(`{"symbol":"Runner","path":"agent.go"}`)},
+			call: llmkit.ToolCall{Name: "read_symbol", Arguments: []byte(`{"symbol":"Runner","path":"agent.go"}`)},
 			want: ToolActivity{Tool: "read_symbol", Symbol: "Runner", File: "agent.go"},
 		},
 		{
 			name: "grep with pattern and dir",
-			call: llm.ToolCall{Name: "grep", Arguments: []byte(`{"pattern":"TODO","dir":"internal/"}`)},
+			call: llmkit.ToolCall{Name: "grep", Arguments: []byte(`{"pattern":"TODO","dir":"internal/"}`)},
 			want: ToolActivity{Tool: "grep", Pattern: "TODO", File: "internal/"},
 		},
 		{
 			name: "find_definition",
-			call: llm.ToolCall{Name: "find_definition", Arguments: []byte(`{"symbol":"Runner","file":"runner.go"}`)},
+			call: llmkit.ToolCall{Name: "find_definition", Arguments: []byte(`{"symbol":"Runner","file":"runner.go"}`)},
 			want: ToolActivity{Tool: "find_definition", Symbol: "Runner", File: "runner.go"},
 		},
 		{
 			name: "find_references",
-			call: llm.ToolCall{Name: "find_references", Arguments: []byte(`{"symbol":"Emit"}`)},
+			call: llmkit.ToolCall{Name: "find_references", Arguments: []byte(`{"symbol":"Emit"}`)},
 			want: ToolActivity{Tool: "find_references", Symbol: "Emit"},
 		},
 		{
 			name: "find_implementations",
-			call: llm.ToolCall{Name: "find_implementations", Arguments: []byte(`{"symbol":"Tool"}`)},
+			call: llmkit.ToolCall{Name: "find_implementations", Arguments: []byte(`{"symbol":"Tool"}`)},
 			want: ToolActivity{Tool: "find_implementations", Symbol: "Tool"},
 		},
 		{
 			name: "find_usages",
-			call: llm.ToolCall{Name: "find_usages", Arguments: []byte(`{"symbol":"Sink"}`)},
+			call: llmkit.ToolCall{Name: "find_usages", Arguments: []byte(`{"symbol":"Sink"}`)},
 			want: ToolActivity{Tool: "find_usages", Symbol: "Sink"},
 		},
 		{
 			name: "list_dir",
-			call: llm.ToolCall{Name: "list_dir", Arguments: []byte(`{"dir":"internal/agent"}`)},
+			call: llmkit.ToolCall{Name: "list_dir", Arguments: []byte(`{"dir":"internal/agent"}`)},
 			want: ToolActivity{Tool: "list_dir", File: "internal/agent"},
 		},
 		{
 			name: "list_dir via directory field",
-			call: llm.ToolCall{Name: "list_dir", Arguments: []byte(`{"directory":"src"}`)},
+			call: llmkit.ToolCall{Name: "list_dir", Arguments: []byte(`{"directory":"src"}`)},
 			want: ToolActivity{Tool: "list_dir", File: "src"},
 		},
 		{
 			name: "list_dir empty defaults to dot",
-			call: llm.ToolCall{Name: "list_dir", Arguments: []byte(`{}`)},
+			call: llmkit.ToolCall{Name: "list_dir", Arguments: []byte(`{}`)},
 			want: ToolActivity{Tool: "list_dir", File: "."},
 		},
 		{
 			name: "sandbox_exec",
-			call: llm.ToolCall{Name: "sandbox_exec", Arguments: []byte(`{}`)},
+			call: llmkit.ToolCall{Name: "sandbox_exec", Arguments: []byte(`{}`)},
 			want: ToolActivity{Tool: "sandbox_exec", Symbol: "sandbox"},
 		},
 		{
 			name: "post_lead",
-			call: llm.ToolCall{Name: "post_lead", Arguments: []byte(`{}`)},
+			call: llmkit.ToolCall{Name: "post_lead", Arguments: []byte(`{}`)},
 			want: ToolActivity{Tool: "post_lead"},
 		},
 		{
 			name: "status_note",
-			call: llm.ToolCall{Name: "status_note", Arguments: []byte(`{"note":"checking parser"}`)},
+			call: llmkit.ToolCall{Name: "status_note", Arguments: []byte(`{"note":"checking parser"}`)},
 			want: ToolActivity{Tool: "status_note", Symbol: "checking parser"},
 		},
 		{
 			name: "write_repro_file",
-			call: llm.ToolCall{Name: "write_repro_file", Arguments: []byte(`{"path":"repro_test.go","contents":"package main"}`)},
+			call: llmkit.ToolCall{Name: "write_repro_file", Arguments: []byte(`{"path":"repro_test.go","contents":"package main"}`)},
 			want: ToolActivity{Tool: "write_repro_file", File: "repro_test.go"},
 		},
 		{
 			name: "delete_repro_file",
-			call: llm.ToolCall{Name: "delete_repro_file", Arguments: []byte(`{"path":"repro_test.go"}`)},
+			call: llmkit.ToolCall{Name: "delete_repro_file", Arguments: []byte(`{"path":"repro_test.go"}`)},
 			want: ToolActivity{Tool: "delete_repro_file", File: "repro_test.go"},
 		},
 		{
 			name: "workspace",
-			call: llm.ToolCall{Name: "workspace", Arguments: []byte(`{"argv":["exec","go","test","./..."]}`)},
+			call: llmkit.ToolCall{Name: "workspace", Arguments: []byte(`{"argv":["exec","go","test","./..."]}`)},
 			want: ToolActivity{Tool: "workspace", Symbol: "exec go test ./..."},
 		},
 		{
 			name: "workspace truncates long argv",
-			call: llm.ToolCall{Name: "workspace", Arguments: []byte(`{"argv":["exec","go","test","-run","` + strings.Repeat("x", 130) + `"]}`)},
+			call: llmkit.ToolCall{Name: "workspace", Arguments: []byte(`{"argv":["exec","go","test","-run","` + strings.Repeat("x", 130) + `"]}`)},
 			want: ToolActivity{Tool: "workspace", Symbol: "exec go test -run " + strings.Repeat("x", 101) + "…"},
 		},
 		{
 			name: "unknown tool",
-			call: llm.ToolCall{Name: "some_custom_tool", Arguments: []byte(`{}`)},
+			call: llmkit.ToolCall{Name: "some_custom_tool", Arguments: []byte(`{}`)},
 			want: ToolActivity{Tool: "some_custom_tool"},
 		},
 		{
 			name: "malformed JSON args",
-			call: llm.ToolCall{Name: "read_file", Arguments: []byte(`not-valid-json`)},
+			call: llmkit.ToolCall{Name: "read_file", Arguments: []byte(`not-valid-json`)},
 			want: ToolActivity{Tool: "read_file"}, // zero fields; no panic
 		},
 	}
@@ -626,8 +626,8 @@ type healthEchoTool struct {
 	plain  string           // non-empty => Run returns errors.New(plain)
 }
 
-func (e healthEchoTool) Def() llm.ToolDef {
-	return llm.ToolDef{
+func (e healthEchoTool) Def() llmkit.ToolDef {
+	return llmkit.ToolDef{
 		Name:        e.name,
 		Description: "health-echo",
 		Parameters:  json.RawMessage(`{"type":"object"}`),
@@ -744,7 +744,7 @@ func TestRunTool_ToolHealthSink_SkippedOnCancelledCtx(t *testing.T) {
 	}}}, "sys", WithToolHealthSink(sink))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, isErr := r.runTool(ctx, llm.ToolCall{Name: "broken", Arguments: json.RawMessage("{}")})
+	_, isErr := r.runTool(ctx, llmkit.ToolCall{Name: "broken", Arguments: json.RawMessage("{}")})
 	if !isErr {
 		t.Fatal("a ToolHealthError must still be returned as an error result")
 	}
@@ -756,10 +756,10 @@ func TestRunTool_ToolHealthSink_SkippedOnCancelledCtx(t *testing.T) {
 // stopErrorResp builds a response with StopReason == StopError (refusal,
 // safety filter, recitation) and no tool calls.
 func stopErrorResp(text string, in, out int64) scriptStep {
-	return scriptStep{resp: llm.Response{
+	return scriptStep{resp: llmkit.Response{
 		Text:       text,
-		StopReason: llm.StopError,
-		Usage:      llm.Usage{InputTokens: in, OutputTokens: out},
+		StopReason: llmkit.StopError,
+		Usage:      llmkit.Usage{InputTokens: in, OutputTokens: out},
 	}}
 }
 
@@ -775,8 +775,8 @@ func TestRun_StopErrorYieldsTypedError(t *testing.T) {
 	if !errors.As(err, &stopErr) {
 		t.Fatalf("Run error = %v, want *ErrStopReason", err)
 	}
-	if stopErr.StopReason != llm.StopError {
-		t.Errorf("StopReason = %q, want %q", stopErr.StopReason, llm.StopError)
+	if stopErr.StopReason != llmkit.StopError {
+		t.Errorf("StopReason = %q, want %q", stopErr.StopReason, llmkit.StopError)
 	}
 	if stopErr.Text != "I cannot help with that." {
 		t.Errorf("Text = %q, want refusal prose", stopErr.Text)
@@ -818,7 +818,7 @@ func TestRun_StopErrorAfterToolsYieldsTypedError(t *testing.T) {
 func TestRun_EmptyFinalTurnFinalTextSet(t *testing.T) {
 	withText := toolResp("c1", "ghost", `{}`, 5, 2)
 	withText.resp.Text = "thinking out loud"
-	emptyFinal := scriptStep{resp: llm.Response{StopReason: llm.StopEndTurn, Usage: llm.Usage{InputTokens: 5, OutputTokens: 1}}}
+	emptyFinal := scriptStep{resp: llmkit.Response{StopReason: llmkit.StopEndTurn, Usage: llmkit.Usage{InputTokens: 5, OutputTokens: 1}}}
 	fc := newFakeClient(
 		withText,
 		emptyFinal,

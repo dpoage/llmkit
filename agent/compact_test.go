@@ -4,27 +4,27 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dpoage/llmkit/llm"
+	"github.com/dpoage/llmkit"
 )
 
 // bigToolResult builds a tool-result message large enough to be worth pruning.
-func bigToolResult(id, content string) llm.Message {
-	return llm.Message{Role: llm.RoleToolResult, ToolCallID: id, Content: content}
+func bigToolResult(id, content string) llmkit.Message {
+	return llmkit.Message{Role: llmkit.RoleToolResult, ToolCallID: id, Content: content}
 }
 
 // sampleHistory builds a realistic history: a task, then alternating
 // assistant turns (with tool calls) and tool results. n is the number of
 // tool-result messages; each is a long blob so it is a pruning candidate.
-func sampleHistory(n int) ([]llm.Message, map[string]string) {
-	msgs := []llm.Message{{Role: llm.RoleUser, Content: "investigate these files for bugs"}}
+func sampleHistory(n int) ([]llmkit.Message, map[string]string) {
+	msgs := []llmkit.Message{{Role: llmkit.RoleUser, Content: "investigate these files for bugs"}}
 	names := map[string]string{}
 	for i := range n {
 		id := "call-" + string(rune('a'+i))
 		name := "read_file"
 		names[id] = name
 		msgs = append(msgs,
-			llm.Message{Role: llm.RoleAssistant, Content: "let me read file " + id,
-				ToolCalls: []llm.ToolCall{{ID: id, Name: name, Arguments: []byte(`{"path":"x.go"}`)}}},
+			llmkit.Message{Role: llmkit.RoleAssistant, Content: "let me read file " + id,
+				ToolCalls: []llmkit.ToolCall{{ID: id, Name: name, Arguments: []byte(`{"path":"x.go"}`)}}},
 			bigToolResult(id, strings.Repeat("line of source code\n", 200)),
 		)
 	}
@@ -43,7 +43,7 @@ func TestCompactHistory_PrunesOldKeepsRecentK(t *testing.T) {
 	// Walk tool-result messages; the first (6-4)=2 must be stubs, the last 4 verbatim.
 	var trIdx int
 	for _, m := range out {
-		if m.Role != llm.RoleToolResult {
+		if m.Role != llmkit.RoleToolResult {
 			continue
 		}
 		isStub := strings.HasPrefix(m.Content, "[tool result pruned")
@@ -59,7 +59,7 @@ func TestCompactHistory_PrunesOldKeepsRecentK(t *testing.T) {
 
 func TestCompactHistory_PreservesPairingAndStructure(t *testing.T) {
 	msgs, names := sampleHistory(5)
-	orig := append([]llm.Message(nil), msgs...)
+	orig := append([]llmkit.Message(nil), msgs...)
 
 	out, pruned := compactHistory(msgs, 1, names)
 	if !pruned {
@@ -90,20 +90,20 @@ func TestCompactHistory_PreservesPairingAndStructure(t *testing.T) {
 		t.Errorf("task message content mutated: %q", out[0].Content)
 	}
 	for i := range out {
-		if out[i].Role == llm.RoleAssistant && out[i].Content != orig[i].Content {
+		if out[i].Role == llmkit.RoleAssistant && out[i].Content != orig[i].Content {
 			t.Errorf("assistant turn %d content mutated (reasoning chain lost)", i)
 		}
 	}
 }
 
 func TestCompactHistory_StubFormat(t *testing.T) {
-	msgs := []llm.Message{
-		{Role: llm.RoleUser, Content: "task"},
-		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "c1", Name: "read_file"}}},
+	msgs := []llmkit.Message{
+		{Role: llmkit.RoleUser, Content: "task"},
+		{Role: llmkit.RoleAssistant, ToolCalls: []llmkit.ToolCall{{ID: "c1", Name: "read_file"}}},
 		bigToolResult("c1", strings.Repeat("x", 8412)),
-		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "c2", Name: "grep"}}},
-		{Role: llm.RoleToolResult, ToolCallID: "c2", Content: strings.Repeat("y", 500), IsError: true},
-		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "c3", Name: "list_dir"}}},
+		{Role: llmkit.RoleAssistant, ToolCalls: []llmkit.ToolCall{{ID: "c2", Name: "grep"}}},
+		{Role: llmkit.RoleToolResult, ToolCallID: "c2", Content: strings.Repeat("y", 500), IsError: true},
+		{Role: llmkit.RoleAssistant, ToolCalls: []llmkit.ToolCall{{ID: "c3", Name: "list_dir"}}},
 		bigToolResult("c3", strings.Repeat("z", 100)),
 	}
 	names := map[string]string{"c1": "read_file", "c2": "grep", "c3": "list_dir"}
@@ -140,13 +140,13 @@ func TestCompactHistory_NothingToPruneWhenAllRecent(t *testing.T) {
 func TestCompactHistory_SkipsAlreadyStubbed(t *testing.T) {
 	// A result already at/under stub size must not be re-mutated (that would
 	// needlessly invalidate the prompt-cache prefix on a later compaction).
-	msgs := []llm.Message{
-		{Role: llm.RoleUser, Content: "task"},
-		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "c1", Name: "read_file"}}},
-		{Role: llm.RoleToolResult, ToolCallID: "c1", Content: "tiny"},
-		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "c2", Name: "read_file"}}},
+	msgs := []llmkit.Message{
+		{Role: llmkit.RoleUser, Content: "task"},
+		{Role: llmkit.RoleAssistant, ToolCalls: []llmkit.ToolCall{{ID: "c1", Name: "read_file"}}},
+		{Role: llmkit.RoleToolResult, ToolCallID: "c1", Content: "tiny"},
+		{Role: llmkit.RoleAssistant, ToolCalls: []llmkit.ToolCall{{ID: "c2", Name: "read_file"}}},
 		bigToolResult("c2", strings.Repeat("x", 4000)),
-		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "c3", Name: "read_file"}}},
+		{Role: llmkit.RoleAssistant, ToolCalls: []llmkit.ToolCall{{ID: "c3", Name: "read_file"}}},
 		bigToolResult("c3", strings.Repeat("y", 4000)),
 	}
 	names := map[string]string{"c1": "read_file", "c2": "read_file", "c3": "read_file"}
@@ -162,10 +162,10 @@ func TestCompactHistory_SkipsAlreadyStubbed(t *testing.T) {
 }
 
 func TestEstimateTokens_CountsContentAndToolCalls(t *testing.T) {
-	msgs := []llm.Message{
-		{Role: llm.RoleUser, Content: strings.Repeat("a", 400)}, // 400 bytes
-		{Role: llm.RoleAssistant, Content: strings.Repeat("b", 400),
-			ToolCalls: []llm.ToolCall{{Name: "read_file", Arguments: []byte(strings.Repeat("c", 192))}}},
+	msgs := []llmkit.Message{
+		{Role: llmkit.RoleUser, Content: strings.Repeat("a", 400)}, // 400 bytes
+		{Role: llmkit.RoleAssistant, Content: strings.Repeat("b", 400),
+			ToolCalls: []llmkit.ToolCall{{Name: "read_file", Arguments: []byte(strings.Repeat("c", 192))}}},
 	}
 	// (400 + 400 + len("read_file")=9 + 192) / 4 = 1001/4 = 250
 	if got := estimateTokens(msgs); got != 250 {

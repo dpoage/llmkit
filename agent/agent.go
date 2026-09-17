@@ -1,5 +1,5 @@
 // Package agent is a tool-call execution harness: a reusable loop that
-// drives an [llm.Client] through a bounded set of tools until the model
+// drives an [llmkit.Client] through a bounded set of tools until the model
 // produces a final answer, runs out of iterations, or exhausts a token budget.
 //
 // Callers with different roles (e.g. a bug finder, a verifier, a reproducer)
@@ -13,7 +13,7 @@
 // Tool errors are *not* loop failures: they are fed back to the model as
 // tool-result content prefixed with "ERROR:" so the model can recover (retry
 // with different arguments, try another tool, or give up gracefully). Only
-// infrastructure-level failures (a failed [llm.Client.Complete], context
+// infrastructure-level failures (a failed [llmkit.Client.Complete], context
 // cancellation) abort the loop.
 //
 // The built-in read-only code tools ([NewReadFile], [NewListDir], [NewGrep])
@@ -24,7 +24,7 @@
 // # Limits and partial results
 //
 // The loop enforces two limits: [Limits.MaxIterations] (model turns) and
-// [Limits.TokenBudget] (cumulative input+output tokens from [llm.Usage]).
+// [Limits.TokenBudget] (cumulative input+output tokens from [llmkit.Usage]).
 // Exceeding either stops the loop cleanly, returning an [Outcome] with
 // Truncated set and the last assistant text preserved — partial results are
 // data, not errors. Only context cancellation and infra failures return a
@@ -41,7 +41,7 @@ package agent
 import (
 	"fmt"
 
-	"github.com/dpoage/llmkit/llm"
+	"github.com/dpoage/llmkit"
 )
 
 // Default limits applied when a Runner is constructed with zero-value limits.
@@ -63,7 +63,7 @@ type Limits struct {
 	// MaxIterations caps the number of model turns. Zero uses
 	// DefaultMaxIterations. A negative value disables the iteration cap.
 	MaxIterations int
-	// TokenBudget caps cumulative input+output tokens (summed from llm.Usage
+	// TokenBudget caps cumulative input+output tokens (summed from llmkit.Usage
 	// across every completion in the run). Zero uses DefaultTokenBudget. A
 	// negative value disables the budget.
 	TokenBudget int64
@@ -162,7 +162,7 @@ type Outcome struct {
 	// Iterations is the number of completed model turns.
 	Iterations int
 	// Usage is cumulative token consumption across the run.
-	Usage llm.Usage
+	Usage llmkit.Usage
 	// Finalized reports whether forced finalization fired: the loop reserved its
 	// last turn, injected the finalization prompt, and took one final completion
 	// instead of returning dangling exploration prose. See [WithFinalization].
@@ -171,7 +171,7 @@ type Outcome struct {
 	// StopMaxTokens when the model's last output was truncated at the token cap,
 	// which JSON-expecting callers use to distinguish "truncated mid-answer" from
 	// a genuine parse failure.
-	LastStopReason llm.StopReason
+	LastStopReason llmkit.StopReason
 	// Transcript is the full ordered record of the run. Never nil.
 	Transcript *Transcript
 	// Messages is the full conversation state (system-less: user/assistant/
@@ -182,7 +182,7 @@ type Outcome struct {
 	// round's starting history so the model keeps its prior investigation
 	// instead of re-orienting from scratch. Callers that don't continue a
 	// conversation (the common case) can ignore this field entirely.
-	Messages []llm.Message
+	Messages []llmkit.Message
 }
 
 // Validate checks the Outcome's internal invariants. It returns a non-nil error
@@ -196,14 +196,14 @@ func (o *Outcome) Validate() error {
 }
 
 // ErrStopReason is returned by [Runner.Run] when the model's final turn ended
-// with [llm.StopError] (refusal, safety filter, recitation) and no tool calls.
+// with [llmkit.StopError] (refusal, safety filter, recitation) and no tool calls.
 // Before this error existed the loop treated such turns as clean completions,
 // recording refusal prose — or stale text from an earlier turn — as the answer
 // (observed in production). The partial Outcome is attached so callers can
 // still inspect usage and the transcript.
 type ErrStopReason struct {
 	// StopReason is the provider stop reason that ended the run.
-	StopReason llm.StopReason
+	StopReason llmkit.StopReason
 	// Text is whatever text the refusing turn carried (often refusal prose).
 	Text string
 	// Outcome is the partial outcome at the point the run stopped. Never nil.

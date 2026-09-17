@@ -3,13 +3,13 @@ package agent
 import (
 	"testing"
 
-	"github.com/dpoage/llmkit/llm"
+	"github.com/dpoage/llmkit"
 )
 
 func TestOverBudget_CacheReadWeighted(t *testing.T) {
 	r := &Runner{limits: Limits{TokenBudget: 2000, CacheReadWeight: 0.1}}
 	// 5000 input (4500 cached) + 100 out -> chargeable 500 + 450 + 100 = 1050 < 2000.
-	u := llm.Usage{InputTokens: 5000, OutputTokens: 100, CacheReadInputTokens: 4500}
+	u := llmkit.Usage{InputTokens: 5000, OutputTokens: 100, CacheReadInputTokens: 4500}
 	if r.overBudget(u) {
 		t.Error("weighted usage 1050 should be under budget 2000")
 	}

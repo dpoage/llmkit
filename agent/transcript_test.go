@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dpoage/llmkit/llm"
+	"github.com/dpoage/llmkit"
 )
 
 func TestTranscript_RoundTrip(t *testing.T) {
@@ -66,7 +66,7 @@ func TestReplayClient_ReproducesRun(t *testing.T) {
 	}
 
 	// Replay it through a fresh runner with the same tools.
-	replay, err := NewReplayClient(rec.Transcript, llm.Capabilities{})
+	replay, err := NewReplayClient(rec.Transcript, llmkit.Capabilities{})
 	if err != nil {
 		t.Fatalf("NewReplayClient: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestReplayClient_Divergence(t *testing.T) {
 	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys")
 	rec, _ := r.Run(context.Background(), "task")
 
-	replay, err := NewReplayClient(rec.Transcript, llm.Capabilities{})
+	replay, err := NewReplayClient(rec.Transcript, llmkit.Capabilities{})
 	if err != nil {
 		t.Fatalf("NewReplayClient: %v", err)
 	}
@@ -112,20 +112,20 @@ func TestReplayClient_Divergence(t *testing.T) {
 }
 
 func TestReplayClient_FromResponses(t *testing.T) {
-	replay := NewReplayClientFromResponses([]llm.Response{
-		{Text: "one", StopReason: llm.StopEndTurn},
-	}, llm.Capabilities{ContextWindow: 1234})
+	replay := NewReplayClientFromResponses([]llmkit.Response{
+		{Text: "one", StopReason: llmkit.StopEndTurn},
+	}, llmkit.Capabilities{ContextWindow: 1234})
 	if replay.Capabilities().ContextWindow != 1234 {
 		t.Error("capabilities not threaded through")
 	}
-	resp, err := replay.Complete(context.Background(), llm.Request{})
+	resp, err := replay.Complete(context.Background(), llmkit.Request{})
 	if err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 	if resp.Text != "one" {
 		t.Errorf("Text = %q", resp.Text)
 	}
-	if _, err := replay.Complete(context.Background(), llm.Request{}); err == nil {
+	if _, err := replay.Complete(context.Background(), llmkit.Request{}); err == nil {
 		t.Error("expected exhaustion on second call")
 	}
 }

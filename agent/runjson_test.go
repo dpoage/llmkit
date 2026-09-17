@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/dpoage/llmkit/llm"
+	"github.com/dpoage/llmkit"
 )
 
 type finding struct {
@@ -101,10 +101,10 @@ func TestRunJSONContinue_PreservesPriorConversation(t *testing.T) {
 	}
 	sawToolCall, sawToolResult := false, false
 	for _, m := range round2Req.Messages {
-		if m.Role == llm.RoleAssistant && len(m.ToolCalls) > 0 {
+		if m.Role == llmkit.RoleAssistant && len(m.ToolCalls) > 0 {
 			sawToolCall = true
 		}
-		if m.Role == llm.RoleToolResult {
+		if m.Role == llmkit.RoleToolResult {
 			sawToolResult = true
 		}
 	}
@@ -320,7 +320,7 @@ func TestRunJSON_ForcedFinalization(t *testing.T) {
 	}
 	// The finalization user message must have been injected.
 	lastMsg := finalReq.Messages[len(finalReq.Messages)-1]
-	if lastMsg.Role != llm.RoleUser || !strings.Contains(lastMsg.Content, "STOP investigating") {
+	if lastMsg.Role != llmkit.RoleUser || !strings.Contains(lastMsg.Content, "STOP investigating") {
 		t.Errorf("finalization message missing; last message = %+v", lastMsg)
 	}
 }
@@ -554,7 +554,7 @@ func TestStripFences(t *testing.T) {
 	}
 }
 
-// budgetCutClient is a scripted llm.Client for budget-pressure tests: it
+// budgetCutClient is a scripted llmkit.Client for budget-pressure tests: it
 // always requests a tool (so the loop never naturally finishes) and reports
 // a large, fixed Usage on every completion. The first N-1 completions also
 // report a tool call, and the final one (the reserved finalization turn)
@@ -569,10 +569,10 @@ type budgetCutClient struct {
 	chargeFn  func() // optional: called before each completion
 }
 
-func (c *budgetCutClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
-func (c *budgetCutClient) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
+func (c *budgetCutClient) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
+func (c *budgetCutClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	if err := ctx.Err(); err != nil {
-		return llm.Response{}, err
+		return llmkit.Response{}, err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -581,16 +581,16 @@ func (c *budgetCutClient) Complete(ctx context.Context, req llm.Request) (llm.Re
 		c.chargeFn()
 	}
 	if c.calls == c.finalAt {
-		return llm.Response{
+		return llmkit.Response{
 			Text:       c.finalText,
-			StopReason: llm.StopEndTurn,
-			Usage:      llm.Usage{InputTokens: 1, OutputTokens: 1},
+			StopReason: llmkit.StopEndTurn,
+			Usage:      llmkit.Usage{InputTokens: 1, OutputTokens: 1},
 		}, nil
 	}
-	return llm.Response{
-		StopReason: llm.StopToolUse,
-		ToolCalls:  []llm.ToolCall{{ID: "c", Name: "echo", Arguments: []byte(`{}`)}},
-		Usage:      llm.Usage{InputTokens: c.perCall, OutputTokens: c.perCall},
+	return llmkit.Response{
+		StopReason: llmkit.StopToolUse,
+		ToolCalls:  []llmkit.ToolCall{{ID: "c", Name: "echo", Arguments: []byte(`{}`)}},
+		Usage:      llmkit.Usage{InputTokens: c.perCall, OutputTokens: c.perCall},
 	}, nil
 }
 
@@ -796,7 +796,7 @@ func TestRunJSON_NoCapPassthrough(t *testing.T) {
 // decoding. This is the "CAP ON" half of the acceptance criterion.
 func TestRunJSON_CapOnCarriesSchema(t *testing.T) {
 	fc := newFakeClient(textResp(validFindingJSON, 5, 5))
-	fc.caps = llm.Capabilities{StructuredOutput: true}
+	fc.caps = llmkit.Capabilities{StructuredOutput: true}
 	r := NewRunner(fc, nil, "sys")
 
 	var got findingWithRefuted
@@ -832,7 +832,7 @@ func TestRunJSON_ValidationTriggersRepair(t *testing.T) {
 		textResp(`[{"file":"a.go","message":"bug"}]`, 5, 5),
 		textResp(validFindingJSON, 5, 5),
 	)
-	fc.caps = llm.Capabilities{StructuredOutput: true}
+	fc.caps = llmkit.Capabilities{StructuredOutput: true}
 	r := NewRunner(fc, nil, "sys")
 
 	var got findingWithRefuted
@@ -878,7 +878,7 @@ func TestRunJSON_ValidationTriggersRepair_MissingRequired(t *testing.T) {
 		textResp(`{"file":"a.go","message":"bug"}`, 5, 5),
 		textResp(validFindingJSON, 5, 5),
 	)
-	fc.caps = llm.Capabilities{StructuredOutput: true}
+	fc.caps = llmkit.Capabilities{StructuredOutput: true}
 	r := NewRunner(fc, nil, "sys")
 
 	var got findingWithRefuted
@@ -994,7 +994,7 @@ func TestRunJSON_RepairStillWrongShape(t *testing.T) {
 		textResp(`[{"file":"a.go"}]`, 5, 5),
 		textResp(`[{"file":"a.go"}]`, 5, 5),
 	)
-	fc.caps = llm.Capabilities{StructuredOutput: true}
+	fc.caps = llmkit.Capabilities{StructuredOutput: true}
 	r := NewRunner(fc, nil, "sys")
 
 	var got findingWithRefuted
@@ -1046,7 +1046,7 @@ func TestRunJSON_ParseFailureWrapsSentinel(t *testing.T) {
 			textResp(`[{"file":"a.go"}]`, 5, 5),
 			textResp(`[{"file":"a.go"}]`, 5, 5),
 		)
-		fc.caps = llm.Capabilities{StructuredOutput: true}
+		fc.caps = llmkit.Capabilities{StructuredOutput: true}
 		r := NewRunner(fc, nil, "sys")
 		var got findingWithRefuted
 		_, err := r.RunJSON(context.Background(), "task", json.RawMessage(findWithCandidatesSchema), &got)
@@ -1223,7 +1223,7 @@ func TestRunJSON_DeepValidationTriggersRepair(t *testing.T) {
 		textResp(`{"severity":"blocker"}`, 5, 5),
 		textResp(`{"severity":"high"}`, 5, 5),
 	)
-	fc.caps = llm.Capabilities{StructuredOutput: true}
+	fc.caps = llmkit.Capabilities{StructuredOutput: true}
 	r := NewRunner(fc, nil, "sys")
 
 	var got sev
@@ -1364,7 +1364,7 @@ func TestRunJSON_EmptyTurnNudgeRecovers(t *testing.T) {
 	}
 	foundNudge := false
 	for _, m := range out.Messages {
-		if m.Role == llm.RoleUser && m.Content == emptyTurnNudge {
+		if m.Role == llmkit.RoleUser && m.Content == emptyTurnNudge {
 			foundNudge = true
 		}
 	}
@@ -1400,7 +1400,7 @@ func TestRunJSON_EmptyTurnNudgeCapExhausted(t *testing.T) {
 	}
 	nudgeCount := 0
 	for _, m := range out.Messages {
-		if m.Role == llm.RoleUser && m.Content == emptyTurnNudge {
+		if m.Role == llmkit.RoleUser && m.Content == emptyTurnNudge {
 			nudgeCount++
 		}
 	}

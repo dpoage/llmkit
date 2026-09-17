@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/dpoage/llmkit/llm"
+	"github.com/dpoage/llmkit"
 )
 
-// ReplayClient is an [llm.Client] that serves a fixed sequence of recorded
+// ReplayClient is an [llmkit.Client] that serves a fixed sequence of recorded
 // responses in order, instead of calling a real provider. It is the building
 // block for offline evaluation: record a run's transcript once, then replay it
 // deterministically against modified harness code.
@@ -26,13 +26,13 @@ type ReplayClient struct {
 	mu        sync.Mutex
 	responses []replayStep
 	idx       int
-	caps      llm.Capabilities
+	caps      llmkit.Capabilities
 }
 
 // replayStep pairs a recorded response with the tool-call structure expected of
 // the request that should elicit it.
 type replayStep struct {
-	resp          llm.Response
+	resp          llmkit.Response
 	expectToolIDs []string
 }
 
@@ -43,7 +43,7 @@ type replayStep struct {
 // caps is returned from Capabilities; pass a profile matching the model the
 // transcript was recorded against (or the zero value if it doesn't matter for
 // the code under test).
-func NewReplayClient(tr *Transcript, caps llm.Capabilities) (*ReplayClient, error) {
+func NewReplayClient(tr *Transcript, caps llmkit.Capabilities) (*ReplayClient, error) {
 	if tr == nil {
 		return nil, fmt.Errorf("agent: nil transcript")
 	}
@@ -59,7 +59,7 @@ func NewReplayClient(tr *Transcript, caps llm.Capabilities) (*ReplayClient, erro
 			pending = append(pending, ev.ToolCallID)
 		case EventAssistant:
 			step := replayStep{
-				resp: llm.Response{
+				resp: llmkit.Response{
 					Text:       ev.Text,
 					ToolCalls:  ev.ToolCalls,
 					StopReason: ev.StopReason,
@@ -81,7 +81,7 @@ func NewReplayClient(tr *Transcript, caps llm.Capabilities) (*ReplayClient, erro
 
 // NewReplayClientFromResponses builds a ReplayClient that serves resps in order
 // without any tool-call structure validation. Useful for hand-scripted tests.
-func NewReplayClientFromResponses(resps []llm.Response, caps llm.Capabilities) *ReplayClient {
+func NewReplayClientFromResponses(resps []llmkit.Response, caps llmkit.Capabilities) *ReplayClient {
 	rc := &ReplayClient{caps: caps}
 	for _, r := range resps {
 		rc.responses = append(rc.responses, replayStep{resp: r})
@@ -90,19 +90,19 @@ func NewReplayClientFromResponses(resps []llm.Response, caps llm.Capabilities) *
 }
 
 // Capabilities returns the configured capability profile.
-func (rc *ReplayClient) Capabilities() llm.Capabilities { return rc.caps }
+func (rc *ReplayClient) Capabilities() llmkit.Capabilities { return rc.caps }
 
 // Complete serves the next recorded response, validating tool-call structure.
-func (rc *ReplayClient) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
+func (rc *ReplayClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	if err := ctx.Err(); err != nil {
-		return llm.Response{}, err
+		return llmkit.Response{}, err
 	}
 
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 
 	if rc.idx >= len(rc.responses) {
-		return llm.Response{}, fmt.Errorf("agent: replay exhausted after %d responses; request sequence diverged (extra completion call)", len(rc.responses))
+		return llmkit.Response{}, fmt.Errorf("agent: replay exhausted after %d responses; request sequence diverged (extra completion call)", len(rc.responses))
 	}
 	step := rc.responses[rc.idx]
 
@@ -111,7 +111,7 @@ func (rc *ReplayClient) Complete(ctx context.Context, req llm.Request) (llm.Resp
 	if step.expectToolIDs != nil {
 		got := trailingToolResultIDs(req.Messages, len(step.expectToolIDs))
 		if err := matchToolIDs(rc.idx, step.expectToolIDs, got); err != nil {
-			return llm.Response{}, err
+			return llmkit.Response{}, err
 		}
 	}
 
@@ -122,10 +122,10 @@ func (rc *ReplayClient) Complete(ctx context.Context, req llm.Request) (llm.Resp
 // trailingToolResultIDs returns the ToolCallIDs of the last n tool-result
 // messages in msgs, in order. If there are fewer than n, it returns all of
 // them.
-func trailingToolResultIDs(msgs []llm.Message, n int) []string {
+func trailingToolResultIDs(msgs []llmkit.Message, n int) []string {
 	var ids []string
 	for _, m := range msgs {
-		if m.Role == llm.RoleToolResult {
+		if m.Role == llmkit.RoleToolResult {
 			ids = append(ids, m.ToolCallID)
 		}
 	}

@@ -7,10 +7,10 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/dpoage/llmkit/llm"
+	"github.com/dpoage/llmkit"
 )
 
-// bigSpendClient is a scripted llm.Client that reports a large, fixed Usage on
+// bigSpendClient is a scripted llmkit.Client that reports a large, fixed Usage on
 // every completion and always requests a tool so the loop never finishes on its
 // own — it can only be stopped by a limit or the shared budget pool. Every
 // completion charges the pool, mirroring how a spend recorder feeds it.
@@ -20,11 +20,11 @@ type bigSpendClient struct {
 	callCount atomic.Int64
 }
 
-func (c *bigSpendClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+func (c *bigSpendClient) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
 
-func (c *bigSpendClient) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
+func (c *bigSpendClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	if err := ctx.Err(); err != nil {
-		return llm.Response{}, err
+		return llmkit.Response{}, err
 	}
 	c.callCount.Add(1)
 	// Charge the pool exactly as a spend recorder would, on the same
@@ -33,18 +33,18 @@ func (c *bigSpendClient) Complete(ctx context.Context, req llm.Request) (llm.Res
 	in := c.perCall - c.perCall/10
 	out := c.perCall - in
 	c.pool.Add(in + out)
-	return llm.Response{
-		StopReason: llm.StopToolUse,
-		ToolCalls:  []llm.ToolCall{{ID: "c", Name: "noop", Arguments: []byte(`{}`)}},
-		Usage:      llm.Usage{InputTokens: in, OutputTokens: out},
+	return llmkit.Response{
+		StopReason: llmkit.StopToolUse,
+		ToolCalls:  []llmkit.ToolCall{{ID: "c", Name: "noop", Arguments: []byte(`{}`)}},
+		Usage:      llmkit.Usage{InputTokens: in, OutputTokens: out},
 	}, nil
 }
 
 // noopTool always succeeds, keeping the loop turning until a budget stops it.
 type noopTool struct{}
 
-func (noopTool) Def() llm.ToolDef {
-	return llm.ToolDef{Name: "noop", Description: "noop", Parameters: []byte(`{"type":"object"}`)}
+func (noopTool) Def() llmkit.ToolDef {
+	return llmkit.ToolDef{Name: "noop", Description: "noop", Parameters: []byte(`{"type":"object"}`)}
 }
 func (noopTool) Run(ctx context.Context, args json.RawMessage) (string, error) { return "ok", nil }
 

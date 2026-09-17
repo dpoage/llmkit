@@ -11,7 +11,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/dpoage/llmkit/llm"
+	"github.com/dpoage/llmkit"
 )
 
 // ErrUnparseableOutput marks a RunJSON failure whose cause is the model's final
@@ -39,7 +39,7 @@ var ErrUnparseableOutput = errors.New("model output did not parse as JSON")
 // profile are unchanged by that method's existence.
 //
 // schema is a JSON Schema (raw JSON) describing the expected shape. It is
-// threaded natively as llm.Request.ResponseSchema (capability-gated: when the
+// threaded natively as llmkit.Request.ResponseSchema (capability-gated: when the
 // client reports StructuredOutput==true the schema is sent on the wire, so
 // adapters that support native structured output can apply grammar-constrained
 // decoding). The same schema is also embedded verbatim in the prompt as a
@@ -73,7 +73,7 @@ func (r *Runner) RunJSON(ctx context.Context, task string, schema json.RawMessag
 // bounds the continued history exactly as it does within a single run — no
 // separate summarizer is introduced here.
 func (r *Runner) RunJSONContinue(ctx context.Context, prev *Outcome, task string, schema json.RawMessage, out any) (*Outcome, error) {
-	var seed []llm.Message
+	var seed []llmkit.Message
 	if prev != nil {
 		seed = prev.Messages
 	}
@@ -83,7 +83,7 @@ func (r *Runner) RunJSONContinue(ctx context.Context, prev *Outcome, task string
 // runJSON is the shared implementation behind RunJSON and RunJSONContinue.
 // seed is nil for RunJSON (reseed) or a prior Outcome's Messages for
 // RunJSONContinue (continue).
-func (r *Runner) runJSON(ctx context.Context, seed []llm.Message, task string, schema json.RawMessage, out any) (*Outcome, error) {
+func (r *Runner) runJSON(ctx context.Context, seed []llmkit.Message, task string, schema json.RawMessage, out any) (*Outcome, error) {
 	prompt := task + "\n\n" + jsonInstruction(schema)
 
 	// Reserve the last iteration for a forced finalization turn: if the model is
@@ -213,7 +213,7 @@ func rescueBody(text string, schema json.RawMessage) (string, bool) {
 	if len(schema) == 0 {
 		return "", false
 	}
-	body := stripFences(llm.StripThinkBlocks(text))
+	body := stripFences(llmkit.StripThinkBlocks(text))
 	const maxCandidates = 64
 	tried := 0
 	for i := 0; i < len(body) && tried < maxCandidates; i++ {
@@ -239,7 +239,7 @@ func rescueBody(text string, schema json.RawMessage) (string, bool) {
 // in the error from a model that simply produced malformed JSON. Empty
 // otherwise.
 func truncationNote(o *Outcome) string {
-	if o != nil && o.LastStopReason == llm.StopMaxTokens {
+	if o != nil && o.LastStopReason == llmkit.StopMaxTokens {
 		return " (output truncated at the max-tokens cap)"
 	}
 	return ""
@@ -289,7 +289,7 @@ func jsonInstruction(schema json.RawMessage) string {
 // the original cleaned body is returned unchanged so the existing repair
 // round-trip logic still drives recovery.
 func stripBody(text string) (string, error) {
-	body := stripFences(llm.StripThinkBlocks(text))
+	body := stripFences(llmkit.StripThinkBlocks(text))
 	if strings.TrimSpace(body) == "" {
 		return "", fmt.Errorf("empty model output")
 	}

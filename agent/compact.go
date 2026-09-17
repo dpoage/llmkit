@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/dpoage/llmkit/llm"
+	"github.com/dpoage/llmkit"
 )
 
 // compactRecentToolResults is the number of most-recent tool-result messages
@@ -28,7 +28,7 @@ const compactRearmFactor = 2
 // using the same bytes/4 heuristic the Runner's compaction trigger uses. It is
 // exported so offline measurement harnesses report numbers that agree with the
 // live compaction decision.
-func EstimateHistoryTokens(msgs []llm.Message) int64 { return estimateTokens(msgs) }
+func EstimateHistoryTokens(msgs []llmkit.Message) int64 { return estimateTokens(msgs) }
 
 // SimulateCompaction applies the Runner's threshold-triggered history-compaction
 // policy to a single history snapshot, given the threshold currently in force
@@ -41,7 +41,7 @@ func EstimateHistoryTokens(msgs []llm.Message) int64 { return estimateTokens(msg
 // budget <= 0 disables compaction (returns the snapshot unchanged). recentK is
 // the trailing tool-result window to preserve; pass CompactRecentToolResults to
 // match the Runner.
-func SimulateCompaction(msgs []llm.Message, budget, threshold int64, recentK int, toolNameByID map[string]string) (out []llm.Message, nextThreshold int64) {
+func SimulateCompaction(msgs []llmkit.Message, budget, threshold int64, recentK int, toolNameByID map[string]string) (out []llmkit.Message, nextThreshold int64) {
 	if budget <= 0 || threshold <= 0 {
 		return msgs, threshold
 	}
@@ -66,7 +66,7 @@ const CompactRecentToolResults = compactRecentToolResults
 // for "is history big enough to compact", not a billing oracle. The same
 // heuristic is used by the offline measurement harness so the trigger and the
 // reported numbers agree.
-func estimateTokens(msgs []llm.Message) int64 {
+func estimateTokens(msgs []llmkit.Message) int64 {
 	var b int64
 	for i := range msgs {
 		b += messageBytes(msgs[i])
@@ -77,7 +77,7 @@ func estimateTokens(msgs []llm.Message) int64 {
 // messageBytes returns the approximate billed byte size of one message: its
 // textual content plus, for assistant turns, each tool call's name and raw
 // argument JSON.
-func messageBytes(m llm.Message) int64 {
+func messageBytes(m llmkit.Message) int64 {
 	b := int64(len(m.Content))
 	for _, tc := range m.ToolCalls {
 		b += int64(len(tc.Name)) + int64(len(tc.Arguments))
@@ -135,7 +135,7 @@ func compactStub(toolName string, origBytes int, isErr bool) string {
 // The returned slice is always a fresh allocation when pruning occurs (the
 // caller must swap it in so the prior, longer prefix is not aliased), and the
 // original is returned unchanged when there is nothing to prune.
-func compactHistory(msgs []llm.Message, recentK int, toolNameFor map[string]string) ([]llm.Message, bool) {
+func compactHistory(msgs []llmkit.Message, recentK int, toolNameFor map[string]string) ([]llmkit.Message, bool) {
 	if recentK < 0 {
 		recentK = 0
 	}
@@ -143,7 +143,7 @@ func compactHistory(msgs []llm.Message, recentK int, toolNameFor map[string]stri
 	// trailing recent-K window. Only those become stub candidates.
 	var toolIdx []int
 	for i := range msgs {
-		if msgs[i].Role == llm.RoleToolResult {
+		if msgs[i].Role == llmkit.RoleToolResult {
 			toolIdx = append(toolIdx, i)
 		}
 	}
@@ -159,7 +159,7 @@ func compactHistory(msgs []llm.Message, recentK int, toolNameFor map[string]stri
 		prunable[idx] = true
 	}
 
-	out := make([]llm.Message, len(msgs))
+	out := make([]llmkit.Message, len(msgs))
 	copy(out, msgs)
 	pruned := false
 	for _, idx := range toolIdx[:keepFrom] {
