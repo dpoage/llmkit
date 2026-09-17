@@ -44,7 +44,6 @@ set the variables above, then re-run:
 
 func main() {
 	if err := run(); err != nil {
-		log.SetFlags(0)
 		fmt.Fprintln(os.Stderr, "agent:", err)
 		os.Exit(1)
 	}

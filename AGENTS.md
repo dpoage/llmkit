@@ -140,6 +140,11 @@ go test -race -count=1 ./...
 golangci-lint run ./...            # config: .golangci.yml (v2 schema, conservative set)
 gofmt -l .                         # must print nothing
 ```
+The tag-gated suites RUN (not just compile) outside CI, when their
+backends exist: `go test -tags live ./provider/` exercises the real-API
+probe and skips itself unless the `LLM_LIVE_*` environment variables are
+set; `go test -tags integration ./embed/` needs a local Ollama (default
+localhost:11434).
 
 `examples/` are runnable contract checks (also compiled by
 `go build ./...`): `go run ./examples/basic`, `go run ./examples/agent`,
@@ -198,11 +203,16 @@ accident.
   `llmkit.DefaultMaxTokens` (4096) on every adapter; explicit values pass
   through verbatim.
 - **Capabilities**: adapters report `ContextWindow 0` for models outside
-  their per-model table — never a fabricated number. A false feature flag
-  is silently dropped, with one deliberate exception: an explicit
-  `Request.ToolChoice` mode against a model with
-  `Capabilities.ToolChoice=false` is refused with `ErrInvalidRequest`
-  (silently dropping `none` would let the model call forbidden tools).
+  their per-model table — never a fabricated number. Enforcement is
+  uneven, and callers should know which is which: `Thinking=false` and
+  `StructuredOutput=false` are hard gates (the request's thinking config /
+  response schema is dropped silently), an explicit `Request.ToolChoice`
+  mode against `Capabilities.ToolChoice=false` is refused before the wire
+  call with `ErrInvalidRequest` (silently dropping `none` would let the
+  model call forbidden tools), while `Images`/`Documents` are ADVISORY
+  today — no adapter reads them, the blocks are sent regardless, and the
+  provider may reject the request. Gate your own image/document input on
+  the capability (see `examples/basic`).
 - **Hooks are synchronous**: every `agent.Hooks` callback runs inline on
   the goroutine that reaches the fire point — a slow hook stalls the run.
   `ToolEvent.Step`, `CompactionEvent.Step`, and the transcript's

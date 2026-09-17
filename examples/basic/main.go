@@ -13,9 +13,11 @@
 //	go run ./examples/basic [--image path/to/photo.jpg]
 //
 // With --image, the user message carries a second content block
-// (llmkit.BlockImage with the file's bytes inline), gated on the model's
-// Capabilities.Images. Without the environment variables set, the program
-// prints usage and exits non-zero without touching the network.
+// (llmkit.BlockImage with the file's bytes inline), guarded by the model's
+// Capabilities.Images — an advisory flag: adapters do not read it, but this
+// example refuses to send an image the model does not advertise. Without
+// the environment variables set, the program prints usage and exits
+// non-zero without touching the network.
 package main
 
 import (
@@ -77,7 +79,7 @@ func run() error {
 		}
 		caps := client.Capabilities()
 		if !caps.Images {
-			return fmt.Errorf("model %s reports Capabilities.Images=false; image blocks are dropped on the wire — re-run without --image or pick another model", model)
+			return fmt.Errorf("model %s reports Capabilities.Images=false — the flag is advisory (llmkit sends the block anyway and the provider may reject the request), so this example refuses to send it; re-run without --image or pick another model", model)
 		}
 		msg.Content = append(msg.Content, block)
 	}
