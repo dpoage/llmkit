@@ -142,7 +142,7 @@ func (o *openaiAdapter) buildParams(req llmkit.Request) (openai.ChatCompletionNe
 	if req.System != "" {
 		msgs = append(msgs, openai.SystemMessage(req.System))
 	}
-	converted, err := toOpenAIMessages(req.Messages)
+	converted, err := toOpenAIMessages(o.provider, req.Messages)
 	if err != nil {
 		return openai.ChatCompletionNewParams{}, err
 	}
@@ -254,11 +254,22 @@ func (o *openaiAdapter) applyToolChoice(params *openai.ChatCompletionNewParams, 
 // toOpenAIMessages converts normalized messages into Chat Completions
 // messages. Content blocks map in order: text → text part, image →
 // image_url part, document → file part; assistant and tool-result messages
-// carry their concatenated text. Image/document source validation happens
+// carry their concatenated text.
+//
+// Per-role block rule (ValidateMessageBlocks, before any mapping):
+// user text/image/document; assistant text/thinking (no thinking is
+// re-emitted on OpenAI — Capabilities.Thinking=false); system and
+// tool-result text only. Violations are ErrInvalidRequest. Image/document source validation happens
 // here, BEFORE any wire call.
-func toOpenAIMessages(msgs []llmkit.Message) ([]openai.ChatCompletionMessageParamUnion, error) {
+func toOpenAIMessages(provider string, msgs []llmkit.Message) ([]openai.ChatCompletionMessageParamUnion, error) {
 	out := make([]openai.ChatCompletionMessageParamUnion, 0, len(msgs))
 	for _, m := range msgs {
+		// Per-role block-kind rule + media source rule, before any mapping.
+		// Without this, an image in a system/tool-result/assistant message
+		// would be silently dropped by m.Text().
+		if err := adapter.ValidateMessageBlocks(provider, m); err != nil {
+			return nil, err
+		}
 		switch m.Role {
 		case llmkit.RoleSystem:
 			out = append(out, openai.SystemMessage(m.Text()))
@@ -360,9 +371,6 @@ func openAIUserParts(m llmkit.Message) ([]openai.ChatCompletionContentPartUnionP
 					},
 				},
 			})
-		default:
-			return nil, llmkit.NewAPIError("openai", 0, 0, llmkit.ErrInvalidRequest,
-				"block kind "+string(b.Kind)+" not allowed in a user message", nil)
 		}
 	}
 	if len(parts) == 0 {

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 
 	"github.com/dpoage/llmkit"
@@ -96,6 +97,12 @@ func (g *googleAdapter) Complete(ctx context.Context, req llmkit.Request) (llmki
 		cfg.TopK = &k
 	}
 	if req.Seed != nil {
+		// genai carries seed as int32; reject out-of-range values instead of
+		// silently truncating to a different deterministic seed.
+		if *req.Seed < int64(math.MinInt32) || *req.Seed > int64(math.MaxInt32) {
+			return llmkit.Response{}, llmkit.NewAPIError("google", 0, 0, llmkit.ErrInvalidRequest,
+				"Seed out of range for int32", nil)
+		}
 		s := int32(*req.Seed)
 		cfg.Seed = &s
 	}
@@ -205,6 +212,10 @@ func applyGoogleToolChoice(cfg *genai.GenerateContentConfig, tc llmkit.ToolChoic
 // uses "user"/"model" roles; tool results are sent as user-turn
 // functionResponse parts.
 //
+// Per-role block rule (ValidateMessageBlocks, before any mapping):
+// user text/image/document; assistant text/thinking (Provider-matched only);
+// system and tool-result text only. Violations are ErrInvalidRequest.
+//
 // Content blocks map in order: text → text parts, image/document →
 // inline_data (bytes) or file_data (URL) parts. Assistant thinking blocks
 // re-emit Text/Thought/ThoughtSignature from Raw (Provider "google" only —
@@ -214,6 +225,10 @@ func applyGoogleToolChoice(cfg *genai.GenerateContentConfig, tc llmkit.ToolChoic
 func toGoogleContents(msgs []llmkit.Message) ([]*genai.Content, error) {
 	out := make([]*genai.Content, 0, len(msgs))
 	for _, m := range msgs {
+		// Per-role block-kind rule + media source rule, before any mapping.
+		if err := adapter.ValidateMessageBlocks("google", m); err != nil {
+			return nil, err
+		}
 		switch m.Role {
 		case llmkit.RoleSystem:
 			// Hoisted into SystemInstruction by the caller; if inline, attach as a
@@ -280,9 +295,6 @@ func googleUserParts(m llmkit.Message) ([]*genai.Part, error) {
 					MIMEType: b.MediaType,
 				}})
 			}
-		default:
-			return nil, llmkit.NewAPIError("google", 0, 0, llmkit.ErrInvalidRequest,
-				"block kind "+string(b.Kind)+" not allowed in a user message", nil)
 		}
 	}
 	if len(parts) == 0 {
@@ -314,9 +326,6 @@ func googleAssistantParts(m llmkit.Message) ([]*genai.Part, error) {
 			}
 			p.FunctionCall = nil
 			parts = append(parts, &p)
-		default:
-			return nil, llmkit.NewAPIError("google", 0, 0, llmkit.ErrInvalidRequest,
-				"block kind "+string(b.Kind)+" not allowed in an assistant message", nil)
 		}
 	}
 	for _, tc := range m.ToolCalls {

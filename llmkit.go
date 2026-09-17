@@ -56,9 +56,10 @@ const (
 	// reject any other combination with an error wrapping ErrInvalidRequest
 	// before any wire call.
 	BlockImage BlockKind = "image"
-	// BlockDocument is a document (e.g. PDF), carried like BlockImage. Where
-	// a provider constrains the format (Anthropic accepts PDFs only), the
-	// adapter surfaces the provider's own error for unsupported media.
+	// BlockDocument is a document (e.g. PDF), carried like BlockImage.
+	// Provider-specific format constraints (Anthropic accepts base64 PDFs
+	// only; the OpenAI file part accepts inline data only) are rejected
+	// with an error wrapping ErrInvalidRequest before any wire call.
 	BlockDocument BlockKind = "document"
 	// BlockThinking is a provider reasoning block (e.g. Anthropic extended
 	// thinking). Provider names the adapter that produced/signed it (e.g.
@@ -114,6 +115,11 @@ type Block struct {
 //     request (see BlockThinking for the per-provider rule).
 //   - tool-result: ToolCallID identifies the call being answered, Content
 //     holds the (textual) result, and IsError marks a failed execution.
+//
+// Per-role block kinds, enforced by every adapter BEFORE any wire call
+// (violations are errors wrapping ErrInvalidRequest): RoleUser carries
+// text/image/document; RoleAssistant carries text/thinking; RoleSystem and
+// RoleToolResult carry text only.
 type Message struct {
 	Role Role
 	// Content is the message's content blocks. Build the common
@@ -165,10 +171,12 @@ type ToolCall struct {
 }
 
 // ThinkingConfig requests provider reasoning (Anthropic extended thinking,
-// Gemini thinkingConfig). Nil on Request.Thinking leaves reasoning off.
-// BudgetTokens must be positive; adapters reject a non-positive budget with
-// an error wrapping ErrInvalidRequest. Providers without a budget concept
-// (or without reasoning at all) document it via Capabilities.Thinking.
+// Gemini thinkingConfig). Nil on Request.Thinking leaves reasoning off. On
+// providers that honor thinking, BudgetTokens must be positive and their
+// adapters reject anything else with an error wrapping ErrInvalidRequest;
+// providers without reasoning support (Capabilities.Thinking = false, e.g.
+// the OpenAI adapters this round) drop the whole field and never see the
+// budget.
 type ThinkingConfig struct {
 	BudgetTokens int
 }

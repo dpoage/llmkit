@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strings"
 	"testing"
 
 	"github.com/dpoage/llmkit"
@@ -333,7 +332,13 @@ func TestConformance_ToolChoiceWireShape(t *testing.T) {
 				}, &captured))
 				client := f.build(t, base)
 
+				// A named tool only makes sense against a declared tool —
+				// and real requests always declare one.
 				req := simpleRequest()
+				req.Tools = []llmkit.ToolDef{{
+					Name:       "read_file",
+					Parameters: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`),
+				}}
 				req.ToolChoice = c.tc
 				if _, err := client.Complete(context.Background(), req); err != nil {
 					t.Fatalf("Complete: %v", err)
@@ -487,19 +492,64 @@ func TestConformance_MediaSourceRejectedBeforeWire(t *testing.T) {
 		{Kind: llmkit.BlockDocument, MediaType: "application/pdf", Data: pdfBytes, URL: "https://x/y.pdf"},
 		{Kind: llmkit.BlockDocument, MediaType: "application/pdf"},
 	}
+	// The per-role rule is uniform: an invalid media block is rejected
+	// BEFORE any wire call in EVERY role that could carry it — not just
+	// user turns. system/tool-result/assistant previously slipped through
+	// as silent m.Text() drops.
+	roles := []llmkit.Role{llmkit.RoleUser, llmkit.RoleSystem, llmkit.RoleAssistant, llmkit.RoleToolResult}
 	for _, f := range allAdapters() {
 		for i, blk := range bad {
-			t.Run(f.name+"/"+string(blk.Kind)+"/case"+string(rune('a'+i)), func(t *testing.T) {
+			for _, role := range roles {
+				t.Run(f.name+"/"+string(blk.Kind)+"/case"+string(rune('a'+i))+"/"+string(role), func(t *testing.T) {
+					n := 0
+					base := newServer(t, captureWireBody(t, &n, func() string {
+						return mockTextBody(f.name, "should not be reached", 0, 0)
+					}, &wireBody{}))
+					client := f.build(t, base)
+
+					msg := llmkit.Message{Role: role, Content: []llmkit.Block{blk}}
+					if role == llmkit.RoleToolResult {
+						msg.ToolCallID = "call_1"
+					}
+					req := llmkit.Request{Messages: []llmkit.Message{msg}}
+					_, err := client.Complete(context.Background(), req)
+					if err == nil {
+						t.Fatal("expected error, got nil")
+					}
+					if !errors.Is(err, llmkit.ErrInvalidRequest) {
+						t.Errorf("error = %v, want ErrInvalidRequest", err)
+					}
+					if n != 0 {
+						t.Errorf("wire calls = %d, want 0 (validation must precede the request)", n)
+					}
+				})
+			}
+		}
+	}
+
+	// A block KIND outside its role's set is also ErrInvalidRequest with
+	// zero wire calls — including the image-in-assistant case that the
+	// openai adapter used to drop silently via m.Text().
+	kindViolations := []struct {
+		role llmkit.Role
+		blk  llmkit.Block
+	}{
+		{llmkit.RoleUser, llmkit.Block{Kind: llmkit.BlockThinking, Provider: "anthropic", Raw: json.RawMessage(`{}`)}},
+		{llmkit.RoleAssistant, llmkit.Block{Kind: llmkit.BlockImage, MediaType: "image/png", Data: pngBytes}},
+		{llmkit.RoleSystem, llmkit.Block{Kind: llmkit.BlockImage, MediaType: "image/png", Data: pngBytes}},
+		{llmkit.RoleToolResult, llmkit.Block{Kind: llmkit.BlockImage, MediaType: "image/png", Data: pngBytes}},
+	}
+	for _, f := range allAdapters() {
+		for i, v := range kindViolations {
+			t.Run(f.name+"/kind/"+string(rune('a'+i))+"/"+string(v.role), func(t *testing.T) {
 				n := 0
 				base := newServer(t, captureWireBody(t, &n, func() string {
 					return mockTextBody(f.name, "should not be reached", 0, 0)
 				}, &wireBody{}))
 				client := f.build(t, base)
 
-				req := llmkit.Request{
-					Messages: []llmkit.Message{{Role: llmkit.RoleUser, Content: []llmkit.Block{blk}}},
-				}
-				_, err := client.Complete(context.Background(), req)
+				msg := llmkit.Message{Role: v.role, Content: []llmkit.Block{v.blk}}
+				_, err := client.Complete(context.Background(), llmkit.Request{Messages: []llmkit.Message{msg}})
 				if err == nil {
 					t.Fatal("expected error, got nil")
 				}
@@ -507,7 +557,7 @@ func TestConformance_MediaSourceRejectedBeforeWire(t *testing.T) {
 					t.Errorf("error = %v, want ErrInvalidRequest", err)
 				}
 				if n != 0 {
-					t.Errorf("wire calls = %d, want 0 (validation must precede the request)", n)
+					t.Errorf("wire calls = %d, want 0", n)
 				}
 			})
 		}
@@ -562,16 +612,23 @@ func TestConformance_ForeignThinkingBlockDropped(t *testing.T) {
 				break
 			}
 		}
+		// The Raw decodes cleanly into a VISIBLE genai.Part (google-shaped
+		// payload), so if the Provider guard were removed the block would
+		// appear on the wire as a thought part and the exact-part-list
+		// assertion below would fail — this subtest discriminates.
 		foreign := llmkit.Block{
 			Kind:     llmkit.BlockThinking,
 			Provider: "anthropic",
 			Text:     "claude thought",
-			Raw:      json.RawMessage(`{"type":"thinking","thinking":"claude thought","signature":"sig"}`),
+			Raw:      json.RawMessage(`{"text":"claude thought","thought":true,"thoughtSignature":"Y2xhdWRlLXNpZw=="}`),
 		}
 		req := llmkit.Request{
 			Messages: []llmkit.Message{
 				llmkit.TextMessage(llmkit.RoleUser, "hi"),
-				{Role: llmkit.RoleAssistant, Content: []llmkit.Block{foreign}},
+				{Role: llmkit.RoleAssistant, Content: []llmkit.Block{
+					{Kind: llmkit.BlockText, Text: "visible note"},
+					foreign,
+				}},
 			},
 		}
 		if _, err := client.Complete(context.Background(), req); err != nil {
@@ -579,14 +636,13 @@ func TestConformance_ForeignThinkingBlockDropped(t *testing.T) {
 		}
 		contents := captured["contents"].([]any)
 		parts := contents[1].(map[string]any)["parts"].([]any)
-		for _, p := range parts {
-			pm, _ := p.(map[string]any)
-			if thought, ok := pm["thought"]; ok && thought == true {
-				t.Errorf("foreign thinking block reached the google wire: %v", pm)
-			}
-			if txt, _ := pm["text"].(string); strings.Contains(txt, "claude thought") {
-				t.Errorf("foreign thinking text reached the google wire: %v", pm)
-			}
+		// EXACT part list: the sibling text survives, the foreign thinking
+		// block must not appear in any shape (dropped, not re-encoded).
+		want := []any{map[string]any{"text": "visible note"}}
+		gotJSON, _ := json.Marshal(parts)
+		wantJSON, _ := json.Marshal(want)
+		if string(gotJSON) != string(wantJSON) {
+			t.Errorf("google wire parts = %s, want %s (foreign thinking leaked?)", gotJSON, wantJSON)
 		}
 	})
 }
