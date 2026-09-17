@@ -4,6 +4,7 @@ package anthropic
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -136,6 +137,30 @@ func (a *anthropicAdapter) buildParams(req llmkit.Request) (anthropic.MessageNew
 		params.Temperature = anthropic.Float(*req.Temperature)
 	}
 
+	// Extended thinking. The budget rides through verbatim; Anthropic
+	// enforces budget < MaxTokens and its 1024 floor server-side.
+	if req.Thinking != nil {
+		if req.Thinking.BudgetTokens <= 0 {
+			return anthropic.MessageNewParams{}, llmkit.NewAPIError("anthropic", 0, 0,
+				llmkit.ErrInvalidRequest, "Thinking.BudgetTokens must be positive", nil)
+		}
+		params.Thinking = anthropic.ThinkingConfigParamUnion{
+			OfEnabled: &anthropic.ThinkingConfigEnabledParam{
+				BudgetTokens: int64(req.Thinking.BudgetTokens),
+			},
+		}
+	}
+	if len(req.StopSequences) > 0 {
+		params.StopSequences = req.StopSequences
+	}
+	if req.TopP != nil {
+		params.TopP = anthropic.Float(*req.TopP)
+	}
+	if req.TopK != nil {
+		params.TopK = anthropic.Int(int64(*req.TopK))
+	}
+	// Request.Seed: the Anthropic Messages API has no seed parameter, so it
+	// is dropped here and documented via Capabilities.Seed = false.
 	msgs, err := toAnthropicMessages(req.Messages)
 	if err != nil {
 		return anthropic.MessageNewParams{}, err
@@ -152,6 +177,15 @@ func (a *anthropicAdapter) buildParams(req llmkit.Request) (anthropic.MessageNew
 			tools = append(tools, anthropic.ToolUnionParam{OfTool: tp})
 		}
 		params.Tools = tools
+	}
+
+	// Request-level tool choice is validated UNCONDITIONALLY — an unknown
+	// mode or a missing Name must error even when a schema below forces the
+	// synthetic tool. The synthetic forcing then overwrites whatever was
+	// mapped: a structured-output request is meaningless without the forced
+	// tool call, so it keeps precedence over req.ToolChoice.
+	if err := applyAnthropicToolChoice(&params, req.ToolChoice); err != nil {
+		return anthropic.MessageNewParams{}, err
 	}
 
 	// Schema-constrained output. Anthropic has no native response_format, so
@@ -182,6 +216,32 @@ func (a *anthropicAdapter) buildParams(req llmkit.Request) (anthropic.MessageNew
 
 	applyCacheBreakpoints(&params)
 	return params, nil
+}
+
+// applyAnthropicToolChoice maps the normalized tool-choice request onto the
+// Anthropic tool_choice parameter. Auto (and the zero value) is the provider
+// default and is never serialized.
+func applyAnthropicToolChoice(params *anthropic.MessageNewParams, tc llmkit.ToolChoice) error {
+	switch tc.Mode {
+	case "", llmkit.ToolChoiceAuto:
+		return nil
+	case llmkit.ToolChoiceNone:
+		params.ToolChoice = anthropic.ToolChoiceUnionParam{OfNone: &anthropic.ToolChoiceNoneParam{}}
+	case llmkit.ToolChoiceRequired:
+		params.ToolChoice = anthropic.ToolChoiceUnionParam{OfAny: &anthropic.ToolChoiceAnyParam{}}
+	case llmkit.ToolChoiceTool:
+		if tc.Name == "" {
+			return llmkit.NewAPIError("anthropic", 0, 0, llmkit.ErrInvalidRequest,
+				"ToolChoice.Mode=tool requires ToolChoice.Name", nil)
+		}
+		params.ToolChoice = anthropic.ToolChoiceUnionParam{
+			OfTool: &anthropic.ToolChoiceToolParam{Name: tc.Name},
+		}
+	default:
+		return llmkit.NewAPIError("anthropic", 0, 0, llmkit.ErrInvalidRequest,
+			"unknown ToolChoice.Mode "+string(tc.Mode), nil)
+	}
+	return nil
 }
 
 // applyCacheBreakpoints marks ephemeral prompt-cache breakpoints on the
@@ -220,9 +280,9 @@ func applyCacheBreakpoints(params *anthropic.MessageNewParams) {
 }
 
 // markLastBlock sets an ephemeral cache_control on the last content block of m,
-// reporting whether a markable block was found. Thinking blocks (and any other
-// variant without a CacheControl field) are skipped by GetCacheControl
-// returning nil; the adapter never produces those today.
+// reporting whether a markable block was found. Thinking (and redacted
+// thinking) blocks have no CacheControl field, so GetCacheControl returns nil
+// and they are skipped — the marker moves to the nearest markable block.
 func markLastBlock(m *anthropic.MessageParam) bool {
 	for i := len(m.Content) - 1; i >= 0; i-- {
 		if cc := m.Content[i].GetCacheControl(); cc != nil {
@@ -273,6 +333,17 @@ func structuredOutputToolName(req llmkit.Request, caps llmkit.Capabilities) (str
 // toAnthropicMessages converts normalized messages into Anthropic message
 // params, coalescing consecutive tool-result turns into a single user message
 // (Anthropic requires tool_result blocks to ride in a user turn).
+//
+// Per-role block rule (ValidateMessageBlocks, before any mapping):
+// user text/image/document; assistant text/thinking (Provider-matched only);
+// system and tool-result text only. Violations are ErrInvalidRequest.
+//
+// Content blocks map in order: text → text blocks, image → image source
+// (base64 data or URL), document → document source (base64 PDF or URL),
+// thinking → thinking/redacted_thinking blocks re-emitted verbatim from Raw.
+// Thinking blocks whose Provider is not "anthropic" (including empty) are
+// dropped silently per the llmkit.Block contract. Validation of image and
+// document sources happens here, BEFORE any wire call.
 func toAnthropicMessages(msgs []llmkit.Message) ([]anthropic.MessageParam, error) {
 	out := make([]anthropic.MessageParam, 0, len(msgs))
 	var pendingResults []anthropic.ContentBlockParamUnion
@@ -285,44 +356,33 @@ func toAnthropicMessages(msgs []llmkit.Message) ([]anthropic.MessageParam, error
 	}
 
 	for _, m := range msgs {
+		// Per-role block-kind rule + media source rule, before any mapping.
+		if err := adapter.ValidateMessageBlocks("anthropic", m); err != nil {
+			return nil, err
+		}
 		switch m.Role {
 		case llmkit.RoleSystem:
 			// System messages are hoisted into params.System by the caller; if one
 			// appears inline, treat it as a user instruction to preserve content.
 			flush()
-			out = append(out, anthropic.NewUserMessage(anthropic.NewTextBlock(m.Content)))
+			out = append(out, anthropic.NewUserMessage(anthropic.NewTextBlock(m.Text())))
 		case llmkit.RoleUser:
 			flush()
-			out = append(out, anthropic.NewUserMessage(anthropic.NewTextBlock(m.Content)))
+			blocks, err := anthropicUserBlocks(m)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, anthropic.NewUserMessage(blocks...))
 		case llmkit.RoleAssistant:
 			flush()
-			blocks := make([]anthropic.ContentBlockParamUnion, 0, 1+len(m.ToolCalls))
-			if m.Content != "" {
-				blocks = append(blocks, anthropic.NewTextBlock(m.Content))
-			}
-			for _, tc := range m.ToolCalls {
-				var input any
-				if len(tc.Arguments) > 0 {
-					if err := json.Unmarshal(tc.Arguments, &input); err != nil {
-						return nil, llmkit.NewAPIError("anthropic", 0, 0, llmkit.ErrInvalidRequest,
-							"assistant tool call "+tc.Name+": invalid arguments JSON", err)
-					}
-				}
-				blocks = append(blocks, anthropic.ContentBlockParamUnion{
-					OfToolUse: &anthropic.ToolUseBlockParam{
-						ID:    tc.ID,
-						Name:  tc.Name,
-						Input: input,
-					},
-				})
-			}
-			if len(blocks) == 0 {
-				blocks = append(blocks, anthropic.NewTextBlock(""))
+			blocks, err := anthropicAssistantBlocks(m)
+			if err != nil {
+				return nil, err
 			}
 			out = append(out, anthropic.NewAssistantMessage(blocks...))
 		case llmkit.RoleToolResult:
 			pendingResults = append(pendingResults,
-				anthropic.NewToolResultBlock(m.ToolCallID, m.Content, m.IsError))
+				anthropic.NewToolResultBlock(m.ToolCallID, m.Text(), m.IsError))
 		default:
 			return nil, llmkit.NewAPIError("anthropic", 0, 0, llmkit.ErrInvalidRequest,
 				"unknown message role "+string(m.Role), nil)
@@ -332,6 +392,142 @@ func toAnthropicMessages(msgs []llmkit.Message) ([]anthropic.MessageParam, error
 	return out, nil
 }
 
+// anthropicUserBlocks maps a user message's content blocks onto Anthropic
+// content blocks. A message with no blocks yields one empty text block so
+// the wire shape of a previously-valid empty user turn is preserved.
+func anthropicUserBlocks(m llmkit.Message) ([]anthropic.ContentBlockParamUnion, error) {
+	blocks := make([]anthropic.ContentBlockParamUnion, 0, len(m.Content))
+	for _, b := range m.Content {
+		switch b.Kind {
+		case llmkit.BlockText:
+			blocks = append(blocks, anthropic.NewTextBlock(b.Text))
+		case llmkit.BlockImage:
+			if err := adapter.ValidateMediaBlock("anthropic", b); err != nil {
+				return nil, err
+			}
+			src := anthropic.ImageBlockParamSourceUnion{}
+			if b.URL != "" {
+				src.OfURL = &anthropic.URLImageSourceParam{URL: b.URL}
+			} else {
+				src.OfBase64 = &anthropic.Base64ImageSourceParam{
+					Data:      base64.StdEncoding.EncodeToString(b.Data),
+					MediaType: anthropic.Base64ImageSourceMediaType(b.MediaType),
+				}
+			}
+			blocks = append(blocks, anthropic.ContentBlockParamUnion{
+				OfImage: &anthropic.ImageBlockParam{Source: src},
+			})
+		case llmkit.BlockDocument:
+			if err := adapter.ValidateMediaBlock("anthropic", b); err != nil {
+				return nil, err
+			}
+			if len(b.Data) > 0 && b.MediaType != "application/pdf" {
+				return nil, llmkit.NewAPIError("anthropic", 0, 0, llmkit.ErrInvalidRequest,
+					"document block: Anthropic base64 documents support application/pdf only", nil)
+			}
+			src := anthropic.DocumentBlockParamSourceUnion{}
+			if b.URL != "" {
+				src.OfURL = &anthropic.URLPDFSourceParam{URL: b.URL}
+			} else {
+				src.OfBase64 = &anthropic.Base64PDFSourceParam{
+					Data: base64.StdEncoding.EncodeToString(b.Data),
+				}
+			}
+			dp := &anthropic.DocumentBlockParam{Source: src}
+			if b.Title != "" {
+				dp.Title = anthropic.String(b.Title)
+			}
+			blocks = append(blocks, anthropic.ContentBlockParamUnion{OfDocument: dp})
+		}
+	}
+	if len(blocks) == 0 {
+		blocks = append(blocks, anthropic.NewTextBlock(""))
+	}
+	return blocks, nil
+}
+
+// anthropicAssistantBlocks maps an assistant message's content blocks onto
+// Anthropic content blocks: text in order, then thinking blocks re-emitted
+// verbatim from Raw (Provider "anthropic" only — foreign thinking blocks are
+// dropped silently), then one tool_use block per ToolCall. A message with
+// no blocks yields one empty text block, matching the SDK's requirement
+// that assistant turns are never empty.
+func anthropicAssistantBlocks(m llmkit.Message) ([]anthropic.ContentBlockParamUnion, error) {
+	blocks := make([]anthropic.ContentBlockParamUnion, 0, 1+len(m.Content)+len(m.ToolCalls))
+	for _, b := range m.Content {
+		switch b.Kind {
+		case llmkit.BlockText:
+			if b.Text != "" {
+				blocks = append(blocks, anthropic.NewTextBlock(b.Text))
+			}
+		case llmkit.BlockThinking:
+			if b.Provider != "anthropic" {
+				continue
+			}
+			pb, err := anthropicThinkingBlock(b)
+			if err != nil {
+				return nil, err
+			}
+			blocks = append(blocks, pb)
+		}
+	}
+	for _, tc := range m.ToolCalls {
+		var input any
+		if len(tc.Arguments) > 0 {
+			if err := json.Unmarshal(tc.Arguments, &input); err != nil {
+				return nil, llmkit.NewAPIError("anthropic", 0, 0, llmkit.ErrInvalidRequest,
+					"assistant tool call "+tc.Name+": invalid arguments JSON", err)
+			}
+		}
+		blocks = append(blocks, anthropic.ContentBlockParamUnion{
+			OfToolUse: &anthropic.ToolUseBlockParam{
+				ID:    tc.ID,
+				Name:  tc.Name,
+				Input: input,
+			},
+		})
+	}
+	if len(blocks) == 0 {
+		blocks = append(blocks, anthropic.NewTextBlock(""))
+	}
+	return blocks, nil
+}
+
+// anthropicThinkingBlock re-emits a captured Anthropic thinking block
+// verbatim: the thinking text and signature (or the redacted payload) are
+// decoded from Raw — the provider's wire block — and sent back through the
+// SDK's typed params, so the next request carries the same signed reasoning.
+func anthropicThinkingBlock(b llmkit.Block) (anthropic.ContentBlockParamUnion, error) {
+	var probe struct {
+		Type      string `json:"type"`
+		Thinking  string `json:"thinking"`
+		Signature string `json:"signature"`
+		Data      string `json:"data"`
+	}
+	// A Block that passed through encoding/json with a nil Raw re-decodes as
+	// the literal bytes "null" — treat both as missing, not as an empty
+	// payload to forward.
+	if len(b.Raw) == 0 || string(b.Raw) == "null" {
+		return anthropic.ContentBlockParamUnion{}, llmkit.NewAPIError("anthropic", 0, 0,
+			llmkit.ErrInvalidRequest, "thinking block: Raw is empty; the verbatim provider payload is required", nil)
+	}
+	if err := json.Unmarshal(b.Raw, &probe); err != nil {
+		return anthropic.ContentBlockParamUnion{}, llmkit.NewAPIError("anthropic", 0, 0,
+			llmkit.ErrInvalidRequest, "thinking block: malformed Raw JSON", err)
+	}
+	if probe.Type == "redacted_thinking" {
+		return anthropic.ContentBlockParamUnion{
+			OfRedactedThinking: &anthropic.RedactedThinkingBlockParam{Data: probe.Data},
+		}, nil
+	}
+	return anthropic.ContentBlockParamUnion{
+		OfThinking: &anthropic.ThinkingBlockParam{
+			Thinking:  probe.Thinking,
+			Signature: probe.Signature,
+		},
+	}, nil
+}
+
 func (a *anthropicAdapter) toResponse(msg *anthropic.Message) llmkit.Response {
 	var resp llmkit.Response
 	var text string
@@ -339,6 +535,23 @@ func (a *anthropicAdapter) toResponse(msg *anthropic.Message) llmkit.Response {
 		switch v := block.AsAny().(type) {
 		case anthropic.TextBlock:
 			text += v.Text
+			resp.Blocks = append(resp.Blocks, llmkit.Block{Kind: llmkit.BlockText, Text: v.Text})
+		case anthropic.ThinkingBlock:
+			// Raw keeps the provider's wire block (thinking text + signature)
+			// byte-for-byte so the caller can re-send it verbatim on the next
+			// request.
+			resp.Blocks = append(resp.Blocks, llmkit.Block{
+				Kind:     llmkit.BlockThinking,
+				Text:     v.Thinking,
+				Provider: "anthropic",
+				Raw:      json.RawMessage(v.RawJSON()),
+			})
+		case anthropic.RedactedThinkingBlock:
+			resp.Blocks = append(resp.Blocks, llmkit.Block{
+				Kind:     llmkit.BlockThinking,
+				Provider: "anthropic",
+				Raw:      json.RawMessage(v.RawJSON()),
+			})
 		case anthropic.ToolUseBlock:
 			resp.ToolCalls = append(resp.ToolCalls, llmkit.ToolCall{
 				ID:        v.ID,
@@ -370,7 +583,7 @@ func mapAnthropicStop(sr anthropic.StopReason) llmkit.StopReason {
 	case anthropic.StopReasonMaxTokens:
 		return llmkit.StopMaxTokens
 	case anthropic.StopReasonRefusal:
-		return llmkit.StopError
+		return llmkit.StopRefusal
 	default:
 		return llmkit.StopEndTurn
 	}
@@ -389,12 +602,22 @@ func (a *anthropicAdapter) normalizeErr(err error) error {
 func anthropicCapabilities(model string) llmkit.Capabilities {
 	// Anthropic models support parallel tool calls, prompt caching, and
 	// structured output. Context window varies; 200k is a safe floor for the
-	// 4.x family and beyond. The model parameter is accepted for symmetry
-	// with the other capability constructors.
+	// 4.x family and beyond. Thinking, tool choice, image/document blocks,
+	// stop sequences, top_p, and top_k are all honored; there is no seed
+	// parameter. The model parameter is accepted for symmetry with the
+	// other capability constructors.
 	return llmkit.Capabilities{
 		ContextWindow:     200_000,
 		ParallelToolCalls: true,
 		PromptCaching:     true,
 		StructuredOutput:  true,
+		Thinking:          true,
+		ToolChoice:        true,
+		Images:            true,
+		Documents:         true,
+		StopSequences:     true,
+		TopP:              true,
+		TopK:              true,
+		Seed:              false,
 	}
 }

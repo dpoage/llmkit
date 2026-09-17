@@ -188,9 +188,9 @@ func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task, finalizeP
 	if len(seed) > 0 {
 		messages = make([]llmkit.Message, 0, len(seed)+1)
 		messages = append(messages, seed...)
-		messages = append(messages, llmkit.Message{Role: llmkit.RoleUser, Content: task})
+		messages = append(messages, llmkit.TextMessage(llmkit.RoleUser, task))
 	} else {
-		messages = []llmkit.Message{{Role: llmkit.RoleUser, Content: task}}
+		messages = []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, task)}
 	}
 
 	outcome := &Outcome{Transcript: tr}
@@ -280,11 +280,14 @@ func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task, finalizeP
 
 		// No tool calls => the model finished its turn.
 		if len(resp.ToolCalls) == 0 {
-			// StopError means the model stopped for a provider-specific error
-			// reason (refusal, safety filter, recitation). Breaking cleanly here
-			// would record refusal prose — or stale FinalText from an earlier
-			// turn — as the answer. Surface a typed error instead.
-			if resp.StopReason == llmkit.StopError {
+			// StopError/StopRefusal/StopContentFilter mean the model stopped
+			// for a provider-specific error reason (refusal, safety filter,
+			// recitation). Breaking cleanly here would record refusal prose —
+			// or stale FinalText from an earlier turn — as the answer.
+			// Surface a typed error instead.
+			if resp.StopReason == llmkit.StopError ||
+				resp.StopReason == llmkit.StopRefusal ||
+				resp.StopReason == llmkit.StopContentFilter {
 				tr.closeStream()
 				return outcome, &ErrStopReason{StopReason: resp.StopReason, Text: resp.Text, Outcome: outcome}
 			}
@@ -301,7 +304,7 @@ func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task, finalizeP
 			// and nudging gives the model a chance to re-emit cleanly.
 			if strings.TrimSpace(llmkit.StripThinkBlocks(resp.Text)) == "" && emptyTurnNudges < maxEmptyTurnNudges {
 				emptyTurnNudges++
-				messages = append(messages, llmkit.Message{Role: llmkit.RoleUser, Content: emptyTurnNudge})
+				messages = append(messages, llmkit.TextMessage(llmkit.RoleUser, emptyTurnNudge))
 				continue
 			}
 			break
@@ -335,12 +338,10 @@ func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task, finalizeP
 			}
 			tr.recordToolResult(outcome.Iterations, call, result, isErr)
 			toolNameByID[call.ID] = call.Name
-			messages = append(messages, llmkit.Message{
-				Role:       llmkit.RoleToolResult,
-				ToolCallID: call.ID,
-				Content:    result,
-				IsError:    isErr,
-			})
+			trMsg := llmkit.TextMessage(llmkit.RoleToolResult, result)
+			trMsg.ToolCallID = call.ID
+			trMsg.IsError = isErr
+			messages = append(messages, trMsg)
 		}
 
 		// After executing tools, check the budget again before looping so we
@@ -397,10 +398,7 @@ func (r *Runner) finalizeAndTruncate(
 	if finalizePrompt == "" || outcome.Finalized {
 		return nil
 	}
-	*messages = append(*messages, llmkit.Message{
-		Role:    llmkit.RoleUser,
-		Content: finalizePrompt,
-	})
+	*messages = append(*messages, llmkit.TextMessage(llmkit.RoleUser, finalizePrompt))
 	outcome.Finalized = true
 	// Compact before the finalization turn: it is often the largest history of
 	// the run, and the model needs only its own reasoning chain (preserved) to
@@ -464,7 +462,7 @@ func (r *Runner) maybeCompact(messages []llmkit.Message, threshold int64, toolNa
 // bounds the repair to exactly the one model call the spec mandates.
 func (r *Runner) repair(ctx context.Context, tr *Transcript, prompt string, responseSchema json.RawMessage) (*Outcome, error) {
 	outcome := &Outcome{Transcript: tr}
-	messages := []llmkit.Message{{Role: llmkit.RoleUser, Content: prompt}}
+	messages := []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, prompt)}
 	if _, err := r.completeOnce(ctx, tr, &messages, outcome, responseSchema, true); err != nil {
 		return outcome, err
 	}
@@ -491,29 +489,23 @@ func (r *Runner) completeOnce(ctx context.Context, tr *Transcript, messages *[]l
 	if err != nil {
 		return llmkit.Response{}, err
 	}
-	*messages = append(*messages, llmkit.Message{
-		Role:      llmkit.RoleAssistant,
-		Content:   resp.Text,
-		ToolCalls: resp.ToolCalls,
-	})
+	assistantMsg := llmkit.TextMessage(llmkit.RoleAssistant, resp.Text)
+	assistantMsg.ToolCalls = resp.ToolCalls
+	*messages = append(*messages, assistantMsg)
 
 	// One continuation retry when output was truncated mid-generation: ask the
 	// model to continue and emit ONLY the remaining answer, then concatenate.
 	// Guarded so it fires at most once per completeOnce call.
 	if resp.StopReason == llmkit.StopMaxTokens && len(resp.ToolCalls) == 0 {
-		*messages = append(*messages, llmkit.Message{
-			Role:    llmkit.RoleUser,
-			Content: "Your previous message was cut off at the output token limit. Continue from exactly where you stopped and output ONLY the remaining text needed to complete the answer — no preamble, no repetition.",
-		})
+		*messages = append(*messages, llmkit.TextMessage(llmkit.RoleUser,
+			"Your previous message was cut off at the output token limit. Continue from exactly where you stopped and output ONLY the remaining text needed to complete the answer — no preamble, no repetition."))
 		cont, cerr := r.complete(ctx, tr, *messages, outcome, responseSchema, final)
 		if cerr != nil {
 			return llmkit.Response{}, cerr
 		}
-		*messages = append(*messages, llmkit.Message{
-			Role:      llmkit.RoleAssistant,
-			Content:   cont.Text,
-			ToolCalls: cont.ToolCalls,
-		})
+		contMsg := llmkit.TextMessage(llmkit.RoleAssistant, cont.Text)
+		contMsg.ToolCalls = cont.ToolCalls
+		*messages = append(*messages, contMsg)
 		// Stitch the two halves so the caller (and FinalText) sees one answer.
 		// Models frequently ignore "continue from where you stopped" and instead
 		// restart, repeating some head of the first half. A naive resp.Text+cont.Text

@@ -40,8 +40,12 @@ Shared LLM tooling extracted from `bugbot`, `known`, and `go-research`.
 
 ## Design decisions
 
-- Message model: flat `Message{Role, Content, ToolCalls, ToolCallID, IsError}`
-  (bugbot's), not content-block unions (go-research's). See the root package docs.
+- Message model: content-block `Message{Role, Content []Block, ...}` — text,
+  image, document, and opaque provider thinking blocks (Anthropic thinking
+  signatures round-trip verbatim; foreign-provider thinking is dropped).
+  `llmkit.TextMessage(role, s)` / `Message.Text()` keep the common
+  text-only case one line; `Block.Data` is base64 in JSONL transcripts.
+  See the root package docs.
 - No streaming: none of the three donor projects used it; the interface stays
   synchronous until a consumer needs otherwise.
 - Official vendor SDKs (anthropic-sdk-go, openai-go, google genai) rather than

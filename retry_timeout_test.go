@@ -12,7 +12,7 @@ import (
 func simpleRequest() Request {
 	return Request{
 		System:    "you are a test",
-		Messages:  []Message{{Role: RoleUser, Content: "hi"}},
+		Messages:  []Message{TextMessage(RoleUser, "hi")},
 		MaxTokens: 64,
 	}
 }

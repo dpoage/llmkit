@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 
 	"github.com/dpoage/llmkit"
@@ -84,6 +85,47 @@ func (g *googleAdapter) Complete(ctx context.Context, req llmkit.Request) (llmki
 		t := float32(*req.Temperature)
 		cfg.Temperature = &t
 	}
+	if len(req.StopSequences) > 0 {
+		cfg.StopSequences = req.StopSequences
+	}
+	if req.TopP != nil {
+		t := float32(*req.TopP)
+		cfg.TopP = &t
+	}
+	if req.TopK != nil {
+		k := float32(*req.TopK)
+		cfg.TopK = &k
+	}
+	if req.Seed != nil {
+		// genai carries seed as int32; reject out-of-range values instead of
+		// silently truncating to a different deterministic seed.
+		if *req.Seed < int64(math.MinInt32) || *req.Seed > int64(math.MaxInt32) {
+			return llmkit.Response{}, llmkit.NewAPIError("google", 0, 0, llmkit.ErrInvalidRequest,
+				"Seed out of range for int32", nil)
+		}
+		s := int32(*req.Seed)
+		cfg.Seed = &s
+	}
+	if req.Thinking != nil {
+		if req.Thinking.BudgetTokens <= 0 {
+			return llmkit.Response{}, llmkit.NewAPIError("google", 0, 0,
+				llmkit.ErrInvalidRequest, "Thinking.BudgetTokens must be positive", nil)
+		}
+		// IncludeThoughts makes the model return thought-summary parts so
+		// reasoning is visible (and round-trippable) in Response.Blocks.
+		budget := int32(req.Thinking.BudgetTokens)
+		cfg.ThinkingConfig = &genai.ThinkingConfig{
+			ThinkingBudget:  &budget,
+			IncludeThoughts: true,
+		}
+	}
+
+	// Request.ToolChoice maps onto function_calling_config. Auto (and the
+	// zero value) is the provider default and is never serialized.
+	if err := applyGoogleToolChoice(cfg, req.ToolChoice); err != nil {
+		return llmkit.Response{}, err
+	}
+
 	if len(req.Tools) > 0 {
 		decls := make([]*genai.FunctionDeclaration, 0, len(req.Tools))
 		for _, t := range req.Tools {
@@ -139,52 +181,79 @@ func (g *googleAdapter) Complete(ctx context.Context, req llmkit.Request) (llmki
 	return g.toResponse(resp), nil
 }
 
+// applyGoogleToolChoice maps the normalized tool-choice request onto the
+// Gemini function_calling_config: required → mode ANY, none → mode NONE,
+// and a named tool → mode ANY restricted to that function's name.
+func applyGoogleToolChoice(cfg *genai.GenerateContentConfig, tc llmkit.ToolChoice) error {
+	fcc := &genai.FunctionCallingConfig{}
+	switch tc.Mode {
+	case "", llmkit.ToolChoiceAuto:
+		return nil
+	case llmkit.ToolChoiceNone:
+		fcc.Mode = genai.FunctionCallingConfigModeNone
+	case llmkit.ToolChoiceRequired:
+		fcc.Mode = genai.FunctionCallingConfigModeAny
+	case llmkit.ToolChoiceTool:
+		if tc.Name == "" {
+			return llmkit.NewAPIError("google", 0, 0, llmkit.ErrInvalidRequest,
+				"ToolChoice.Mode=tool requires ToolChoice.Name", nil)
+		}
+		fcc.Mode = genai.FunctionCallingConfigModeAny
+		fcc.AllowedFunctionNames = []string{tc.Name}
+	default:
+		return llmkit.NewAPIError("google", 0, 0, llmkit.ErrInvalidRequest,
+			"unknown ToolChoice.Mode "+string(tc.Mode), nil)
+	}
+	cfg.ToolConfig = &genai.ToolConfig{FunctionCallingConfig: fcc}
+	return nil
+}
+
 // toGoogleContents converts normalized messages into genai Contents. Gemini
 // uses "user"/"model" roles; tool results are sent as user-turn
 // functionResponse parts.
+//
+// Per-role block rule (ValidateMessageBlocks, before any mapping):
+// user text/image/document; assistant text/thinking (Provider-matched only);
+// system and tool-result text only. Violations are ErrInvalidRequest.
+//
+// Content blocks map in order: text → text parts, image/document →
+// inline_data (bytes) or file_data (URL) parts. Assistant thinking blocks
+// re-emit Text/Thought/ThoughtSignature from Raw (Provider "google" only —
+// foreign thinking blocks are dropped silently per the llmkit.Block
+// contract). Image/document source validation happens here, BEFORE any wire
+// call.
 func toGoogleContents(msgs []llmkit.Message) ([]*genai.Content, error) {
 	out := make([]*genai.Content, 0, len(msgs))
 	for _, m := range msgs {
+		// Per-role block-kind rule + media source rule, before any mapping.
+		if err := adapter.ValidateMessageBlocks("google", m); err != nil {
+			return nil, err
+		}
 		switch m.Role {
 		case llmkit.RoleSystem:
 			// Hoisted into SystemInstruction by the caller; if inline, attach as a
 			// user turn to preserve content.
 			out = append(out, &genai.Content{
 				Role:  "user",
-				Parts: []*genai.Part{{Text: m.Content}},
+				Parts: []*genai.Part{{Text: m.Text()}},
 			})
 		case llmkit.RoleUser:
-			out = append(out, &genai.Content{
-				Role:  "user",
-				Parts: []*genai.Part{{Text: m.Content}},
-			})
-		case llmkit.RoleAssistant:
-			parts := make([]*genai.Part, 0, 1+len(m.ToolCalls))
-			if m.Content != "" {
-				parts = append(parts, &genai.Part{Text: m.Content})
+			parts, err := googleUserParts(m)
+			if err != nil {
+				return nil, err
 			}
-			for _, tc := range m.ToolCalls {
-				var args map[string]any
-				if len(tc.Arguments) > 0 {
-					if err := json.Unmarshal(tc.Arguments, &args); err != nil {
-						return nil, llmkit.NewAPIError("google", 0, 0, llmkit.ErrInvalidRequest,
-							"assistant tool call "+tc.Name+": invalid arguments JSON", err)
-					}
-				}
-				parts = append(parts, &genai.Part{
-					FunctionCall: &genai.FunctionCall{
-						ID:   tc.ID,
-						Name: tc.Name,
-						Args: args,
-					},
-				})
+			out = append(out, &genai.Content{Role: "user", Parts: parts})
+		case llmkit.RoleAssistant:
+			parts, err := googleAssistantParts(m)
+			if err != nil {
+				return nil, err
 			}
 			out = append(out, &genai.Content{Role: "model", Parts: parts})
 		case llmkit.RoleToolResult:
 			// Gemini expects the function result wrapped under an "output" key.
-			resultObj := map[string]any{"output": m.Content}
+			resultObj := map[string]any{"output": m.Text()}
 			if m.IsError {
-				resultObj = map[string]any{"error": m.Content}
+				resultObj = map[string]any{"error": m.Text()}
 			}
 			out = append(out, &genai.Content{
 				Role: "user",
@@ -204,6 +273,83 @@ func toGoogleContents(msgs []llmkit.Message) ([]*genai.Content, error) {
 	return out, nil
 }
 
+// googleUserParts maps a user message's content blocks onto genai parts.
+func googleUserParts(m llmkit.Message) ([]*genai.Part, error) {
+	parts := make([]*genai.Part, 0, len(m.Content))
+	for _, b := range m.Content {
+		switch b.Kind {
+		case llmkit.BlockText:
+			parts = append(parts, &genai.Part{Text: b.Text})
+		case llmkit.BlockImage, llmkit.BlockDocument:
+			if err := adapter.ValidateMediaBlock("google", b); err != nil {
+				return nil, err
+			}
+			if len(b.Data) > 0 {
+				parts = append(parts, &genai.Part{InlineData: &genai.Blob{
+					MIMEType: b.MediaType,
+					Data:     b.Data,
+				}})
+			} else {
+				parts = append(parts, &genai.Part{FileData: &genai.FileData{
+					FileURI:  b.URL,
+					MIMEType: b.MediaType,
+				}})
+			}
+		}
+	}
+	if len(parts) == 0 {
+		parts = append(parts, &genai.Part{Text: ""})
+	}
+	return parts, nil
+}
+
+// googleAssistantParts maps an assistant message onto genai model parts:
+// text in order, then thinking parts rebuilt from Raw (preserving the
+// ThoughtSignature Gemini requires on later turns), then one functionCall
+// part per ToolCall.
+func googleAssistantParts(m llmkit.Message) ([]*genai.Part, error) {
+	parts := make([]*genai.Part, 0, 1+len(m.Content)+len(m.ToolCalls))
+	for _, b := range m.Content {
+		switch b.Kind {
+		case llmkit.BlockText:
+			if b.Text != "" {
+				parts = append(parts, &genai.Part{Text: b.Text})
+			}
+		case llmkit.BlockThinking:
+			if b.Provider != "google" {
+				continue
+			}
+			var p genai.Part
+			if err := json.Unmarshal(b.Raw, &p); err != nil {
+				return nil, llmkit.NewAPIError("google", 0, 0, llmkit.ErrInvalidRequest,
+					"thinking block: malformed Raw JSON", err)
+			}
+			p.FunctionCall = nil
+			parts = append(parts, &p)
+		}
+	}
+	for _, tc := range m.ToolCalls {
+		var args map[string]any
+		if len(tc.Arguments) > 0 {
+			if err := json.Unmarshal(tc.Arguments, &args); err != nil {
+				return nil, llmkit.NewAPIError("google", 0, 0, llmkit.ErrInvalidRequest,
+					"assistant tool call "+tc.Name+": invalid arguments JSON", err)
+			}
+		}
+		parts = append(parts, &genai.Part{
+			FunctionCall: &genai.FunctionCall{
+				ID:   tc.ID,
+				Name: tc.Name,
+				Args: args,
+			},
+		})
+	}
+	if len(parts) == 0 {
+		parts = append(parts, &genai.Part{Text: ""})
+	}
+	return parts, nil
+}
+
 func (g *googleAdapter) toResponse(resp *genai.GenerateContentResponse) llmkit.Response {
 	var out llmkit.Response
 	var text string
@@ -217,10 +363,8 @@ func (g *googleAdapter) toResponse(resp *genai.GenerateContentResponse) llmkit.R
 				if p == nil {
 					continue
 				}
-				if p.Text != "" {
-					text += p.Text
-				}
-				if p.FunctionCall != nil {
+				switch {
+				case p.FunctionCall != nil:
 					args, _ := json.Marshal(p.FunctionCall.Args)
 					if len(args) == 0 || string(args) == "null" {
 						args = json.RawMessage("{}")
@@ -230,6 +374,22 @@ func (g *googleAdapter) toResponse(resp *genai.GenerateContentResponse) llmkit.R
 						Name:      p.FunctionCall.Name,
 						Arguments: json.RawMessage(args),
 					})
+				case p.Thought:
+					// Thought-summary part. Raw re-encodes the parsed part
+					// (the SDK exposes no raw wire bytes) preserving text
+					// and ThoughtSignature for verbatim re-emission.
+					raw, _ := json.Marshal(p)
+					out.Blocks = append(out.Blocks, llmkit.Block{
+						Kind:     llmkit.BlockThinking,
+						Text:     p.Text,
+						Provider: "google",
+						Raw:      raw,
+					})
+				default:
+					if p.Text != "" {
+						text += p.Text
+						out.Blocks = append(out.Blocks, llmkit.Block{Kind: llmkit.BlockText, Text: p.Text})
+					}
 				}
 			}
 		}
@@ -262,7 +422,7 @@ func mapGoogleStop(reason genai.FinishReason, hasToolCalls bool) llmkit.StopReas
 	case genai.FinishReasonSafety, genai.FinishReasonRecitation,
 		genai.FinishReasonProhibitedContent, genai.FinishReasonBlocklist,
 		genai.FinishReasonSPII:
-		return llmkit.StopError
+		return llmkit.StopContentFilter
 	default:
 		if hasToolCalls {
 			return llmkit.StopToolUse
@@ -287,12 +447,23 @@ func googleCapabilities(model string) llmkit.Capabilities {
 	// Gemini supports parallel function calls and structured output. Prompt
 	// caching is implicit (server-side, automatic on 2.x models); the adapter
 	// surfaces cache hits via Usage.CacheReadInputTokens but does not manage
-	// explicit CachedContent. The model parameter is accepted for symmetry
-	// with the other capability constructors.
+	// explicit CachedContent. Thinking (thinkingConfig budget + thought
+	// summaries), tool choice (function_calling_config), image/document
+	// parts, stop sequences, top_p, top_k, and seed are all honored. The
+	// model parameter is accepted for symmetry with the other capability
+	// constructors.
 	return llmkit.Capabilities{
 		ContextWindow:     1_000_000,
 		ParallelToolCalls: true,
 		PromptCaching:     true,
 		StructuredOutput:  true,
+		Thinking:          true,
+		ToolChoice:        true,
+		Images:            true,
+		Documents:         true,
+		StopSequences:     true,
+		TopP:              true,
+		TopK:              true,
+		Seed:              true,
 	}
 }
