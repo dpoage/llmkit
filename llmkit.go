@@ -212,11 +212,17 @@ type Request struct {
 	// System is an optional system prompt. It is kept separate from Messages so
 	// adapters can route it to the provider's dedicated system field.
 	System string
-	// Messages is the ordered conversation. It must not be empty.
+	// Messages is the ordered conversation. It must not be empty. An inline
+	// RoleSystem message is honored, but where it lands on the wire differs:
+	// OpenAI keeps it as a system-role entry in place; Anthropic and Gemini
+	// have no system role inside the message list, so it is sent as a user
+	// turn (Request.System is the reliable system channel).
 	Messages []Message
 	// Tools is the set of tools the model may call. May be empty.
 	Tools []ToolDef
-	// MaxTokens caps output tokens. If zero, the adapter applies a sane default.
+	// MaxTokens caps output tokens. If zero (or negative), every adapter
+	// applies the same default: llmkit.DefaultMaxTokens. An explicit value is
+	// passed through verbatim.
 	MaxTokens int
 	// Temperature is the sampling temperature. Nil means "use the provider
 	// default" (some models reject an explicit temperature). Use a pointer so
@@ -347,8 +353,11 @@ type Response struct {
 // sniffing the provider type. The bools name features a Request can ask for;
 // a false feature is silently dropped by the adapter (see each field).
 type Capabilities struct {
-	// ContextWindow is the model's maximum input+output token window. Zero means
-	// unknown (e.g. an arbitrary OpenAI-compatible endpoint).
+	// ContextWindow is the model's maximum input+output token window. Zero
+	// means unknown: adapters report 0 for any model outside their per-model
+	// table (on every provider, never a fabricated fallback number) and for
+	// arbitrary OpenAI-compatible endpoints. Pin a value for such models via
+	// provider.Spec.Capabilities.
 	ContextWindow int
 	// ParallelToolCalls reports whether the model may return more than one tool
 	// call in a single response.

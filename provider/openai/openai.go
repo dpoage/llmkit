@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/internal/adapter"
@@ -43,15 +44,20 @@ type openaiAdapter struct {
 // boolean downgrades for object-valued additionalProperties, and the
 // "openai-compatible" provider label on errors.
 //
+// Capabilities, when non-nil, REPLACES the selected profile wholesale (all
+// fields, including ContextWindow). nil = profile default.
+//
 // StructuredOutput, when non-nil, overrides the profile's StructuredOutput
-// capability. nil = profile default (true for first-party OpenAI, false for
-// openai-compatible).
+// capability — applied after Capabilities, so it wins over an override that
+// carries the field. nil = profile default (true for first-party OpenAI,
+// false for openai-compatible).
 type Options struct {
 	APIKey     string
 	BaseURL    string       // optional; for testing or non-default endpoints
 	HTTPClient *http.Client // optional; for testing (httptest)
 
 	Compatible       bool
+	Capabilities     *llmkit.Capabilities
 	StructuredOutput *bool
 }
 
@@ -80,6 +86,10 @@ func New(model string, opts Options) llmkit.Client {
 		// adapter.CoerceBoolAdditionalProperties. First-party OpenAI keeps the
 		// subschema.
 		requireBoolAdditionalProps = true
+	}
+	if opts.Capabilities != nil {
+		// Caller-provided profile replaces whichever table was selected.
+		caps = *opts.Capabilities
 	}
 	// The conservative default for openai-compatible endpoints is
 	// StructuredOutput=false; the option can flip it on (e.g. for a
@@ -117,9 +127,13 @@ func (o *openaiAdapter) buildParams(req llmkit.Request) (openai.ChatCompletionNe
 	params := openai.ChatCompletionNewParams{
 		Model: shared.ChatModel(o.model),
 	}
-	if req.MaxTokens > 0 {
-		params.MaxCompletionTokens = openai.Int(int64(req.MaxTokens))
+	maxTokens := req.MaxTokens
+	if maxTokens <= 0 {
+		// Uniform rule: the same documented default on every adapter instead
+		// of relying on each backend's unset behavior.
+		maxTokens = llmkit.DefaultMaxTokens
 	}
+	params.MaxCompletionTokens = openai.Int(int64(maxTokens))
 	if req.Temperature != nil {
 		params.Temperature = openai.Float(*req.Temperature)
 	}
@@ -223,6 +237,17 @@ func (o *openaiAdapter) buildParams(req llmkit.Request) (openai.ChatCompletionNe
 // applyToolChoice maps the normalized tool-choice request onto the Chat
 // Completions tool_choice parameter.
 func (o *openaiAdapter) applyToolChoice(params *openai.ChatCompletionNewParams, tc llmkit.ToolChoice) error {
+	// Models without function calling (o1-mini/o1-preview — see
+	// openAICapabilities) report ToolChoice=false. Per the Capabilities
+	// contract a false feature is silently dropped — but only the supported
+	// steering modes; an invalid mode still falls through and errors so
+	// caller mistakes surface.
+	if !o.caps.ToolChoice {
+		switch tc.Mode {
+		case llmkit.ToolChoiceNone, llmkit.ToolChoiceRequired, llmkit.ToolChoiceTool:
+			return nil
+		}
+	}
 	switch tc.Mode {
 	case "", llmkit.ToolChoiceAuto:
 		return nil
@@ -385,7 +410,16 @@ func (o *openaiAdapter) toResponse(cc *openai.ChatCompletion) llmkit.Response {
 	var resp llmkit.Response
 	if len(cc.Choices) > 0 {
 		choice := cc.Choices[0]
-		resp.Text = choice.Message.Content
+		// message.refusal: when the model declines on policy grounds OpenAI
+		// puts the explanation here and leaves content empty. Surface it as
+		// the response text with StopRefusal, so a caller sees WHY the turn
+		// ended instead of an empty StopEndTurn.
+		refused := choice.Message.Refusal != ""
+		if refused {
+			resp.Text = choice.Message.Refusal
+		} else {
+			resp.Text = choice.Message.Content
+		}
 		if resp.Text != "" {
 			resp.Blocks = append(resp.Blocks, llmkit.Block{Kind: llmkit.BlockText, Text: resp.Text})
 		}
@@ -397,7 +431,11 @@ func (o *openaiAdapter) toResponse(cc *openai.ChatCompletion) llmkit.Response {
 				Arguments: json.RawMessage(tc.Function.Arguments),
 			})
 		}
-		resp.StopReason = mapOpenAIStop(choice.FinishReason, len(resp.ToolCalls) > 0)
+		if refused {
+			resp.StopReason = llmkit.StopRefusal
+		} else {
+			resp.StopReason = mapOpenAIStop(choice.FinishReason, len(resp.ToolCalls) > 0)
+		}
 	}
 	// prompt_tokens already INCLUDES cached tokens (OpenAI convention), which
 	// matches the normalized Usage semantics directly. Caching is automatic
@@ -441,66 +479,85 @@ func (o *openaiAdapter) normalizeErr(err error) error {
 	return llmkit.NewAPIError(o.provider, 0, 0, llmkit.ErrServer, err.Error(), err)
 }
 
-// openAICapabilities returns the capability profile for first-party OpenAI
-// models. Context window is per-model where known, with a 128k default for
-// unrecognized models.
-func openAICapabilities(model string) llmkit.Capabilities {
+// Sources (vendor docs consulted for this table):
+//   - https://platform.openai.com/docs/models — per-model context windows:
+//     gpt-5 / gpt-5-mini / gpt-5-nano 400,000; gpt-4.1 / -mini / -nano
+//     1,047,576; gpt-4o / gpt-4o-mini 128,000; o1 / o3 / o3-mini / o4-mini
+//     200,000 with o1-mini and o1-preview at 128,000; gpt-4-turbo 128,000;
+//     gpt-4 8,192; gpt-4-32k 32,768; gpt-3.5-turbo 16,385.
+//   - https://platform.openai.com/docs/guides/prompt-caching — automatic
+//     prompt caching exists only for models introduced from Aug 2024 on
+//     (gpt-4o and later, o1 and later); the gpt-4 / gpt-4-turbo /
+//     gpt-3.5-turbo families predate it.
+//   - https://platform.openai.com/docs/guides/structured-outputs plus the
+//     per-model pages — structured outputs are unsupported on gpt-4,
+//     gpt-4-32k, gpt-4-turbo, and gpt-3.5-turbo; o1-mini and o1-preview
+//     support neither structured outputs nor function calling at all
+//     (https://platform.openai.com/docs/models/o1-mini), so their
+//     ToolChoice and ParallelToolCalls are false too.
+//
+// The table is matched by LONGEST prefix, so "gpt-4-turbo" and "gpt-4.1"
+// win over the shorter "gpt-4" family prefix and "o1-mini" wins over "o1".
+// Only the fields that genuinely vary by model are stored per entry
+// (window + the parallel/caching/structured/tool-choice bools); everything
+// else is shared Chat Completions API behavior (see firstPartyCaps).
+//
+// An unknown first-party model reports ContextWindow 0 — unknown is never
+// fabricated into a number (the old 128k fallback overstated gpt-4's 8k
+// window) — while the feature bools keep the API-level defaults: an
+// unrecognized name on the first-party endpoint is most likely a NEW model
+// with the modern feature set, and the server is the final validator. Pin
+// exact values for unknown models via Options.Capabilities.
+type openAIModelCaps struct {
+	prefix string
+	caps   llmkit.Capabilities
+}
+
+// firstPartyCaps fills a first-party profile: the API-level defaults with
+// the per-model fields supplied by the caller.
+func firstPartyCaps(window int, parallel, caching, structured, toolChoice bool) llmkit.Capabilities {
 	return llmkit.Capabilities{
-		ContextWindow:     openAIContextWindow(model),
-		ParallelToolCalls: true,
-		PromptCaching:     true,
-		StructuredOutput:  true,
-		Thinking:          false,
-		ToolChoice:        true,
+		ContextWindow:     window,
+		ParallelToolCalls: parallel,
+		PromptCaching:     caching,
+		StructuredOutput:  structured,
+		Thinking:          false, // reasoning_effort is a coarse dial, not a budget — never mapped
+		ToolChoice:        toolChoice,
 		Images:            true,
 		Documents:         true,
 		StopSequences:     true,
 		TopP:              true,
-		TopK:              false,
+		TopK:              false, // Chat Completions has no top_k
 		Seed:              true,
 	}
 }
 
-// openAIContextWindow returns the known context-window size for a first-party
-// OpenAI model. Unrecognized models get the 128k default which covers the
-// current GPT-4o family.
-func openAIContextWindow(model string) int {
-	switch model {
-	case "gpt-3.5-turbo", "gpt-3.5-turbo-0125":
-		return 16_385
-	case "gpt-3.5-turbo-16k":
-		return 16_385
-	case "gpt-4", "gpt-4-0613":
-		return 8_192
-	case "gpt-4-32k", "gpt-4-32k-0613":
-		return 32_768
-	case "gpt-4-turbo", "gpt-4-turbo-2024-04-09", "gpt-4-turbo-preview":
-		return 128_000
-	case "gpt-4o", "gpt-4o-2024-05-13", "gpt-4o-2024-08-06", "gpt-4o-2024-11-20":
-		return 128_000
-	case "gpt-4o-mini", "gpt-4o-mini-2024-07-18":
-		return 128_000
-	case "o1", "o1-2024-12-17":
-		return 200_000
-	case "o1-mini", "o1-mini-2024-09-12":
-		return 128_000
-	case "o1-preview", "o1-preview-2024-09-12":
-		return 128_000
-	case "o3", "o3-2025-04-16":
-		return 200_000
-	case "o3-mini", "o3-mini-2025-01-31":
-		return 200_000
-	case "o4-mini", "o4-mini-2025-04-16":
-		return 200_000
-	case "gpt-4.1", "gpt-4.1-2025-04-14":
-		return 1_047_576
-	case "gpt-4.1-mini", "gpt-4.1-mini-2025-04-14":
-		return 1_047_576
-	case "gpt-4.1-nano", "gpt-4.1-nano-2025-04-14":
-		return 1_047_576
-	default:
-		return 128_000
+var openAIModelTable = []openAIModelCaps{
+	{"gpt-5", firstPartyCaps(400_000, true, true, true, true)},
+	{"gpt-4.1", firstPartyCaps(1_047_576, true, true, true, true)},
+	{"gpt-4o", firstPartyCaps(128_000, true, true, true, true)},
+	{"gpt-4-turbo", firstPartyCaps(128_000, true, false, false, true)},
+	{"gpt-4-32k", firstPartyCaps(32_768, false, false, false, true)},
+	{"gpt-4", firstPartyCaps(8_192, false, false, false, true)},
+	{"gpt-3.5-turbo", firstPartyCaps(16_385, true, false, false, true)},
+	{"o1-mini", firstPartyCaps(128_000, false, true, false, false)},
+	{"o1-preview", firstPartyCaps(128_000, false, true, false, false)},
+	{"o1", firstPartyCaps(200_000, true, true, true, true)},
+	{"o3", firstPartyCaps(200_000, true, true, true, true)},
+	{"o4-mini", firstPartyCaps(200_000, true, true, true, true)},
+}
+
+func openAICapabilities(model string) llmkit.Capabilities {
+	best := -1
+	for i, e := range openAIModelTable {
+		if strings.HasPrefix(model, e.prefix) && (best < 0 || len(e.prefix) > len(openAIModelTable[best].prefix)) {
+			best = i
+		}
 	}
+	if best >= 0 {
+		return openAIModelTable[best].caps
+	}
+	return firstPartyCaps(0, true, true, true, true)
 }
 
 // openAICompatibleCapabilities returns a conservative profile for arbitrary
