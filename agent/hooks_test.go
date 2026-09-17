@@ -142,8 +142,9 @@ func itoa(n int) string {
 }
 
 // TestHook_BeforeAfterCompletion_MainLoop verifies the hook pair fires around
-// every loop completion with step = outcome.Iterations at fire time: 0 for the
-// first turn, 1 for the second.
+// every loop completion with the unified hook Step: the 1-based transcript
+// step the completion is recorded under — 1 for the first turn, 2 for the
+// second.
 func TestHook_BeforeAfterCompletion_MainLoop(t *testing.T) {
 	fc := newFakeClient(
 		toolResp("c1", "echo", `{"v":"hi"}`, 10, 4),
@@ -155,7 +156,7 @@ func TestHook_BeforeAfterCompletion_MainLoop(t *testing.T) {
 	if _, err := r.Run(context.Background(), "task"); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	want := []string{"before:0", "after:0", "start:1:echo", "end:1:echo", "before:1", "after:1"}
+	want := []string{"before:1", "after:1", "start:1:echo", "end:1:echo", "before:2", "after:2"}
 	if len(rec.events) != len(want) {
 		t.Fatalf("events = %v, want %v", rec.events, want)
 	}
@@ -184,7 +185,7 @@ func TestHook_BeforeAfterCompletion_MainLoop(t *testing.T) {
 }
 
 // TestHook_BeforeAfterCompletion_Continuation verifies the max-tokens
-// continuation completion fires its own hook pair (steps 0 then 1).
+// continuation completion fires its own hook pair (steps 1 then 2).
 func TestHook_BeforeAfterCompletion_Continuation(t *testing.T) {
 	fc := newFakeClient(
 		maxTokensResp("half ", 5, 5),
@@ -200,7 +201,7 @@ func TestHook_BeforeAfterCompletion_Continuation(t *testing.T) {
 	if out.FinalText != "half done" {
 		t.Fatalf("FinalText = %q, want stitched halves", out.FinalText)
 	}
-	want := []string{"before:0", "after:0", "before:1", "after:1"}
+	want := []string{"before:1", "after:1", "before:2", "after:2"}
 	if len(rec.events) != len(want) {
 		t.Fatalf("events = %v, want %v", rec.events, want)
 	}
@@ -222,7 +223,7 @@ func TestHook_AfterCompletion_ReceivesError(t *testing.T) {
 	if _, err := r.Run(context.Background(), "task"); err == nil {
 		t.Fatal("expected the run to fail")
 	}
-	want := []string{"before:0", "after:0"}
+	want := []string{"before:1", "after:1"}
 	if len(rec.events) != len(want) {
 		t.Fatalf("events = %v, want %v", rec.events, want)
 	}
@@ -352,12 +353,19 @@ func TestHook_Compaction_FiresOnRealPrune(t *testing.T) {
 		t.Errorf("BeforeTokens = %d, want >= 5000 (five 4000-byte results)", ev.BeforeTokens)
 	}
 	// step is the completion that will consume the compacted history: the
-	// sixth, after five tool turns.
+	// sixth, after five tool turns — and it must be the SAME number that
+	// completion's Before/AfterCompletion report (one joinable base).
 	if ev.Step != 6 {
 		t.Errorf("Step = %d, want 6", ev.Step)
 	}
-	if rec.eventCount() != len(rec.events) {
-		t.Error("event log raced with itself")
+	compactIdx := -1
+	for i, e := range rec.events {
+		if e == "compact" {
+			compactIdx = i
+		}
+	}
+	if compactIdx < 0 || compactIdx+1 >= len(rec.events) || rec.events[compactIdx+1] != "before:6" {
+		t.Errorf("compaction at events[%d] not followed by before:6 (events: %v)", compactIdx, rec.events)
 	}
 }
 
@@ -434,7 +442,7 @@ func TestHook_Repair_FiresOnceAtRepairStart(t *testing.T) {
 	if rec.repairs != 1 {
 		t.Fatalf("repairs = %d, want 1", rec.repairs)
 	}
-	want := []string{"before:0", "after:0", "repair", "before:0", "after:0"}
+	want := []string{"before:1", "after:1", "repair", "before:1", "after:1"}
 	if len(rec.events) != len(want) {
 		t.Fatalf("events = %v, want %v", rec.events, want)
 	}
@@ -508,11 +516,14 @@ func TestHooks_FullRunSequence(t *testing.T) {
 		t.Fatalf("RunJSON: %v", err)
 	}
 	want := []string{
-		"before:0", "after:0", // main turn 1
+		"before:1", "after:1", // main turn 1
 		"start:1:echo", "end:1:echo", // tool lifecycle
-		"before:1", "after:1", // main turn 2 (unparseable final answer)
+		"before:2", "after:2", // main turn 2 (unparseable final answer)
 		"repair",              // repair pass entry
-		"before:0", "after:0", // repair completion (fresh outcome)
+		"before:1", "after:1", // repair completion (fresh outcome)
+	}
+	if len(rec.events) != len(want) {
+		t.Fatalf("events = %v, want %v", rec.events, want)
 	}
 	for i := range want {
 		if rec.events[i] != want[i] {

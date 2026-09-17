@@ -313,9 +313,11 @@ func stripBody(text string) (string, error) {
 //     only integral numbers; number accepts any).
 //   - required — at EVERY object level, not just the root (a required
 //     nested object or string missing).
+//   - properties — recursively.
 //   - additionalProperties — false rejects unknown keys; a subschema
 //     validates the values of free-form maps (an object keyed by path
 //     with string values).
+//   - items — recursively, for every array element.
 //   - enum — exact membership (a confidence level of "high", a status of
 //     "open").
 //   - minItems / minProperties / minLength / maxLength / minimum / maximum.

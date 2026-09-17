@@ -20,9 +20,12 @@ import (
 // A Runner is safe for concurrent use: every field is fixed at construction,
 // and all mutable state (conversation, transcript, budget accounting,
 // compaction thresholds, nudge counters) is local to a single Run call.
-// Observability hooks (WithHooks) fire from whichever goroutine reaches the
-// event — concurrently under WithParallelTools or concurrent Run calls — so
-// hook functions must synchronize their own state.
+// Tools inherit an obligation from this: a [Tool] passed to one Runner may be
+// invoked concurrently (see [Tool.Run] and [WithParallelTools]), so it must
+// be safe for concurrent calls. Observability hooks (WithHooks) fire from
+// whichever goroutine reaches the event — concurrently under
+// WithParallelTools or concurrent Run calls — so hook functions must
+// synchronize their own state.
 type Runner struct {
 	client       llmkit.Client
 	tools        toolSet
@@ -563,13 +566,15 @@ func assistantMessage(resp llmkit.Response) llmkit.Message {
 	return llmkit.TextMessage(llmkit.RoleAssistant, resp.Text)
 }
 
-// stitchBlocks merges the two halves of a max-tokens continuation into one
-// block list for the stitched response returned to the caller: thinking
-// blocks from BOTH halves in their original order, then a single text block
-// holding joinedText. Only text blocks are stitched (see [stitchContinuation]);
-// thinking blocks are carried through untouched — never split, reordered, or
-// re-emitted differently — because the next turn must return them to the
-// provider exactly as they arrived. Assistant turns carry no other block kinds.
+// stitchBlocks shapes the Block list of the stitched llmkit.Response that
+// completeOnce returns to ITS caller. It does not touch the conversation
+// history: completeOnce already appended each half verbatim via
+// [assistantMessage], so both halves' thinking blocks are carried in history
+// in order exactly as the provider issued them. Only text blocks are
+// stitched (see [stitchContinuation]); thinking blocks from BOTH halves are
+// carried through untouched — never split, reordered, or re-emitted
+// differently — because the next turn must return them to the provider
+// exactly as they arrived. Assistant turns carry no other block kinds.
 func stitchBlocks(head, cont []llmkit.Block, joinedText string) []llmkit.Block {
 	var out []llmkit.Block
 	for _, b := range head {
@@ -620,14 +625,18 @@ func (r *Runner) complete(ctx context.Context, tr *Transcript, messages []llmkit
 	// This is the single fire point for [Hooks.BeforeCompletion] and
 	// [Hooks.AfterCompletion]: every client.Complete in the loop (main turn,
 	// max-tokens continuation, forced finalization, repair) goes through here.
-	// step is captured before Complete because outcome.Iterations is
-	// incremented only after the call returns, keeping the hook pair's step
-	// identical.
-	step := outcome.Iterations
+	// step is the 1-based transcript step this completion is recorded under
+	// (outcome.Iterations+1 at fire time): the SAME number every other hook
+	// reports for this turn — ToolEvent.Step, CompactionEvent.Step — and the
+	// Event.Step of the request/assistant transcript events below, so
+	// consumers can join all hook families on Step. Captured before Complete
+	// because outcome.Iterations is incremented only after the call returns,
+	// keeping the hook pair's step identical.
+	step := outcome.Iterations + 1
 	if r.hooks.BeforeCompletion != nil {
 		r.hooks.BeforeCompletion(ctx, step, &req)
 	}
-	tr.recordRequest(step+1, messages)
+	tr.recordRequest(step, messages)
 
 	resp, err := r.client.Complete(ctx, req)
 	if r.hooks.AfterCompletion != nil {
@@ -638,7 +647,7 @@ func (r *Runner) complete(ctx context.Context, tr *Transcript, messages []llmkit
 		r.hooks.AfterCompletion(ctx, step, &req, respPtr, err)
 	}
 	if err != nil {
-		return llmkit.Response{}, fmt.Errorf("agent: completion failed at iteration %d: %w", step+1, err)
+		return llmkit.Response{}, fmt.Errorf("agent: completion failed at iteration %d: %w", step, err)
 	}
 
 	outcome.Iterations++
@@ -731,9 +740,11 @@ type toolResult struct {
 // the returned slice then holds only the already-executed results. Parallel
 // mode (WithParallelTools) runs each call on its own goroutine (bounded by
 // len(calls)) and waits for all of them: per-call failures are isolated (a
-// tool error never fails its siblings), and the full-length result slice is
-// always returned. Neither mode mutates the conversation or the transcript;
-// the caller appends the results in call order after executeTools returns.
+// tool error or panic never fails its siblings — a panic is recovered in the
+// call's goroutine and rendered as that call's error result), and the
+// full-length result slice is always returned. Neither mode mutates the
+// conversation or the transcript; the caller appends the results in call
+// order after executeTools returns.
 func (r *Runner) executeTools(ctx context.Context, outcome *Outcome, calls []llmkit.ToolCall) []toolResult {
 	results := make([]toolResult, len(calls))
 	if !r.parallelTools || len(calls) < 2 {
@@ -749,7 +760,21 @@ func (r *Runner) executeTools(ctx context.Context, outcome *Outcome, calls []llm
 	for i, call := range calls {
 		wg.Add(1)
 		go func(i int, call llmkit.ToolCall) {
+			// A panicking Tool.Run must not abort the process from this
+			// goroutine (a panic here escapes any caller recover and kills
+			// every concurrent Run): render it as THIS call's error result so
+			// isolation stays literal. Sequential dispatch propagates the
+			// panic to the Runner's caller, unchanged.
+			// Recover FIRST (this defer runs before wg.Done below) so
+			// wg.Wait cannot observe the result slot before the panic
+			// rendering is published.
 			defer wg.Done()
+			defer func() {
+				if v := recover(); v != nil {
+					results[i].result = fmt.Sprintf("ERROR: tool %s panicked: %v", call.Name, v)
+					results[i].isErr = true
+				}
+			}()
 			results[i].result, results[i].isErr = r.runTool(ctx, call, outcome.Iterations)
 		}(i, call)
 	}

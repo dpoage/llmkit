@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -27,10 +29,13 @@ func (h hangingTool) Run(ctx context.Context, _ json.RawMessage) (string, error)
 	return "", ctx.Err()
 }
 
-// staggerTool sleeps for its delay (honoring cancellation) before returning.
+// staggerTool sleeps for its delay (honoring cancellation) before returning
+// its own distinctive result string, so result↔call association is
+// observable in parallel-dispatch tests.
 type staggerTool struct {
-	name  string
-	delay time.Duration
+	name   string
+	delay  time.Duration
+	result string
 }
 
 func (s staggerTool) Def() llmkit.ToolDef {
@@ -42,8 +47,20 @@ func (s staggerTool) Run(ctx context.Context, _ json.RawMessage) (string, error)
 	case <-ctx.Done():
 		return "", ctx.Err()
 	case <-time.After(s.delay):
-		return "done", nil
+		return s.result, nil
 	}
+}
+
+// panicTool always panics from Run — the vehicle for WithParallelTools panic
+// isolation.
+type panicTool struct{ name string }
+
+func (p panicTool) Def() llmkit.ToolDef {
+	return llmkit.ToolDef{Name: p.name, Description: "panics", Parameters: json.RawMessage(`{"type":"object"}`)}
+}
+
+func (p panicTool) Run(context.Context, json.RawMessage) (string, error) {
+	panic("tool exploded")
 }
 
 // toolCallsResp builds one response requesting SEVERAL tool calls in order.
@@ -106,11 +123,80 @@ func TestRun_ToolTimeout_CancelsHangingTool(t *testing.T) {
 	}
 }
 
+// ctxObsTool closes started when Run begins and reports the context error it
+// observed when its context was done.
+type ctxObsTool struct {
+	name     string
+	started  chan struct{}
+	observed chan error
+	once     sync.Once
+}
+
+func (c *ctxObsTool) Def() llmkit.ToolDef {
+	return llmkit.ToolDef{Name: c.name, Description: "observes ctx", Parameters: json.RawMessage(`{"type":"object"}`)}
+}
+
+func (c *ctxObsTool) Run(ctx context.Context, _ json.RawMessage) (string, error) {
+	c.once.Do(func() { close(c.started) })
+	<-ctx.Done()
+	err := ctx.Err()
+	select {
+	case c.observed <- err:
+	default:
+	}
+	return "", err
+}
+
+// TestRun_ToolTimeout_DerivesFromRunContext pins that the per-tool deadline
+// derives FROM the run's context: cancelling the run while a tool is in
+// flight under WithToolTimeout must reach the tool as context.Canceled — not
+// leave it blocked until its own deadline fires off a detached parent.
+func TestRun_ToolTimeout_DerivesFromRunContext(t *testing.T) {
+	tool := &ctxObsTool{name: "watch", started: make(chan struct{}), observed: make(chan error, 1)}
+	fc := newFakeClient(
+		toolResp("c1", "watch", `{}`, 1, 1),
+		textResp("unused", 1, 1),
+	)
+	r := NewRunner(fc, []Tool{tool}, "sys", WithToolTimeout(10*time.Second))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.Run(ctx, "task")
+		done <- err
+	}()
+
+	<-tool.started // the call is in flight under its 10s deadline
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Run err = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("run did not return after cancellation — the per-tool deadline is not derived from the run context")
+	}
+	select {
+	case observed := <-tool.observed:
+		if !errors.Is(observed, context.Canceled) {
+			t.Errorf("tool observed %v, want context.Canceled (deadline must inherit the run ctx)", observed)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("tool never observed cancellation")
+	}
+}
+
 // TestRun_ParallelTools_OrderAndTiming verifies WithParallelTools dispatches
 // one turn's calls concurrently (wall time approaches the slowest call, not
-// the sum) while results are appended to history in the model's original call
-// order — byte-identical to sequential dispatch. The default sequential path
-// is pinned in the same test.
+// the sum) while each result lands under ITS OWN call ID in the model's
+// original call order — in both the follow-up request and the transcript.
+// Each tool returns a distinctive payload and finishes in an order different
+// from the call order (fast → mid → slow vs c1,c2,c3), so a mis-slotting or
+// completion-order append cannot pass. The default sequential path is pinned
+// in the same test.
 func TestRun_ParallelTools_OrderAndTiming(t *testing.T) {
 	calls := []llmkit.ToolCall{
 		{ID: "c1", Name: "slow", Arguments: json.RawMessage(`{}`)},
@@ -118,13 +204,16 @@ func TestRun_ParallelTools_OrderAndTiming(t *testing.T) {
 		{ID: "c3", Name: "fast", Arguments: json.RawMessage(`{}`)},
 	}
 	tools := []Tool{
-		staggerTool{name: "slow", delay: 250 * time.Millisecond},
-		staggerTool{name: "mid", delay: 150 * time.Millisecond},
-		staggerTool{name: "fast", delay: 30 * time.Millisecond},
+		staggerTool{name: "slow", delay: 250 * time.Millisecond, result: "R_slow"},
+		staggerTool{name: "mid", delay: 150 * time.Millisecond, result: "R_mid"},
+		staggerTool{name: "fast", delay: 30 * time.Millisecond, result: "R_fast"},
 	}
-	// runOnce executes one scripted run and returns the elapsed wall time and
-	// the tool-result order the model saw in the follow-up request.
-	runOnce := func(parallel bool) (time.Duration, []string) {
+	wantByCall := map[string]string{"c1": "R_slow", "c2": "R_mid", "c3": "R_fast"}
+
+	// runOnce executes one scripted run and returns the elapsed wall time,
+	// the per-call result content in the follow-up request, and the per-call
+	// result content in the transcript.
+	runOnce := func(parallel bool) (time.Duration, map[string]string, map[string]string) {
 		fc := newFakeClient(
 			toolCallsResp(calls...),
 			textResp("all done", 5, 2),
@@ -147,44 +236,171 @@ func TestRun_ParallelTools_OrderAndTiming(t *testing.T) {
 		if len(fc.requests) != 2 {
 			t.Fatalf("requests = %d, want 2", len(fc.requests))
 		}
-		var got []string
+		history := map[string]string{}
 		for _, m := range fc.requests[1].Messages {
 			if m.Role == llmkit.RoleToolResult {
-				got = append(got, m.ToolCallID)
+				history[m.ToolCallID] = m.Text()
 			}
 		}
-		return elapsed, got
+		transcript := map[string]string{}
+		for _, ev := range out.Transcript.Events {
+			if ev.Kind == EventToolResult {
+				transcript[ev.ToolCallID] = ev.Result
+			}
+		}
+		return elapsed, history, transcript
 	}
 
-	// Parallel: all three run concurrently, so wall time ≈ slowest (250ms),
-	// far below the 430ms sum; history order still matches call order.
-	parElapsed, parOrder := runOnce(true)
-	wantOrder := []string{"c1", "c2", "c3"}
-	if len(parOrder) != 3 {
-		t.Fatalf("parallel history order = %v, want %v", parOrder, wantOrder)
-	}
-	for i := range wantOrder {
-		if parOrder[i] != wantOrder[i] {
-			t.Errorf("parallel result %d = %s, want %s (history must preserve call order)", i, parOrder[i], wantOrder[i])
+	// Parallel: completion order is fast→mid→slow (≠ call order), so per-ID
+	// content assertions actually discriminate mis-slotting; wall time ≈ max.
+	parElapsed, parHistory, parTranscript := runOnce(true)
+	for id, want := range wantByCall {
+		if got := parHistory[id]; got != want {
+			t.Errorf("parallel history result for %s = %q, want %q (call→result misassociated)", id, got, want)
 		}
+		if got := parTranscript[id]; got != want {
+			t.Errorf("parallel transcript result for %s = %q, want %q", id, got, want)
+		}
+	}
+	if len(parHistory) != 3 || len(parTranscript) != 3 {
+		t.Fatalf("parallel results incomplete: history=%v transcript=%v", parHistory, parTranscript)
 	}
 	if parElapsed >= 400*time.Millisecond {
 		t.Errorf("parallel wall time = %v, want ≈ max(250ms), not the 430ms sum", parElapsed)
 	}
 
 	// Sequential (default): calls run one at a time, so wall time is at least
-	// the sum; order is the same call order.
-	seqElapsed, seqOrder := runOnce(false)
-	if len(seqOrder) != 3 {
-		t.Fatalf("sequential history order = %v, want %v", seqOrder, wantOrder)
-	}
-	for i := range wantOrder {
-		if seqOrder[i] != wantOrder[i] {
-			t.Errorf("sequential result %d = %s, want %s", i, seqOrder[i], wantOrder[i])
+	// the sum; the same per-ID payloads must land in the same call order.
+	seqElapsed, seqHistory, seqTranscript := runOnce(false)
+	for id, want := range wantByCall {
+		if got := seqHistory[id]; got != want {
+			t.Errorf("sequential history result for %s = %q, want %q", id, got, want)
 		}
+		if got := seqTranscript[id]; got != want {
+			t.Errorf("sequential transcript result for %s = %q, want %q", id, got, want)
+		}
+	}
+	if len(seqHistory) != 3 || len(seqTranscript) != 3 {
+		t.Fatalf("sequential results incomplete: history=%v transcript=%v", seqHistory, seqTranscript)
 	}
 	if seqElapsed < 400*time.Millisecond {
 		t.Errorf("sequential wall time = %v, want >= the 430ms sum (calls must not overlap)", seqElapsed)
+	}
+}
+
+// TestRun_ParallelTools_ErrorIsolation verifies that one immediately-failing
+// call cannot disturb a slow sibling under WithParallelTools: the sibling's
+// own result lands under its call ID and the run completes.
+func TestRun_ParallelTools_ErrorIsolation(t *testing.T) {
+	calls := []llmkit.ToolCall{
+		{ID: "c1", Name: "boom", Arguments: json.RawMessage(`{}`)},
+		{ID: "c2", Name: "slowok", Arguments: json.RawMessage(`{}`)},
+	}
+	tools := []Tool{
+		echoTool{name: "boom", failMsg: "kaput"},
+		staggerTool{name: "slowok", delay: 200 * time.Millisecond, result: "R_ok"},
+	}
+	fc := newFakeClient(
+		toolCallsResp(calls...),
+		textResp("done", 5, 2),
+	)
+	r := NewRunner(fc, tools, "sys", WithParallelTools())
+
+	out, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out.FinalText != "done" {
+		t.Fatalf("FinalText = %q", out.FinalText)
+	}
+	results := map[string]string{}
+	for _, m := range fc.requests[1].Messages {
+		if m.Role == llmkit.RoleToolResult {
+			results[m.ToolCallID] = m.Text()
+		}
+	}
+	if got := results["c1"]; !strings.HasPrefix(got, "ERROR:") || !strings.Contains(got, "kaput") {
+		t.Errorf("failing call result = %q, want the ERROR rendering of kaput", got)
+	}
+	if got := results["c2"]; got != "R_ok" {
+		t.Errorf("sibling result = %q, want its own R_ok (one call's failure cancelled or replaced it)", got)
+	}
+}
+
+// TestRun_ParallelTools_TimeoutIsolation verifies a call stuck past its
+// per-tool deadline yields the timeout result while a fast sibling under the
+// same WithParallelTools turn still returns its own result.
+func TestRun_ParallelTools_TimeoutIsolation(t *testing.T) {
+	calls := []llmkit.ToolCall{
+		{ID: "c1", Name: "hang", Arguments: json.RawMessage(`{}`)},
+		{ID: "c2", Name: "fast", Arguments: json.RawMessage(`{}`)},
+	}
+	tools := []Tool{
+		hangingTool{name: "hang"},
+		staggerTool{name: "fast", delay: 5 * time.Millisecond, result: "R_fast"},
+	}
+	fc := newFakeClient(
+		toolCallsResp(calls...),
+		textResp("done", 5, 2),
+	)
+	r := NewRunner(fc, tools, "sys", WithParallelTools(), WithToolTimeout(80*time.Millisecond))
+
+	out, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out.FinalText != "done" {
+		t.Fatalf("FinalText = %q", out.FinalText)
+	}
+	results := map[string]string{}
+	for _, m := range fc.requests[1].Messages {
+		if m.Role == llmkit.RoleToolResult {
+			results[m.ToolCallID] = m.Text()
+		}
+	}
+	if got := results["c1"]; got != "ERROR: tool hang timed out after 80ms" {
+		t.Errorf("hung call result = %q, want the timeout rendering", got)
+	}
+	if got := results["c2"]; got != "R_fast" {
+		t.Errorf("sibling result = %q, want its own R_fast", got)
+	}
+}
+
+// TestRun_ParallelTools_PanicIsolation verifies a panicking Tool.Run under
+// WithParallelTools does not abort the process: the panic is recovered in the
+// call's goroutine, rendered as that call's error result, and the sibling's
+// result plus the run's completion are unaffected.
+func TestRun_ParallelTools_PanicIsolation(t *testing.T) {
+	calls := []llmkit.ToolCall{
+		{ID: "c1", Name: "panicky", Arguments: json.RawMessage(`{}`)},
+		{ID: "c2", Name: "echo", Arguments: json.RawMessage(`{"v":"hi"}`)},
+	}
+	tools := []Tool{panicTool{name: "panicky"}, echoTool{name: "echo"}}
+	fc := newFakeClient(
+		toolCallsResp(calls...),
+		textResp("survived", 5, 2),
+	)
+	r := NewRunner(fc, tools, "sys", WithParallelTools())
+
+	out, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run must survive a panicking tool: %v", err)
+	}
+	if out.FinalText != "survived" {
+		t.Fatalf("FinalText = %q, want the run to continue past the panic", out.FinalText)
+	}
+	results := map[string]string{}
+	for _, m := range fc.requests[1].Messages {
+		if m.Role == llmkit.RoleToolResult {
+			results[m.ToolCallID] = m.Text()
+		}
+	}
+	want := "ERROR: tool panicky panicked: tool exploded"
+	if got := results["c1"]; got != want {
+		t.Errorf("panicking call result = %q, want %q", got, want)
+	}
+	if got := results["c2"]; got != "echo:{\"v\":\"hi\"}" {
+		t.Errorf("sibling result = %q, want its own echo output", got)
 	}
 }
 

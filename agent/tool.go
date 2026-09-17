@@ -20,9 +20,13 @@ import (
 // for tool-level problems (bad arguments, file not found); never use them to
 // signal that the loop should abort.
 //
-// Run must honor ctx cancellation. Implementations are invoked sequentially
-// within a single run, so they need not be safe for concurrent calls from one
-// Runner; but a Tool shared across concurrent Runners must be.
+// Run must honor ctx cancellation. Run MAY BE INVOKED CONCURRENTLY: within a
+// single run when the Runner was constructed with [WithParallelTools] (one
+// goroutine per tool call in a turn), and across simultaneous Run calls on
+// one Runner (a Runner is safe for concurrent Run calls). A Tool used under
+// either arrangement must be safe for concurrent calls — unsynchronized state
+// data-races rather than erroring, and races surface as silently wrong tool
+// results. See the [Runner] concurrency paragraph and [WithParallelTools].
 type Tool interface {
 	// Def returns the tool's declaration (name, description, JSON-schema
 	// parameters) as advertised to the model.

@@ -5,7 +5,7 @@
 // Callers with different roles (e.g. a coder, a reviewer, a researcher) all
 // instantiate the same [Runner] with different system prompts and tool
 // sets. The harness itself is provider-agnostic: it speaks only the
-// normalized [llm] vocabulary.
+// normalized [llmkit] vocabulary.
 //
 // # Tools
 //
@@ -15,11 +15,6 @@
 // with different arguments, try another tool, or give up gracefully). Only
 // infrastructure-level failures (a failed [llmkit.Client.Complete], context
 // cancellation) abort the loop.
-//
-// The built-in read-only code tools ([NewReadFile], [NewListDir], [NewGrep])
-// are rooted at a single repository directory and enforce path-traversal
-// protection: absolute paths and "../" escapes are rejected, and symlinks may
-// not resolve outside the root.
 //
 // # Limits and partial results
 //
