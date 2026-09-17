@@ -12,11 +12,14 @@ import (
 	"time"
 )
 
-// RetryConfig tunes how embed backends retry transient failures. The field
-// set mirrors llmkit.RetryConfig so the two retry policies stay consistent
-// in spirit. The zero value is not usable on its own: a Config whose Retry
-// is entirely zero selects DefaultRetryConfig, and a custom policy should
-// start from DefaultRetryConfig and modify fields.
+// RetryConfig tunes how embed backends retry transient failures. The four
+// tuning knobs are named and typed as in llmkit.RetryConfig, but the types
+// are deliberately distinct: embed bounds each attempt with the HTTP client
+// timeout (Config.Timeout), not llmkit's per-attempt RequestTimeout, and
+// embed's defaults differ (3 attempts vs root's 4) — the types are not
+// convertible and no shared implementation is implied. Callers do not
+// normalize this struct themselves: Config.retryPolicy fills unset knobs
+// (<= 0) from DefaultRetryConfig and clamps Jitter into [0,1].
 type RetryConfig struct {
 	// MaxAttempts is the total number of attempts (initial try + retries).
 	// Must be >= 1.
@@ -169,7 +172,7 @@ func backoffDelay(cfg RetryConfig, attempt int, after time.Duration, hasAfter bo
 	delay := cfg.BaseDelay
 	for range attempt - 1 {
 		delay *= 2
-		if delay <= 0 { // int64 overflow
+		if delay < 0 { // int64 overflow; zero BaseDelay means no wait
 			delay = 1 << 62
 			break
 		}

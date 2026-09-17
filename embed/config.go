@@ -56,9 +56,10 @@ type Config struct {
 	// bound evicts the least recently used entry.
 	CacheSize int
 
-	// Retry tunes transient-failure retries. The zero value selects
-	// DefaultRetryConfig; customize by starting from DefaultRetryConfig and
-	// modifying fields.
+	// Retry tunes transient-failure retries. Unset knobs (<= 0) are filled
+	// from DefaultRetryConfig and Jitter is clamped into [0,1] when a
+	// backend is constructed, so a partial policy like
+	// RetryConfig{MaxAttempts: 5} is safe to use as written.
 	Retry RetryConfig
 }
 
@@ -182,11 +183,25 @@ func (c Config) httpClient() *http.Client {
 	return &http.Client{Timeout: c.timeout()}
 }
 
-// retryPolicy returns the effective retry policy: c.Retry when it sets
-// MaxAttempts, otherwise DefaultRetryConfig.
+// retryPolicy returns the effective retry policy: c.Retry with unset knobs
+// filled from DefaultRetryConfig and Jitter clamped into [0,1], the same
+// normalization llmkit.WithRetry applies to its policy.
 func (c Config) retryPolicy() RetryConfig {
-	if c.Retry.MaxAttempts > 0 {
-		return c.Retry
+	p := c.Retry
+	def := DefaultRetryConfig()
+	if p.MaxAttempts <= 0 {
+		p.MaxAttempts = def.MaxAttempts
 	}
-	return DefaultRetryConfig()
+	if p.BaseDelay <= 0 {
+		p.BaseDelay = def.BaseDelay
+	}
+	if p.MaxDelay <= 0 {
+		p.MaxDelay = def.MaxDelay
+	}
+	if p.Jitter < 0 {
+		p.Jitter = 0
+	} else if p.Jitter > 1 {
+		p.Jitter = 1
+	}
+	return p
 }

@@ -151,8 +151,14 @@ func (o *OllamaEmbedder) doEmbed(ctx context.Context, input any) ([][]float32, e
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("ollama: decode response: %w", err)
 	}
-	if len(result.Embeddings) == 0 {
-		return nil, fmt.Errorf("ollama: empty embeddings in response")
+	// The server must return exactly one embedding per input; a wrong
+	// count would silently misattribute vectors to texts.
+	expected := 1
+	if texts, ok := input.([]string); ok {
+		expected = len(texts)
+	}
+	if len(result.Embeddings) != expected {
+		return nil, fmt.Errorf("ollama: expected %d embeddings, got %d", expected, len(result.Embeddings))
 	}
 
 	// Convert float64 -> float32, enforce dimension consistency, and

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"sync"
 )
 
@@ -116,6 +117,9 @@ func (c *CachedEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]fl
 	computed, err := c.inner.EmbedBatch(ctx, missingTexts)
 	if err != nil {
 		return nil, err
+	}
+	if len(computed) != len(missingTexts) {
+		return nil, fmt.Errorf("embed: inner embedder returned %d results for %d texts", len(computed), len(missingTexts))
 	}
 
 	c.mu.Lock()

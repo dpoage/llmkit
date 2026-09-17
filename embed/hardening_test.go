@@ -484,7 +484,20 @@ func TestCachedEmbedder_LRU_EvictionOrderAndCounters(t *testing.T) {
 }
 
 func TestCachedEmbedder_ConcurrentAccess(t *testing.T) {
-	inner := &fakeEmbedder{dims: 4, model: "m"}
+	inner := &fakeEmbedder{
+		dims:  4,
+		model: "m",
+		embedFn: func(text string) []float32 {
+			return []float32{float32(text[0]), float32(len(text)), 0, 0}
+		},
+		embedBatchFn: func(texts []string) [][]float32 {
+			out := make([][]float32, len(texts))
+			for i, s := range texts {
+				out[i] = []float32{float32(s[0]), float32(len(s)), 0, 0}
+			}
+			return out
+		},
+	}
 	c := NewCachedEmbedder(inner, 8)
 
 	const goroutines, iters = 16, 50
@@ -808,4 +821,204 @@ func anyToStrings(v any) []string {
 		out[i] = s
 	}
 	return out
+}
+
+// =============================================================================
+// Fix round: response-count validation, policy normalization, defaults
+// =============================================================================
+
+func TestOllamaEmbedder_EmbedBatch_CountMismatch(t *testing.T) {
+	tests := []struct {
+		name    string
+		inputs  []string
+		embs    [][]float64
+		wantErr string
+	}{
+		{
+			name:    "too few vectors",
+			inputs:  []string{"a", "b", "c"},
+			embs:    [][]float64{{97}, {98}},
+			wantErr: "expected 3 embeddings, got 2",
+		},
+		{
+			name:    "too many vectors",
+			inputs:  []string{"a", "b"},
+			embs:    [][]float64{{97}, {98}, {99}, {100}},
+			wantErr: "expected 2 embeddings, got 4",
+		},
+		{
+			name:    "empty response",
+			inputs:  []string{"a", "b"},
+			embs:    nil,
+			wantErr: "expected 2 embeddings, got 0",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				jsonEncode(w, ollamaResponse{Model: "m", Embeddings: tt.embs})
+			}))
+			defer srv.Close()
+
+			emb, err := NewOllamaEmbedder(Config{Embedder: "ollama", Model: "m", URL: srv.URL, Retry: RetryConfig{MaxAttempts: 1}})
+			if err != nil {
+				t.Fatalf("NewOllamaEmbedder: %v", err)
+			}
+
+			results, err := emb.EmbedBatch(context.Background(), tt.inputs)
+			if err == nil {
+				t.Fatalf("expected error %q, got success with %d results", tt.wantErr, len(results))
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %q, want it to contain %q", err, tt.wantErr)
+			}
+		})
+	}
+
+	// The single-text (string) request form must expect exactly one vector.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		jsonEncode(w, ollamaResponse{Model: "m", Embeddings: [][]float64{{97}, {98}}})
+	}))
+	defer srv.Close()
+
+	emb, err := NewOllamaEmbedder(Config{Embedder: "ollama", Model: "m", URL: srv.URL, Retry: RetryConfig{MaxAttempts: 1}})
+	if err != nil {
+		t.Fatalf("NewOllamaEmbedder: %v", err)
+	}
+	if _, err := emb.Embed(context.Background(), "a"); err == nil || !strings.Contains(err.Error(), "expected 1 embeddings, got 2") {
+		t.Errorf("Embed overlong response: err = %v, want expected-1-got-2 error", err)
+	}
+}
+
+func TestCachedEmbedder_EmbedBatch_ShortInnerResult(t *testing.T) {
+	inner := &fakeEmbedder{
+		dims:  1,
+		model: "m",
+		embedBatchFn: func(texts []string) [][]float32 {
+			return [][]float32{{float32(texts[0][0])}} // one vector for two texts
+		},
+	}
+	c := NewCachedEmbedder(inner, 0)
+
+	results, err := c.EmbedBatch(context.Background(), []string{"a", "b"})
+	if err == nil {
+		t.Fatalf("expected error for short inner result, got %v", results)
+	}
+	if !strings.Contains(err.Error(), "1 results for 2 texts") {
+		t.Errorf("error = %q, want count-mismatch detail", err)
+	}
+	if results != nil {
+		t.Errorf("results = %v, want nil", results)
+	}
+}
+
+func TestRetry_MaxAttemptsOnlyPolicy_Bounded(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		jsonEncode(w, ollamaResponse{Model: "m", Embeddings: [][]float64{{0.1}}})
+	}))
+	defer srv.Close()
+
+	// MaxAttempts-only policy: unset knobs are normalized, so the call must
+	// complete in bounded time. A policy that mapped zero BaseDelay to an
+	// overflow value would sleep for years here.
+	emb, err := NewOllamaEmbedder(Config{
+		Embedder: "ollama",
+		Model:    "m",
+		URL:      srv.URL,
+		Retry:    RetryConfig{MaxAttempts: 4},
+	})
+	if err != nil {
+		t.Fatalf("NewOllamaEmbedder: %v", err)
+	}
+
+	start := time.Now()
+	if _, err := emb.Embed(context.Background(), "x"); err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 8*time.Second {
+		t.Fatalf("Embed took %v; retry policy not bounded", elapsed)
+	}
+	if got := calls.Load(); got != 3 {
+		t.Errorf("requests = %d, want 3", got)
+	}
+}
+
+func TestRetry_PolicyNormalization(t *testing.T) {
+	p := Config{Retry: RetryConfig{MaxAttempts: 5}}.retryPolicy()
+	def := DefaultRetryConfig()
+	if p.BaseDelay != def.BaseDelay || p.MaxDelay != def.MaxDelay {
+		t.Errorf("MaxAttempts-only policy = %+v, want delays normalized from defaults", p)
+	}
+
+	// Retry-After is capped at MaxDelay even under a normalized policy
+	// whose explicit MaxDelay is zero.
+	after := backoffDelay(p, 1, time.Hour, true)
+	if after != def.MaxDelay {
+		t.Errorf("Retry-After backoff = %v, want capped at %v", after, def.MaxDelay)
+	}
+	d := backoffDelay(p, 3, 0, false)
+	if d <= 0 || d > def.MaxDelay {
+		t.Errorf("exponential backoff = %v, want in (0, %v]", d, def.MaxDelay)
+	}
+
+	if got := (Config{Retry: RetryConfig{MaxAttempts: 3, Jitter: 5}}).retryPolicy().Jitter; got != 1 {
+		t.Errorf("Jitter 5 clamped to %v, want 1", got)
+	}
+	if got := (Config{Retry: RetryConfig{MaxAttempts: 3, Jitter: -2}}).retryPolicy().Jitter; got != 0 {
+		t.Errorf("Jitter -2 clamped to %v, want 0", got)
+	}
+}
+
+func TestDefaultClientTimeout(t *testing.T) {
+	if got := (Config{}).httpClient().Timeout; got != DefaultEmbedTimeout {
+		t.Errorf("default client timeout = %v, want %v", got, DefaultEmbedTimeout)
+	}
+	if got := (Config{Timeout: -1}).httpClient().Timeout; got != DefaultEmbedTimeout {
+		t.Errorf("negative Timeout client = %v, want %v", got, DefaultEmbedTimeout)
+	}
+	if got := (Config{Timeout: 7 * time.Second}).httpClient().Timeout; got != 7*time.Second {
+		t.Errorf("Timeout 7s client = %v, want 7s", got)
+	}
+	injected := &http.Client{}
+	if got := (Config{HTTPClient: injected, Timeout: 7 * time.Second}).httpClient(); got != injected {
+		t.Error("httpClient must return the injected client as-is")
+	}
+}
+
+func TestOllamaEmbedder_TimeoutRetriedAsTransient(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		time.Sleep(200 * time.Millisecond)
+	}))
+	defer srv.Close()
+
+	emb, err := NewOllamaEmbedder(Config{
+		Embedder: "ollama",
+		Model:    "m",
+		URL:      srv.URL,
+		Timeout:  30 * time.Millisecond,
+		Retry:    RetryConfig{MaxAttempts: 2, BaseDelay: time.Millisecond},
+	})
+	if err != nil {
+		t.Fatalf("NewOllamaEmbedder: %v", err)
+	}
+
+	_, err = emb.Embed(context.Background(), "x")
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	var ne net.Error
+	if !errors.As(err, &ne) || !ne.Timeout() {
+		t.Errorf("expected timeout-classified error, got %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Errorf("requests = %d, want 2 (timeouts are transient)", got)
+	}
 }
