@@ -12,9 +12,9 @@ import (
 // calls, prompt caching, synthetic-tool structured output, tool choice,
 // images, documents, stop sequences, top_p, top_k; no seed); per-model the
 // table pins only the window and extended thinking (Claude 3.7+).
-func anthropicWant(thinking bool) llmkit.Capabilities {
+func anthropicWant(window int, thinking bool) llmkit.Capabilities {
 	return llmkit.Capabilities{
-		ContextWindow:     200_000,
+		ContextWindow:     window,
 		ParallelToolCalls: true,
 		PromptCaching:     true,
 		StructuredOutput:  true,
@@ -30,45 +30,51 @@ func anthropicWant(thinking bool) llmkit.Capabilities {
 }
 
 // TestAnthropicCapabilities_PerModel walks the model table: one
-// representative per family (claude-3 through 4.5), date-suffixed snapshots
-// to pin prefix matching against real model IDs, and the unknown-model rule
-// (ContextWindow 0, never a fabricated number). The whole struct is
+// representative per verified generation, date-suffixed snapshots to pin
+// segment-boundary matching against real model IDs, and the unknown-model
+// rule (ContextWindow 0, never a fabricated number). The whole struct is
 // compared so an entry that silently regresses any bool fails here.
 func TestAnthropicCapabilities_PerModel(t *testing.T) {
 	cases := []struct {
-		model    string
-		thinking bool
+		model string
+		want  llmkit.Capabilities
 	}{
-		// 4.x / 4.5 families: extended thinking everywhere.
-		{"claude-opus-4-5", true},
-		{"claude-sonnet-4-5-20250929", true},
-		{"claude-haiku-4-5", true},
-		{"claude-opus-4-1-20250805", true},
-		{"claude-opus-4-20250514", true},
-		{"claude-sonnet-4-20250514", true},
-		// 3.7: extended thinking's first family.
-		{"claude-3-7-sonnet-20250219", true},
-		// 3.5 / 3: no thinkingConfig on the wire.
-		{"claude-3-5-sonnet-20241022", false},
-		{"claude-3-5-haiku-20241022", false},
-		{"claude-3-opus-20240229", false},
-		{"claude-3-sonnet-20240229", false},
-		{"claude-3-haiku-20240307", false},
+		// 1M-window generations (Opus 4.6+, Sonnet 4.6).
+		{"claude-opus-4-8", anthropicWant(1_000_000, true)},
+		{"claude-opus-4-7", anthropicWant(1_000_000, true)},
+		{"claude-opus-4-6", anthropicWant(1_000_000, true)},
+		{"claude-sonnet-4-6", anthropicWant(1_000_000, true)},
+		// 200k generations (1M only behind the context-1m beta header this
+		// adapter never sends).
+		{"claude-opus-4-5", anthropicWant(200_000, true)},
+		{"claude-opus-4-5-20251101", anthropicWant(200_000, true)},
+		{"claude-opus-4-1-20250805", anthropicWant(200_000, true)},
+		{"claude-sonnet-4-5-20250929", anthropicWant(200_000, true)},
+		{"claude-haiku-4-5-20251001", anthropicWant(200_000, true)},
+		// 3.x: extended thinking starts with 3.7.
+		{"claude-3-7-sonnet-20250219", anthropicWant(200_000, true)},
+		{"claude-3-5-sonnet-20241022", anthropicWant(200_000, false)},
+		{"claude-3-5-haiku-20241022", anthropicWant(200_000, false)},
+		{"claude-3-opus-20240229", anthropicWant(200_000, false)},
+		{"claude-3-sonnet-20240229", anthropicWant(200_000, false)},
+		{"claude-3-haiku-20240307", anthropicWant(200_000, false)},
+
+		// Unknown models: window UNKNOWN (0) with the API-level feature
+		// defaults. claude-opus-4-9 is the oracle-mandated probe — an
+		// unverified future generation must NOT inherit 200k or 1M from any
+		// listed key. claude-3-5-sonnetish extends a key mid-token and is a
+		// different (nonexistent) name, not a snapshot. The retired 4.0
+		// generation is deliberately unlisted (the API rejects those IDs).
+		{"claude-opus-4-9", anthropicWant(0, true)},
+		{"claude-sonnet-4-7", anthropicWant(0, true)},
+		{"claude-3-5-sonnetish", anthropicWant(0, true)},
+		{"claude-opus-4", anthropicWant(0, true)},
+		{"unknown-model-xyz", anthropicWant(0, true)},
 	}
 	for _, tc := range cases {
 		got := anthropicCapabilities(tc.model)
-		want := anthropicWant(tc.thinking)
-		if !reflect.DeepEqual(got, want) {
-			t.Errorf("anthropicCapabilities(%q) =\n  %+v\nwant\n  %+v", tc.model, got, want)
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("anthropicCapabilities(%q) =\n  %+v\nwant\n  %+v", tc.model, got, tc.want)
 		}
-	}
-
-	// Unknown model: window UNKNOWN (0) with the API-level feature defaults;
-	// the server is the final validator for unrecognized names.
-	got := anthropicCapabilities("unknown-model-xyz")
-	want := anthropicWant(true)
-	want.ContextWindow = 0
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("anthropicCapabilities(unknown) =\n  %+v\nwant\n  %+v", got, want)
 	}
 }

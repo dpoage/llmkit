@@ -233,8 +233,13 @@ type Request struct {
 	// = false.
 	Thinking *ThinkingConfig
 	// ToolChoice steers tool use. Zero value = auto (never sent on the wire).
-	// Adapters that cannot express a mode reject the request with an error
-	// wrapping ErrInvalidRequest rather than silently ignoring it.
+	// Two rejection paths wrap ErrInvalidRequest rather than silently
+	// ignoring the request: an adapter that cannot express a mode, and —
+	// enforced by every adapter before the wire call — a model whose
+	// Capabilities.ToolChoice is false receives an error for any explicit
+	// mode (auto stays allowed). Dropping an explicit "none" would let the
+	// model call tools the caller tried to forbid, so it is refused, not
+	// ignored.
 	ToolChoice ToolChoice
 	// StopSequences makes the model stop when it generates any of these
 	// strings (a matching provider reports StopEndTurn).
@@ -273,7 +278,8 @@ const (
 	// StopMaxTokens: output was truncated at the token limit.
 	StopMaxTokens StopReason = "max_tokens"
 	// StopRefusal: the model declined the request on policy grounds
-	// (Anthropic stop_reason "refusal").
+	// (Anthropic stop_reason "refusal"; a non-empty OpenAI message.refusal,
+	// surfaced as the response text).
 	StopRefusal StopReason = "refusal"
 	// StopContentFilter: output was blocked by a provider safety filter
 	// (OpenAI finish_reason "content_filter", Gemini SAFETY/RECITATION/

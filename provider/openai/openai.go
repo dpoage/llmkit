@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strings"
 
 	"github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/internal/adapter"
@@ -237,16 +236,16 @@ func (o *openaiAdapter) buildParams(req llmkit.Request) (openai.ChatCompletionNe
 // applyToolChoice maps the normalized tool-choice request onto the Chat
 // Completions tool_choice parameter.
 func (o *openaiAdapter) applyToolChoice(params *openai.ChatCompletionNewParams, tc llmkit.ToolChoice) error {
-	// Models without function calling (o1-mini/o1-preview — see
-	// openAICapabilities) report ToolChoice=false. Per the Capabilities
-	// contract a false feature is silently dropped — but only the supported
-	// steering modes; an invalid mode still falls through and errors so
-	// caller mistakes surface.
-	if !o.caps.ToolChoice {
-		switch tc.Mode {
-		case llmkit.ToolChoiceNone, llmkit.ToolChoiceRequired, llmkit.ToolChoiceTool:
-			return nil
-		}
+	// Capability gate: models without function calling (o1-mini/o1-preview
+	// — see openAICapabilities) report ToolChoice=false, and every explicit
+	// steering mode is then REJECTED before the wire call. Silently dropping
+	// "none" would escalate permissions (the model stays free to call the
+	// offered tools) and dropping "required"/"tool" would silently degrade;
+	// auto and the zero value are the provider default and pass. An
+	// unrecognized mode falls through so the mapper below produces its
+	// precise unknown-mode error.
+	if err := adapter.GateToolChoice(o.provider, tc, o.caps.ToolChoice); err != nil {
+		return err
 	}
 	switch tc.Mode {
 	case "", llmkit.ToolChoiceAuto:
@@ -482,9 +481,11 @@ func (o *openaiAdapter) normalizeErr(err error) error {
 // Sources (vendor docs consulted for this table):
 //   - https://platform.openai.com/docs/models — per-model context windows:
 //     gpt-5 / gpt-5-mini / gpt-5-nano 400,000; gpt-4.1 / -mini / -nano
-//     1,047,576; gpt-4o / gpt-4o-mini 128,000; o1 / o3 / o3-mini / o4-mini
-//     200,000 with o1-mini and o1-preview at 128,000; gpt-4-turbo 128,000;
-//     gpt-4 8,192; gpt-4-32k 32,768; gpt-3.5-turbo 16,385.
+//     1,047,576; gpt-4.5-preview 128,000; gpt-4o / gpt-4o-mini 128,000;
+//     o1 / o3 / o3-mini / o4-mini 200,000 with o1-mini and o1-preview at
+//     128,000; gpt-4-turbo (incl. the gpt-4-0125-preview and gpt-4-1106-*
+//     snapshots) 128,000; gpt-4 8,192; gpt-4-32k 32,768; gpt-3.5-turbo
+//     16,385.
 //   - https://platform.openai.com/docs/guides/prompt-caching — automatic
 //     prompt caching exists only for models introduced from Aug 2024 on
 //     (gpt-4o and later, o1 and later); the gpt-4 / gpt-4-turbo /
@@ -496,11 +497,13 @@ func (o *openaiAdapter) normalizeErr(err error) error {
 //     (https://platform.openai.com/docs/models/o1-mini), so their
 //     ToolChoice and ParallelToolCalls are false too.
 //
-// The table is matched by LONGEST prefix, so "gpt-4-turbo" and "gpt-4.1"
-// win over the shorter "gpt-4" family prefix and "o1-mini" wins over "o1".
-// Only the fields that genuinely vary by model are stored per entry
-// (window + the parallel/caching/structured/tool-choice bools); everything
-// else is shared Chat Completions API behavior (see firstPartyCaps).
+// The table is matched by LONGEST key with a "-" segment boundary
+// (adapter.MatchesModelFamily), so "gpt-4-turbo" and "gpt-4.1" win over the
+// shorter "gpt-4" key, "o1-mini" wins over "o1", and the dotted sibling
+// "gpt-4.5" needs — and has — its own key. Only the fields that genuinely
+// vary by model are stored per entry (window + the
+// parallel/caching/structured/tool-choice bools); everything else is shared
+// Chat Completions API behavior (see firstPartyCaps).
 //
 // An unknown first-party model reports ContextWindow 0 — unknown is never
 // fabricated into a number (the old 128k fallback overstated gpt-4's 8k
@@ -535,8 +538,16 @@ func firstPartyCaps(window int, parallel, caching, structured, toolChoice bool) 
 var openAIModelTable = []openAIModelCaps{
 	{"gpt-5", firstPartyCaps(400_000, true, true, true, true)},
 	{"gpt-4.1", firstPartyCaps(1_047_576, true, true, true, true)},
+	// gpt-4.5: a dotted sibling of gpt-4 — under segment matching it can
+	// never inherit the gpt-4 entry, so it carries its own key.
+	{"gpt-4.5", firstPartyCaps(128_000, true, true, true, true)},
 	{"gpt-4o", firstPartyCaps(128_000, true, true, true, true)},
 	{"gpt-4-turbo", firstPartyCaps(128_000, true, false, false, true)},
+	// The GPT-4 Turbo Preview snapshots (128k, parallel function calling
+	// since the 1106 generation) — without these keys the 8,192 gpt-4
+	// entry would swallow them via the "-" continuation.
+	{"gpt-4-0125", firstPartyCaps(128_000, true, false, false, true)},
+	{"gpt-4-1106", firstPartyCaps(128_000, true, false, false, true)},
 	{"gpt-4-32k", firstPartyCaps(32_768, false, false, false, true)},
 	{"gpt-4", firstPartyCaps(8_192, false, false, false, true)},
 	{"gpt-3.5-turbo", firstPartyCaps(16_385, true, false, false, true)},
@@ -548,19 +559,13 @@ var openAIModelTable = []openAIModelCaps{
 }
 
 func openAICapabilities(model string) llmkit.Capabilities {
-	best := -1
-	for i, e := range openAIModelTable {
-		if strings.HasPrefix(model, e.prefix) && (best < 0 || len(e.prefix) > len(openAIModelTable[best].prefix)) {
-			best = i
-		}
-	}
+	best := adapter.BestMatchingFamily(model, openAIModelTable, func(e openAIModelCaps) string { return e.prefix })
 	if best >= 0 {
 		return openAIModelTable[best].caps
 	}
 	return firstPartyCaps(0, true, true, true, true)
 }
 
-// openAICompatibleCapabilities returns a conservative profile for arbitrary
 // OpenAI-compatible endpoints (Ollama/vLLM/Groq/etc.). We can't know the
 // backend's true capabilities, so we assume no parallel tool calls (the
 // degraded path serializes them) and no caching. The adapter still parses

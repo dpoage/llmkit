@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -193,11 +192,18 @@ func (a *anthropicAdapter) buildParams(req llmkit.Request) (anthropic.MessageNew
 		params.Tools = tools
 	}
 
-	// Request-level tool choice is validated UNCONDITIONALLY — an unknown
-	// mode or a missing Name must error even when a schema below forces the
-	// synthetic tool. The synthetic forcing then overwrites whatever was
-	// mapped: a structured-output request is meaningless without the forced
-	// tool call, so it keeps precedence over req.ToolChoice.
+	// Capability gate first: a profile with ToolChoice=false must reject
+	// every explicit mode before the wire call (dropping "none" would
+	// escalate permissions; dropping "required"/"tool" would silently
+	// degrade). Request-level tool choice is then validated UNCONDITIONALLY
+	// — an unknown mode or a missing Name must error even when a schema
+	// below forces the synthetic tool. The synthetic forcing then overwrites
+	// whatever was mapped: a structured-output request is meaningless
+	// without the forced tool call, so it keeps precedence over
+	// req.ToolChoice.
+	if err := adapter.GateToolChoice("anthropic", req.ToolChoice, a.caps.ToolChoice); err != nil {
+		return anthropic.MessageNewParams{}, err
+	}
 	if err := applyAnthropicToolChoice(&params, req.ToolChoice); err != nil {
 		return anthropic.MessageNewParams{}, err
 	}
@@ -601,9 +607,11 @@ func mapAnthropicStop(sr anthropic.StopReason) llmkit.StopReason {
 	default:
 		// Catch-all per llmkit.StopError's contract. This includes
 		// pause_turn: a server-paused turn is NOT a natural completion, and
-		// reporting StopEndTurn made an agent loop treat it as one. Callers
-		// that hit StopError should inspect the raw reason (re-invoke to
-		// continue a paused turn) rather than assume the conversation ended.
+		// reporting StopEndTurn made an agent loop treat it as one. The raw
+		// provider reason is not exposed on llmkit.Response, so a caller
+		// seeing StopError should treat the step as failed — surface it and
+		// re-issue the request if continuing matters — never assume the
+		// conversation reached a natural end.
 		return llmkit.StopError
 	}
 }
@@ -619,27 +627,32 @@ func (a *anthropicAdapter) normalizeErr(err error) error {
 }
 
 // Sources (vendor docs consulted for this table):
-//   - https://platform.claude.com/docs/en/about-claude/models/overview —
-//     context windows: 200k for every model in the Claude 3 / 3.5 / 3.7 /
-//     4 / 4.1 / 4.5 families (Sonnet 4/4.5 accept 1M only behind the
-//     context-1m beta header, which this adapter does not send, so 200k is
-//     the honest number for requests this adapter can make);
+//   - https://platform.claude.com/docs/en/about-claude/models/overview and
+//     the per-model overview pages — context windows: 1M for the Opus 4.6 /
+//     4.7 / 4.8 and Sonnet 4.6 generations; 200k for Opus 4.1 / 4.5, Sonnet
+//     4.5, Haiku 4.5, and the whole 3.x line (Opus 4.5 / Sonnet 4.x can
+//     reach 1M only behind the context-1m beta header, which this adapter
+//     does not send, so 200k is the honest number for requests this adapter
+//     can make);
 //   - https://platform.claude.com/docs/en/build-with-claude/prompt-caching —
 //     prompt caching is supported on all active Claude models;
 //   - https://platform.claude.com/docs/en/build-with-claude/extended-thinking —
 //     extended thinking requires Claude 3.7 Sonnet or newer.
 //
-// The table is matched by LONGEST prefix, so "claude-opus-4-1" wins over
-// the shorter "claude-opus-4" family prefix. Only the fields that genuinely
-// vary by model are stored per entry; everything else is shared (parallel
-// tool calls, prompt caching, synthetic-tool structured output, tool
-// choice, images, documents, stop sequences, top_p, and top_k are
-// supported across the 3+ families; there is no seed parameter).
+// Keys name exactly the generations the cited docs verify, and matching
+// (adapter.MatchesModelFamily) requires a "-" segment boundary, so an
+// unverified future ID such as "claude-opus-4-9" reports ContextWindow 0
+// instead of inheriting a stale window. The retired 4.0 generation
+// (claude-opus-4 / claude-sonnet-4, deprecated 2026-06) is deliberately
+// unlisted: the API rejects those IDs outright, and unknown reports 0 rather
+// than resurrecting a stale window. Pin exact values for unknown models via
+// Options.Capabilities.
 //
-// An unknown model reports ContextWindow 0 — unknown is never fabricated
-// into a number — and keeps the adapter's API-level feature defaults (the
-// server is the final validator for an unrecognized model name). Pin exact
-// values for unknown models via Options.Capabilities.
+// Only the fields that genuinely vary by model are stored per entry;
+// everything else is shared (parallel tool calls, prompt caching,
+// synthetic-tool structured output, tool choice, images, documents, stop
+// sequences, top_p, and top_k are supported across the 3+ families; there
+// is no seed parameter).
 type anthropicModelCaps struct {
 	prefix   string
 	window   int
@@ -647,12 +660,14 @@ type anthropicModelCaps struct {
 }
 
 var anthropicModelTable = []anthropicModelCaps{
+	{"claude-opus-4-8", 1_000_000, true},
+	{"claude-opus-4-7", 1_000_000, true},
+	{"claude-opus-4-6", 1_000_000, true},
+	{"claude-sonnet-4-6", 1_000_000, true},
 	{"claude-opus-4-5", 200_000, true},
+	{"claude-opus-4-1", 200_000, true},
 	{"claude-sonnet-4-5", 200_000, true},
 	{"claude-haiku-4-5", 200_000, true},
-	{"claude-opus-4-1", 200_000, true},
-	{"claude-opus-4", 200_000, true},
-	{"claude-sonnet-4", 200_000, true},
 	{"claude-3-7-sonnet", 200_000, true},
 	{"claude-3-5-sonnet", 200_000, false},
 	{"claude-3-5-haiku", 200_000, false},
@@ -676,12 +691,7 @@ func anthropicCapabilities(model string) llmkit.Capabilities {
 		TopK:              true,
 		Seed:              false,
 	}
-	best := -1
-	for i, e := range anthropicModelTable {
-		if strings.HasPrefix(model, e.prefix) && (best < 0 || len(e.prefix) > len(anthropicModelTable[best].prefix)) {
-			best = i
-		}
-	}
+	best := adapter.BestMatchingFamily(model, anthropicModelTable, func(e anthropicModelCaps) string { return e.prefix })
 	if best >= 0 {
 		e := anthropicModelTable[best]
 		caps.ContextWindow = e.window

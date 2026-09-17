@@ -8,7 +8,6 @@ import (
 	"errors"
 	"math"
 	"net/http"
-	"strings"
 
 	"github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/internal/adapter"
@@ -136,8 +135,16 @@ func (g *googleAdapter) Complete(ctx context.Context, req llmkit.Request) (llmki
 		}
 	}
 
-	// Request.ToolChoice maps onto function_calling_config. Auto (and the
-	// zero value) is the provider default and is never serialized.
+	// Capability gate first: a profile with ToolChoice=false (e.g.
+	// gemini-2.0-flash-lite, which launched without function calling) must
+	// reject every explicit mode before the wire call — dropping "none"
+	// would escalate permissions, dropping "required"/"tool" would silently
+	// degrade. Request.ToolChoice then maps onto function_calling_config;
+	// auto (and the zero value) is the provider default and is never
+	// serialized.
+	if err := adapter.GateToolChoice("google", req.ToolChoice, g.caps.ToolChoice); err != nil {
+		return llmkit.Response{}, err
+	}
 	if err := applyGoogleToolChoice(cfg, req.ToolChoice); err != nil {
 		return llmkit.Response{}, err
 	}
@@ -503,41 +510,64 @@ func (g *googleAdapter) normalizeErr(err error) error {
 
 // Sources (vendor docs consulted for this table):
 //   - https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash-lite and
-//     the sibling 2.5 model pages — input token limit 1,048,576 for 2.5
+//     the sibling 2.5 text-model pages — input token limit 1,048,576 for 2.5
 //     pro / flash / flash-lite; function calling, structured outputs,
 //     caching, and thinking all supported (verified on the flash-lite page).
+//   - https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash-image —
+//     the image-generation variant: input token limit 65,536; function
+//     calling, structured outputs, and thinking NOT supported. Explicitly
+//     listed so the text "gemini-2.5-flash" key cannot swallow it.
+//   - https://ai.google.dev/gemini-api/docs/speech-generation — TTS models
+//     take text in and produce audio only, with a 32k-token context limit;
+//     no function calling / structured output / thinking. Listed so the
+//     text entry cannot swallow gemini-2.5-flash-preview-tts.
+//   - The native-audio dialog models (e.g.
+//     gemini-2.5-flash-native-audio-preview-12-2025) are Live API models
+//     with a 128k context; they are not reachable through GenerateContent,
+//     so the entry pins the verified window with conservative feature
+//     bools — again so the text entry cannot swallow them.
 //   - Gemini 1.5 / 2.0 model pages (now retired from the docs): 1.5-pro
 //     2,097,152 (the 002 refresh; 1M before), 1.5-flash and both 2.0 flash
 //     tiers 1,048,576. The 2.0/1.5 generations have no thinkingConfig —
-//     Thinking is false there.
-//   - gemini-2.0-flash-lite launched without function calling, so its
-//     ParallelToolCalls and ToolChoice are false.
+//     Thinking is false there. gemini-2.0-flash-lite launched without
+//     function calling, so its ParallelToolCalls and ToolChoice are false.
 //
-// The table is matched by LONGEST prefix, so "gemini-2.5-flash-lite" wins
-// over the "gemini-2.5-flash" prefix. Structured output, prompt caching
-// (implicit server-side on 2.x; explicit context caching on 1.5),
-// image/document parts, stop sequences, top_p, top_k, and seed hold for
-// every entry and stay in the shared defaults.
+// The table is matched by LONGEST key with a "-" segment boundary
+// (adapter.MatchesModelFamily), so "gemini-2.5-flash-lite" and the
+// non-text variant keys win over "gemini-2.5-flash", while a mid-token
+// extension like "gemini-2.5-flashy" matches nothing. Structured output,
+// prompt caching (implicit server-side on 2.x; explicit context caching on
+// 1.5), image/document parts, stop sequences, top_p, top_k, and seed hold
+// for every TEXT entry and stay in the shared defaults; the non-text
+// variants pin StructuredOutput=false explicitly.
 //
 // An unknown model reports ContextWindow 0 — unknown is never fabricated
 // into a number — with the API-level feature defaults; the server is the
 // final validator for unrecognized names. Pin exact values for unknown
 // models via Options.Capabilities.
 type googleModelCaps struct {
-	prefix   string
-	window   int
-	thinking bool
-	tools    bool // function calling supported at all
+	prefix     string
+	window     int
+	thinking   bool
+	tools      bool // function calling supported at all
+	structured bool // responseMIMEType/JSON-schema structured output
 }
 
 var googleModelTable = []googleModelCaps{
-	{"gemini-2.5-pro", 1_048_576, true, true},
-	{"gemini-2.5-flash", 1_048_576, true, true},
-	{"gemini-2.5-flash-lite", 1_048_576, true, true},
-	{"gemini-2.0-flash", 1_048_576, false, true},
-	{"gemini-2.0-flash-lite", 1_048_576, false, false},
-	{"gemini-1.5-pro", 2_097_152, false, true},
-	{"gemini-1.5-flash", 1_048_576, false, true},
+	// Text generation models.
+	{"gemini-2.5-pro", 1_048_576, true, true, true},
+	{"gemini-2.5-flash", 1_048_576, true, true, true},
+	{"gemini-2.5-flash-lite", 1_048_576, true, true, true},
+	{"gemini-2.0-flash", 1_048_576, false, true, true},
+	{"gemini-2.0-flash-lite", 1_048_576, false, false, true},
+	{"gemini-1.5-pro", 2_097_152, false, true, true},
+	{"gemini-1.5-flash", 1_048_576, false, true, true},
+	// Non-text variants of the 2.5 flash generation — pinned so the text
+	// entry above cannot swallow them (its Thinking=true is load-bearing:
+	// it gates thinkingConfig on the wire).
+	{"gemini-2.5-flash-image", 65_536, false, false, false},
+	{"gemini-2.5-flash-preview-tts", 32_768, false, false, false},
+	{"gemini-2.5-flash-native-audio", 128_000, false, false, false},
 }
 
 func googleCapabilities(model string) llmkit.Capabilities {
@@ -555,18 +585,14 @@ func googleCapabilities(model string) llmkit.Capabilities {
 		TopK:              true,
 		Seed:              true,
 	}
-	best := -1
-	for i, e := range googleModelTable {
-		if strings.HasPrefix(model, e.prefix) && (best < 0 || len(e.prefix) > len(googleModelTable[best].prefix)) {
-			best = i
-		}
-	}
+	best := adapter.BestMatchingFamily(model, googleModelTable, func(e googleModelCaps) string { return e.prefix })
 	if best >= 0 {
 		e := googleModelTable[best]
 		caps.ContextWindow = e.window
 		caps.Thinking = e.thinking
 		caps.ParallelToolCalls = e.tools
 		caps.ToolChoice = e.tools
+		caps.StructuredOutput = e.structured
 	}
 	return caps
 }

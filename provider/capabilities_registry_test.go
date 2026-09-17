@@ -63,39 +63,51 @@ func TestCapabilities_SpecOverride_ReplacesTableWholesale(t *testing.T) {
 // replaces it wholesale, and Spec.StructuredOutput is applied LAST so the
 // field-level override wins even over an override that carries the field.
 func TestCapabilities_SpecOverride_ComposesWithStructuredOutput(t *testing.T) {
-	t.Run("structured output option wins over override", func(t *testing.T) {
-		client, err := New(context.Background(), Spec{
-			Type:             TypeOpenAICompatible,
-			Capabilities:     overrideEveryField(), // StructuredOutput: false
-			StructuredOutput: ptr(true),
-		}, "test", "llama3", "k", Options{})
-		if err != nil {
-			t.Fatalf("New: %v", err)
-		}
-		got := client.Capabilities()
-		if !got.StructuredOutput {
-			t.Error("Capabilities().StructuredOutput = false, want true (Spec.StructuredOutput applied last)")
-		}
-		// ...and the rest of the override still holds.
-		if got.ContextWindow != 123_456 {
-			t.Errorf("ContextWindow = %d, want 123456 (override must still apply)", got.ContextWindow)
-		}
-	})
-	t.Run("structured output option can force it off", func(t *testing.T) {
-		ov := overrideEveryField()
-		ov.StructuredOutput = true
-		client, err := New(context.Background(), Spec{
-			Type:             TypeOpenAI,
-			Capabilities:     ov,
-			StructuredOutput: ptr(false),
-		}, "test", "gpt-5", "k", Options{})
-		if err != nil {
-			t.Fatalf("New: %v", err)
-		}
-		if client.Capabilities().StructuredOutput {
-			t.Error("Capabilities().StructuredOutput = true, want false (explicit off wins)")
-		}
-	})
+	// The same four-provider table as the wholesale test: the composition
+	// order (table -> Capabilities wholesale -> StructuredOutput last) is
+	// contract surface on EVERY adapter, so skipping one in New must fail
+	// here.
+	providers := []struct {
+		name  string
+		spec  Spec
+		model string
+	}{
+		{"anthropic", Spec{Type: TypeAnthropic}, "claude-opus-4-5"},
+		{"openai", Spec{Type: TypeOpenAI}, "gpt-5"},
+		{"openai-compatible", Spec{Type: TypeOpenAICompatible}, "llama3"},
+		{"google", Spec{Type: TypeGoogle}, "gemini-2.5-pro"},
+	}
+	for _, tc := range providers {
+		t.Run(tc.name+"/option wins over override", func(t *testing.T) {
+			tc.spec.Capabilities = overrideEveryField() // StructuredOutput: false
+			tc.spec.StructuredOutput = ptr(true)
+			client, err := New(context.Background(), tc.spec, "test", tc.model, "k", Options{})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			got := client.Capabilities()
+			if !got.StructuredOutput {
+				t.Error("Capabilities().StructuredOutput = false, want true (Spec.StructuredOutput applied last)")
+			}
+			// ...and the rest of the override still holds.
+			if got.ContextWindow != 123_456 {
+				t.Errorf("ContextWindow = %d, want 123456 (override must still apply)", got.ContextWindow)
+			}
+		})
+		t.Run(tc.name+"/option can force it off", func(t *testing.T) {
+			ov := overrideEveryField()
+			ov.StructuredOutput = true
+			tc.spec.Capabilities = ov
+			tc.spec.StructuredOutput = ptr(false)
+			client, err := New(context.Background(), tc.spec, "test", tc.model, "k", Options{})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			if client.Capabilities().StructuredOutput {
+				t.Error("Capabilities().StructuredOutput = true, want false (explicit off wins)")
+			}
+		})
+	}
 }
 
 // TestCapabilities_NilSpec_KeepsTableProfile is the regression guard: with
