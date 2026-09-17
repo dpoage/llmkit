@@ -4,12 +4,13 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"github.com/dpoage/llmkit"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
-
-	"github.com/dpoage/llmkit"
 )
 
 // EventKind tags each [Event] in a [Transcript].
@@ -75,18 +76,25 @@ type Event struct {
 // can `tail -f` a stuck run's transcript instead of waiting for it to finish.
 // The file is opened lazily on the first recorded event (never for a run that
 // records nothing) and closed via closeStream at run end. Streaming is
-// best-effort: open/encode failures disable it silently (streamPath is
-// cleared) so a broken disk never affects the run's result. The Runner that
-// owns a Transcript is single-goroutine per run, so streamFile/streamEnc need
-// no locking.
+// best-effort: open/encode failures disable it for the rest of the
+// transcript — a broken disk never affects the run's result — and every
+// failure is reported through the callback passed to enableStreaming (the
+// Runner wires [Hooks.TranscriptError] there), so a silently-dropped line is
+// never the only trace. The Runner that owns a Transcript is single-goroutine
+// per run, so streamFile/streamEnc need no locking.
 type Transcript struct {
-	// Events are the run's events in chronological order.
 	Events []Event `json:"-"`
 	clock  func() time.Time
 
 	streamPath string
 	streamFile *os.File
 	streamEnc  *json.Encoder
+	// streamOpened records that a stream file was created for this transcript
+	// at least once; the first open is exclusive (collision-avoiding), a
+	// reopen after closeStream must append to the existing file.
+	streamOpened bool
+	// onStreamErr, when non-nil, receives every streaming failure.
+	onStreamErr func(error)
 }
 
 // NewTranscript returns an empty transcript using the real wall clock.
@@ -97,9 +105,12 @@ func NewTranscript() *Transcript {
 // enableStreaming arms incremental JSONL writes to path: the file is created
 // (directories included) on the first subsequent record* call, not here, so a
 // run that records nothing never touches disk. A no-op path (empty string)
-// leaves streaming disabled.
-func (t *Transcript) enableStreaming(path string) {
+// leaves streaming disabled. onErr, when non-nil, is called once per streaming
+// failure (directory creation, file open, line encode) with a wrapped,
+// path-qualified error; the Runner passes [Hooks.TranscriptError].
+func (t *Transcript) enableStreaming(path string, onErr func(error)) {
 	t.streamPath = path
+	t.onStreamErr = onErr
 }
 
 // streamAppend writes ev as one JSON line to the streaming file, opening it
@@ -108,28 +119,71 @@ func (t *Transcript) enableStreaming(path string) {
 // reuses the run's Transcript after the main loop already closed the stream)
 // continues the same JSONL file instead of truncating it. Best-effort: any
 // failure disables further attempts for this transcript by clearing
-// streamPath, matching the never-fail-the-run autosave contract.
+// streamPath (open failures) or drops the single line (encode failures),
+// matching the never-fail-the-run autosave contract; every failure is
+// reported through onErr before it is swallowed.
 func (t *Transcript) streamAppend(ev *Event) {
 	if t.streamPath == "" {
 		return
 	}
 	if t.streamFile == nil {
-		if err := os.MkdirAll(filepath.Dir(t.streamPath), 0o755); err != nil {
-			t.streamPath = ""
-			return
-		}
-		f, err := os.OpenFile(t.streamPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		f, path, err := t.openStreamFile()
 		if err != nil {
+			t.streamFail(err)
 			t.streamPath = ""
 			return
 		}
 		t.streamFile = f
+		t.streamPath = path
 		t.streamEnc = json.NewEncoder(f)
+		t.streamOpened = true
 	}
 	if err := t.streamEnc.Encode(ev); err != nil {
 		// Leave the file open (a later event might still succeed); just drop
 		// this line, matching autosave's discard-on-error contract.
+		t.streamFail(fmt.Errorf("encode: %w", err))
 		return
+	}
+}
+
+// openStreamFile creates the stream file for the first append and returns the
+// (possibly disambiguated) path. The FIRST open is exclusive (O_EXCL): two
+// concurrent runs that derive the same path — same millisecond timestamp,
+// same task slug — must never interleave two JSONL streams into one file, so
+// the loser appends a numeric suffix before the extension ("-1", "-2", …)
+// and gets its own file. A reopen after closeStream (the RunJSON repair pass
+// appending to the same transcript) is NOT exclusive: the file already
+// exists and must be appended to.
+func (t *Transcript) openStreamFile() (*os.File, string, error) {
+	if err := os.MkdirAll(filepath.Dir(t.streamPath), 0o755); err != nil {
+		return nil, "", fmt.Errorf("mkdir: %w", err)
+	}
+	path := t.streamPath
+	if t.streamOpened {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			return nil, "", fmt.Errorf("open %s: %w", path, err)
+		}
+		return f, path, nil
+	}
+	for i := 0; ; i++ {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err == nil {
+			return f, path, nil
+		}
+		if !os.IsExist(err) || i >= 99 {
+			return nil, "", fmt.Errorf("open %s: %w", path, err)
+		}
+		// Collision with a concurrent run or a leftover file: disambiguate.
+		path = strings.TrimSuffix(t.streamPath, ".jsonl") + "-" + strconv.Itoa(i+1) + ".jsonl"
+	}
+}
+
+// streamFail reports a streaming failure through onErr, path-qualified so an
+// operator can tell WHICH autosave file stopped being written.
+func (t *Transcript) streamFail(err error) {
+	if t.onStreamErr != nil {
+		t.onStreamErr(fmt.Errorf("agent: transcript stream %s: %w", t.streamPath, err))
 	}
 }
 

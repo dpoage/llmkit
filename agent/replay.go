@@ -38,7 +38,7 @@ type replayStep struct {
 
 // NewReplayClient builds a ReplayClient from a recorded [Transcript]. It pairs
 // each EventAssistant with the tool-result IDs that preceded its request, so
-// replay can verify the harness reproduces the same tool round-trips.
+// replay can drive the same tool round-trips deterministically.
 //
 // caps is returned from Capabilities; pass a profile matching the model the
 // transcript was recorded against (or the zero value if it doesn't matter for

@@ -18,7 +18,7 @@ func bigToolResult(id, content string) llmkit.Message {
 // assistant turns (with tool calls) and tool results. n is the number of
 // tool-result messages; each is a long blob so it is a pruning candidate.
 func sampleHistory(n int) ([]llmkit.Message, map[string]string) {
-	msgs := []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "investigate these files for bugs")}
+	msgs := []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "summarize these files")}
 	names := map[string]string{}
 	for i := range n {
 		id := "call-" + string(rune('a'+i))
@@ -39,8 +39,8 @@ func TestCompactHistory_PrunesOldKeepsRecentK(t *testing.T) {
 	recentK := 4
 
 	out, pruned := compactHistory(msgs, recentK, names)
-	if !pruned {
-		t.Fatal("expected pruning to occur")
+	if pruned != 2 {
+		t.Fatalf("pruned = %d, want 2 (the (6-4) oldest results)", pruned)
 	}
 
 	// Walk tool-result messages; the first (6-4)=2 must be stubs, the last 4 verbatim.
@@ -65,8 +65,8 @@ func TestCompactHistory_PreservesPairingAndStructure(t *testing.T) {
 	orig := append([]llmkit.Message(nil), msgs...)
 
 	out, pruned := compactHistory(msgs, 1, names)
-	if !pruned {
-		t.Fatal("expected pruning")
+	if pruned != 4 {
+		t.Fatalf("pruned = %d, want 4 (5 results minus the recent-1 window)", pruned)
 	}
 	if len(out) != len(orig) {
 		t.Fatalf("message count changed: got %d want %d", len(out), len(orig))
@@ -113,8 +113,8 @@ func TestCompactHistory_StubFormat(t *testing.T) {
 	names := map[string]string{"c1": "read_file", "c2": "grep", "c3": "list_dir"}
 
 	out, pruned := compactHistory(msgs, 1, names) // keep only the last result (c3)
-	if !pruned {
-		t.Fatal("expected pruning")
+	if pruned != 2 {
+		t.Fatalf("pruned = %d, want 2 (c1 and the errored c2; c3 is recent)", pruned)
 	}
 	if got := out[2].Text(); got != "[tool result pruned to save context: read_file, 8412 bytes]" {
 		t.Errorf("c1 stub = %q", got)
@@ -132,8 +132,8 @@ func TestCompactHistory_NothingToPruneWhenAllRecent(t *testing.T) {
 	msgs, names := sampleHistory(3)
 	// recentK >= number of results: nothing falls outside the window.
 	out, pruned := compactHistory(msgs, 3, names)
-	if pruned {
-		t.Error("expected no pruning when all results are within recent-K")
+	if pruned != 0 {
+		t.Errorf("pruned = %d, want 0 when all results are within recent-K", pruned)
 	}
 	// Same backing slice returned unchanged (append-only prefix preserved).
 	if &out[0] != &msgs[0] {
@@ -157,8 +157,8 @@ func TestCompactHistory_SkipsAlreadyStubbed(t *testing.T) {
 	names := map[string]string{"c1": "read_file", "c2": "read_file", "c3": "read_file"}
 
 	out, pruned := compactHistory(msgs, 1, names)
-	if !pruned {
-		t.Fatal("expected the large c2 result to be pruned")
+	if pruned != 1 {
+		t.Fatalf("pruned = %d, want 1 (the large c2 result; tiny c1 is skipped, c3 is recent)", pruned)
 	}
 	// c1 ("tiny") is shorter than any stub, so it stays as-is.
 	if out[2].Text() != "tiny" {

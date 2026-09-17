@@ -395,231 +395,9 @@ func TestRun_AccumulatesCacheUsage(t *testing.T) {
 	}
 }
 
-// TestExtractToolActivity_Mapping verifies the structured extractor populates
-// the correct ToolActivity fields for each tool type.
-func TestExtractToolActivity_Mapping(t *testing.T) {
-	tests := []struct {
-		name string
-		call llmkit.ToolCall
-		want ToolActivity
-	}{
-		{
-			name: "read_file with path and range",
-			call: llmkit.ToolCall{Name: "read_file", Arguments: []byte(`{"path":"cmd/main.go","start_line":10,"end_line":40}`)},
-			want: ToolActivity{Tool: "read_file", File: "cmd/main.go", Line: 10, EndLine: 40},
-		},
-		{
-			name: "read_file no path",
-			call: llmkit.ToolCall{Name: "read_file", Arguments: []byte(`{}`)},
-			want: ToolActivity{Tool: "read_file"},
-		},
-		{
-			name: "read_symbol",
-			call: llmkit.ToolCall{Name: "read_symbol", Arguments: []byte(`{"symbol":"Runner","path":"agent.go"}`)},
-			want: ToolActivity{Tool: "read_symbol", Symbol: "Runner", File: "agent.go"},
-		},
-		{
-			name: "grep with pattern and dir",
-			call: llmkit.ToolCall{Name: "grep", Arguments: []byte(`{"pattern":"TODO","dir":"internal/"}`)},
-			want: ToolActivity{Tool: "grep", Pattern: "TODO", File: "internal/"},
-		},
-		{
-			name: "find_definition",
-			call: llmkit.ToolCall{Name: "find_definition", Arguments: []byte(`{"symbol":"Runner","file":"runner.go"}`)},
-			want: ToolActivity{Tool: "find_definition", Symbol: "Runner", File: "runner.go"},
-		},
-		{
-			name: "find_references",
-			call: llmkit.ToolCall{Name: "find_references", Arguments: []byte(`{"symbol":"Emit"}`)},
-			want: ToolActivity{Tool: "find_references", Symbol: "Emit"},
-		},
-		{
-			name: "find_implementations",
-			call: llmkit.ToolCall{Name: "find_implementations", Arguments: []byte(`{"symbol":"Tool"}`)},
-			want: ToolActivity{Tool: "find_implementations", Symbol: "Tool"},
-		},
-		{
-			name: "find_usages",
-			call: llmkit.ToolCall{Name: "find_usages", Arguments: []byte(`{"symbol":"Sink"}`)},
-			want: ToolActivity{Tool: "find_usages", Symbol: "Sink"},
-		},
-		{
-			name: "list_dir",
-			call: llmkit.ToolCall{Name: "list_dir", Arguments: []byte(`{"dir":"internal/agent"}`)},
-			want: ToolActivity{Tool: "list_dir", File: "internal/agent"},
-		},
-		{
-			name: "list_dir via directory field",
-			call: llmkit.ToolCall{Name: "list_dir", Arguments: []byte(`{"directory":"src"}`)},
-			want: ToolActivity{Tool: "list_dir", File: "src"},
-		},
-		{
-			name: "list_dir empty defaults to dot",
-			call: llmkit.ToolCall{Name: "list_dir", Arguments: []byte(`{}`)},
-			want: ToolActivity{Tool: "list_dir", File: "."},
-		},
-		{
-			name: "sandbox_exec",
-			call: llmkit.ToolCall{Name: "sandbox_exec", Arguments: []byte(`{}`)},
-			want: ToolActivity{Tool: "sandbox_exec", Symbol: "sandbox"},
-		},
-		{
-			name: "post_lead",
-			call: llmkit.ToolCall{Name: "post_lead", Arguments: []byte(`{}`)},
-			want: ToolActivity{Tool: "post_lead"},
-		},
-		{
-			name: "status_note",
-			call: llmkit.ToolCall{Name: "status_note", Arguments: []byte(`{"note":"checking parser"}`)},
-			want: ToolActivity{Tool: "status_note", Symbol: "checking parser"},
-		},
-		{
-			name: "write_repro_file",
-			call: llmkit.ToolCall{Name: "write_repro_file", Arguments: []byte(`{"path":"repro_test.go","contents":"package main"}`)},
-			want: ToolActivity{Tool: "write_repro_file", File: "repro_test.go"},
-		},
-		{
-			name: "delete_repro_file",
-			call: llmkit.ToolCall{Name: "delete_repro_file", Arguments: []byte(`{"path":"repro_test.go"}`)},
-			want: ToolActivity{Tool: "delete_repro_file", File: "repro_test.go"},
-		},
-		{
-			name: "workspace",
-			call: llmkit.ToolCall{Name: "workspace", Arguments: []byte(`{"argv":["exec","go","test","./..."]}`)},
-			want: ToolActivity{Tool: "workspace", Symbol: "exec go test ./..."},
-		},
-		{
-			name: "workspace truncates long argv",
-			call: llmkit.ToolCall{Name: "workspace", Arguments: []byte(`{"argv":["exec","go","test","-run","` + strings.Repeat("x", 130) + `"]}`)},
-			want: ToolActivity{Tool: "workspace", Symbol: "exec go test -run " + strings.Repeat("x", 101) + "…"},
-		},
-		{
-			name: "unknown tool",
-			call: llmkit.ToolCall{Name: "some_custom_tool", Arguments: []byte(`{}`)},
-			want: ToolActivity{Tool: "some_custom_tool"},
-		},
-		{
-			name: "malformed JSON args",
-			call: llmkit.ToolCall{Name: "read_file", Arguments: []byte(`not-valid-json`)},
-			want: ToolActivity{Tool: "read_file"}, // zero fields; no panic
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := extractToolActivity(tc.call)
-			if got.Tool != tc.want.Tool {
-				t.Errorf("Tool = %q, want %q", got.Tool, tc.want.Tool)
-			}
-			if got.File != tc.want.File {
-				t.Errorf("File = %q, want %q", got.File, tc.want.File)
-			}
-			if got.Symbol != tc.want.Symbol {
-				t.Errorf("Symbol = %q, want %q", got.Symbol, tc.want.Symbol)
-			}
-			if got.Pattern != tc.want.Pattern {
-				t.Errorf("Pattern = %q, want %q", got.Pattern, tc.want.Pattern)
-			}
-			if got.Line != tc.want.Line {
-				t.Errorf("Line = %d, want %d", got.Line, tc.want.Line)
-			}
-			if got.EndLine != tc.want.EndLine {
-				t.Errorf("EndLine = %d, want %d", got.EndLine, tc.want.EndLine)
-			}
-		})
-	}
-}
-
-// TestWithActivitySink_CalledPerCallStartDone verifies that WithActivitySink
-// emits start+done pairs per tool call (not once per turn) and that Phase is
-// set correctly.
-func TestWithActivitySink_CalledPerCallStartDone(t *testing.T) {
-	fc := newFakeClient(
-		toolResp("c1", "echo", `{"v":"hi"}`, 10, 4),
-		toolResp("c2", "echo", `{"v":"bye"}`, 8, 3),
-		textResp("done", 5, 2),
-	)
-
-	var acts []ToolActivity
-	sink := func(act ToolActivity) {
-		acts = append(acts, act)
-	}
-	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys", WithActivitySink(sink))
-	_, err := r.Run(context.Background(), "task")
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	// Two tool-call turns, one call each => 4 events: start+done per call.
-	if len(acts) != 4 {
-		t.Errorf("sink called %d times, want 4 (start+done per call × 2 turns)", len(acts))
-	}
-	phases := make([]string, len(acts))
-	for i, a := range acts {
-		phases[i] = a.Phase
-		if a.Tool == "" {
-			t.Errorf("act[%d].Tool is empty", i)
-		}
-	}
-	wantPhases := []string{"start", "done", "start", "done"}
-	for i, p := range wantPhases {
-		if i >= len(phases) {
-			break
-		}
-		if phases[i] != p {
-			t.Errorf("acts[%d].Phase = %q, want %q", i, phases[i], p)
-		}
-	}
-}
-
-// TestWithActivitySink_NilIsNoop verifies that a nil sink or a Runner without
-// WithActivitySink runs cleanly with no overhead (no panic, no extra state).
-func TestWithActivitySink_NilIsNoop(t *testing.T) {
-	fc := newFakeClient(
-		toolResp("c1", "echo", `{}`, 5, 2),
-		textResp("done", 3, 1),
-	)
-	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys")
-	_, err := r.Run(context.Background(), "task")
-	if err != nil {
-		t.Fatalf("Run without sink: %v", err)
-	}
-}
-
-// TestWithActivitySink_DoneErrOnFailingTool verifies that when a tool returns
-// an error the done event carries Err (non-empty) and Count=0.
-func TestWithActivitySink_DoneErrOnFailingTool(t *testing.T) {
-	fc := newFakeClient(
-		toolResp("c1", "boom", `{}`, 5, 2),
-		textResp("recovered", 3, 1),
-	)
-	var acts []ToolActivity
-	r := NewRunner(fc, []Tool{echoTool{name: "boom", failMsg: "disk on fire"}}, "sys",
-		WithActivitySink(func(act ToolActivity) { acts = append(acts, act) }))
-	_, err := r.Run(context.Background(), "task")
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if len(acts) != 2 {
-		t.Fatalf("sink called %d times, want 2 (start+done)", len(acts))
-	}
-	start, done := acts[0], acts[1]
-	if start.Phase != "start" {
-		t.Errorf("acts[0].Phase = %q, want start", start.Phase)
-	}
-	if done.Phase != "done" {
-		t.Errorf("acts[1].Phase = %q, want done", done.Phase)
-	}
-	if done.Err == "" {
-		t.Error("done.Err is empty; want the tool error string")
-	}
-	if done.Count != 0 {
-		t.Errorf("done.Count = %d, want 0 on error", done.Count)
-	}
-}
-
 // healthEchoTool is an echo-style tool whose Run returns a *ToolHealthError
-// when configured to. It is the test vehicle for the WithToolHealthSink
-// dispatch seam: a health error must reach the sink, a plain error must not.
+// when configured to. It is the test vehicle for the [Hooks.ToolHealth]
+// dispatch seam: a health error must reach the hook, a plain error must not.
 type healthEchoTool struct {
 	name   string
 	health *ToolHealthError // non-nil => Run returns this
@@ -644,112 +422,109 @@ func (e healthEchoTool) Run(ctx context.Context, args json.RawMessage) (string, 
 	return "ok", nil
 }
 
-// TestWithToolHealthSink_CalledOnHealthError verifies that a tool returning a
-// *ToolHealthError triggers the sink with the tool name and the
-// *ToolHealthError pointer (preserving Severity, Reason, Err).
-func TestWithToolHealthSink_CalledOnHealthError(t *testing.T) {
+// TestHook_ToolHealth_FiresOnToolHealthError verifies that a tool returning a
+// *ToolHealthError fires Hooks.ToolHealth with the tool name and the SAME
+// *ToolHealthError pointer (Reason and Err preserved), in addition to the
+// error text being fed back to the model.
+func TestHook_ToolHealth_FiresOnToolHealthError(t *testing.T) {
 	healthErr := &ToolHealthError{
-		Severity: SeverityHigh,
-		Reason:   "sandbox runtime unavailable",
-		Err:      errors.New("podman not found"),
+		Reason: "container runtime unavailable",
+		Err:    errors.New("podman not found"),
 	}
 	fc := newFakeClient(
 		toolResp("c1", "broken", `{}`, 10, 4),
 		textResp("done", 5, 2),
 	)
 
-	var sinkTool string
-	var sinkErr *ToolHealthError
-	sink := func(tool string, he *ToolHealthError) {
-		sinkTool = tool
-		sinkErr = he
-	}
-	r := NewRunner(fc, []Tool{healthEchoTool{name: "broken", health: healthErr}}, "sys", WithToolHealthSink(sink))
+	var hookTool string
+	var hookErr *ToolHealthError
+	r := NewRunner(fc, []Tool{healthEchoTool{name: "broken", health: healthErr}}, "sys",
+		WithHooks(Hooks{ToolHealth: func(_ context.Context, tool string, he *ToolHealthError) {
+			hookTool = tool
+			hookErr = he
+		}}))
 	_, err := r.Run(context.Background(), "task")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if sinkTool != "broken" {
-		t.Errorf("sink called with tool %q, want %q", sinkTool, "broken")
+	if hookTool != "broken" {
+		t.Errorf("hook called with tool %q, want %q", hookTool, "broken")
 	}
-	if sinkErr != healthErr {
-		t.Errorf("sink called with error %p, want the original %p", sinkErr, healthErr)
+	if hookErr != healthErr {
+		t.Errorf("hook called with error %p, want the original %p", hookErr, healthErr)
 	}
-	if sinkErr.Severity != SeverityHigh {
-		t.Errorf("sink severity = %q, want high", sinkErr.Severity)
+	if hookErr.Reason != "container runtime unavailable" {
+		t.Errorf("hook reason = %q", hookErr.Reason)
 	}
-	if sinkErr.Reason != "sandbox runtime unavailable" {
-		t.Errorf("sink reason = %q", sinkErr.Reason)
+	if hookErr.Err == nil || hookErr.Err.Error() != "podman not found" {
+		t.Errorf("hook Err = %v, want the wrapped podman error", hookErr.Err)
 	}
 }
 
-// TestWithToolHealthSink_NotCalledOnPlainError is the central infra-vs-
+// TestHook_ToolHealth_NotFiredOnPlainError is the central infra-vs-
 // recoverable assertion: an ordinary model-recoverable tool error (e.g. bad
-// args, file-not-found) must NOT trigger the health sink. Only *ToolHealthError
+// args, file-not-found) must NOT fire Hooks.ToolHealth. Only *ToolHealthError
 // reaches it.
-func TestWithToolHealthSink_NotCalledOnPlainError(t *testing.T) {
+func TestHook_ToolHealth_NotFiredOnPlainError(t *testing.T) {
 	fc := newFakeClient(
 		toolResp("c1", "plain", `{}`, 10, 4),
 		textResp("done", 5, 2),
 	)
 
 	called := false
-	sink := func(tool string, he *ToolHealthError) { called = true }
-	r := NewRunner(fc, []Tool{healthEchoTool{name: "plain", plain: "bad args"}}, "sys", WithToolHealthSink(sink))
+	r := NewRunner(fc, []Tool{healthEchoTool{name: "plain", plain: "bad args"}}, "sys",
+		WithHooks(Hooks{ToolHealth: func(context.Context, string, *ToolHealthError) { called = true }}))
 	_, err := r.Run(context.Background(), "task")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if called {
-		t.Error("sink was called for a plain errors.New — must only fire on *ToolHealthError")
+		t.Error("ToolHealth fired for a plain errors.New — must only fire on *ToolHealthError")
 	}
 }
 
-// TestWithToolHealthSink_NilIsNoop verifies that a nil sink (or no
-// WithToolHealthSink option at all) runs cleanly with no overhead — no
-// panic, no extra state. Mirrors TestWithActivitySink_NilIsNoop.
-func TestWithToolHealthSink_NilIsNoop(t *testing.T) {
+// TestHook_ToolHealth_NilIsNoop verifies that a nil ToolHealth func (or no
+// WithHooks option at all) runs cleanly with no overhead — no panic, no
+// extra state.
+func TestHook_ToolHealth_NilIsNoop(t *testing.T) {
 	fc := newFakeClient(
 		toolResp("c1", "broken", `{}`, 5, 2),
 		textResp("done", 3, 1),
 	)
-	// No WithToolHealthSink option at all.
+	// No hooks registered at all.
 	r := NewRunner(fc, []Tool{healthEchoTool{name: "broken", health: &ToolHealthError{
-		Severity: SeverityCritical,
-		Reason:   "container runtime missing",
+		Reason: "container runtime missing",
 	}}}, "sys")
 	if _, err := r.Run(context.Background(), "task"); err != nil {
-		t.Fatalf("Run without sink: %v", err)
+		t.Fatalf("Run without hooks: %v", err)
 	}
 
-	// Nil sink is also a no-op.
+	// Hooks registered with a nil ToolHealth func.
 	r2 := NewRunner(fc, []Tool{healthEchoTool{name: "broken", health: &ToolHealthError{
-		Severity: SeverityCritical,
-		Reason:   "container runtime missing",
-	}}}, "sys", WithToolHealthSink(nil))
+		Reason: "container runtime missing",
+	}}}, "sys", WithHooks(Hooks{}))
 	if _, err := r2.Run(context.Background(), "task"); err != nil {
-		t.Fatalf("Run with nil sink: %v", err)
+		t.Fatalf("Run with nil ToolHealth hook: %v", err)
 	}
 }
 
-// TestRunTool_ToolHealthSink_SkippedOnCancelledCtx verifies the dispatch seam
-// does NOT record a tool-health signal when ctx is already cancelled: a failure
+// TestRunTool_ToolHealth_SkippedOnCancelledCtx verifies the dispatch seam
+// does NOT fire the health hook when ctx is already cancelled: a failure
 // caused by run teardown/cancellation is not a harness-tooling problem, even
 // when the tool returns a *ToolHealthError.
-func TestRunTool_ToolHealthSink_SkippedOnCancelledCtx(t *testing.T) {
+func TestRunTool_ToolHealth_SkippedOnCancelledCtx(t *testing.T) {
 	called := false
-	sink := func(tool string, he *ToolHealthError) { called = true }
 	r := NewRunner(newFakeClient(), []Tool{healthEchoTool{name: "broken", health: &ToolHealthError{
-		Severity: SeverityHigh, Reason: "sandbox runtime unavailable",
-	}}}, "sys", WithToolHealthSink(sink))
+		Reason: "container runtime unavailable",
+	}}}, "sys", WithHooks(Hooks{ToolHealth: func(context.Context, string, *ToolHealthError) { called = true }}))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, isErr := r.runTool(ctx, llmkit.ToolCall{Name: "broken", Arguments: json.RawMessage("{}")})
+	_, isErr := r.runTool(ctx, llmkit.ToolCall{Name: "broken", Arguments: json.RawMessage("{}")}, 1)
 	if !isErr {
 		t.Fatal("a ToolHealthError must still be returned as an error result")
 	}
 	if called {
-		t.Error("health sink must NOT fire when ctx is already cancelled")
+		t.Error("ToolHealth must NOT fire when ctx is already cancelled")
 	}
 }
 

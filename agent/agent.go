@@ -2,8 +2,8 @@
 // drives an [llmkit.Client] through a bounded set of tools until the model
 // produces a final answer, runs out of iterations, or exhausts a token budget.
 //
-// Callers with different roles (e.g. a bug finder, a verifier, a reproducer)
-// all instantiate the same [Runner] with different system prompts and tool
+// Callers with different roles (e.g. a coder, a reviewer, a researcher) all
+// instantiate the same [Runner] with different system prompts and tool
 // sets. The harness itself is provider-agnostic: it speaks only the
 // normalized [llm] vocabulary.
 //
