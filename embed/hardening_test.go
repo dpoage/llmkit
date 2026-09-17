@@ -952,8 +952,17 @@ func TestRetry_MaxAttemptsOnlyPolicy_Bounded(t *testing.T) {
 func TestRetry_PolicyNormalization(t *testing.T) {
 	p := Config{Retry: RetryConfig{MaxAttempts: 5}}.retryPolicy()
 	def := DefaultRetryConfig()
+	if p.Jitter != def.Jitter {
+		t.Errorf("MaxAttempts-only policy Jitter = %v, want default %v", p.Jitter, def.Jitter)
+	}
 	if p.BaseDelay != def.BaseDelay || p.MaxDelay != def.MaxDelay {
 		t.Errorf("MaxAttempts-only policy = %+v, want delays normalized from defaults", p)
+	}
+	// Literal pin: the default policy must include 20% jitter, so a
+	// DefaultRetryConfig that drops Jitter fails here rather than silently
+	// making the default unreachable via Config{}.
+	if got := (Config{}).retryPolicy(); got != (RetryConfig{MaxAttempts: 3, BaseDelay: 500 * time.Millisecond, MaxDelay: 30 * time.Second, Jitter: 0.2}) {
+		t.Errorf("Config{}.retryPolicy() = %+v, want the documented default {3, 500ms, 30s, 0.2}", got)
 	}
 
 	// Retry-After is capped at MaxDelay even under a normalized policy
@@ -970,20 +979,28 @@ func TestRetry_PolicyNormalization(t *testing.T) {
 	if got := (Config{Retry: RetryConfig{MaxAttempts: 3, Jitter: 5}}).retryPolicy().Jitter; got != 1 {
 		t.Errorf("Jitter 5 clamped to %v, want 1", got)
 	}
-	if got := (Config{Retry: RetryConfig{MaxAttempts: 3, Jitter: -2}}).retryPolicy().Jitter; got != 0 {
-		t.Errorf("Jitter -2 clamped to %v, want 0", got)
+	if got := (Config{Retry: RetryConfig{MaxAttempts: 3, Jitter: -2}}).retryPolicy().Jitter; got != 0.2 {
+		t.Errorf("Jitter -2 filled to %v, want default 0.2", got)
+	}
+
+	// Zero BaseDelay must stay zero (immediate retry), never be mistaken
+	// for int64 overflow.
+	if d := backoffDelay(RetryConfig{BaseDelay: 0}, 3, 0, false); d != 0 {
+		t.Errorf("backoffDelay with zero BaseDelay = %v, want 0", d)
 	}
 }
 
 func TestDefaultClientTimeout(t *testing.T) {
-	if got := (Config{}).httpClient().Timeout; got != DefaultEmbedTimeout {
-		t.Errorf("default client timeout = %v, want %v", got, DefaultEmbedTimeout)
+	// Literal, not DefaultEmbedTimeout: mutating the constant to 0 must
+	// fail here.
+	if DefaultEmbedTimeout != 60*time.Second {
+		t.Errorf("DefaultEmbedTimeout = %v, want 60s", DefaultEmbedTimeout)
 	}
-	if got := (Config{Timeout: -1}).httpClient().Timeout; got != DefaultEmbedTimeout {
-		t.Errorf("negative Timeout client = %v, want %v", got, DefaultEmbedTimeout)
+	if got := (Config{}).httpClient().Timeout; got != 60*time.Second {
+		t.Errorf("default client timeout = %v, want 60s", got)
 	}
-	if got := (Config{Timeout: 7 * time.Second}).httpClient().Timeout; got != 7*time.Second {
-		t.Errorf("Timeout 7s client = %v, want 7s", got)
+	if got := (Config{Timeout: -1}).httpClient().Timeout; got != 60*time.Second {
+		t.Errorf("negative Timeout client = %v, want 60s", got)
 	}
 	injected := &http.Client{}
 	if got := (Config{HTTPClient: injected, Timeout: 7 * time.Second}).httpClient(); got != injected {

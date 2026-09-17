@@ -19,7 +19,7 @@ import (
 // embed's defaults differ (3 attempts vs root's 4) — the types are not
 // convertible and no shared implementation is implied. Callers do not
 // normalize this struct themselves: Config.retryPolicy fills unset knobs
-// (<= 0) from DefaultRetryConfig and clamps Jitter into [0,1].
+// (<= 0, including Jitter) from DefaultRetryConfig and clamps Jitter above 1.
 type RetryConfig struct {
 	// MaxAttempts is the total number of attempts (initial try + retries).
 	// Must be >= 1.

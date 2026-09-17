@@ -56,9 +56,9 @@ type Config struct {
 	// bound evicts the least recently used entry.
 	CacheSize int
 
-	// Retry tunes transient-failure retries. Unset knobs (<= 0) are filled
-	// from DefaultRetryConfig and Jitter is clamped into [0,1] when a
-	// backend is constructed, so a partial policy like
+	// Retry tunes transient-failure retries. Unset knobs (<= 0, including
+	// Jitter) are filled from DefaultRetryConfig when a backend is
+	// constructed — Jitter above 1 is clamped — so a partial policy like
 	// RetryConfig{MaxAttempts: 5} is safe to use as written.
 	Retry RetryConfig
 }
@@ -198,8 +198,10 @@ func (c Config) retryPolicy() RetryConfig {
 	if p.MaxDelay <= 0 {
 		p.MaxDelay = def.MaxDelay
 	}
-	if p.Jitter < 0 {
-		p.Jitter = 0
+	if p.Jitter <= 0 {
+		// Unset (zero) or nonsensical (negative) jitter falls back to the
+		// default, so the default 20% jitter is reachable without naming it.
+		p.Jitter = def.Jitter
 	} else if p.Jitter > 1 {
 		p.Jitter = 1
 	}
