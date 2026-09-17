@@ -219,7 +219,7 @@ func newServer(t *testing.T, handler http.HandlerFunc) string {
 func simpleRequest() llmkit.Request {
 	return llmkit.Request{
 		System:    "you are a test",
-		Messages:  []llmkit.Message{{Role: llmkit.RoleUser, Content: "hi"}},
+		Messages:  []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "hi")},
 		MaxTokens: 64,
 	}
 }
@@ -282,11 +282,12 @@ func TestConformance_ToolCallRoundTrip(t *testing.T) {
 			req := llmkit.Request{
 				System: "sys",
 				Messages: []llmkit.Message{
-					{Role: llmkit.RoleUser, Content: "read the hosts file"},
+					llmkit.TextMessage(llmkit.RoleUser, "read the hosts file"),
 					{Role: llmkit.RoleAssistant, ToolCalls: []llmkit.ToolCall{{
 						ID: callID, Name: toolName, Arguments: json.RawMessage(argsJSON),
 					}}},
-					{Role: llmkit.RoleToolResult, ToolCallID: callID, Content: "127.0.0.1 localhost"},
+					{Role: llmkit.RoleToolResult, ToolCallID: callID,
+						Content: []llmkit.Block{{Kind: llmkit.BlockText, Text: "127.0.0.1 localhost"}}},
 				},
 				Tools: []llmkit.ToolDef{{
 					Name:        toolName,
@@ -325,7 +326,7 @@ func TestConformance_ToolCallResponse(t *testing.T) {
 			client := f.build(t, base)
 
 			req := llmkit.Request{
-				Messages: []llmkit.Message{{Role: llmkit.RoleUser, Content: "find bugs"}},
+				Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "find bugs")},
 				Tools: []llmkit.ToolDef{{
 					Name:       toolName,
 					Parameters: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}}}`),

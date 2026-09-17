@@ -22,7 +22,7 @@ func newServer(t *testing.T, handler http.HandlerFunc) string {
 func simpleRequest() llmkit.Request {
 	return llmkit.Request{
 		System:    "you are a test",
-		Messages:  []llmkit.Message{{Role: llmkit.RoleUser, Content: "hi"}},
+		Messages:  []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "hi")},
 		MaxTokens: 64,
 	}
 }

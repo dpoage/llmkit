@@ -34,7 +34,7 @@ func toolResultBytes(req llmkit.Request) int {
 	n := 0
 	for _, m := range req.Messages {
 		if m.Role == llmkit.RoleToolResult {
-			n += len(m.Content)
+			n += len(m.Text())
 		}
 	}
 	return n
@@ -88,7 +88,7 @@ func TestRun_CompactionShrinksRequest(t *testing.T) {
 			maxSent = b
 		}
 		for _, m := range req.Messages {
-			if m.Role == llmkit.RoleToolResult && strings.HasPrefix(m.Content, "[tool result pruned") {
+			if m.Role == llmkit.RoleToolResult && strings.HasPrefix(m.Text(), "[tool result pruned") {
 				stubbedAny = true
 			}
 		}
@@ -124,7 +124,7 @@ func TestRun_CompactionDisabledWhenBudgetZero(t *testing.T) {
 	last := reqs[len(reqs)-1]
 	// All three full blobs must be present (no stubbing).
 	for _, m := range last.Messages {
-		if m.Role == llmkit.RoleToolResult && strings.HasPrefix(m.Content, "[tool result pruned") {
+		if m.Role == llmkit.RoleToolResult && strings.HasPrefix(m.Text(), "[tool result pruned") {
 			t.Fatal("compaction fired despite HistoryTokenBudget=0")
 		}
 	}
@@ -167,11 +167,11 @@ func TestRun_CompactionSingleShotPerCrossingThenRearms(t *testing.T) {
 		if m.Role != llmkit.RoleToolResult {
 			continue
 		}
-		if strings.HasPrefix(m.Content, "[tool result pruned") {
+		if strings.HasPrefix(m.Text(), "[tool result pruned") {
 			if firstStub == "" {
-				firstStub = m.Content
-			} else if m.Content != firstStub {
-				t.Errorf("oldest stub mutated across turns: %q vs %q", firstStub, m.Content)
+				firstStub = m.Text()
+			} else if m.Text() != firstStub {
+				t.Errorf("oldest stub mutated across turns: %q vs %q", firstStub, m.Text())
 			}
 		}
 	}

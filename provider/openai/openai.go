@@ -5,6 +5,7 @@ package openai
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -122,6 +123,20 @@ func (o *openaiAdapter) buildParams(req llmkit.Request) (openai.ChatCompletionNe
 	if req.Temperature != nil {
 		params.Temperature = openai.Float(*req.Temperature)
 	}
+	if len(req.StopSequences) > 0 {
+		params.Stop = openai.ChatCompletionNewParamsStopUnion{OfStringArray: req.StopSequences}
+	}
+	if req.TopP != nil {
+		params.TopP = openai.Float(*req.TopP)
+	}
+	if req.Seed != nil {
+		params.Seed = openai.Int(*req.Seed)
+	}
+	// Request.TopK: the Chat Completions API has no top_k parameter, so it
+	// is dropped here and documented via Capabilities.TopK = false.
+	// Request.Thinking: not mapped onto reasoning_effort (a coarse
+	// low/medium/high dial, not a token budget), so it is dropped and
+	// documented via Capabilities.Thinking = false.
 
 	msgs := make([]openai.ChatCompletionMessageParamUnion, 0, len(req.Messages)+1)
 	if req.System != "" {
@@ -155,6 +170,13 @@ func (o *openaiAdapter) buildParams(req llmkit.Request) (openai.ChatCompletionNe
 			tools = append(tools, openai.ChatCompletionFunctionTool(fn))
 		}
 		params.Tools = tools
+	}
+
+	// Request.ToolChoice. Auto (and the zero value) is the provider default
+	// and is never serialized. Unlike Anthropic, no synthetic forcing
+	// competes here: response_format coexists with tool_choice.
+	if err := o.applyToolChoice(&params, req.ToolChoice); err != nil {
+		return openai.ChatCompletionNewParams{}, err
 	}
 
 	// Schema-constrained output. Honored even when tools are present
@@ -198,19 +220,65 @@ func (o *openaiAdapter) buildParams(req llmkit.Request) (openai.ChatCompletionNe
 	return params, nil
 }
 
+// applyToolChoice maps the normalized tool-choice request onto the Chat
+// Completions tool_choice parameter.
+func (o *openaiAdapter) applyToolChoice(params *openai.ChatCompletionNewParams, tc llmkit.ToolChoice) error {
+	switch tc.Mode {
+	case "", llmkit.ToolChoiceAuto:
+		return nil
+	case llmkit.ToolChoiceNone:
+		params.ToolChoice = openai.ChatCompletionToolChoiceOptionUnionParam{
+			OfAuto: openai.String("none"),
+		}
+	case llmkit.ToolChoiceRequired:
+		params.ToolChoice = openai.ChatCompletionToolChoiceOptionUnionParam{
+			OfAuto: openai.String("required"),
+		}
+	case llmkit.ToolChoiceTool:
+		if tc.Name == "" {
+			return llmkit.NewAPIError(o.provider, 0, 0, llmkit.ErrInvalidRequest,
+				"ToolChoice.Mode=tool requires ToolChoice.Name", nil)
+		}
+		params.ToolChoice = openai.ChatCompletionToolChoiceOptionUnionParam{
+			OfFunctionToolChoice: &openai.ChatCompletionNamedToolChoiceParam{
+				Function: openai.ChatCompletionNamedToolChoiceFunctionParam{Name: tc.Name},
+			},
+		}
+	default:
+		return llmkit.NewAPIError(o.provider, 0, 0, llmkit.ErrInvalidRequest,
+			"unknown ToolChoice.Mode "+string(tc.Mode), nil)
+	}
+	return nil
+}
+
+// toOpenAIMessages converts normalized messages into Chat Completions
+// messages. Content blocks map in order: text → text part, image →
+// image_url part, document → file part; assistant and tool-result messages
+// carry their concatenated text. Image/document source validation happens
+// here, BEFORE any wire call.
 func toOpenAIMessages(msgs []llmkit.Message) ([]openai.ChatCompletionMessageParamUnion, error) {
 	out := make([]openai.ChatCompletionMessageParamUnion, 0, len(msgs))
 	for _, m := range msgs {
 		switch m.Role {
 		case llmkit.RoleSystem:
-			out = append(out, openai.SystemMessage(m.Content))
+			out = append(out, openai.SystemMessage(m.Text()))
 		case llmkit.RoleUser:
-			out = append(out, openai.UserMessage(m.Content))
+			parts, err := openAIUserParts(m)
+			if err != nil {
+				return nil, err
+			}
+			if len(parts) == 1 && parts[0].OfText != nil {
+				// Common text-only form: keep the flat string content the
+				// API (and compatible backends) have always accepted.
+				out = append(out, openai.UserMessage(parts[0].OfText.Text))
+			} else {
+				out = append(out, openai.UserMessage(parts))
+			}
 		case llmkit.RoleAssistant:
 			am := openai.ChatCompletionAssistantMessageParam{}
-			if m.Content != "" {
+			if text := m.Text(); text != "" {
 				am.Content = openai.ChatCompletionAssistantMessageParamContentUnion{
-					OfString: openai.String(m.Content),
+					OfString: openai.String(text),
 				}
 			}
 			for _, tc := range m.ToolCalls {
@@ -230,7 +298,7 @@ func toOpenAIMessages(msgs []llmkit.Message) ([]openai.ChatCompletionMessagePara
 			}
 			out = append(out, openai.ChatCompletionMessageParamUnion{OfAssistant: &am})
 		case llmkit.RoleToolResult:
-			out = append(out, openai.ToolMessage(m.Content, m.ToolCallID))
+			out = append(out, openai.ToolMessage(m.Text(), m.ToolCallID))
 		default:
 			return nil, llmkit.NewAPIError("openai", 0, 0, llmkit.ErrInvalidRequest,
 				"unknown message role "+string(m.Role), nil)
@@ -239,11 +307,80 @@ func toOpenAIMessages(msgs []llmkit.Message) ([]openai.ChatCompletionMessagePara
 	return out, nil
 }
 
+// dataURI renders inline block bytes as an RFC-2397 data URL, the form the
+// image_url and file content parts accept for embedded media.
+func dataURI(mediaType string, data []byte) string {
+	return "data:" + mediaType + ";base64," + base64.StdEncoding.EncodeToString(data)
+}
+
+// openAIUserParts maps a user message's content blocks onto Chat Completions
+// content parts: image → image_url part (data: URI for inline bytes, URL
+// verbatim), document → file part (file_data as a data: URI). Document URLs
+// are rejected: the Chat Completions file part has no URL source. A message
+// with no blocks yields one empty text part so the wire shape of a
+// previously-valid empty user turn is preserved.
+func openAIUserParts(m llmkit.Message) ([]openai.ChatCompletionContentPartUnionParam, error) {
+	parts := make([]openai.ChatCompletionContentPartUnionParam, 0, len(m.Content))
+	for _, b := range m.Content {
+		switch b.Kind {
+		case llmkit.BlockText:
+			parts = append(parts, openai.ChatCompletionContentPartUnionParam{
+				OfText: &openai.ChatCompletionContentPartTextParam{Text: b.Text},
+			})
+		case llmkit.BlockImage:
+			if err := adapter.ValidateMediaBlock("openai", b); err != nil {
+				return nil, err
+			}
+			url := b.URL
+			if len(b.Data) > 0 {
+				url = dataURI(b.MediaType, b.Data)
+			}
+			parts = append(parts, openai.ChatCompletionContentPartUnionParam{
+				OfImageURL: &openai.ChatCompletionContentPartImageParam{
+					ImageURL: openai.ChatCompletionContentPartImageImageURLParam{URL: url},
+				},
+			})
+		case llmkit.BlockDocument:
+			if err := adapter.ValidateMediaBlock("openai", b); err != nil {
+				return nil, err
+			}
+			if b.URL != "" {
+				return nil, llmkit.NewAPIError("openai", 0, 0, llmkit.ErrInvalidRequest,
+					"document block: the Chat Completions file part accepts inline data only, not URLs", nil)
+			}
+			filename := b.Title
+			if filename == "" {
+				filename = "document"
+			}
+			parts = append(parts, openai.ChatCompletionContentPartUnionParam{
+				OfFile: &openai.ChatCompletionContentPartFileParam{
+					File: openai.ChatCompletionContentPartFileFileParam{
+						FileData: openai.String(dataURI(b.MediaType, b.Data)),
+						Filename: openai.String(filename),
+					},
+				},
+			})
+		default:
+			return nil, llmkit.NewAPIError("openai", 0, 0, llmkit.ErrInvalidRequest,
+				"block kind "+string(b.Kind)+" not allowed in a user message", nil)
+		}
+	}
+	if len(parts) == 0 {
+		parts = append(parts, openai.ChatCompletionContentPartUnionParam{
+			OfText: &openai.ChatCompletionContentPartTextParam{Text: ""},
+		})
+	}
+	return parts, nil
+}
+
 func (o *openaiAdapter) toResponse(cc *openai.ChatCompletion) llmkit.Response {
 	var resp llmkit.Response
 	if len(cc.Choices) > 0 {
 		choice := cc.Choices[0]
 		resp.Text = choice.Message.Content
+		if resp.Text != "" {
+			resp.Blocks = append(resp.Blocks, llmkit.Block{Kind: llmkit.BlockText, Text: resp.Text})
+		}
 		for _, tc := range choice.Message.ToolCalls {
 			// Only function tool calls carry an arguments payload we surface.
 			resp.ToolCalls = append(resp.ToolCalls, llmkit.ToolCall{
@@ -277,7 +414,7 @@ func mapOpenAIStop(reason string, hasToolCalls bool) llmkit.StopReason {
 	case "length":
 		return llmkit.StopMaxTokens
 	case "content_filter":
-		return llmkit.StopError
+		return llmkit.StopContentFilter
 	default:
 		// Some OpenAI-compatible servers return tool calls with an empty or
 		// nonstandard finish_reason; trust the presence of tool calls.
@@ -305,6 +442,14 @@ func openAICapabilities(model string) llmkit.Capabilities {
 		ParallelToolCalls: true,
 		PromptCaching:     true,
 		StructuredOutput:  true,
+		Thinking:          false,
+		ToolChoice:        true,
+		Images:            true,
+		Documents:         true,
+		StopSequences:     true,
+		TopP:              true,
+		TopK:              false,
+		Seed:              true,
 	}
 }
 
@@ -358,6 +503,11 @@ func openAIContextWindow(model string) int {
 // endpoint reports it (e.g. MiniMax), so cache hits are ledgered even with
 // PromptCaching=false. Callers can override.
 //
+// Thinking is false: this adapter does not map Request.Thinking onto
+// reasoning_effort. TopK is false: the Chat Completions API has no top_k.
+// Tool choice, images, documents, stop sequences, top_p, and seed are part
+// of the base Chat Completions contract and are sent when requested.
+//
 // The model parameter is accepted for symmetry with other capability
 // constructors; no per-model lookup is available for arbitrary endpoints,
 // so ContextWindow is left at 0 (unknown).
@@ -367,5 +517,13 @@ func openAICompatibleCapabilities(model string) llmkit.Capabilities {
 		ParallelToolCalls: false,
 		PromptCaching:     false,
 		StructuredOutput:  false,
+		Thinking:          false,
+		ToolChoice:        true,
+		Images:            true,
+		Documents:         true,
+		StopSequences:     true,
+		TopP:              true,
+		TopK:              false,
+		Seed:              true,
 	}
 }

@@ -58,7 +58,7 @@ func TestRun_CleanFinish(t *testing.T) {
 	// A normal text-only final turn must not trigger the
 	// empty-turn nudge: zero nudges, no nudge message in the conversation.
 	for _, m := range out.Messages {
-		if m.Role == llmkit.RoleUser && m.Content == emptyTurnNudge {
+		if m.Role == llmkit.RoleUser && m.Text() == emptyTurnNudge {
 			t.Error("nudge message present for a normal text-only final turn")
 		}
 	}
@@ -86,7 +86,7 @@ func TestRun_EmptyTurnNudgeThenProse(t *testing.T) {
 	}
 	foundNudge := false
 	for _, m := range out.Messages {
-		if m.Role == llmkit.RoleUser && m.Content == emptyTurnNudge {
+		if m.Role == llmkit.RoleUser && m.Text() == emptyTurnNudge {
 			foundNudge = true
 		}
 	}
@@ -125,8 +125,8 @@ func TestRun_ToolCallThenFinish(t *testing.T) {
 	for _, m := range last {
 		if m.Role == llmkit.RoleToolResult && m.ToolCallID == "c1" {
 			foundResult = true
-			if !strings.Contains(m.Content, "echo:") {
-				t.Errorf("tool result content = %q", m.Content)
+			if !strings.Contains(m.Text(), "echo:") {
+				t.Errorf("tool result content = %q", m.Text())
 			}
 		}
 	}
@@ -237,8 +237,8 @@ func TestRun_ToolErrorFedBackToModel(t *testing.T) {
 	if !tr.IsError {
 		t.Error("tool result IsError = false, want true")
 	}
-	if !strings.HasPrefix(tr.Content, "ERROR:") || !strings.Contains(tr.Content, "disk on fire") {
-		t.Errorf("tool result content = %q, want ERROR: ... disk on fire", tr.Content)
+	if !strings.HasPrefix(tr.Text(), "ERROR:") || !strings.Contains(tr.Text(), "disk on fire") {
+		t.Errorf("tool result content = %q, want ERROR: ... disk on fire", tr.Text())
 	}
 }
 
@@ -256,7 +256,7 @@ func TestRun_UnknownToolFedBackToModel(t *testing.T) {
 	last := fc.requests[1].Messages
 	found := false
 	for _, m := range last {
-		if m.Role == llmkit.RoleToolResult && m.IsError && strings.Contains(m.Content, "unknown tool") {
+		if m.Role == llmkit.RoleToolResult && m.IsError && strings.Contains(m.Text(), "unknown tool") {
 			found = true
 		}
 	}

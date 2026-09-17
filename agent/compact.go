@@ -59,13 +59,23 @@ func SimulateCompaction(msgs []llmkit.Message, budget, threshold int64, recentK 
 // measurement harness preserves the same recent tool results the live loop does.
 const CompactRecentToolResults = compactRecentToolResults
 
+// nonTextBlockEstimateBytes is the fixed byte estimate charged for every
+// non-text content block (image, document, thinking) in estimateTokens.
+// Inline media bytes are not billed linearly (a small image can cost more
+// tokens than its byte count suggests, and thinking payloads are already
+// tokenized text), so a flat 1024 bytes — 256 tokens at the bytes/4 rate —
+// keeps the heuristic a relative "is history big" signal without pretending
+// to price media exactly.
+const nonTextBlockEstimateBytes = 1024
+
 // estimateTokens approximates the token cost of a message slice using a
-// bytes/4 heuristic over the text the provider actually bills: message content
-// plus the tool-call names and serialized arguments an assistant turn carries.
-// It deliberately ignores per-message framing overhead; it is a relative signal
-// for "is history big enough to compact", not a billing oracle. The same
-// heuristic is used by the offline measurement harness so the trigger and the
-// reported numbers agree.
+// bytes/4 heuristic over the text the provider actually bills: text-block
+// content plus the tool-call names and serialized arguments an assistant
+// turn carries, plus a fixed nonTextBlockEstimateBytes charge per image,
+// document, or thinking block. It deliberately ignores per-message framing
+// overhead; it is a relative signal for "is history big enough to compact",
+// not a billing oracle. The same heuristic is used by the offline measurement
+// harness so the trigger and the reported numbers agree.
 func estimateTokens(msgs []llmkit.Message) int64 {
 	var b int64
 	for i := range msgs {
@@ -75,10 +85,15 @@ func estimateTokens(msgs []llmkit.Message) int64 {
 }
 
 // messageBytes returns the approximate billed byte size of one message: its
-// textual content plus, for assistant turns, each tool call's name and raw
-// argument JSON.
+// text-block content plus nonTextBlockEstimateBytes per non-text block and,
+// for assistant turns, each tool call's name and raw argument JSON.
 func messageBytes(m llmkit.Message) int64 {
-	b := int64(len(m.Content))
+	b := int64(len(m.Text()))
+	for _, blk := range m.Content {
+		if blk.Kind != llmkit.BlockText {
+			b += nonTextBlockEstimateBytes
+		}
+	}
 	for _, tc := range m.ToolCalls {
 		b += int64(len(tc.Name)) + int64(len(tc.Arguments))
 	}
@@ -125,8 +140,9 @@ func compactStub(toolName string, origBytes int, isErr bool) string {
 //   - the most recent recentK tool-result messages,
 //   - tool_call/tool_result pairing: each stubbed message keeps its Role,
 //     ToolCallID, and IsError, so providers (and the ReplayClient) still see a
-//     well-formed tool result answering its originating tool call. Only Content
-//     shrinks.
+//     well-formed tool result answering its originating tool call. Only the
+//     text Content shrinks (a stubbed message's Content becomes a single text
+//     block; non-text blocks on a pruned result are dropped with the dump).
 //
 // toolNameFor maps a tool-result's ToolCallID back to the tool name recorded
 // when the call was issued, so the stub can name the tool; an empty/missing
@@ -167,15 +183,16 @@ func compactHistory(msgs []llmkit.Message, recentK int, toolNameFor map[string]s
 		// Never re-stub an already-pruned result: re-mutating it would invalidate
 		// the prompt-cache prefix every turn for zero byte savings. This also keeps
 		// the stub's reported byte size pinned to the ORIGINAL dump, not the stub.
-		if isCompactStub(m.Content) {
+		content := m.Text()
+		if isCompactStub(content) {
 			continue
 		}
-		stub := compactStub(toolNameFor[m.ToolCallID], len(m.Content), m.IsError)
+		stub := compactStub(toolNameFor[m.ToolCallID], len(content), m.IsError)
 		// Skip results already smaller than their stub: stubbing would grow them.
-		if len(m.Content) <= len(stub) {
+		if len(content) <= len(stub) {
 			continue
 		}
-		m.Content = stub
+		m.Content = []llmkit.Block{{Kind: llmkit.BlockText, Text: stub}}
 		out[idx] = m
 		pruned = true
 	}

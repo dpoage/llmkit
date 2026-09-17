@@ -61,6 +61,7 @@ func NewReplayClient(tr *Transcript, caps llmkit.Capabilities) (*ReplayClient, e
 			step := replayStep{
 				resp: llmkit.Response{
 					Text:       ev.Text,
+					Blocks:     ev.Blocks,
 					ToolCalls:  ev.ToolCalls,
 					StopReason: ev.StopReason,
 				},

@@ -42,6 +42,11 @@ type Event struct {
 
 	// Text is set on EventAssistant: the model's text output.
 	Text string `json:"text,omitempty"`
+	// Blocks is set on EventAssistant: every content block (text,
+	// thinking, ...) the model returned, so JSONL transcripts round-trip
+	// reasoning payloads verbatim. Block.Data is base64 in JSONL per
+	// encoding/json's []byte handling.
+	Blocks []llmkit.Block `json:"blocks,omitempty"`
 	// ToolCalls is set on EventAssistant: the model's tool-use requests.
 	ToolCalls []llmkit.ToolCall `json:"tool_calls,omitempty"`
 	// StopReason is set on EventAssistant.
@@ -180,6 +185,7 @@ func (t *Transcript) recordAssistant(step int, resp llmkit.Response) {
 		Step:       step,
 		Time:       t.now(),
 		Text:       resp.Text,
+		Blocks:     resp.Blocks,
 		ToolCalls:  resp.ToolCalls,
 		StopReason: resp.StopReason,
 		Usage:      &u,

@@ -95,7 +95,7 @@ func TestRunJSONContinue_PreservesPriorConversation(t *testing.T) {
 	// saw its own prior investigation rather than a reseeded conversation.
 	for i, want := range out1.Messages {
 		got := round2Req.Messages[i]
-		if got.Role != want.Role || got.Content != want.Content || got.ToolCallID != want.ToolCallID {
+		if got.Role != want.Role || got.Text() != want.Text() || got.ToolCallID != want.ToolCallID {
 			t.Errorf("round2 request message %d = %+v, want round1 history entry %+v", i, got, want)
 		}
 	}
@@ -176,7 +176,7 @@ func TestRunJSON_RepairSucceeds(t *testing.T) {
 		t.Errorf("client calls = %d, want 2", len(fc.requests))
 	}
 	// The repair prompt must mention the parse failure.
-	repairTask := fc.requests[1].Messages[0].Content
+	repairTask := fc.requests[1].Messages[0].Text()
 	if !strings.Contains(repairTask, "failed to parse") {
 		t.Errorf("repair prompt missing parse-failure note:\n%s", repairTask)
 	}
@@ -320,7 +320,7 @@ func TestRunJSON_ForcedFinalization(t *testing.T) {
 	}
 	// The finalization user message must have been injected.
 	lastMsg := finalReq.Messages[len(finalReq.Messages)-1]
-	if lastMsg.Role != llmkit.RoleUser || !strings.Contains(lastMsg.Content, "STOP investigating") {
+	if lastMsg.Role != llmkit.RoleUser || !strings.Contains(lastMsg.Text(), "STOP investigating") {
 		t.Errorf("finalization message missing; last message = %+v", lastMsg)
 	}
 }
@@ -861,8 +861,8 @@ func TestRunJSON_ValidationTriggersRepair(t *testing.T) {
 	}
 	// The repair prompt must mention the parse/shape failure so the model
 	// knows why its previous output was rejected.
-	if !strings.Contains(repairReq.Messages[0].Content, "failed to parse") {
-		t.Errorf("repair prompt missing parse-failure note:\n%s", repairReq.Messages[0].Content)
+	if !strings.Contains(repairReq.Messages[0].Text(), "failed to parse") {
+		t.Errorf("repair prompt missing parse-failure note:\n%s", repairReq.Messages[0].Text())
 	}
 	_ = out
 }
@@ -1237,8 +1237,8 @@ func TestRunJSON_DeepValidationTriggersRepair(t *testing.T) {
 		t.Fatalf("client calls = %d, want 2 (main + repair)", len(fc.requests))
 	}
 	// The repair prompt must name the enum violation so the model can fix it.
-	if !strings.Contains(fc.requests[1].Messages[0].Content, "allowed values") {
-		t.Errorf("repair prompt missing the enum-violation detail:\n%s", fc.requests[1].Messages[0].Content)
+	if !strings.Contains(fc.requests[1].Messages[0].Text(), "allowed values") {
+		t.Errorf("repair prompt missing the enum-violation detail:\n%s", fc.requests[1].Messages[0].Text())
 	}
 }
 
@@ -1364,7 +1364,7 @@ func TestRunJSON_EmptyTurnNudgeRecovers(t *testing.T) {
 	}
 	foundNudge := false
 	for _, m := range out.Messages {
-		if m.Role == llmkit.RoleUser && m.Content == emptyTurnNudge {
+		if m.Role == llmkit.RoleUser && m.Text() == emptyTurnNudge {
 			foundNudge = true
 		}
 	}
@@ -1400,7 +1400,7 @@ func TestRunJSON_EmptyTurnNudgeCapExhausted(t *testing.T) {
 	}
 	nudgeCount := 0
 	for _, m := range out.Messages {
-		if m.Role == llmkit.RoleUser && m.Content == emptyTurnNudge {
+		if m.Role == llmkit.RoleUser && m.Text() == emptyTurnNudge {
 			nudgeCount++
 		}
 	}
