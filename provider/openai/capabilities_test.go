@@ -54,8 +54,8 @@ func TestOpenAICapabilities_PerModel(t *testing.T) {
 		// gpt-4o family: 128k, prompt caching (post-Aug-2024 model).
 		{"gpt-4o", firstPartyWant(128_000, true, true, true, true)},
 		{"gpt-4o-mini-2024-07-18", firstPartyWant(128_000, true, true, true, true)},
-		// gpt-4-turbo / gpt-4 / gpt-4-32k: pre-caching, no structured
-		// outputs; only the 1106+ generations parallelize tool calls.
+		// gpt-4-turbo generation: 128k, parallel function calling since the
+		// 1106 refresh, but pre-caching and no structured outputs.
 		{"gpt-4-turbo", firstPartyWant(128_000, true, false, false, true)},
 		{"gpt-4-turbo-2024-04-09", firstPartyWant(128_000, true, false, false, true)},
 		{"gpt-4-turbo-preview", firstPartyWant(128_000, true, false, false, true)},
@@ -66,6 +66,9 @@ func TestOpenAICapabilities_PerModel(t *testing.T) {
 		{"gpt-4-0125-preview", firstPartyWant(128_000, true, false, false, true)},
 		{"gpt-4-1106-preview", firstPartyWant(128_000, true, false, false, true)},
 		{"gpt-4-1106-vision-preview", firstPartyWant(128_000, true, false, false, true)},
+		// Retired vision variant of the 1106 Turbo generation — its own key
+		// so it does not inherit the 8,192 gpt-4 entry.
+		{"gpt-4-vision-preview", firstPartyWant(128_000, true, false, false, true)},
 		{"gpt-4-32k", firstPartyWant(32_768, false, false, false, true)},
 		{"gpt-4-0613", firstPartyWant(8_192, false, false, false, true)},
 		{"gpt-3.5-turbo", firstPartyWant(16_385, true, false, false, true)},

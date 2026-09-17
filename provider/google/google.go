@@ -508,24 +508,25 @@ func (g *googleAdapter) normalizeErr(err error) error {
 	return llmkit.NewAPIError("google", 0, 0, llmkit.ErrServer, err.Error(), err)
 }
 
-// Sources (vendor docs consulted for this table):
+// Sources (vendor docs consulted for this table; every number comes from
+// the model's own spec page):
 //   - https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash-lite and
 //     the sibling 2.5 text-model pages — input token limit 1,048,576 for 2.5
 //     pro / flash / flash-lite; function calling, structured outputs,
 //     caching, and thinking all supported (verified on the flash-lite page).
 //   - https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash-image —
-//     the image-generation variant: input token limit 65,536; function
-//     calling, structured outputs, and thinking NOT supported. Explicitly
-//     listed so the text "gemini-2.5-flash" key cannot swallow it.
-//   - https://ai.google.dev/gemini-api/docs/speech-generation — TTS models
-//     take text in and produce audio only, with a 32k-token context limit;
-//     no function calling / structured output / thinking. Listed so the
-//     text entry cannot swallow gemini-2.5-flash-preview-tts.
-//   - The native-audio dialog models (e.g.
-//     gemini-2.5-flash-native-audio-preview-12-2025) are Live API models
-//     with a 128k context; they are not reachable through GenerateContent,
-//     so the entry pins the verified window with conservative feature
-//     bools — again so the text entry cannot swallow them.
+//     the image-generation variant: input token limit 65,536; caching,
+//     function calling, structured outputs, and thinking all NOT supported.
+//     Explicitly listed so the text "gemini-2.5-flash" key cannot swallow it.
+//   - https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash-preview-tts —
+//     input token limit 8,192; caching, function calling, structured
+//     outputs, and thinking all NOT supported (text in, audio out). Listed
+//     so the text entry cannot swallow it.
+//   - https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash-native-audio-preview-12-2025 —
+//     input token limit 131,072; function calling and thinking SUPPORTED;
+//     structured outputs and caching NOT supported. An audio-dialog
+//     generation (Live API-capable) — listed so the text entry cannot
+//     swallow it.
 //   - Gemini 1.5 / 2.0 model pages (now retired from the docs): 1.5-pro
 //     2,097,152 (the 002 refresh; 1M before), 1.5-flash and both 2.0 flash
 //     tiers 1,048,576. The 2.0/1.5 generations have no thinkingConfig —
@@ -535,11 +536,11 @@ func (g *googleAdapter) normalizeErr(err error) error {
 // The table is matched by LONGEST key with a "-" segment boundary
 // (adapter.MatchesModelFamily), so "gemini-2.5-flash-lite" and the
 // non-text variant keys win over "gemini-2.5-flash", while a mid-token
-// extension like "gemini-2.5-flashy" matches nothing. Structured output,
-// prompt caching (implicit server-side on 2.x; explicit context caching on
-// 1.5), image/document parts, stop sequences, top_p, top_k, and seed hold
-// for every TEXT entry and stay in the shared defaults; the non-text
-// variants pin StructuredOutput=false explicitly.
+// extension like "gemini-2.5-flashy" matches nothing. Image/document
+// parts, stop sequences, top_p, top_k, and seed hold for every entry and
+// stay in the shared defaults; window, thinking, tools, structured output,
+// and caching are stored per entry because the 2.5 flash non-text variants
+// genuinely differ.
 //
 // An unknown model reports ContextWindow 0 — unknown is never fabricated
 // into a number — with the API-level feature defaults; the server is the
@@ -551,23 +552,25 @@ type googleModelCaps struct {
 	thinking   bool
 	tools      bool // function calling supported at all
 	structured bool // responseMIMEType/JSON-schema structured output
+	caching    bool // context/prompt caching accepted
 }
 
 var googleModelTable = []googleModelCaps{
 	// Text generation models.
-	{"gemini-2.5-pro", 1_048_576, true, true, true},
-	{"gemini-2.5-flash", 1_048_576, true, true, true},
-	{"gemini-2.5-flash-lite", 1_048_576, true, true, true},
-	{"gemini-2.0-flash", 1_048_576, false, true, true},
-	{"gemini-2.0-flash-lite", 1_048_576, false, false, true},
-	{"gemini-1.5-pro", 2_097_152, false, true, true},
-	{"gemini-1.5-flash", 1_048_576, false, true, true},
+	{"gemini-2.5-pro", 1_048_576, true, true, true, true},
+	{"gemini-2.5-flash", 1_048_576, true, true, true, true},
+	{"gemini-2.5-flash-lite", 1_048_576, true, true, true, true},
+	{"gemini-2.0-flash", 1_048_576, false, true, true, true},
+	{"gemini-2.0-flash-lite", 1_048_576, false, false, true, true},
+	{"gemini-1.5-pro", 2_097_152, false, true, true, true},
+	{"gemini-1.5-flash", 1_048_576, false, true, true, true},
 	// Non-text variants of the 2.5 flash generation — pinned so the text
 	// entry above cannot swallow them (its Thinking=true is load-bearing:
-	// it gates thinkingConfig on the wire).
-	{"gemini-2.5-flash-image", 65_536, false, false, false},
-	{"gemini-2.5-flash-preview-tts", 32_768, false, false, false},
-	{"gemini-2.5-flash-native-audio", 128_000, false, false, false},
+	// it gates thinkingConfig on the wire). Facts are from each variant's
+	// own spec page, cited above.
+	{"gemini-2.5-flash-image", 65_536, false, false, false, false},
+	{"gemini-2.5-flash-preview-tts", 8_192, false, false, false, false},
+	{"gemini-2.5-flash-native-audio", 131_072, true, true, false, false},
 }
 
 func googleCapabilities(model string) llmkit.Capabilities {
@@ -593,6 +596,7 @@ func googleCapabilities(model string) llmkit.Capabilities {
 		caps.ParallelToolCalls = e.tools
 		caps.ToolChoice = e.tools
 		caps.StructuredOutput = e.structured
+		caps.PromptCaching = e.caching
 	}
 	return caps
 }

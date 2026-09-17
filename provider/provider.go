@@ -37,9 +37,14 @@ const (
 // wholesale — every field, including ContextWindow. Use it to pin exact
 // values for models the adapter's table doesn't know (adapters report
 // ContextWindow 0 for unknown models; llmkit never fabricates a window).
-// The override is plumbed into the adapter itself, so wire behavior
-// (synthetic structured-output tools, response_format, thinking config,
-// tool choice) follows the effective profile, not just the reported one.
+// The override is plumbed into the adapter itself, so wire behavior follows
+// the effective profile, not just the reported one — concretely: on a
+// profile with Thinking=false the thinking config is dropped silently; on a
+// profile with ToolChoice=false every explicit Request.ToolChoice mode is
+// rejected with ErrInvalidRequest before the wire call (auto stays
+// allowed); StructuredOutput=false gates response_format (OpenAI) and the
+// synthetic forced-output tool (Anthropic) off, and ParallelToolCalls=false
+// installs the tool-call serializer.
 //
 // Composition with StructuredOutput: the adapter's model table is applied
 // first, then a non-nil Capabilities replaces it wholesale, then a non-nil

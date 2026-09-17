@@ -548,6 +548,10 @@ var openAIModelTable = []openAIModelCaps{
 	// entry would swallow them via the "-" continuation.
 	{"gpt-4-0125", firstPartyCaps(128_000, true, false, false, true)},
 	{"gpt-4-1106", firstPartyCaps(128_000, true, false, false, true)},
+	// gpt-4-vision-preview: the retired vision variant of the 1106 Turbo
+	// generation (128k, parallel function calling) — without its own key it
+	// would inherit the 8,192 gpt-4 entry.
+	{"gpt-4-vision", firstPartyCaps(128_000, true, false, false, true)},
 	{"gpt-4-32k", firstPartyCaps(32_768, false, false, false, true)},
 	{"gpt-4", firstPartyCaps(8_192, false, false, false, true)},
 	{"gpt-3.5-turbo", firstPartyCaps(16_385, true, false, false, true)},
@@ -566,6 +570,7 @@ func openAICapabilities(model string) llmkit.Capabilities {
 	return firstPartyCaps(0, true, true, true, true)
 }
 
+// openAICompatibleCapabilities returns a conservative profile for arbitrary
 // OpenAI-compatible endpoints (Ollama/vLLM/Groq/etc.). We can't know the
 // backend's true capabilities, so we assume no parallel tool calls (the
 // degraded path serializes them) and no caching. The adapter still parses
