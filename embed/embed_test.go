@@ -499,7 +499,7 @@ func TestCachedEmbedder_Embed(t *testing.T) {
 		},
 	}
 
-	cached := NewCachedEmbedder(inner)
+	cached := NewCachedEmbedder(inner, 0)
 
 	// First call should hit the inner embedder.
 	result1, err := cached.Embed(context.Background(), "hello")
@@ -554,7 +554,7 @@ func TestCachedEmbedder_EmbedBatch(t *testing.T) {
 		},
 	}
 
-	cached := NewCachedEmbedder(inner)
+	cached := NewCachedEmbedder(inner, 0)
 
 	// First batch call.
 	results1, err := cached.EmbedBatch(context.Background(), []string{"a", "b", "c"})
@@ -592,7 +592,7 @@ func TestCachedEmbedder_EmbedBatch(t *testing.T) {
 
 func TestCachedEmbedder_EmbedBatch_Empty(t *testing.T) {
 	inner := &fakeEmbedder{dims: 2, model: "test-model"}
-	cached := NewCachedEmbedder(inner)
+	cached := NewCachedEmbedder(inner, 0)
 
 	results, err := cached.EmbedBatch(context.Background(), nil)
 	if err != nil {
@@ -612,7 +612,7 @@ func TestCachedEmbedder_Clear(t *testing.T) {
 		},
 	}
 
-	cached := NewCachedEmbedder(inner)
+	cached := NewCachedEmbedder(inner, 0)
 	cached.Embed(context.Background(), "hello")
 
 	if cached.Len() != 1 {
@@ -627,7 +627,7 @@ func TestCachedEmbedder_Clear(t *testing.T) {
 
 func TestCachedEmbedder_DelegatesMethods(t *testing.T) {
 	inner := &fakeEmbedder{dims: 384, model: "nomic-embed-text"}
-	cached := NewCachedEmbedder(inner)
+	cached := NewCachedEmbedder(inner, 0)
 
 	if cached.Dimensions() != 384 {
 		t.Errorf("Dimensions() = %d, want 384", cached.Dimensions())
@@ -769,7 +769,10 @@ func TestConfig_Validate(t *testing.T) {
 
 func TestLoadConfig_Defaults(t *testing.T) {
 	// Ensure no test env vars are set.
-	cfg := LoadConfig("LLMKIT_TEST_UNSET")
+	cfg, err := LoadConfig("LLMKIT_TEST_UNSET")
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
 	if cfg.Embedder != "ollama" {
 		t.Errorf("default Embedder = %q, want %q", cfg.Embedder, "ollama")
 	}
@@ -789,7 +792,10 @@ func TestLoadConfig_EnvOverrides(t *testing.T) {
 	t.Setenv("MYAPP_EMBED_DIMENSIONS", "1536")
 	t.Setenv("MYAPP_EMBED_CACHE", "true")
 
-	cfg := LoadConfig("MYAPP")
+	cfg, err := LoadConfig("MYAPP")
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
 
 	if cfg.Embedder != "openai-compatible" {
 		t.Errorf("Embedder = %q, want %q", cfg.Embedder, "openai-compatible")
@@ -812,11 +818,14 @@ func TestLoadConfig_EnvOverrides(t *testing.T) {
 }
 
 func TestLoadConfig_PrefixIsCaseInsensitive(t *testing.T) {
-	t.Setenv("KNOWN_EMBEDDER", "ollama")
-	t.Setenv("KNOWN_EMBED_MODEL", "nomic-embed-text")
-	t.Setenv("KNOWN_EMBED_URL", "http://localhost:11434")
+	t.Setenv("LLMKIT_EMBEDDER", "ollama")
+	t.Setenv("LLMKIT_EMBED_MODEL", "nomic-embed-text")
+	t.Setenv("LLMKIT_EMBED_URL", "http://localhost:11434")
 
-	cfg := LoadConfig("known") // lowercase prefix should work
+	cfg, err := LoadConfig("llmkit") // lowercase prefix should work
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
 
 	if cfg.Embedder != "ollama" {
 		t.Errorf("Embedder = %q, want ollama", cfg.Embedder)
