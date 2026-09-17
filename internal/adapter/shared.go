@@ -35,10 +35,13 @@ import (
 //     cache writes implicitly with no separate counter, so this field
 //     is 0 on those providers' Usage.
 //
-// (c) Default MaxTokens. Anthropic's API requires max_tokens; the
-//     adapter applies a floor of 4096 when req.MaxTokens <= 0 (see
-//     anthropicAdapter.buildParams). OpenAI and Google accept a 0/omitted
-//     cap, so no default is applied there.
+// (c) Default MaxTokens. Every adapter applies the same uniform rule:
+//     when req.MaxTokens is zero (or negative) it sends
+//     llmkit.DefaultMaxTokens (see llmkit/defaults.go) as the output cap —
+//     max_tokens on Anthropic (which requires it), max_completion_tokens on
+//     OpenAI, maxOutputTokens on Gemini. Explicit values pass through
+//     verbatim, so callers see one documented behavior instead of Anthropic
+//     forcing a floor while the others leave the cap unset.
 // ---------------------------------------------------------------------------
 
 // ParseToolParameters unmarshals a tool's JSON Schema and extracts the

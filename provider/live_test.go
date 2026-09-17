@@ -135,7 +135,7 @@ func TestLive_Complete(t *testing.T) {
 
 	resp, err := client.Complete(ctx, llmkit.Request{
 		System:    "You are a terse assistant. Answer in one short sentence.",
-		Messages:  []llmkit.Message{{Role: llmkit.RoleUser, Content: "Say hello."}},
+		Messages:  []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "Say hello.")},
 		MaxTokens: 64,
 	})
 	if err != nil {
@@ -175,11 +175,8 @@ func TestLive_ToolRoundTrip(t *testing.T) {
 
 	// Turn 1: demand the tool. Keep the prompt tiny but unambiguous.
 	first, err := client.Complete(ctx, llmkit.Request{
-		System: "You are a coding agent. To read a file you MUST call the read_file tool. Do not guess file contents.",
-		Messages: []llmkit.Message{{
-			Role:    llmkit.RoleUser,
-			Content: "Read the file named " + wantPath + " using the read_file tool, then tell me what it contains.",
-		}},
+		System:    "You are a coding agent. To read a file you MUST call the read_file tool. Do not guess file contents.",
+		Messages:  []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "Read the file named "+wantPath+" using the read_file tool, then tell me what it contains.")},
 		Tools:     []llmkit.ToolDef{readFile},
 		MaxTokens: 256,
 	})
@@ -213,12 +210,18 @@ func TestLive_ToolRoundTrip(t *testing.T) {
 	// assistant turn must echo the tool_use the model produced so the
 	// conversation is well-formed for the backend.
 	const fileBody = "service: bugbot\nversion: 1\n"
+	assistantEcho := llmkit.Message{Role: llmkit.RoleAssistant, ToolCalls: first.ToolCalls}
+	if first.Text != "" {
+		assistantEcho.Content = []llmkit.Block{{Kind: llmkit.BlockText, Text: first.Text}}
+	}
+	toolResult := llmkit.TextMessage(llmkit.RoleToolResult, fileBody)
+	toolResult.ToolCallID = call.ID
 	second, err := client.Complete(ctx, llmkit.Request{
 		System: "You are a coding agent.",
 		Messages: []llmkit.Message{
-			{Role: llmkit.RoleUser, Content: "Read the file named " + wantPath + " using the read_file tool, then tell me what it contains."},
-			{Role: llmkit.RoleAssistant, Content: first.Text, ToolCalls: first.ToolCalls},
-			{Role: llmkit.RoleToolResult, ToolCallID: call.ID, Content: fileBody},
+			llmkit.TextMessage(llmkit.RoleUser, "Read the file named "+wantPath+" using the read_file tool, then tell me what it contains."),
+			assistantEcho,
+			toolResult,
 		},
 		Tools:     []llmkit.ToolDef{readFile},
 		MaxTokens: 256,
@@ -246,7 +249,7 @@ func TestLive_UsageRecorded(t *testing.T) {
 	defer cancel()
 
 	if _, err := client.Complete(ctx, llmkit.Request{
-		Messages:  []llmkit.Message{{Role: llmkit.RoleUser, Content: "Reply with the single word: ok"}},
+		Messages:  []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "Reply with the single word: ok")},
 		MaxTokens: 16,
 	}); err != nil {
 		t.Fatalf("Complete: %v", err)

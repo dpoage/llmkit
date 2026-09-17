@@ -30,14 +30,19 @@ type anthropicAdapter struct {
 // the anthropic-beta: oauth-2025-04-20 header and must NOT also set x-api-key
 // (the Anthropic API rejects requests that carry both credentials).
 //
+// Capabilities, when non-nil, REPLACES the adapter's model-table profile
+// wholesale (all fields, including ContextWindow). nil = model-table default.
+//
 // StructuredOutput, when non-nil, overrides the adapter's built-in default
-// (true). nil = adapter default.
+// (true) — applied after Capabilities, so it wins over an override that
+// carries the field. nil = default.
 type Options struct {
 	APIKey     string
 	AuthToken  string       // OAuth bearer token; mutually exclusive with APIKey
 	BaseURL    string       // optional; for testing or proxies
 	HTTPClient *http.Client // optional; for testing (httptest)
 
+	Capabilities     *llmkit.Capabilities
 	StructuredOutput *bool
 }
 
@@ -80,6 +85,10 @@ func New(model string, opts Options) llmkit.Client {
 		reqOpts = append(reqOpts, option.WithHTTPClient(opts.HTTPClient))
 	}
 	caps := anthropicCapabilities(model)
+	if opts.Capabilities != nil {
+		// Caller-provided profile replaces the model table wholesale.
+		caps = *opts.Capabilities
+	}
 	if opts.StructuredOutput != nil {
 		caps.StructuredOutput = *opts.StructuredOutput
 	}
@@ -123,7 +132,8 @@ func (a *anthropicAdapter) Complete(ctx context.Context, req llmkit.Request) (ll
 func (a *anthropicAdapter) buildParams(req llmkit.Request) (anthropic.MessageNewParams, error) {
 	maxTokens := int64(req.MaxTokens)
 	if maxTokens <= 0 {
-		maxTokens = 4096
+		// Anthropic requires max_tokens; the uniform default applies.
+		maxTokens = llmkit.DefaultMaxTokens
 	}
 
 	params := anthropic.MessageNewParams{
@@ -138,8 +148,11 @@ func (a *anthropicAdapter) buildParams(req llmkit.Request) (anthropic.MessageNew
 	}
 
 	// Extended thinking. The budget rides through verbatim; Anthropic
-	// enforces budget < MaxTokens and its 1024 floor server-side.
-	if req.Thinking != nil {
+	// enforces budget < MaxTokens and its 1024 floor server-side. Gated on
+	// the capability profile: extended thinking exists only on Claude 3.7+
+	// (see anthropicCapabilities), and the documented contract for a false
+	// feature is a silent drop rather than a server 400.
+	if req.Thinking != nil && a.caps.Thinking {
 		if req.Thinking.BudgetTokens <= 0 {
 			return anthropic.MessageNewParams{}, llmkit.NewAPIError("anthropic", 0, 0,
 				llmkit.ErrInvalidRequest, "Thinking.BudgetTokens must be positive", nil)
@@ -179,11 +192,18 @@ func (a *anthropicAdapter) buildParams(req llmkit.Request) (anthropic.MessageNew
 		params.Tools = tools
 	}
 
-	// Request-level tool choice is validated UNCONDITIONALLY — an unknown
-	// mode or a missing Name must error even when a schema below forces the
-	// synthetic tool. The synthetic forcing then overwrites whatever was
-	// mapped: a structured-output request is meaningless without the forced
-	// tool call, so it keeps precedence over req.ToolChoice.
+	// Capability gate first: a profile with ToolChoice=false must reject
+	// every explicit mode before the wire call (dropping "none" would
+	// escalate permissions; dropping "required"/"tool" would silently
+	// degrade). Request-level tool choice is then validated UNCONDITIONALLY
+	// — an unknown mode or a missing Name must error even when a schema
+	// below forces the synthetic tool. The synthetic forcing then overwrites
+	// whatever was mapped: a structured-output request is meaningless
+	// without the forced tool call, so it keeps precedence over
+	// req.ToolChoice.
+	if err := adapter.GateToolChoice("anthropic", req.ToolChoice, a.caps.ToolChoice); err != nil {
+		return anthropic.MessageNewParams{}, err
+	}
 	if err := applyAnthropicToolChoice(&params, req.ToolChoice); err != nil {
 		return anthropic.MessageNewParams{}, err
 	}
@@ -585,7 +605,14 @@ func mapAnthropicStop(sr anthropic.StopReason) llmkit.StopReason {
 	case anthropic.StopReasonRefusal:
 		return llmkit.StopRefusal
 	default:
-		return llmkit.StopEndTurn
+		// Catch-all per llmkit.StopError's contract. This includes
+		// pause_turn: a server-paused turn is NOT a natural completion, and
+		// reporting StopEndTurn made an agent loop treat it as one. The raw
+		// provider reason is not exposed on llmkit.Response, so a caller
+		// seeing StopError should treat the step as failed — surface it and
+		// re-issue the request if continuing matters — never assume the
+		// conversation reached a natural end.
+		return llmkit.StopError
 	}
 }
 
@@ -599,15 +626,59 @@ func (a *anthropicAdapter) normalizeErr(err error) error {
 	return llmkit.NewAPIError("anthropic", 0, 0, llmkit.ErrServer, err.Error(), err)
 }
 
+// Sources (vendor docs consulted for this table):
+//   - https://platform.claude.com/docs/en/about-claude/models/overview and
+//     the per-model overview pages — context windows: 1M for the Opus 4.6 /
+//     4.7 / 4.8 and Sonnet 4.6 generations; 200k for Opus 4.1 / 4.5, Sonnet
+//     4.5, Haiku 4.5, and the whole 3.x line (Opus 4.5 / Sonnet 4.x can
+//     reach 1M only behind the context-1m beta header, which this adapter
+//     does not send, so 200k is the honest number for requests this adapter
+//     can make);
+//   - https://platform.claude.com/docs/en/build-with-claude/prompt-caching —
+//     prompt caching is supported on all active Claude models;
+//   - https://platform.claude.com/docs/en/build-with-claude/extended-thinking —
+//     extended thinking requires Claude 3.7 Sonnet or newer.
+//
+// Keys name exactly the generations the cited docs verify, and matching
+// (adapter.MatchesModelFamily) requires a "-" segment boundary, so an
+// unverified future ID such as "claude-opus-4-9" reports ContextWindow 0
+// instead of inheriting a stale window. The retired 4.0 generation
+// (claude-opus-4 / claude-sonnet-4, deprecated 2026-06) is deliberately
+// unlisted: the API rejects those IDs outright, and unknown reports 0 rather
+// than resurrecting a stale window. Pin exact values for unknown models via
+// Options.Capabilities.
+//
+// Only the fields that genuinely vary by model are stored per entry;
+// everything else is shared (parallel tool calls, prompt caching,
+// synthetic-tool structured output, tool choice, images, documents, stop
+// sequences, top_p, and top_k are supported across the 3+ families; there
+// is no seed parameter).
+type anthropicModelCaps struct {
+	prefix   string
+	window   int
+	thinking bool
+}
+
+var anthropicModelTable = []anthropicModelCaps{
+	{"claude-opus-4-8", 1_000_000, true},
+	{"claude-opus-4-7", 1_000_000, true},
+	{"claude-opus-4-6", 1_000_000, true},
+	{"claude-sonnet-4-6", 1_000_000, true},
+	{"claude-opus-4-5", 200_000, true},
+	{"claude-opus-4-1", 200_000, true},
+	{"claude-sonnet-4-5", 200_000, true},
+	{"claude-haiku-4-5", 200_000, true},
+	{"claude-3-7-sonnet", 200_000, true},
+	{"claude-3-5-sonnet", 200_000, false},
+	{"claude-3-5-haiku", 200_000, false},
+	{"claude-3-opus", 200_000, false},
+	{"claude-3-sonnet", 200_000, false},
+	{"claude-3-haiku", 200_000, false},
+}
+
 func anthropicCapabilities(model string) llmkit.Capabilities {
-	// Anthropic models support parallel tool calls, prompt caching, and
-	// structured output. Context window varies; 200k is a safe floor for the
-	// 4.x family and beyond. Thinking, tool choice, image/document blocks,
-	// stop sequences, top_p, and top_k are all honored; there is no seed
-	// parameter. The model parameter is accepted for symmetry with the
-	// other capability constructors.
-	return llmkit.Capabilities{
-		ContextWindow:     200_000,
+	caps := llmkit.Capabilities{
+		ContextWindow:     0, // unknown until the table matches
 		ParallelToolCalls: true,
 		PromptCaching:     true,
 		StructuredOutput:  true,
@@ -620,4 +691,11 @@ func anthropicCapabilities(model string) llmkit.Capabilities {
 		TopK:              true,
 		Seed:              false,
 	}
+	best := adapter.BestMatchingFamily(model, anthropicModelTable, func(e anthropicModelCaps) string { return e.prefix })
+	if best >= 0 {
+		e := anthropicModelTable[best]
+		caps.ContextWindow = e.window
+		caps.Thinking = e.thinking
+	}
+	return caps
 }

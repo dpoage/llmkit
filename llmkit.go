@@ -212,11 +212,17 @@ type Request struct {
 	// System is an optional system prompt. It is kept separate from Messages so
 	// adapters can route it to the provider's dedicated system field.
 	System string
-	// Messages is the ordered conversation. It must not be empty.
+	// Messages is the ordered conversation. It must not be empty. An inline
+	// RoleSystem message is honored, but where it lands on the wire differs:
+	// OpenAI keeps it as a system-role entry in place; Anthropic and Gemini
+	// have no system role inside the message list, so it is sent as a user
+	// turn (Request.System is the reliable system channel).
 	Messages []Message
 	// Tools is the set of tools the model may call. May be empty.
 	Tools []ToolDef
-	// MaxTokens caps output tokens. If zero, the adapter applies a sane default.
+	// MaxTokens caps output tokens. If zero (or negative), every adapter
+	// applies the same default: llmkit.DefaultMaxTokens. An explicit value is
+	// passed through verbatim.
 	MaxTokens int
 	// Temperature is the sampling temperature. Nil means "use the provider
 	// default" (some models reject an explicit temperature). Use a pointer so
@@ -227,8 +233,13 @@ type Request struct {
 	// = false.
 	Thinking *ThinkingConfig
 	// ToolChoice steers tool use. Zero value = auto (never sent on the wire).
-	// Adapters that cannot express a mode reject the request with an error
-	// wrapping ErrInvalidRequest rather than silently ignoring it.
+	// Two rejection paths wrap ErrInvalidRequest rather than silently
+	// ignoring the request: an adapter that cannot express a mode, and —
+	// enforced by every adapter before the wire call — a model whose
+	// Capabilities.ToolChoice is false receives an error for any explicit
+	// mode (auto stays allowed). Dropping an explicit "none" would let the
+	// model call tools the caller tried to forbid, so it is refused, not
+	// ignored.
 	ToolChoice ToolChoice
 	// StopSequences makes the model stop when it generates any of these
 	// strings (a matching provider reports StopEndTurn).
@@ -267,7 +278,8 @@ const (
 	// StopMaxTokens: output was truncated at the token limit.
 	StopMaxTokens StopReason = "max_tokens"
 	// StopRefusal: the model declined the request on policy grounds
-	// (Anthropic stop_reason "refusal").
+	// (Anthropic stop_reason "refusal"; a non-empty OpenAI message.refusal,
+	// surfaced as the response text).
 	StopRefusal StopReason = "refusal"
 	// StopContentFilter: output was blocked by a provider safety filter
 	// (OpenAI finish_reason "content_filter", Gemini SAFETY/RECITATION/
@@ -347,8 +359,11 @@ type Response struct {
 // sniffing the provider type. The bools name features a Request can ask for;
 // a false feature is silently dropped by the adapter (see each field).
 type Capabilities struct {
-	// ContextWindow is the model's maximum input+output token window. Zero means
-	// unknown (e.g. an arbitrary OpenAI-compatible endpoint).
+	// ContextWindow is the model's maximum input+output token window. Zero
+	// means unknown: adapters report 0 for any model outside their per-model
+	// table (on every provider, never a fabricated fallback number) and for
+	// arbitrary OpenAI-compatible endpoints. Pin a value for such models via
+	// provider.Spec.Capabilities.
 	ContextWindow int
 	// ParallelToolCalls reports whether the model may return more than one tool
 	// call in a single response.
