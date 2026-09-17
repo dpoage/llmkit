@@ -108,12 +108,6 @@ func (h *hookRecorder) hooks() Hooks {
 	}
 }
 
-func (h *hookRecorder) eventCount() int {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return len(h.events)
-}
-
 // bigResultTool returns a fixed multi-kilobyte result, large enough to trip a
 // small history-token budget.
 type bigResultTool struct{ name string }

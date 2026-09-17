@@ -42,7 +42,7 @@ func TestOllamaEmbedder_Embed(t *testing.T) {
 			Embeddings: [][]float64{want},
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
@@ -87,13 +87,13 @@ func TestOllamaEmbedder_EmbedBatch(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req ollamaRequest
-		json.NewDecoder(r.Body).Decode(&req)
+		_ = json.NewDecoder(r.Body).Decode(&req)
 
 		resp := ollamaResponse{
 			Model:      "nomic-embed-text",
 			Embeddings: embeddings,
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
@@ -143,7 +143,7 @@ func TestOllamaEmbedder_EmbedBatch_Empty(t *testing.T) {
 func TestOllamaEmbedder_HTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte(`{"error": "model not found"}`))
+		_, _ = w.Write([]byte(`{"error": "model not found"}`))
 	}))
 	defer srv.Close()
 
@@ -249,7 +249,7 @@ func TestOpenAIEmbedder_Embed(t *testing.T) {
 		}
 
 		var req openaiRequest
-		json.NewDecoder(r.Body).Decode(&req)
+		_ = json.NewDecoder(r.Body).Decode(&req)
 		if req.Model != "text-embedding-3-small" {
 			t.Errorf("expected model text-embedding-3-small, got %s", req.Model)
 		}
@@ -263,7 +263,7 @@ func TestOpenAIEmbedder_Embed(t *testing.T) {
 				{Embedding: want, Index: 0},
 			},
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
@@ -302,7 +302,7 @@ func TestOpenAIEmbedder_Embed(t *testing.T) {
 func TestOpenAIEmbedder_EmbedBatch(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req openaiRequest
-		json.NewDecoder(r.Body).Decode(&req)
+		_ = json.NewDecoder(r.Body).Decode(&req)
 
 		data := make([]openaiEmbedding, len(req.Input))
 		for i := range req.Input {
@@ -316,7 +316,7 @@ func TestOpenAIEmbedder_EmbedBatch(t *testing.T) {
 			Model: "text-embedding-3-small",
 			Data:  data,
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
@@ -351,7 +351,7 @@ func TestOpenAIEmbedder_EmbedBatch_UnorderedResponse(t *testing.T) {
 				{Embedding: []float64{0.5}, Index: 1},
 			},
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
@@ -408,7 +408,7 @@ func TestOpenAIEmbedder_APIError(t *testing.T) {
 				Type:    "invalid_request_error",
 			},
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
@@ -430,7 +430,7 @@ func TestOpenAIEmbedder_APIError(t *testing.T) {
 func TestOpenAIEmbedder_HTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`{"error": {"message": "invalid api key"}}`))
+		_, _ = w.Write([]byte(`{"error": {"message": "invalid api key"}}`))
 	}))
 	defer srv.Close()
 
@@ -460,7 +460,7 @@ func TestOpenAIEmbedder_NoAuthHeader_WithoutAPIKey(t *testing.T) {
 				{Embedding: []float64{0.1}, Index: 0},
 			},
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
@@ -613,7 +613,7 @@ func TestCachedEmbedder_Clear(t *testing.T) {
 	}
 
 	cached := NewCachedEmbedder(inner, 0)
-	cached.Embed(context.Background(), "hello")
+	_, _ = cached.Embed(context.Background(), "hello")
 
 	if cached.Len() != 1 {
 		t.Fatalf("cache Len() = %d, want 1", cached.Len())
