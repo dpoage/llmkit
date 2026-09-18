@@ -29,6 +29,24 @@
 //     and records the calls it receives, so callers can be tested without a
 //     real container runtime or bwrap.
 //
+// # Capability probes
+//
+// Before planning work against an unfamiliar sandbox, a caller can measure
+// what it can actually run: ProbeCapabilities executes the caller's
+// []ProbeEntry table (each entry names a capability, supplies the argv that
+// measures it, and interprets the probe's exit code/stdout into named
+// modes) inside the sandbox and returns the result as a CapabilitySet,
+// cached per process. The kit ships no probe entries — what to probe and
+// how to interpret it is entirely the caller's knowledge; this package
+// only runs the argv and caches the answers.
+//
+// # Backend conformance
+//
+// Every backend must give a Result the same shape semantics (exit codes,
+// InfraKilled/KillReason, Captured, truncation flags); conformance_test.go
+// runs one shared case table through Mock and, under the integration tag,
+// through Bwrap and CLI to pin that contract.
+
 // # Security posture
 //
 // Because the commands executed here originate from an LLM and run against
