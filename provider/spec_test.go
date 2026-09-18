@@ -4,11 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/dpoage/llmkit"
 )
@@ -144,51 +145,110 @@ func TestNew_RejectsOAuthOnNonAnthropic(t *testing.T) {
 	}
 }
 
+// zeroDialTransport counts DialContext attempts on an *http.Transport,
+// proving a refusal path never touches the network even against an
+// unroutable BaseURL that would otherwise hang the test if dialed.
+type zeroDialTransport struct {
+	dials int
+}
+
+func (z *zeroDialTransport) dialContext(_ context.Context, _, _ string) (net.Conn, error) {
+	z.dials++
+	return nil, errors.New("zeroDialTransport: dial attempted")
+}
+
+func (z *zeroDialTransport) client() *http.Client {
+	return &http.Client{Transport: &http.Transport{DialContext: z.dialContext}}
+}
+
 // TestNew_RejectsEmptySecret pins the required-Secret contract: Secret is
-// the resolved credential, so an empty or whitespace-only value is a caller
-// bug. New must refuse it for every Type with an error wrapping
-// ErrInvalidRequest — uniformly, because the adapters disagree on empty
-// secrets (ambient-env fallback, empty Bearer, hard error) — and the error
-// must never echo the secret. The unroutable BaseURL plus the elapsed-time
-// bound prove the refusal returns before any network activity.
+// the resolved credential, so an empty or whitespace-only value is a
+// caller bug. New must refuse it for every Type with an error wrapping
+// ErrInvalidRequest — uniformly, because the adapters disagree on a bare
+// empty Secret (Anthropic overrides an ambient env key with an empty
+// x-api-key or hard-errors with no env key at all, OpenAI sends no auth
+// header, Google fails inside genai construction) — and the error must
+// never echo the secret. The zero-dial transport proves the refusal
+// returns before any network activity, even against an unroutable
+// BaseURL. Message invariance (not a per-secret substring check, which is
+// vacuous for a secret like " " that trivially matches ordinary prose)
+// proves the error text cannot carry the secret's bytes.
 func TestNew_RejectsEmptySecret(t *testing.T) {
+	secrets := []string{"", " ", "   ", "\t", "\n", "\t\n", " \t \n "}
 	for _, typ := range []Type{TypeAnthropic, TypeOpenAI, TypeOpenAICompatible, TypeGoogle} {
-		for _, secret := range []string{"", "   ", "\t\n"} {
-			t.Run(string(typ)+"/"+fmt.Sprintf("%q", secret), func(t *testing.T) {
-				spec := Spec{Type: typ, Model: "test-model", Secret: secret, BaseURL: "http://10.255.255.1:1"}
-				start := time.Now()
-				client, err := New(context.Background(), spec, Options{})
-				if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
-					t.Fatalf("New took %s; a refusal path must not touch the network", elapsed)
+		t.Run(string(typ), func(t *testing.T) {
+			messages := make([]string, len(secrets))
+			for i, secret := range secrets {
+				t.Run(fmt.Sprintf("%q", secret), func(t *testing.T) {
+					z := &zeroDialTransport{}
+					spec := Spec{Type: typ, Model: "test-model", Secret: secret, BaseURL: "http://10.255.255.1:1"}
+					client, err := New(context.Background(), spec, Options{HTTPClient: z.client()})
+					if z.dials != 0 {
+						t.Fatalf("New dialed %d time(s); a refusal path must not touch the network", z.dials)
+					}
+					if client != nil {
+						t.Fatal("New returned a client for an empty Secret")
+					}
+					if !errors.Is(err, llmkit.ErrInvalidRequest) {
+						t.Fatalf("error = %v, want ErrInvalidRequest", err)
+					}
+					if !strings.Contains(err.Error(), "secret") {
+						t.Errorf("error %q must name the field", err)
+					}
+					messages[i] = err.Error()
+				})
+			}
+			for i := 1; i < len(messages); i++ {
+				if messages[i] != messages[0] {
+					t.Errorf("error for secret %q = %q, want byte-identical to the error for %q (%q) — the message must not vary with the secret's content", secrets[i], messages[i], secrets[0], messages[0])
 				}
-				if client != nil {
-					t.Fatal("New returned a client for an empty Secret")
-				}
-				if !errors.Is(err, llmkit.ErrInvalidRequest) {
-					t.Errorf("error = %v, want ErrInvalidRequest", err)
-				}
-				if !strings.Contains(err.Error(), "secret") {
-					t.Errorf("error %q must name the field", err)
-				}
-				if secret != "" && strings.Contains(err.Error(), secret) {
-					t.Errorf("error %q must not echo the secret", err)
-				}
-			})
-		}
+			}
+		})
+	}
+}
+
+// TestNew_RejectsSecretWithSurroundingWhitespace pins the trimmed-Secret
+// contract: a Secret that differs from its own strings.TrimSpace — e.g.
+// "sk-abc\n", exactly the shape `cat`/`pass` produce — must be refused
+// before any adapter is built. Left unchecked this shape passes every
+// adapter's own validation and only fails net/http's header-value check
+// on the first wire attempt, after the full retry budget elapses.
+func TestNew_RejectsSecretWithSurroundingWhitespace(t *testing.T) {
+	for _, secret := range []string{"sk-abc\n", " sk-abc", "sk-abc ", "sk-abc\t", "\tsk-abc\n"} {
+		t.Run(fmt.Sprintf("%q", secret), func(t *testing.T) {
+			z := &zeroDialTransport{}
+			spec := Spec{Type: TypeOpenAI, Model: "test-model", Secret: secret, BaseURL: "http://10.255.255.1:1"}
+			client, err := New(context.Background(), spec, Options{HTTPClient: z.client()})
+			if z.dials != 0 {
+				t.Fatalf("New dialed %d time(s); a refusal path must not touch the network", z.dials)
+			}
+			if client != nil {
+				t.Fatal("New returned a client for a Secret with surrounding whitespace")
+			}
+			if !errors.Is(err, llmkit.ErrInvalidRequest) {
+				t.Fatalf("error = %v, want ErrInvalidRequest", err)
+			}
+			if !strings.Contains(err.Error(), "secret") {
+				t.Errorf("error %q must name the field", err)
+			}
+			if strings.Contains(err.Error(), "sk-abc") {
+				t.Errorf("error %q must not echo the secret", err)
+			}
+		})
 	}
 }
 
 // TestNew_RejectsOpenAICompatibleEmptyBaseURL pins the BaseURL rule: an
 // openai-compatible Type with an empty BaseURL would silently target the
 // first-party OpenAI host, so New refuses it with ErrInvalidRequest and a
-// message saying the endpoint must be given. The elapsed-time bound proves
-// the refusal returns before any dial could begin.
+// message saying the endpoint must be given. The zero-dial transport
+// proves the refusal returns before any dial could begin.
 func TestNew_RejectsOpenAICompatibleEmptyBaseURL(t *testing.T) {
+	z := &zeroDialTransport{}
 	spec := Spec{Type: TypeOpenAICompatible, Model: "test-model", Secret: "k"}
-	start := time.Now()
-	client, err := New(context.Background(), spec, Options{})
-	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
-		t.Fatalf("New took %s; a refusal path must not touch the network", elapsed)
+	client, err := New(context.Background(), spec, Options{HTTPClient: z.client()})
+	if z.dials != 0 {
+		t.Fatalf("New dialed %d time(s); a refusal path must not touch the network", z.dials)
 	}
 	if client != nil {
 		t.Fatal("New returned a client for an openai-compatible Spec with an empty BaseURL")
@@ -225,6 +285,64 @@ func TestNew_BaseURLRules(t *testing.T) {
 			}
 			if client == nil {
 				t.Fatal("New returned a nil client")
+			}
+		})
+	}
+}
+
+// hostCapturingTransport records the resolved request URL then fails the
+// round trip immediately, so a test binds a Type's vendor-default host
+// with no real network I/O.
+type hostCapturingTransport struct {
+	mu  sync.Mutex
+	url *url.URL
+}
+
+func (t *hostCapturingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.mu.Lock()
+	t.url = req.URL
+	t.mu.Unlock()
+	return nil, errors.New("hostCapturingTransport: no network")
+}
+
+func (t *hostCapturingTransport) observed() *url.URL {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.url
+}
+
+// TestNew_VendorHosts pins the vendor-default endpoint each Type resolves
+// to with an empty spec.BaseURL — the claim the package godoc makes. It
+// binds a RoundTripper and reads the resolved req.URL instead of trusting
+// the godoc prose, so an SDK bump that silently changes the default host
+// fails this test rather than only being caught by reading source.
+// Retry is capped at one attempt: the transport always fails the round
+// trip, and the shared retry wrapper would otherwise spend several
+// seconds backing off a failure this test induces on purpose.
+func TestNew_VendorHosts(t *testing.T) {
+	for _, tc := range []struct {
+		typ  Type
+		host string
+	}{
+		{TypeAnthropic, "api.anthropic.com"},
+		{TypeOpenAI, "api.openai.com"},
+		{TypeGoogle, "generativelanguage.googleapis.com"},
+	} {
+		t.Run(string(tc.typ), func(t *testing.T) {
+			rt := &hostCapturingTransport{}
+			spec := Spec{Type: tc.typ, Model: "test-model", Secret: "k"}
+			opts := Options{HTTPClient: &http.Client{Transport: rt}, Retry: llmkit.RetryConfig{MaxAttempts: 1}}
+			client, err := New(context.Background(), spec, opts)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			_, _ = client.Complete(context.Background(), simpleRequest())
+			u := rt.observed()
+			if u == nil {
+				t.Fatal("no request observed; the adapter never reached the transport")
+			}
+			if u.Host != tc.host {
+				t.Errorf("resolved host = %q, want %q", u.Host, tc.host)
 			}
 		})
 	}

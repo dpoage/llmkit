@@ -15,10 +15,11 @@ import (
 //
 //	LLMKIT_PROVIDER  required; anthropic | openai | openai-compatible | google
 //	LLMKIT_MODEL     required; the model identifier
-//	LLMKIT_API_KEY   required; the provider API key
+//	LLMKIT_API_KEY   required; the provider API key (any placeholder for a local endpoint)
 //	LLMKIT_BASE_URL  required for openai-compatible, optional otherwise; for testing, proxies, and self-hosted gateways
 //
-// When a required variable is missing or the provider name is unknown, the
+// When a required variable is missing, the provider name is unknown, or
+// LLMKIT_BASE_URL is missing for the openai-compatible provider, the
 // returned error carries the usage string the caller passed in, so each
 // example prints instructions for itself.
 func Load(usage string) (provider.Spec, error) {
@@ -33,6 +34,9 @@ func Load(usage string) (provider.Spec, error) {
 	typ, err := provider.ParseType(os.Getenv("LLMKIT_PROVIDER"))
 	if err != nil {
 		return provider.Spec{}, fmt.Errorf("%w\n\n%s", err, usage)
+	}
+	if typ == provider.TypeOpenAICompatible && spec.BaseURL == "" {
+		return provider.Spec{}, errors.New(usage)
 	}
 	spec.Type = typ
 	return spec, nil
