@@ -68,6 +68,7 @@ go build ./...
 go vet ./...
 go vet -tags live ./provider/      # the `live` real-API probe must keep compiling
 go vet -tags integration ./embed/  # the `integration` Ollama test must keep compiling
+go vet -tags integration ./sandbox/ # the sandbox integration test must keep compiling
 go test -race -count=1 ./...
 golangci-lint run ./...            # config: .golangci.yml (v2 schema, conservative set)
 gofmt -l .                         # must print nothing
@@ -76,7 +77,10 @@ The tag-gated suites RUN (not just compile) outside CI, when their
 backends exist: `go test -tags live ./provider/` exercises the real-API
 probe and skips itself unless the `LLM_LIVE_*` environment variables are
 set; `go test -tags integration ./embed/` needs a local Ollama (default
-localhost:11434).
+localhost:11434); `go test -tags integration ./sandbox/` needs bwrap
+(`bubblewrap` on Linux) and/or a container runtime (podman/docker) — each
+test auto-skips when its backend is missing, and CI runs the suite in the
+dedicated `sandbox-integration` job.
 
 `examples/` are runnable contract checks (also compiled by
 `go build ./...`): `go run ./examples/basic`, `go run ./examples/agent`,
@@ -106,6 +110,17 @@ accident.
   max-tokens continuation stitching, JSONL transcripts + offline
   `ReplayClient`, schema-constrained `RunJSON`, and the synchronous
   `Hooks` observer surface.
+- **`llmkit/sandbox`** — isolated execution of untrusted, model-generated
+  commands against repo snapshots: one
+  `Sandbox.Exec(ctx, Spec) (Result, error)` over the Bubblewrap backend
+  (Linux, unprivileged user namespaces), a container CLI backend
+  (podman/docker), and a scriptable `Mock` (plus `HostExec`, the documented
+  no-isolation attended escape hatch that no kit default or example
+  constructs). Workspace materialization with symlink-hardened writes,
+  capped output capture, and a shared idle/growth-ceiling watchdog;
+  standard library plus golang.org/x/sys (the reflink fast path). Path
+  containment for agent tools lives in the
+  sibling `fsroot` package.
 - **`llmkit/embed`** — `Embedder` interface with Ollama and
   OpenAI-compatible HTTP backends (retry, batching, timeouts) plus the
   content-hash `CachedEmbedder` decorator.
