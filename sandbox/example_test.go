@@ -27,14 +27,14 @@ func ExampleNewBwrap() {
 		fmt.Println(ready)
 		return
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }() // best-effort example cleanup
 
 	repo, err := os.MkdirTemp("", "llmkit-example-")
 	if err != nil {
 		fmt.Println(ready)
 		return
 	}
-	defer os.RemoveAll(repo)
+	defer func() { _ = os.RemoveAll(repo) }() // best-effort example cleanup
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
