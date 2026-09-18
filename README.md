@@ -69,8 +69,8 @@ plain completion with content blocks and capability gating (`basic`), a
 tool-calling agent with hooks (`agent`), schema-constrained output via
 `RunJSONAs` (`structured`), and a multi-turn chat REPL on `Run(...,
 Continue(prev))` (`chat`). All four read
-`LLMKIT_PROVIDER`/`LLMKIT_MODEL`/`LLMKIT_API_KEY` (plus optional
-`LLMKIT_BASE_URL`) and print a usage message instead of touching the
+`LLMKIT_PROVIDER`/`LLMKIT_MODEL`/`LLMKIT_API_KEY` (`LLMKIT_BASE_URL` required for
+openai-compatible, optional otherwise) and print a usage message instead of touching the
 network when the environment is unset:
 
 ```bash

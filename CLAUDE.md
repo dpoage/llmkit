@@ -87,7 +87,7 @@ dedicated `sandbox-integration` job.
 `go run ./examples/structured`, `go run ./examples/chat`. All four no-op with
 a usage message and
 exit 1 unless `LLMKIT_PROVIDER`, `LLMKIT_MODEL`, and `LLMKIT_API_KEY` are
-set (`LLMKIT_BASE_URL` optional), so they never touch the network by
+set (`LLMKIT_BASE_URL` required for openai-compatible, optional otherwise), so they never touch the network by
 accident.
 
 ## Architecture Overview
