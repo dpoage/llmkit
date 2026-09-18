@@ -15,7 +15,7 @@ import (
 
 // Runner drives an [llmkit.Client] through a tool-call loop. Construct one per
 // agent role with that role's system prompt and tool set, then call
-// [Runner.Run], [Runner.RunContinue], or [Runner.RunJSON] per task.
+// [Runner.Run], [Runner.RunJSON], or [Runner.RunJSONAs] per task.
 //
 // A Runner is safe for concurrent use: every field is fixed at construction,
 // and all mutable state (conversation, transcript, budget accounting,
@@ -112,10 +112,15 @@ func NewRunner(client llmkit.Client, tools []Tool, systemPrompt string, opts ...
 // the system prompt and the task as a user message, then repeatedly calls the
 // model and executes any requested tools until the model finishes its turn, a
 // limit is hit, or an infrastructure error occurs.
+
+// Pass [Continue] to run the task inside a prior conversation instead of a
+// fresh one.
 //
-// Limit exhaustion is not an error: it returns an [Outcome] with Truncated set
-// and the last assistant text preserved. Only context cancellation and
-// client/IO failures return a non-nil error. The returned Outcome's Transcript
+// Limit exhaustion is not an error: it returns an [Outcome] with a non-empty
+// [Outcome.TruncationReason] and the last assistant text preserved. Only
+// context cancellation, client/IO failures, or [StopReasonError] return a
+// non-nil error. The
+// returned Outcome's Transcript
 // is always non-nil, even on error, capturing whatever happened before the
 // failure.
 //
@@ -126,56 +131,69 @@ func NewRunner(client llmkit.Client, tools []Tool, systemPrompt string, opts ...
 // applies to plain Run, not only RunJSON: a truncated final answer is completed
 // rather than returned half-written. It costs at most one additional completion
 // per truncated turn and is reflected in the Outcome's Iterations and Usage.
-func (r *Runner) Run(ctx context.Context, task string) (*Outcome, error) {
-	return r.run(ctx, nil, task, "", nil)
+func (r *Runner) Run(ctx context.Context, task string, opts ...RunOption) (*Outcome, error) {
+	var cfg runConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	return r.run(ctx, cfg.seed, task, "", nil)
 }
 
-// RunContinue behaves exactly like [Runner.Run] except it CONTINUES a prior
-// conversation instead of reseeding one: prev.Messages (the Messages field of
-// an earlier Run/RunContinue call's Outcome, on this same Runner) becomes the
-// starting history, and task is appended as a NEW user turn rather than
-// becoming the conversation's sole seed message. A nil prev, or a prev with no
-// Messages, degrades to plain reseeding — identical to Run — so a first-turn
-// caller can use this method unconditionally without a nil check.
+// RunOption is a per-call option for [Runner.Run], [Runner.RunJSON], and
+// [Runner.RunJSONAs]. Options apply in order; a later option wins.
+type RunOption func(*runConfig)
+
+// runConfig carries the resolved per-call options. It is unexported so new
+// options never widen the exported surface.
+type runConfig struct {
+	// seed, when non-empty, continues this conversation instead of reseeding
+	// one; see [Continue].
+	seed []llmkit.Message
+}
+
+// Continue makes the run CONTINUE a prior conversation instead of reseeding
+// one: prev.Messages (the Messages field of an earlier Run/RunJSON call's
+// Outcome on this same Runner) becomes the starting history, and task is
+// appended as a NEW user turn rather than becoming the conversation's sole
+// seed message. A nil prev, or a prev with no Messages, degrades to plain
+// reseeding — identical to a run without Continue — so a first-turn caller
+// can pass it unconditionally without a nil check.
 //
-// The same-Runner contract from [Runner.RunJSONContinue] applies: prev must
-// come from a run of THIS Runner — the system prompt and the tool set must
-// match the seed — and Limits apply per call: WithLimits iteration and token
-// budgets are re-armed fresh for each RunContinue (a [BudgetPool] via
-// [Limits.BudgetCheck] already spans runs).
+// The same-Runner contract: prev must come from a run of THIS Runner — the
+// system prompt and the tool set must match the seed — and Limits apply per
+// call: iteration and token budgets are re-armed fresh for each continued run
+// (a [BudgetPool] via [Limits.BudgetCheck] already spans runs).
 //
 // If the seed's final assistant turn carries tool calls that were never
 // answered (the history a context-cancelled run returns), that trailing turn
 // is dropped before the run starts — see [trimDanglingToolTurn] — so the wire
-// request is always well-formed.
-//
-// Trimming can leave two consecutive user turns on the wire (the cancelled
-// tool turn is dropped whole, so nothing answers between them), and a seed
-// ending with the empty-turn nudge does the same; the in-tree adapters send
-// consecutive user messages as-is and the providers accept or coalesce them.
+// request is always well-formed. Trimming can leave two consecutive user
+// turns on the wire (the cancelled tool turn is dropped whole, so nothing
+// answers between them); the in-tree adapters send consecutive user messages
+// as-is and the providers accept or coalesce them.
 //
 // Like Run, there is no context-window management: a caller driving a long
 // conversation must bound the history itself, using the client's
 // [llmkit.Capabilities].ContextWindow and [EstimateHistoryTokens]. There is
 // likewise no streaming and no persistence across processes.
 //
-// When an earlier call returned [ErrStopReason] (model refusal/safety stop),
-// the attached err.Outcome may be threaded back in here: the refusal turn
-// stays in the history and the conversation proceeds from it.
-func (r *Runner) RunContinue(ctx context.Context, prev *Outcome, task string) (*Outcome, error) {
-	var seed []llmkit.Message
-	if prev != nil {
-		seed = prev.Messages
+// When an earlier call returned [StopReasonError] (model refusal/safety
+// stop), the attached err.Outcome may be threaded back in here: the refusal
+// turn stays in the history and the conversation proceeds from it.
+func Continue(prev *Outcome) RunOption {
+	return func(c *runConfig) {
+		if prev != nil {
+			c.seed = prev.Messages
+		}
 	}
-	return r.run(ctx, seed, task, "", nil)
 }
 
-// run is the shared loop body. seed, when non-nil, is a prior conversation to
-// continue: task is appended as a NEW user turn onto seed instead of becoming
-// the conversation's sole seed message. Run passes seed == nil (reseed every
-// call); [Runner.RunJSONContinue] and [Runner.RunContinue] pass a prior
-// Outcome's Messages (nil or empty degrades to reseeding) so the next round
-// lands in the SAME conversation as the one that produced it. Before the task
+// run is the shared loop body. seed, when non-empty, is a prior conversation
+// to continue: task is appended as a NEW user turn onto seed instead of
+// becoming the conversation's sole seed message. Run and RunJSON pass seed ==
+// nil (reseed every call); [Continue] seeds a prior Outcome's Messages so the
+// next round lands in the SAME conversation as the one that produced it.
+// Before the task
 // is appended, a seed whose trailing assistant turn carries unanswered tool
 // calls is trimmed — see [trimDanglingToolTurn].
 //
@@ -228,7 +246,7 @@ func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task, finalizeP
 	outcome := &Outcome{Transcript: tr}
 	// Snapshot the conversation into the Outcome on every return path (clean
 	// finish, truncation, or error) so a caller that wants to continue this
-	// conversation (RunJSONContinue) always has the latest history available,
+	// conversation ([Continue]) always has the latest history available,
 	// even from a truncated or erroring run. messages is reassigned (not just
 	// mutated) throughout the loop below; the deferred closure reads it by
 	// reference at return time, not at defer-registration time.
@@ -331,7 +349,7 @@ func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task, finalizeP
 				resp.StopReason == llmkit.StopRefusal ||
 				resp.StopReason == llmkit.StopContentFilter {
 				tr.closeStream()
-				return outcome, &ErrStopReason{StopReason: resp.StopReason, Text: resp.Text, Outcome: outcome}
+				return outcome, &StopReasonError{StopReason: resp.StopReason, Text: resp.Text, Outcome: outcome}
 			}
 			// A turn with no tool call and no visible text once reasoning
 			// <think> blocks are stripped is not a real answer — it's an
@@ -462,7 +480,7 @@ func (r *Runner) finalizeAndTruncate(
 	responseSchema json.RawMessage,
 	compactThreshold int64,
 	toolNameByID map[string]string,
-	reason string,
+	reason TruncationReason,
 ) error {
 	if finalizePrompt == "" || outcome.Finalized {
 		return nil
@@ -882,15 +900,9 @@ func (r *Runner) overBudget(u llmkit.Usage) bool {
 	return u.ChargeableTokens(r.limits.CacheReadWeight) > r.limits.TokenBudget
 }
 
-// finishTruncated marks the outcome as a clean partial result. reason MUST be
-// one of the Trunc* constants and non-empty; passing an empty reason panics to
-// surface a programming error at the call site rather than silently producing
-// an Outcome that violates the Truncated→TruncationReason invariant.
-func (r *Runner) finishTruncated(o *Outcome, reason string) {
-	if reason == "" {
-		panic("agent: finishTruncated called with empty reason — callers must pass a Trunc* constant")
-	}
-	o.Truncated = true
+// finishTruncated marks the outcome as a clean partial result: reason records
+// the stop condition in Outcome.TruncationReason.
+func (r *Runner) finishTruncated(o *Outcome, reason TruncationReason) {
 	o.TruncationReason = reason
 }
 

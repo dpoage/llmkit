@@ -31,12 +31,13 @@ var ErrUnparseableOutput = errors.New("model output did not parse as JSON")
 // round-trip — sending the precise error back and asking for valid JSON only —
 // before failing.
 //
-// Every call reseeds the conversation from scratch (task becomes the sole
-// seed message) — this is the right default for the single-shot callers
-// that dominate real usage. A caller driving a multi-round
-// revision loop that wants round N+1 to remember round N's investigation
-// should use [Runner.RunJSONContinue] instead; RunJSON's behavior and cost
-// profile are unchanged by that method's existence.
+// By default every call reseeds the conversation from scratch (task becomes
+// the sole seed message) — the right default for the single-shot callers that
+// dominate real usage. Pass [Continue] to make round N+1's feedback land in
+// the SAME conversation as round N's tool-driven investigation, instead of
+// discarding that investigation and asking the model to re-orient from a
+// truncated summary alone; maybeCompact bounds a continued history exactly as
+// it bounds a single run's — no separate summarizer is introduced.
 //
 // schema is a JSON Schema (raw JSON) describing the expected shape. It is
 // threaded natively as llmkit.Request.ResponseSchema (capability-gated: when the
@@ -52,37 +53,27 @@ var ErrUnparseableOutput = errors.New("model output did not parse as JSON")
 // err is nil. If the run truncates before producing parseable JSON, or the
 // repair round-trip still fails, err is non-nil but the Outcome is still
 // returned for inspection.
-func (r *Runner) RunJSON(ctx context.Context, task string, schema json.RawMessage, out any) (*Outcome, error) {
-	return r.runJSON(ctx, nil, task, schema, out)
-}
-
-// RunJSONContinue behaves exactly like [Runner.RunJSON] except it CONTINUES a
-// prior conversation instead of reseeding one: prev.Messages (the Messages
-// field of an earlier RunJSON/RunJSONContinue call's Outcome, on this same
-// Runner) becomes the starting history, and task is appended as a NEW
-// user turn rather than becoming the conversation's sole seed message. A nil
-// prev, or a prev with no Messages, degrades to plain reseeding — identical
-// to RunJSON — so a first-round caller can use this method unconditionally
-// without a nil check.
-//
-// This is the opt-in continuation entry point: it exists so a multi-round
-// revision loop can have round N+1's
-// feedback land in the SAME conversation as round N's tool-driven
-// investigation, instead of discarding that investigation and asking the
-// model to re-orient from a truncated summary alone. maybeCompact still
-// bounds the continued history exactly as it does within a single run — no
-// separate summarizer is introduced here.
-func (r *Runner) RunJSONContinue(ctx context.Context, prev *Outcome, task string, schema json.RawMessage, out any) (*Outcome, error) {
-	var seed []llmkit.Message
-	if prev != nil {
-		seed = prev.Messages
+func (r *Runner) RunJSON(ctx context.Context, task string, schema json.RawMessage, out any, opts ...RunOption) (*Outcome, error) {
+	var cfg runConfig
+	for _, opt := range opts {
+		opt(&cfg)
 	}
-	return r.runJSON(ctx, seed, task, schema, out)
+	return r.runJSON(ctx, cfg.seed, task, schema, out)
 }
 
-// runJSON is the shared implementation behind RunJSON and RunJSONContinue.
-// seed is nil for RunJSON (reseed) or a prior Outcome's Messages for
-// RunJSONContinue (continue).
+// RunJSONAs is [Runner.RunJSON] with the schema derived from T via [SchemaOf]
+// and the validated answer unmarshaled into a fresh T. Everything else —
+// prompt embedding, capability-gated native structured output, the single
+// repair round-trip, [Continue], truncation semantics — behaves exactly as in
+// RunJSON; the T parameter replaces the hand-written schema/out pointer pair.
+func RunJSONAs[T any](ctx context.Context, r *Runner, task string, opts ...RunOption) (T, *Outcome, error) {
+	var out T
+	outcome, err := r.RunJSON(ctx, task, SchemaOf[T](), &out, opts...)
+	return out, outcome, err
+}
+
+// runJSON is the shared implementation behind RunJSON. seed is nil (reseed
+// every call) or a prior Outcome's Messages ([Continue]).
 func (r *Runner) runJSON(ctx context.Context, seed []llmkit.Message, task string, schema json.RawMessage, out any) (*Outcome, error) {
 	prompt := task + "\n\n" + jsonInstruction(schema)
 
@@ -129,8 +120,7 @@ func (r *Runner) runJSON(ctx context.Context, seed []llmkit.Message, task string
 	// output must keep its budget TruncationReason so the caller classifies it as
 	// a budget stop, not a parse failure. Skipping the repair here
 	// also preserves the budget overshoot bound (no extra post-exhaustion call).
-	if outcome.Truncated &&
-		(outcome.TruncationReason == TruncTokenBudget || outcome.TruncationReason == TruncBudgetPool) {
+	if outcome.TruncationReason == TruncTokenBudget || outcome.TruncationReason == TruncBudgetPool {
 		return outcome, fmt.Errorf("agent: %w%s: %w",
 			ErrUnparseableOutput, truncationNote(outcome), perr)
 	}
@@ -159,7 +149,7 @@ func (r *Runner) runJSON(ctx context.Context, seed []llmkit.Message, task string
 	// (see [Runner.repair]), not outcome.messages, so it never sees — and
 	// therefore repairOutcome.Messages never carries — the run's investigation.
 	// Propagate the pre-repair conversation onto repairOutcome regardless of
-	// how repair turns out, so a caller chaining RunJSONContinue after a round
+	// how repair turns out, so a caller chaining [Continue] after a round
 	// that needed repair still continues from the real investigation instead
 	// of an empty history.
 	repairOutcome.Messages = outcome.Messages

@@ -1,8 +1,9 @@
 // Command structured demonstrates schema-constrained output with the
-// llmkit/agent harness: Runner.RunJSON drives the tool loop with a JSON
-// Schema, validates the model's answer against it, and unmarshals it into a
-// Go struct (with one repair round-trip on failure). It doubles as a
-// compile-time contract check for the RunJSON surface.
+// llmkit/agent harness: agent.RunJSONAs[book] drives the tool loop with a
+// schema derived from the Go type via agent.SchemaOf, validates the model's
+// answer against it, and unmarshals it into book (with one repair round-trip
+// on failure). It doubles as a compile-time contract check for the
+// RunJSONAs/SchemaOf surface.
 //
 // Usage:
 //
@@ -28,23 +29,15 @@ import (
 	"github.com/dpoage/llmkit/provider"
 )
 
-// book is the shape the final answer must have. The schema below mirrors it.
+// book is the shape the final answer must have; agent.SchemaOf derives the
+// JSON Schema from these fields and tags. No field has omitempty, so all
+// three are required; unknown keys are rejected; title/author must be
+// non-empty and publication_year at least 1000.
 type book struct {
-	Title           string `json:"title"`
-	Author          string `json:"author"`
-	PublicationYear int    `json:"publication_year"`
+	Title           string `json:"title" jsonschema:"minLength=1"`
+	Author          string `json:"author" jsonschema:"minLength=1"`
+	PublicationYear int    `json:"publication_year" jsonschema:"minimum=1000"`
 }
-
-var bookSchema = json.RawMessage(`{
-  "type": "object",
-  "properties": {
-    "title":            {"type": "string", "minLength": 1},
-    "author":           {"type": "string", "minLength": 1},
-    "publication_year": {"type": "integer", "minimum": 1000}
-  },
-  "required": ["title", "author", "publication_year"],
-  "additionalProperties": false
-}`)
 
 func main() {
 	if err := run(); err != nil {
@@ -75,16 +68,15 @@ set the variables above, then re-run:
 		return fmt.Errorf("build client: %w", err)
 	}
 
-	// No tools: the run is a single schema-bearing completion. RunJSON
-	// attaches bookSchema to the request when the client reports
-	// StructuredOutput capability, and deep-validates the answer either way
-	// before unmarshaling into out.
+	// No tools: the run is a single schema-bearing completion. RunJSONAs
+	// derives the schema from book (see above), attaches it to the request
+	// when the client reports StructuredOutput capability, and deep-validates
+	// the answer either way before unmarshaling into a fresh book.
 	runner := agent.NewRunner(client, nil,
 		"You are a precise reference assistant. Answer only in JSON matching the requested schema.",
 		agent.WithMaxTokens(1024))
 
-	var out book
-	outcome, err := runner.RunJSON(context.Background(), *task, bookSchema, &out)
+	out, outcome, err := agent.RunJSONAs[book](context.Background(), runner, *task)
 	if err != nil {
 		return fmt.Errorf("runjson: %w", err)
 	}

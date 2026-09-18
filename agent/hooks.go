@@ -68,7 +68,7 @@ type Hooks struct {
 	// Repair fires at the start of a RunJSON repair pass.
 	Repair func(ctx context.Context)
 	// Finalize fires when the reserved forced-finalization turn is taken.
-	Finalize func(ctx context.Context, reason string)
+	Finalize func(ctx context.Context, reason TruncationReason)
 	// TranscriptError fires on transcript streaming open/encode/write failures.
 	TranscriptError func(err error)
 }

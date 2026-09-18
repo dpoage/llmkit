@@ -445,10 +445,7 @@ func TestRunner_ConcurrentRunsDistinctTranscripts(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			out, err := r.Run(context.Background(), "task")
-			if err == nil {
-				err = out.Validate()
-			}
+			_, err := r.Run(context.Background(), "task")
 			errs[i] = err
 		}(i)
 	}

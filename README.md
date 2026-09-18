@@ -29,10 +29,12 @@ Shared LLM tooling extracted from `bugbot`, `known`, and `go-research`.
 - **`llmkit/agent`** — tool-calling harness over `llmkit.Client`: `Runner` with
   iteration/token budgets, history compaction, forced finalization,
   max-tokens continuation stitching, JSONL transcripts with offline
-  `ReplayClient`, schema-constrained `RunJSON`, synchronous lifecycle
-  `Hooks`, per-tool timeouts, and optional parallel tool dispatch. Tools
-  implement `Tool{Def, Run}`; tool errors feed back to the model, infra
-  failures surface via `ToolHealthError`. Origin: `bugbot/internal/agent`
+  `ReplayClient`, schema derivation from Go types (`SchemaOf`/`Func`,
+  feeding `RunJSON`/`RunJSONAs`), multi-turn continuation via the
+  `Continue` run option, synchronous lifecycle `Hooks`, per-tool timeouts,
+  and optional parallel tool dispatch. Tools implement `Tool{Def, Run}` or
+  come from `Func`; tool errors feed back to the model, infra failures
+  surface via `ToolHealthError`. Origin: `bugbot/internal/agent`
   (harness only; bugbot's concrete tools stay in bugbot).
 
 - **`embed`** — `Embedder` interface with Ollama and OpenAI-compatible HTTP
@@ -45,8 +47,8 @@ Shared LLM tooling extracted from `bugbot`, `known`, and `go-research`.
 `examples/` contains four runnable programs, one per major surface: a
 plain completion with content blocks and capability gating (`basic`), a
 tool-calling agent with hooks (`agent`), schema-constrained output via
-`RunJSON` (`structured`), and a multi-turn chat REPL on `RunContinue`
-(`chat`). All four read
+`RunJSONAs` (`structured`), and a multi-turn chat REPL on `Run(...,
+Continue(prev))` (`chat`). All four read
 `LLMKIT_PROVIDER`/`LLMKIT_MODEL`/`LLMKIT_API_KEY` (plus optional
 `LLMKIT_BASE_URL`) and print a usage message instead of touching the
 network when the environment is unset:
