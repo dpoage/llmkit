@@ -23,15 +23,6 @@ var mapSchemaForTest = json.RawMessage(`{
   "additionalProperties":false
 }`)
 
-func mustUnmarshalSchema(t *testing.T, raw string) map[string]any {
-	t.Helper()
-	var m map[string]any
-	if err := json.Unmarshal([]byte(raw), &m); err != nil {
-		t.Fatalf("unmarshal schema: %v", err)
-	}
-	return m
-}
-
 func childMap(t *testing.T, m map[string]any, key string) map[string]any {
 	t.Helper()
 	c, ok := m[key].(map[string]any)

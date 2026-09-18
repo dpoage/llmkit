@@ -111,7 +111,7 @@ func TestOllamaEmbedder_RetryOn5xx_ThenSuccess(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if calls.Add(1) == 1 {
 			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte("transient"))
+			_, _ = w.Write([]byte("transient"))
 			return
 		}
 		jsonEncode(w, ollamaResponse{Model: "m", Embeddings: [][]float64{{0.1, 0.2}}})
@@ -140,7 +140,7 @@ func TestOllamaEmbedder_RetryGivesUpAfterMaxAttempts(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		w.WriteHeader(http.StatusBadGateway)
-		w.Write([]byte("down"))
+		_, _ = w.Write([]byte("down"))
 	}))
 	defer srv.Close()
 
@@ -163,7 +163,7 @@ func TestOllamaEmbedder_NoRetryOn400(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`{"error":"bad request"}`))
+		_, _ = w.Write([]byte(`{"error":"bad request"}`))
 	}))
 	defer srv.Close()
 
@@ -398,7 +398,7 @@ func TestOllamaEmbedder_EmbedBatch_ChunkFailureFailsWholeCall(t *testing.T) {
 			return
 		}
 		var req ollamaRequest
-		decodeBody(r, &req)
+		_ = decodeBody(r, &req)
 		texts := anyToStrings(req.Input)
 		embs := make([][]float64, len(texts))
 		for i := range texts {
@@ -509,9 +509,9 @@ func TestCachedEmbedder_ConcurrentAccess(t *testing.T) {
 			for i := 0; i < iters; i++ {
 				key := fmt.Sprintf("text-%d", (g*i)%10)
 				if i%3 == 0 {
-					c.EmbedBatch(context.Background(), []string{key, fmt.Sprintf("b-%d", i%5)})
+					_, _ = c.EmbedBatch(context.Background(), []string{key, fmt.Sprintf("b-%d", i%5)})
 				} else {
-					c.Embed(context.Background(), key)
+					_, _ = c.Embed(context.Background(), key)
 				}
 				if i%25 == 0 {
 					_ = c.Stats()
@@ -798,7 +798,7 @@ func TestConfig_Validate_Negatives(t *testing.T) {
 // jsonEncode writes v as a JSON response body.
 func jsonEncode(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(v)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 // decodeBody decodes r's JSON body into v.

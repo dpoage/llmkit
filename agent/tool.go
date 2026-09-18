@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/dpoage/llmkit"
 )
@@ -50,25 +49,6 @@ func toolError(err error) string {
 func UnmarshalArgs(raw json.RawMessage, dst any) error {
 	if err := json.Unmarshal(raw, dst); err != nil {
 		return fmt.Errorf("invalid arguments: %w", err)
-	}
-	return nil
-}
-
-// requireField returns an error if val (trimmed) is empty. name is the
-// human-readable field name that appears in the error message.
-func requireField(name, val string) error {
-	if strings.TrimSpace(val) == "" {
-		return fmt.Errorf("%s is required", name)
-	}
-	return nil
-}
-
-// requireLineNumber returns an error if n is less than 1. The error message
-// follows the convention established by the existing tools ("line must be a
-// 1-based line number").
-func requireLineNumber(n int) error {
-	if n < 1 {
-		return fmt.Errorf("line must be a 1-based line number, got %d", n)
 	}
 	return nil
 }

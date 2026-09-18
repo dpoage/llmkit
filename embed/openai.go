@@ -153,7 +153,7 @@ func (o *OpenAICompatibleEmbedder) doEmbed(ctx context.Context, texts []string) 
 	if err != nil {
 		return nil, fmt.Errorf("openai-compatible: request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {

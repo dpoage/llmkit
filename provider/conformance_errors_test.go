@@ -57,7 +57,7 @@ func TestConformance_ErrorNormalization_ContextTooLong413(t *testing.T) {
 		t.Run(f.name, func(t *testing.T) {
 			err := completeExpectingError(t, f, http.StatusRequestEntityTooLarge,
 				errorBody(f.name, http.StatusRequestEntityTooLarge, "request too large"), nil)
-			mustBeAPIError(t, err, f, llmkit.ErrContextTooLong, http.StatusRequestEntityTooLarge)
+			_ = mustBeAPIError(t, err, f, llmkit.ErrContextTooLong, http.StatusRequestEntityTooLarge)
 		})
 	}
 }
@@ -83,7 +83,7 @@ func TestConformance_ErrorNormalization_ContextTooLong400Heuristic(t *testing.T)
 			t.Run(f.name+"/"+tc.name, func(t *testing.T) {
 				err := completeExpectingError(t, f, http.StatusBadRequest,
 					errorBody(f.name, http.StatusBadRequest, tc.message), nil)
-				mustBeAPIError(t, err, f, tc.kind, http.StatusBadRequest)
+				_ = mustBeAPIError(t, err, f, tc.kind, http.StatusBadRequest)
 			})
 		}
 	}
@@ -96,7 +96,7 @@ func TestConformance_ErrorNormalization_Server500(t *testing.T) {
 		t.Run(f.name, func(t *testing.T) {
 			err := completeExpectingError(t, f, http.StatusInternalServerError,
 				errorBody(f.name, http.StatusInternalServerError, "internal error"), nil)
-			mustBeAPIError(t, err, f, llmkit.ErrServer, http.StatusInternalServerError)
+			_ = mustBeAPIError(t, err, f, llmkit.ErrServer, http.StatusInternalServerError)
 		})
 	}
 }
@@ -108,7 +108,7 @@ func TestConformance_ErrorNormalization_Overloaded529(t *testing.T) {
 		t.Run(f.name, func(t *testing.T) {
 			err := completeExpectingError(t, f, 529,
 				errorBody(f.name, 529, "overloaded"), nil)
-			mustBeAPIError(t, err, f, llmkit.ErrOverloaded, 529)
+			_ = mustBeAPIError(t, err, f, llmkit.ErrOverloaded, 529)
 		})
 	}
 }

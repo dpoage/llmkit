@@ -136,7 +136,7 @@ func (o *OllamaEmbedder) doEmbed(ctx context.Context, input any) ([][]float32, e
 	if err != nil {
 		return nil, fmt.Errorf("ollama: request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
