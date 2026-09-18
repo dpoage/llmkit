@@ -47,6 +47,14 @@ Shared LLM tooling extracted from `bugbot`, `known`, and `go-research`.
   containment for agent tools lives in the
   sibling `fsroot` package. Origin: `bugbot/internal/sandbox`.
 
+- **`llmkit/fsroot`** — tool-anchored path containment for agent tools:
+  `NewFSRoot(dir)` + `Resolve(rel)` reject absolute paths, `..` escapes, and
+  symlink escapes (checked via the longest existing prefix), returning
+  `ErrPathEscape`; `EvalExistingPrefixPath` is the shared symlink-resolution
+  helper. Deliberately separate from `sandbox`'s post-exec workspace write
+  hardening (different threat model). Standard library only. Origin:
+  `bugbot/internal/agenttools/{fsroot,pathutil}.go`.
+
 - **`embed`** — `Embedder` interface with Ollama and OpenAI-compatible HTTP
   backends plus an in-memory caching decorator. Local ONNX inference (hugot)
   intentionally NOT included — it drags the ONNX/GoMLX dependency tree;

@@ -121,6 +121,11 @@ accident.
   standard library plus golang.org/x/sys (the reflink fast path). Path
   containment for agent tools lives in the
   sibling `fsroot` package.
+- **`llmkit/fsroot`** — tool-anchored path containment for agent tools:
+  `NewFSRoot(dir)` + `Resolve(rel)` reject absolute paths, `..` escapes, and
+  symlink escapes (longest-existing-prefix check), returning `ErrPathEscape`;
+  `EvalExistingPrefixPath` is the shared helper. Deliberately separate from
+  `sandbox`'s post-exec workspace write hardening (different threat model).
 - **`llmkit/embed`** — `Embedder` interface with Ollama and
   OpenAI-compatible HTTP backends (retry, batching, timeouts) plus the
   content-hash `CachedEmbedder` decorator.
