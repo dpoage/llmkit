@@ -230,6 +230,51 @@ func TestSchemaOf_RecursiveTypePanics(t *testing.T) {
 	})
 }
 
+// cyclicKey is comparable and self-cyclic, usable as a map key: invopop's
+// reflectMap never reflects the key type, so the cycle is schema-invisible
+// and must be accepted.
+type cyclicKey struct {
+	Next *cyclicKey `json:"next,omitempty"`
+}
+
+// inlineDoublePtr hides its cycle behind a json:",inline" field two pointer
+// levels deep: invopop unwraps exactly one level, sees a non-struct, and
+// drops the field — so must the walker.
+type inlineDoublePtr struct {
+	Name string            `json:"name"`
+	Self **inlineDoublePtr `json:",inline"`
+}
+
+func TestSchemaOf_UnreflectedShapesAccepted(t *testing.T) {
+	t.Run("map key cycle", func(t *testing.T) {
+		type byKey struct {
+			Roots map[cyclicKey]string `json:"roots"`
+		}
+		doc := decodeSchema(t, SchemaOf[byKey]())
+		props := doc["properties"].(map[string]any)
+		roots := props["roots"].(map[string]any)
+		ap, ok := roots["additionalProperties"].(map[string]any)
+		if !ok || ap["type"] != "string" {
+			t.Errorf("map schema = %v, want additionalProperties carrying the VALUE (string) schema — the cyclic key type must never be reflected", roots)
+		}
+		if ap != nil {
+			if _, hasCycle := ap["$ref"]; hasCycle {
+				t.Errorf("map schema = %v, want no cycle reaching the schema", roots)
+			}
+		}
+	})
+	t.Run("inline double pointer", func(t *testing.T) {
+		doc := decodeSchema(t, SchemaOf[inlineDoublePtr]())
+		props, ok := doc["properties"].(map[string]any)
+		if !ok {
+			t.Fatalf("schema = %v, want a properties object", doc)
+		}
+		if len(props) != 1 {
+			t.Errorf("schema properties = %v, want exactly {name} — the **T inline field must be dropped like invopop drops it", props)
+		}
+	})
+}
+
 func TestSchemaOf_SkippedCycleAccepted(t *testing.T) {
 	s := SchemaOf[skippedCycleStruct]()
 	doc := decodeSchema(t, s)

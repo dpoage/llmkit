@@ -115,7 +115,9 @@ func assertAcyclic(root, t reflect.Type, onPath map[reflect.Type]bool) {
 	case reflect.Slice, reflect.Array:
 		assertAcyclic(root, t.Elem(), onPath)
 	case reflect.Map:
-		assertAcyclic(root, t.Key(), onPath)
+		// Values only: invopop's reflectMap (reflect.go:434-443) inspects
+		// t.Key().Kind() but never reflects the key type, so a cycle behind
+		// a map key is invisible to the reflector and must be accepted here.
 		assertAcyclic(root, t.Elem(), onPath)
 	}
 }
@@ -137,6 +139,9 @@ func assertAcyclic(root, t reflect.Type, onPath map[reflect.Type]bool) {
 //   - a non-anonymous unexported field gets no schema name — skip;
 //   - everything else recurses fully, including an anonymous non-struct
 //     type, which invopop reflects as a property named after the type.
+//
+// "Pointer-to-struct" means exactly ONE pointer level unwrapped — invopop
+// inspects f.Type or f.Type.Elem() only, so **S is dropped, not embedded.
 func schemaFieldVisited(f reflect.StructField) bool {
 	jsonTags := strings.Split(f.Tag.Get("json"), ",")
 	if jsonTags[0] == "-" {
@@ -145,16 +150,16 @@ func schemaFieldVisited(f reflect.StructField) bool {
 	if strings.Split(f.Tag.Get("jsonschema"), ",")[0] == "-" {
 		return false
 	}
-	unwrapped := f.Type
-	for unwrapped.Kind() == reflect.Pointer {
-		unwrapped = unwrapped.Elem()
+	ft := f.Type
+	if ft.Kind() == reflect.Pointer {
+		ft = ft.Elem()
 	}
-	if f.Anonymous && jsonTags[0] == "" && unwrapped.Kind() == reflect.Struct {
+	if f.Anonymous && jsonTags[0] == "" && ft.Kind() == reflect.Struct {
 		return true
 	}
 	for _, tag := range jsonTags[1:] {
 		if tag == "inline" {
-			return unwrapped.Kind() == reflect.Struct
+			return ft.Kind() == reflect.Struct
 		}
 	}
 	return f.Anonymous || f.PkgPath == ""
