@@ -153,6 +153,21 @@ func (r *Runner) runJSON(ctx context.Context, seed []llmkit.Message, task string
 	// that needed repair still continues from the real investigation instead
 	// of an empty history.
 	repairOutcome.Messages = outcome.Messages
+	// repairOutcome is a FRESH Outcome (see [Runner.repair]): it only knows
+	// about its own completion, so without this fold the caller would lose the
+	// original run's truncation signal and undercount the round's cost. Carry
+	// the original run's TruncationReason/Finalized through and make
+	// Usage/Iterations cumulative; LastStopReason keeps reflecting the repair
+	// completion itself (set by completeOnce), so a caller distinguishing
+	// "repair output cut off at the token cap" from a genuine parse failure
+	// still can.
+	repairOutcome.TruncationReason = outcome.TruncationReason
+	repairOutcome.Finalized = outcome.Finalized
+	repairOutcome.Iterations += outcome.Iterations
+	repairOutcome.Usage.InputTokens += outcome.Usage.InputTokens
+	repairOutcome.Usage.OutputTokens += outcome.Usage.OutputTokens
+	repairOutcome.Usage.CacheReadInputTokens += outcome.Usage.CacheReadInputTokens
+	repairOutcome.Usage.CacheCreationInputTokens += outcome.Usage.CacheCreationInputTokens
 	if rerr != nil {
 		return repairOutcome, rerr
 	}

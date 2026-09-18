@@ -132,8 +132,10 @@ accident.
 - **`llmkit/embed`** — `Embedder` interface with Ollama and
   OpenAI-compatible HTTP backends (retry, batching, timeouts) plus the
   content-hash `CachedEmbedder` decorator.
-- **`examples/`** — one runnable program per major surface (single
-  completion + blocks/capabilities; agent loop + hooks; RunJSON).
+- **`examples/`** — one runnable program per major surface: `basic` (single
+  completion + blocks/capabilities), `agent` (agent loop + hooks),
+  `structured` (`RunJSONAs` schema-constrained output), `chat` (multi-turn
+  REPL continued via the `Continue` run option).
 
 ## Conventions & Patterns
 

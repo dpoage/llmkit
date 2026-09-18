@@ -263,6 +263,17 @@ func TestRunJSON_RepairAppendsToStreamedTranscript(t *testing.T) {
 	if len(out.Transcript.Events) != 4 {
 		t.Errorf("in-memory Transcript.Events = %d, want 4 (main run + repair)", len(out.Transcript.Events))
 	}
+	// A repair on a NON-truncated run must leave the truncation fields alone:
+	// only the original run's state folds through, and there is none here.
+	if out.TruncationReason != "" {
+		t.Errorf("TruncationReason = %q, want empty (run never truncated)", out.TruncationReason)
+	}
+	if out.Finalized {
+		t.Error("Outcome.Finalized = true, want false (no finalization on this run)")
+	}
+	if out.LastStopReason != llmkit.StopEndTurn {
+		t.Errorf("LastStopReason = %q, want %q (the repair completion's stop reason)", out.LastStopReason, llmkit.StopEndTurn)
+	}
 }
 
 func TestRunJSON_RepairFails(t *testing.T) {
@@ -326,7 +337,10 @@ func TestRunJSON_ForcedFinalization(t *testing.T) {
 
 // TestRunJSON_ForcedFinalizationFiresOnce confirms finalization is attempted at
 // most once: if the finalization turn itself does not produce JSON, RunJSON does
-// not loop, but falls through to its single repair round-trip.
+// not loop, but falls through to its single repair round-trip. It also pins the
+// returned Outcome's shape after a repaired, truncated run: the original run's
+// TruncationReason/Finalized survive, Usage/Iterations are cumulative, and
+// LastStopReason reflects the repair completion.
 func TestRunJSON_ForcedFinalizationFiresOnce(t *testing.T) {
 	const maxIter = 2
 	steps := []scriptStep{
@@ -341,11 +355,69 @@ func TestRunJSON_ForcedFinalizationFiresOnce(t *testing.T) {
 	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys", WithLimits(Limits{MaxIterations: maxIter}))
 
 	var got item
-	if _, err := r.RunJSON(context.Background(), "audit", nil, &got); err != nil {
+	out, err := r.RunJSON(context.Background(), "audit", nil, &got)
+	if err != nil {
 		t.Fatalf("RunJSON: %v", err)
 	}
 	if got.Path != "r.go" {
 		t.Errorf("parsed = %+v, want repaired JSON", got)
+	}
+	// The repair's fresh Outcome must not erase the original run's stop
+	// condition: the loop truncated at MaxIterations and finalized, and the
+	// caller must still see that after a successful repair.
+	if out.TruncationReason != TruncMaxIterations {
+		t.Errorf("TruncationReason = %q, want %q (the repair must not erase the truncation)", out.TruncationReason, TruncMaxIterations)
+	}
+	if !out.Finalized {
+		t.Error("Outcome.Finalized = false, want true (carried from the original run)")
+	}
+	// Usage/Iterations are cumulative across the original run AND the repair:
+	// 2 tool turns + 1 finalization + 1 repair completion.
+	if out.Iterations != 4 {
+		t.Errorf("Iterations = %d, want 4 (3 run turns + 1 repair)", out.Iterations)
+	}
+	if out.Usage.InputTokens != 4 || out.Usage.OutputTokens != 4 {
+		t.Errorf("Usage = %+v, want 4 in / 4 out (original run + repair)", out.Usage)
+	}
+	if out.LastStopReason != llmkit.StopEndTurn {
+		t.Errorf("LastStopReason = %q, want %q (the repair completion's stop reason)", out.LastStopReason, llmkit.StopEndTurn)
+	}
+}
+
+// TestRunJSON_RepairLastStopReasonReflectsRepair pins the discriminator the
+// post-repair Outcome fold must preserve: when the MAIN run's answer is cut
+// off at the max-tokens cap (LastStopReason StopMaxTokens after the
+// continuation stitch fails to form valid JSON) and the repair completes
+// cleanly, the returned Outcome's LastStopReason is the repair's StopEndTurn,
+// while Usage/Iterations still fold the whole round in. A max-tokens stop is
+// not a TruncationReason, so that field stays empty.
+func TestRunJSON_RepairLastStopReasonReflectsRepair(t *testing.T) {
+	fc := newFakeClient(
+		maxTokensResp(`{"path":"a.go"`, 5, 5),            // cut off mid-object
+		maxTokensResp(` ,"more`, 5, 5),                   // continuation, still no valid JSON
+		textResp(`{"path":"r.go","note":"fixed"}`, 7, 3), // repair completes cleanly
+	)
+	r := NewRunner(fc, nil, "sys")
+
+	var got item
+	out, err := r.RunJSON(context.Background(), "task", nil, &got)
+	if err != nil {
+		t.Fatalf("RunJSON: %v", err)
+	}
+	if got.Path != "r.go" {
+		t.Errorf("parsed = %+v, want repaired JSON", got)
+	}
+	if out.TruncationReason != "" {
+		t.Errorf("TruncationReason = %q, want empty (a max-tokens stop is not a truncation)", out.TruncationReason)
+	}
+	if out.LastStopReason != llmkit.StopEndTurn {
+		t.Errorf("LastStopReason = %q, want %q (the repair completion's stop reason)", out.LastStopReason, llmkit.StopEndTurn)
+	}
+	if out.Iterations != 3 {
+		t.Errorf("Iterations = %d, want 3 (main + continuation + repair)", out.Iterations)
+	}
+	if out.Usage.InputTokens != 17 || out.Usage.OutputTokens != 13 {
+		t.Errorf("Usage = %+v, want 17 in / 13 out (original run + repair)", out.Usage)
 	}
 }
 

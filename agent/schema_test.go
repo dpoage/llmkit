@@ -404,6 +404,86 @@ func TestFunc_BadArgsFeedModelError(t *testing.T) {
 	}
 }
 
+// TestFunc_RejectsSchemaViolations pins the strictness Func adds over a plain
+// decode: Run validates the model's raw arguments against the schema derived
+// from Args BEFORE invoking fn, so a contract-violating call comes back as a
+// model-recoverable "ERROR: invalid arguments" result carrying the
+// path-qualified validator message, and fn never sees the bad input.
+func TestFunc_RejectsSchemaViolations(t *testing.T) {
+	t.Run("unknown key", func(t *testing.T) {
+		fc := newFakeClient(
+			toolResp("c1", "add", `{"a":40,"b":2,"c":7}`, 10, 4),
+			textResp("recovered", 8, 3),
+		)
+		invoked := false
+		tool := Func("add", "adds two numbers", func(_ context.Context, p addArgs) (string, error) {
+			invoked = true
+			return fmt.Sprintf("%g", p.A+p.B), nil
+		})
+		r := NewRunner(fc, []Tool{tool}, "sys")
+		if _, err := r.Run(context.Background(), "task"); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if invoked {
+			t.Error("fn ran despite an argument the derived schema forbids (additionalProperties:false)")
+		}
+		assertToolResult(t, fc, func(text string) bool {
+			return strings.HasPrefix(text, "ERROR: invalid arguments:") && strings.Contains(text, `"c"`)
+		}, `unexpected property "c"`)
+	})
+
+	t.Run("missing required", func(t *testing.T) {
+		fc := newFakeClient(
+			toolResp("c1", "add", `{"a":40}`, 10, 4),
+			textResp("recovered", 8, 3),
+		)
+		invoked := false
+		tool := Func("add", "adds two numbers", func(_ context.Context, p addArgs) (string, error) {
+			invoked = true
+			return fmt.Sprintf("%g", p.A+p.B), nil
+		})
+		r := NewRunner(fc, []Tool{tool}, "sys")
+		if _, err := r.Run(context.Background(), "task"); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if invoked {
+			t.Error("fn ran despite a missing required field the derived schema declares")
+		}
+		assertToolResult(t, fc, func(text string) bool {
+			return strings.HasPrefix(text, "ERROR: invalid arguments:") && strings.Contains(text, `"b"`)
+		}, `missing required field "b"`)
+	})
+}
+
+// assertToolResult fails when no tool-result message in the second completion
+// satisfies match; label names the expected violation for the failure message.
+func assertToolResult(t *testing.T, fc *fakeClient, match func(string) bool, label string) {
+	t.Helper()
+	if len(fc.requests) < 2 {
+		t.Fatalf("completions = %d, want at least 2", len(fc.requests))
+	}
+	for _, m := range fc.requests[1].Messages {
+		if m.Role == llmkit.RoleToolResult && match(m.Text()) {
+			return
+		}
+	}
+	t.Errorf("no tool result in completion 2 matches the expected violation (%s)", label)
+}
+
+// TestUnmarshalArgs_ToleratesUnknownKeys pins the tolerance hand-written Tools
+// rely on: UnmarshalArgs stays a plain encoding/json decode, so an extra key
+// in the model's arguments still decodes. The strictness for Func-declared
+// tools lives in Func.Run's schema validation, not here.
+func TestUnmarshalArgs_ToleratesUnknownKeys(t *testing.T) {
+	var p addArgs
+	if err := UnmarshalArgs(json.RawMessage(`{"a":40,"b":2,"c":7}`), &p); err != nil {
+		t.Fatalf("UnmarshalArgs: %v", err)
+	}
+	if p.A != 40 || p.B != 2 {
+		t.Errorf("decoded = %+v, want a=40 b=2 (unknown key tolerated)", p)
+	}
+}
+
 // TestRunJSONAs_PopulatesT pins the typed RunJSON form: schema derived from T,
 // validated answer unmarshaled into a fresh T, outcome passed through.
 func TestRunJSONAs_PopulatesT(t *testing.T) {

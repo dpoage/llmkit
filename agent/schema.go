@@ -167,7 +167,11 @@ func schemaFieldVisited(f reflect.StructField) bool {
 
 // Func builds a [Tool] from a plain Go function: the advertised parameter
 // schema is derived from Args via [SchemaOf], and the model's raw JSON
-// arguments are decoded into Args with [UnmarshalArgs] before fn runs. It
+// arguments are validated against that schema before fn runs — a violation
+// (unknown key under additionalProperties:false, missing required field, type
+// mismatch) surfaces as a model-recoverable "ERROR: invalid arguments"
+// result naming the offending path, and fn is not invoked. Valid arguments
+// are then decoded into Args with [UnmarshalArgs]. It
 // replaces the two-method Tool implementation (Def + Run) wherever the schema
 // is exactly the shape of a struct the function already wants.
 //
@@ -181,25 +185,30 @@ func Func[Args any](name, description string, fn func(context.Context, Args) (st
 	if fn == nil {
 		panic(fmt.Sprintf("agent: Func(%q): nil function", name))
 	}
-	return funcTool[Args]{name: name, description: description, fn: fn}
+	return funcTool[Args]{name: name, description: description, fn: fn, schema: SchemaOf[Args]()}
 }
 
-// funcTool adapts a Func-declared function to the [Tool] interface.
+// funcTool adapts a Func-declared function to the [Tool] interface. schema is
+// derived once at construction and shared by Def and Run's validation.
 type funcTool[Args any] struct {
 	name        string
 	description string
 	fn          func(context.Context, Args) (string, error)
+	schema      json.RawMessage
 }
 
 func (t funcTool[Args]) Def() llmkit.ToolDef {
 	return llmkit.ToolDef{
 		Name:        t.name,
 		Description: t.description,
-		Parameters:  SchemaOf[Args](),
+		Parameters:  t.schema,
 	}
 }
 
 func (t funcTool[Args]) Run(ctx context.Context, args json.RawMessage) (string, error) {
+	if err := validateSchema(t.schema, args); err != nil {
+		return "", fmt.Errorf("invalid arguments: %w", err)
+	}
 	var a Args
 	if err := UnmarshalArgs(args, &a); err != nil {
 		return "", err
