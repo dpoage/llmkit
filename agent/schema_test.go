@@ -179,6 +179,39 @@ type cyclicMap struct {
 	Next map[string]*cyclicMap `json:"next"`
 }
 
+// prInner is embedded (anonymous, unexported) into prOuter: invopop's
+// shouldEmbed recurses into embedded structs regardless of exportedness, so
+// the cycle MUST be caught even though the field is not exported.
+type prInner struct {
+	Self *prInner `json:"self,omitempty"`
+}
+
+type prOuter struct {
+	prInner
+	Name string `json:"name"`
+}
+
+// Non-struct named recursive types: recursion need not pass through a
+// struct, so the walker must track slices and maps on its DFS path too.
+type cyclicTree []cyclicTree
+
+type cyclicM map[string]cyclicM
+
+type cyclicForest struct {
+	Trees   cyclicTree `json:"trees"`
+	Mapping cyclicM    `json:"mapping"`
+}
+
+// skippedCycleStruct hides its cycle behind fields invopop drops entirely
+// (json:"-" and jsonschema:"-"): the generated schema must be ACCEPTED and
+// contain only the surviving property — the walker must not reject what the
+// reflector never visits.
+type skippedCycleStruct struct {
+	Name string              `json:"name"`
+	Next *skippedCycleStruct `json:"-"`
+	Hide *skippedCycleStruct `json:"hide,omitempty" jsonschema:"-"`
+}
+
 func TestSchemaOf_RecursiveTypePanics(t *testing.T) {
 	t.Run("direct", func(t *testing.T) {
 		assertSchemaCyclePanic(t, "cyclicNode", func() { SchemaOf[cyclicNode]() })
@@ -189,6 +222,27 @@ func TestSchemaOf_RecursiveTypePanics(t *testing.T) {
 	t.Run("map value", func(t *testing.T) {
 		assertSchemaCyclePanic(t, "cyclicMap", func() { SchemaOf[cyclicMap]() })
 	})
+	t.Run("embedded unexported", func(t *testing.T) {
+		assertSchemaCyclePanic(t, "prOuter", func() { SchemaOf[prOuter]() })
+	})
+	t.Run("non-struct slice", func(t *testing.T) {
+		assertSchemaCyclePanic(t, "cyclicForest", func() { SchemaOf[cyclicForest]() })
+	})
+}
+
+func TestSchemaOf_SkippedCycleAccepted(t *testing.T) {
+	s := SchemaOf[skippedCycleStruct]()
+	doc := decodeSchema(t, s)
+	props, ok := doc["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("schema = %s, want a properties object", s)
+	}
+	if _, ok := props["name"]; !ok {
+		t.Errorf("schema properties = %v, want the surviving name property", props)
+	}
+	if len(props) != 1 {
+		t.Errorf("schema properties = %v, want exactly {name} — the json:\"-\" and jsonschema:\"-\" cycles must be dropped, not rejected", props)
+	}
 }
 
 // assertSchemaCyclePanic asserts fn panics with the documented cycle message

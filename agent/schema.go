@@ -79,35 +79,38 @@ func SchemaOf[T any]() json.RawMessage {
 }
 
 // assertAcyclic panics when the type graph reachable from t contains a
-// struct cycle. SchemaOf inlines nested types ([schemaReflector]
-// DoNotReference), and an inlined schema cannot express recursion: feeding
-// a recursive type to the reflector ends in a FATAL, unrecoverable stack
-// overflow, so the cycle is rejected here first with a message naming the
-// SchemaOf root type and the cyclic type. Direct (T→T) and indirect
-// (A→B→A) cycles through struct fields, pointers, slices, arrays, and map
-// keys/values are all caught. Unexported fields and fields excluded from
-// the schema (`json:"-"`) are skipped, mirroring what the reflector
-// actually visits.
+// cycle. SchemaOf inlines nested types ([schemaReflector] DoNotReference),
+// and an inlined schema cannot express recursion: feeding a recursive type
+// to the reflector ends in a FATAL, unrecoverable stack overflow, so the
+// cycle is rejected here first with a message naming the SchemaOf root type
+// and the cyclic type.
+//
+// EVERY composite kind on the DFS path is recorded — struct, pointer,
+// slice, array, and map alike, keyed by reflect.Type — because recursion
+// need not pass through a struct: `type Tree []Tree` used as a field would
+// otherwise loop inside this walker itself. Identity-keyed visited-ON-PATH
+// (not visited-ever) keeps diamond shapes (the same type under two fields)
+// false-positive-free. Interfaces and every non-composite kind terminate.
 func assertAcyclic(root, t reflect.Type, onPath map[reflect.Type]bool) {
-	for t.Kind() == reflect.Pointer {
-		t = t.Elem()
-	}
 	switch t.Kind() {
+	case reflect.Pointer, reflect.Struct, reflect.Slice, reflect.Array, reflect.Map:
+	default:
+		return
+	}
+	if onPath[t] {
+		panic(fmt.Sprintf("agent: SchemaOf[%s]: recursive type %s is unsupported — an inlined schema cannot express cycles", root, t))
+	}
+	onPath[t] = true
+	defer delete(onPath, t)
+
+	switch t.Kind() {
+	case reflect.Pointer:
+		assertAcyclic(root, t.Elem(), onPath)
 	case reflect.Struct:
-		if onPath[t] {
-			panic(fmt.Sprintf("agent: SchemaOf[%s]: recursive type %s is unsupported — an inlined schema cannot express cycles", root, t))
-		}
-		onPath[t] = true
-		defer delete(onPath, t)
-		for i := 0; i < t.NumField(); i++ {
-			f := t.Field(i)
-			if !f.IsExported() {
-				continue
+		for i := range t.NumField() {
+			if f := t.Field(i); schemaFieldVisited(f) {
+				assertAcyclic(root, f.Type, onPath)
 			}
-			if name, ok := f.Tag.Lookup("json"); ok && strings.Split(name, ",")[0] == "-" {
-				continue
-			}
-			assertAcyclic(root, f.Type, onPath)
 		}
 	case reflect.Slice, reflect.Array:
 		assertAcyclic(root, t.Elem(), onPath)
@@ -115,6 +118,46 @@ func assertAcyclic(root, t reflect.Type, onPath map[reflect.Type]bool) {
 		assertAcyclic(root, t.Key(), onPath)
 		assertAcyclic(root, t.Elem(), onPath)
 	}
+}
+
+// schemaFieldVisited mirrors invopop/jsonschema v0.14.0's reflectFieldName +
+// reflectStructFields: it reports whether the reflector would recurse into
+// field f's type, so the cycle walk diverges in NEITHER direction — skipping
+// a field invopop reflects would let a cycle reach the reflector (fatal),
+// while recursing into a field invopop drops would reject schemas invopop
+// accepts. The rules, in reflectFieldName's order:
+//
+//   - `json:"-"` and `jsonschema:"-"` drop the field entirely
+//     (ignoredByJSONTags / ignoredByJSONSchemaTags) — skip;
+//   - an anonymous struct or pointer-to-struct with no json name is
+//     embedded and recursed into REGARDLESS of exportedness (shouldEmbed);
+//   - a `json:"...,inline"` field is embedded, but reflectStructFields only
+//     proceeds for struct (or pointer-to-struct) types — other shapes are
+//     dropped;
+//   - a non-anonymous unexported field gets no schema name — skip;
+//   - everything else recurses fully, including an anonymous non-struct
+//     type, which invopop reflects as a property named after the type.
+func schemaFieldVisited(f reflect.StructField) bool {
+	jsonTags := strings.Split(f.Tag.Get("json"), ",")
+	if jsonTags[0] == "-" {
+		return false
+	}
+	if strings.Split(f.Tag.Get("jsonschema"), ",")[0] == "-" {
+		return false
+	}
+	unwrapped := f.Type
+	for unwrapped.Kind() == reflect.Pointer {
+		unwrapped = unwrapped.Elem()
+	}
+	if f.Anonymous && jsonTags[0] == "" && unwrapped.Kind() == reflect.Struct {
+		return true
+	}
+	for _, tag := range jsonTags[1:] {
+		if tag == "inline" {
+			return unwrapped.Kind() == reflect.Struct
+		}
+	}
+	return f.Anonymous || f.PkgPath == ""
 }
 
 // Func builds a [Tool] from a plain Go function: the advertised parameter
