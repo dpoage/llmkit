@@ -98,3 +98,15 @@ func thinkOnlyResp(think string, in, out int64) scriptStep {
 		Usage:      llmkit.Usage{InputTokens: in, OutputTokens: out},
 	}}
 }
+
+// withCache overlays non-zero prompt-cache usage onto a scripted step's
+// response, so a test can pin all four [llmkit.Usage] counters instead of
+// just InputTokens/OutputTokens. Every builder above leaves the cache
+// fields zero, which silently hides any regression that drops
+// CacheReadInputTokens/CacheCreationInputTokens from a fold — this is the
+// one place a test opts into catching that.
+func withCache(step scriptStep, cacheRead, cacheCreate int64) scriptStep {
+	step.resp.Usage.CacheReadInputTokens = cacheRead
+	step.resp.Usage.CacheCreationInputTokens = cacheCreate
+	return step
+}

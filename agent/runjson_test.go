@@ -384,6 +384,62 @@ func TestRunJSON_ForcedFinalizationFiresOnce(t *testing.T) {
 	}
 }
 
+// TestRunJSON_RepairInfraErrorPreservesTruncationAndUsage covers the
+// `rerr != nil` early return in runJSON's post-repair fold (shp.10): the
+// original run's TruncationReason/Finalized/Iterations/Usage — including all
+// four Usage counters — must survive even when the repair completion itself
+// fails with an infrastructure error, not just on the success path
+// TestRunJSON_ForcedFinalizationFiresOnce already pins. repair()'s own
+// Outcome starts zero-valued (see [Runner.repair]) and never accrues
+// anything on an error exit, so if the fold that copies the main run's
+// numbers onto repairOutcome is moved below the `if rerr != nil { return }`
+// early return, every assertion below fails: TruncationReason reverts to
+// "", Finalized to false, and Iterations/Usage to zero. This also pins the
+// four-counter cache-usage fold: a fake response with zero
+// CacheRead/CacheCreationInputTokens would pass even with the fold lines for
+// those two fields deleted, so every scripted turn here carries non-zero
+// cache usage.
+func TestRunJSON_RepairInfraErrorPreservesTruncationAndUsage(t *testing.T) {
+	const maxIter = 2
+	repairErr := errors.New("boom: transport reset")
+	steps := []scriptStep{
+		withCache(toolResp("c1", "echo", `{"v":"x"}`, 10, 5), 2, 1),
+		withCache(toolResp("c2", "echo", `{"v":"x"}`, 10, 5), 2, 1),
+		// finalization turn: still not JSON, so the repair round-trip fires.
+		withCache(textResp("still just prose, sorry", 10, 5), 2, 1),
+		// repair round-trip: an infrastructure failure, not a parse failure —
+		// repair() never gets to fold anything onto its own Outcome.
+		{err: repairErr},
+	}
+	fc := newFakeClient(steps...)
+	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys", WithLimits(Limits{MaxIterations: maxIter}))
+
+	var got item
+	out, err := r.RunJSON(context.Background(), "audit", nil, &got)
+	if err == nil {
+		t.Fatal("RunJSON: want the repair's infra error, got nil")
+	}
+	if errors.Is(err, ErrUnparseableOutput) {
+		t.Errorf("err = %v, must NOT wrap ErrUnparseableOutput: this is an infrastructure failure, not a bad model answer", err)
+	}
+	if out == nil {
+		t.Fatal("Outcome must be non-nil even when the repair errors, per RunJSON's contract")
+	}
+	if out.TruncationReason != TruncMaxIterations {
+		t.Errorf("TruncationReason = %q, want %q (must survive the repair's infra error)", out.TruncationReason, TruncMaxIterations)
+	}
+	if !out.Finalized {
+		t.Error("Finalized = false, want true (carried from the original run, not repair's zero-valued Outcome)")
+	}
+	if out.Iterations != 3 {
+		t.Errorf("Iterations = %d, want 3 (2 tool turns + 1 finalization; the failed repair contributes none)", out.Iterations)
+	}
+	wantUsage := llmkit.Usage{InputTokens: 30, OutputTokens: 15, CacheReadInputTokens: 6, CacheCreationInputTokens: 3}
+	if out.Usage != wantUsage {
+		t.Errorf("Usage = %+v, want %+v (all four counters summed from the 3 pre-repair turns)", out.Usage, wantUsage)
+	}
+}
+
 // TestRunJSON_RepairLastStopReasonReflectsRepair pins the discriminator the
 // post-repair Outcome fold must preserve: when the MAIN run's answer is cut
 // off at the max-tokens cap (LastStopReason StopMaxTokens after the

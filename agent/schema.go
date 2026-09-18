@@ -175,6 +175,21 @@ func schemaFieldVisited(f reflect.StructField) bool {
 // replaces the two-method Tool implementation (Def + Run) wherever the schema
 // is exactly the shape of a struct the function already wants.
 //
+// Two gotchas follow from validating against the SchemaOf-derived schema
+// rather than decoding directly: an Args field tagged `omitempty` must be
+// OMITTED by the model, not sent as an explicit JSON null — SchemaOf maps a
+// pointer field to its pointee's type verbatim (never "null"-typed, see
+// [SchemaOf]), so `{"age": null}` fails validation even though
+// [UnmarshalArgs] would have accepted it. And an Args field whose custom
+// UnmarshalJSON accepts a wire shape that differs from its Go kind (e.g. an
+// int64-backed duration type decoded from a string like "5s") is refused the
+// same way, because SchemaOf reflects the Go kind ("integer"), not what
+// UnmarshalJSON actually parses ("5s" arrives as a JSON string). The fix in
+// both cases is on the type, not here: implement invopop's
+// `JSONSchema() *jsonschema.Schema` on the custom type so SchemaOf reflects
+// the true wire shape (e.g. return `&jsonschema.Schema{Type: "string"}` for
+// the duration example above) instead of the Go kind.
+//
 // An error from fn is model-recoverable: the harness feeds it back as an
 // "ERROR:"-prefixed tool result and lets the model retry (see [Tool.Run]).
 // Wrap genuine harness/infra failures in [ToolHealthError] so they also reach
@@ -185,16 +200,29 @@ func Func[Args any](name, description string, fn func(context.Context, Args) (st
 	if fn == nil {
 		panic(fmt.Sprintf("agent: Func(%q): nil function", name))
 	}
-	return funcTool[Args]{name: name, description: description, fn: fn, schema: SchemaOf[Args]()}
+	schema := SchemaOf[Args]()
+	parsed, err := parseSchema(schema)
+	if err != nil {
+		// SchemaOf's output is always valid JSON (it is SchemaOf's own
+		// json.Marshal result) — a parse failure here is a bug in SchemaOf,
+		// not a caller mistake, so it panics rather than surfacing as a
+		// runtime error every Run call would have to check for.
+		panic(fmt.Sprintf("agent: Func(%q): derived schema failed to parse: %v", name, err))
+	}
+	return funcTool[Args]{name: name, description: description, fn: fn, schema: schema, parsed: parsed}
 }
 
-// funcTool adapts a Func-declared function to the [Tool] interface. schema is
-// derived once at construction and shared by Def and Run's validation.
+// funcTool adapts a Func-declared function to the [Tool] interface. schema's
+// bytes AND its parsed [parsedSchema] node are both derived once at
+// construction: Def shares the marshaled bytes, Run's validation shares the
+// parsed node (see [validateParsedSchema]) so it does not re-parse the same
+// schema on every call — only the per-call args body is parsed.
 type funcTool[Args any] struct {
 	name        string
 	description string
 	fn          func(context.Context, Args) (string, error)
 	schema      json.RawMessage
+	parsed      parsedSchema
 }
 
 func (t funcTool[Args]) Def() llmkit.ToolDef {
@@ -206,7 +234,7 @@ func (t funcTool[Args]) Def() llmkit.ToolDef {
 }
 
 func (t funcTool[Args]) Run(ctx context.Context, args json.RawMessage) (string, error) {
-	if err := validateSchema(t.schema, args); err != nil {
+	if err := validateParsedSchema(t.parsed, args); err != nil {
 		return "", fmt.Errorf("invalid arguments: %w", err)
 	}
 	var a Args

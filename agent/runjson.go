@@ -338,18 +338,50 @@ func stripBody(text string) (string, error) {
 // allOf/anyOf/oneOf, pattern, format, or multipleOf, because no known caller
 // schema uses them. Unknown keywords are ignored, not rejected.
 func validateSchema(schema json.RawMessage, body []byte) error {
+	ps, err := parseSchema(schema)
+	if err != nil {
+		return err
+	}
+	return validateParsedSchema(ps, body)
+}
+
+// parsedSchema is a JSON Schema already unmarshaled into its Go
+// representation (see [parseSchema]), so a caller that validates many
+// bodies against the SAME schema — [funcTool], whose schema is fixed at
+// construction — pays the schema's own json.Unmarshal once instead of on
+// every [Tool.Run] call.
+type parsedSchema struct {
+	root any
+	set  bool // false means "no schema" (schema was empty), matching validateSchema's no-op case.
+}
+
+// parseSchema unmarshals schema once for reuse via [validateParsedSchema].
+// An empty schema parses to the zero parsedSchema, which validateParsedSchema
+// treats as a no-op — matching validateSchema's len(schema)==0 fast path,
+// including skipping the body unmarshal entirely.
+func parseSchema(schema json.RawMessage) (parsedSchema, error) {
 	if len(schema) == 0 {
-		return nil
+		return parsedSchema{}, nil
 	}
 	var root any
 	if err := json.Unmarshal(schema, &root); err != nil {
-		return fmt.Errorf("schema is not valid JSON: %w", err)
+		return parsedSchema{}, fmt.Errorf("schema is not valid JSON: %w", err)
+	}
+	return parsedSchema{root: root, set: true}, nil
+}
+
+// validateParsedSchema is [validateSchema] against a schema already parsed
+// by [parseSchema], amortizing the schema's own json.Unmarshal across every
+// call that reuses ps.
+func validateParsedSchema(ps parsedSchema, body []byte) error {
+	if !ps.set {
+		return nil
 	}
 	var parsed any
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return fmt.Errorf("body is not valid JSON: %w", err)
 	}
-	return validateNode("", root, parsed)
+	return validateNode("", ps.root, parsed)
 }
 
 // validateNode validates val against a single schema node, which is either a
