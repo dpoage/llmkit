@@ -1,13 +1,13 @@
 // Command chat demonstrates multi-turn conversation through the llmkit/agent
 // harness: a stdin REPL where each line becomes the next task via
-// agent.Runner.RunContinue, so the model keeps every earlier turn of the
-// session instead of re-orienting from scratch. One trivial tool (now) keeps
-// the tool-calling path exercised. When the model stops for a refusal/safety
-// reason (agent.ErrStopReason) a canned reply is printed and the refusal turn
-// stays in the history: the attached err.Outcome is threaded into the next
-// RunContinue so the conversation continues from it. It doubles as a
-// compile-time contract check for agent.RunContinue and Outcome.Messages
-// threading.
+// agent.Runner.Run with agent.Continue(prev), so the model keeps every
+// earlier turn of the session instead of re-orienting from scratch. One
+// trivial tool (now) keeps the tool-calling path exercised. When the model
+// stops for a refusal/safety reason (agent.StopReasonError) a canned reply is
+// printed and the refusal turn stays in the history: the attached
+// err.Outcome is threaded into the next run's agent.Continue so the
+// conversation continues from it. It doubles as a compile-time contract check
+// for agent.Continue and Outcome.Messages threading.
 //
 // Usage:
 //
@@ -24,14 +24,12 @@ package main
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
-	"github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/agent"
 	"github.com/dpoage/llmkit/provider"
 )
@@ -71,7 +69,14 @@ func run() error {
 		return fmt.Errorf("build client: %w", err)
 	}
 
-	runner := agent.NewRunner(client, []agent.Tool{nowTool{}},
+	// now takes no arguments (struct{}); agent.Func derives its parameter
+	// schema and replaces the hand-written ToolDef + Run pair.
+	now := agent.Func[struct{}]("now", "returns the current local date and time",
+		func(_ context.Context, _ struct{}) (string, error) {
+			return time.Now().Format(time.RFC3339), nil
+		})
+
+	runner := agent.NewRunner(client, []agent.Tool{now},
 		"You are a helpful assistant in a multi-turn chat. You remember every earlier turn of this conversation. Use the provided tool when it would help.")
 
 	fmt.Println("llmkit chat — type a message (ctrl-d to exit).")
@@ -86,8 +91,8 @@ func run() error {
 		if line == "" {
 			continue
 		}
-		outcome, err := runner.RunContinue(context.Background(), prev, line)
-		var stopErr *agent.ErrStopReason
+		outcome, err := runner.Run(context.Background(), line, agent.Continue(prev))
+		var stopErr *agent.StopReasonError
 		if errors.As(err, &stopErr) {
 			fmt.Printf("assistant> (the model declined: %s)\n", stopErr.StopReason)
 			prev = stopErr.Outcome // keep the refusal turn in the history
@@ -125,19 +130,4 @@ func specFor(providerName, baseURL string) (provider.Spec, error) {
 	}
 	spec.BaseURL = baseURL
 	return spec, nil
-}
-
-// nowTool reports the current local time; it takes no arguments.
-type nowTool struct{}
-
-func (nowTool) Def() llmkit.ToolDef {
-	return llmkit.ToolDef{
-		Name:        "now",
-		Description: "returns the current local date and time",
-		Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
-	}
-}
-
-func (nowTool) Run(_ context.Context, _ json.RawMessage) (string, error) {
-	return time.Now().Format(time.RFC3339), nil
 }

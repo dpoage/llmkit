@@ -81,9 +81,9 @@ func TestBudgetPool_OvershootBound(t *testing.T) {
 				t.Errorf("Run: %v", err)
 				return
 			}
-			if !out.Truncated || out.TruncationReason != TruncBudgetPool {
+			if !out.Truncated() || out.TruncationReason != TruncBudgetPool {
 				t.Errorf("expected TruncBudgetPool stop, got truncated=%v reason=%q",
-					out.Truncated, out.TruncationReason)
+					out.Truncated(), out.TruncationReason)
 			}
 		}()
 	}

@@ -34,18 +34,18 @@ func sameTurn(t *testing.T, label string, got, want llmkit.Message) {
 	}
 }
 
-// TestRunContinue_PreservesPriorConversation is the plain-Run continuation
+// TestContinue_PreservesPriorConversation is the plain-Run continuation
 // contract: turn 2's outgoing request must carry turn 1's full history
 // element-wise as a prefix, followed by exactly ONE new user message holding
 // the task — not a reseeded conversation.
-func TestRunContinue_PreservesPriorConversation(t *testing.T) {
+func TestContinue_PreservesPriorConversation(t *testing.T) {
 	fc := newFakeClient(
 		toolResp("c1", "echo", `{"v":"orient"}`, 10, 4),
 		textResp("round one answer", 8, 3),
 		textResp("round two answer", 8, 3),
 	)
 	// Advertise structured output so the capability gate in complete() would
-	// actually attach a schema to the request if RunContinue passed one —
+	// actually attach a schema to the request if Run passed one —
 	// without this the ResponseSchema==nil assertion below is vacuous.
 	fc.caps = llmkit.Capabilities{StructuredOutput: true}
 	var turn2Req []llmkit.Message
@@ -67,12 +67,12 @@ func TestRunContinue_PreservesPriorConversation(t *testing.T) {
 		t.Fatalf("turn 1 Messages = %d entries, want 4 (user, assistant tool-call, tool-result, assistant final)", len(out1.Messages))
 	}
 
-	out2, err := r.RunContinue(context.Background(), out1, "second task")
+	out2, err := r.Run(context.Background(), "second task", Continue(out1))
 	if err != nil {
-		t.Fatalf("turn 2 RunContinue: %v", err)
+		t.Fatalf("turn 2 Run: %v", err)
 	}
 	if sawSchema != "" {
-		t.Errorf("a completion carried ResponseSchema %s, want nil on every completion — Run and RunContinue pass no schema (plain-Run semantics)", sawSchema)
+		t.Errorf("a completion carried ResponseSchema %s, want nil on every completion — Run passes no schema (plain-Run semantics)", sawSchema)
 	}
 	if len(turn2Req) != len(out1.Messages)+1 {
 		t.Fatalf("turn 2 request has %d messages, want %d (turn 1 history + one new user turn) -- fewer means a reseed, more means duplicated history", len(turn2Req), len(out1.Messages)+1)
@@ -89,10 +89,10 @@ func TestRunContinue_PreservesPriorConversation(t *testing.T) {
 	}
 }
 
-// TestRunContinue_NilPrevMatchesRun pins the degradation contract: a nil prev
+// TestContinue_NilPrevMatchesRun pins the degradation contract: a nil prev
 // and an empty prev produce byte-for-byte the same outgoing request plain Run
-// would, so a caller can use RunContinue unconditionally.
-func TestRunContinue_NilPrevMatchesRun(t *testing.T) {
+// would, so a caller can pass Continue unconditionally.
+func TestContinue_NilPrevMatchesRun(t *testing.T) {
 	task := "same task every time"
 	newRunner := func(fc *fakeClient) *Runner {
 		return NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys")
@@ -104,13 +104,13 @@ func TestRunContinue_NilPrevMatchesRun(t *testing.T) {
 	}
 
 	fcNil := newFakeClient(textResp("ans", 5, 2))
-	if _, err := newRunner(fcNil).RunContinue(context.Background(), nil, task); err != nil {
-		t.Fatalf("RunContinue(nil): %v", err)
+	if _, err := newRunner(fcNil).Run(context.Background(), task, Continue(nil)); err != nil {
+		t.Fatalf("Run(Continue(nil)): %v", err)
 	}
 
 	fcEmpty := newFakeClient(textResp("ans", 5, 2))
-	if _, err := newRunner(fcEmpty).RunContinue(context.Background(), &Outcome{}, task); err != nil {
-		t.Fatalf("RunContinue(empty): %v", err)
+	if _, err := newRunner(fcEmpty).Run(context.Background(), task, Continue(&Outcome{})); err != nil {
+		t.Fatalf("Run(Continue(empty)): %v", err)
 	}
 
 	for name, fc := range map[string]*fakeClient{"nil prev": fcNil, "empty prev": fcEmpty} {
@@ -130,11 +130,11 @@ func TestRunContinue_NilPrevMatchesRun(t *testing.T) {
 	}
 }
 
-// TestRunContinue_AfterStopError verifies the documented ErrStopReason
+// TestContinue_AfterStopError verifies the documented StopReasonError
 // recovery: the partial Outcome attached to the error threads into
-// RunContinue, the refusal assistant turn stays in the history the model
+// Continue(prev), the refusal assistant turn stays in the history the model
 // sees, and the next turn completes normally.
-func TestRunContinue_AfterStopError(t *testing.T) {
+func TestContinue_AfterStopError(t *testing.T) {
 	fc := newFakeClient(
 		stopErrorResp("I cannot help with that.", 10, 5),
 		textResp("happy to help now", 8, 3),
@@ -142,14 +142,14 @@ func TestRunContinue_AfterStopError(t *testing.T) {
 	r := NewRunner(fc, nil, "sys")
 
 	_, err := r.Run(context.Background(), "do the thing")
-	var stopErr *ErrStopReason
+	var stopErr *StopReasonError
 	if !errors.As(err, &stopErr) {
-		t.Fatalf("Run error = %v, want *ErrStopReason", err)
+		t.Fatalf("Run error = %v, want *StopReasonError", err)
 	}
 
-	out2, err := r.RunContinue(context.Background(), stopErr.Outcome, "please reconsider")
+	out2, err := r.Run(context.Background(), "please reconsider", Continue(stopErr.Outcome))
 	if err != nil {
-		t.Fatalf("RunContinue after stop error: %v", err)
+		t.Fatalf("Run(Continue(prev)) after stop error: %v", err)
 	}
 	if out2.FinalText != "happy to help now" {
 		t.Errorf("FinalText = %q, want %q", out2.FinalText, "happy to help now")
@@ -196,19 +196,19 @@ func danglingPrev(t *testing.T, answered int) *Outcome {
 	return &Outcome{Messages: msgs}
 }
 
-// TestRunContinue_TrimsDanglingToolTurnSeed pins the seed-hygiene rule: a
+// TestContinue_TrimsDanglingToolTurnSeed pins the seed-hygiene rule: a
 // continued seed whose trailing assistant turn carries tool calls not all
 // answered by later tool results is trimmed from that assistant turn onward
 // before the wire request, while everything before it stays intact and the
 // caller's Outcome is never mutated.
-func TestRunContinue_TrimsDanglingToolTurnSeed(t *testing.T) {
+func TestContinue_TrimsDanglingToolTurnSeed(t *testing.T) {
 	fc := newFakeClient(textResp("continued", 10, 5))
 	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys")
 
 	prev := danglingPrev(t, 1) // t1 answered, t2 dangling
-	out, err := r.RunContinue(context.Background(), prev, "next task")
+	out, err := r.Run(context.Background(), "next task", Continue(prev))
 	if err != nil {
-		t.Fatalf("RunContinue: %v", err)
+		t.Fatalf("Run: %v", err)
 	}
 	if out.FinalText != "continued" {
 		t.Errorf("FinalText = %q, want %q", out.FinalText, "continued")
@@ -237,23 +237,23 @@ func TestRunContinue_TrimsDanglingToolTurnSeed(t *testing.T) {
 	// The caller's Outcome must be untouched: trimming happens on the run's
 	// own copy, never on prev.Messages.
 	if len(prev.Messages) != 4 {
-		t.Fatalf("prev.Messages = %d entries after RunContinue, want 4 (caller's history must not be mutated)", len(prev.Messages))
+		t.Fatalf("prev.Messages = %d entries after Run, want 4 (caller's history must not be mutated)", len(prev.Messages))
 	}
 	if prev.Messages[3].ToolCallID != "t1" {
 		t.Errorf("prev.Messages[3] = %+v, want the t1 tool result the caller stored", prev.Messages[3])
 	}
 }
 
-// TestRunContinue_KeepsCompleteToolTurnSeed is the no-trim counterpart: when
+// TestContinue_KeepsCompleteToolTurnSeed is the no-trim counterpart: when
 // every trailing tool call IS answered, the continued request must still carry
 // the assistant tool-call turn and all of its results.
-func TestRunContinue_KeepsCompleteToolTurnSeed(t *testing.T) {
+func TestContinue_KeepsCompleteToolTurnSeed(t *testing.T) {
 	fc := newFakeClient(textResp("continued", 10, 5))
 	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys")
 
 	prev := danglingPrev(t, 2) // both calls answered — nothing to trim
-	if _, err := r.RunContinue(context.Background(), prev, "next task"); err != nil {
-		t.Fatalf("RunContinue: %v", err)
+	if _, err := r.Run(context.Background(), "next task", Continue(prev)); err != nil {
+		t.Fatalf("Run: %v", err)
 	}
 
 	msgs := fc.requests[0].Messages
@@ -268,11 +268,11 @@ func TestRunContinue_KeepsCompleteToolTurnSeed(t *testing.T) {
 	}
 }
 
-// TestRunContinue_CompactionNamesToolFromSeed pins the toolNameByID rebuild:
+// TestContinue_CompactionNamesToolFromSeed pins the toolNameByID rebuild:
 // when compaction fires on a continued history, a PRIOR run's tool result must
 // stub with its real tool name, not the generic "tool" fallback — which is
 // what an empty map at first-turn compaction would produce.
-func TestRunContinue_CompactionNamesToolFromSeed(t *testing.T) {
+func TestContinue_CompactionNamesToolFromSeed(t *testing.T) {
 	blob := strings.Repeat("data line\n", 800) // ~8 KB per tool result
 
 	// Hand-built prior-run history: five big tool turns (oldest first), so the
@@ -299,8 +299,8 @@ func TestRunContinue_CompactionNamesToolFromSeed(t *testing.T) {
 	// the first turn of the continuation.
 	r := NewRunner(fc, nil, "sys", WithLimits(Limits{HistoryTokenBudget: 1500}))
 
-	if _, err := r.RunContinue(context.Background(), prev, "next task"); err != nil {
-		t.Fatalf("RunContinue: %v", err)
+	if _, err := r.Run(context.Background(), "next task", Continue(prev)); err != nil {
+		t.Fatalf("Run: %v", err)
 	}
 	if len(fc.requests) != 1 {
 		t.Fatalf("requests = %d, want 1", len(fc.requests))
@@ -335,12 +335,12 @@ func TestRunContinue_CompactionNamesToolFromSeed(t *testing.T) {
 	}
 }
 
-// TestRunContinue_MaxIterationsTruncationStaysPlainRun pins plain-Run
+// TestContinue_MaxIterationsTruncationStaysPlainRun pins plain-Run
 // truncation semantics on the continuation path: exhausting MaxIterations
 // stops truncated WITHOUT a reserved finalization turn — one completion only,
 // Finalized stays false, and no injected finalize prompt or response schema
 // ever reaches the wire.
-func TestRunContinue_MaxIterationsTruncationStaysPlainRun(t *testing.T) {
+func TestContinue_MaxIterationsTruncationStaysPlainRun(t *testing.T) {
 	fc := newFakeClient(
 		toolResp("c1", "echo", `{"v":"1"}`, 5, 2),
 		textResp("unreachable", 5, 2), // a finalization turn would consume this
@@ -361,15 +361,15 @@ func TestRunContinue_MaxIterationsTruncationStaysPlainRun(t *testing.T) {
 		llmkit.TextMessage(llmkit.RoleUser, "prior task"),
 		llmkit.TextMessage(llmkit.RoleAssistant, "prior answer"),
 	}}
-	out, err := r.RunContinue(context.Background(), prev, "tool task")
+	out, err := r.Run(context.Background(), "tool task", Continue(prev))
 	if err != nil {
-		t.Fatalf("RunContinue: %v", err)
+		t.Fatalf("Run: %v", err)
 	}
-	if !out.Truncated || out.TruncationReason != TruncMaxIterations {
-		t.Errorf("Truncated=%v TruncationReason=%q, want truncated with %q", out.Truncated, out.TruncationReason, TruncMaxIterations)
+	if !out.Truncated() || out.TruncationReason != TruncMaxIterations {
+		t.Errorf("Truncated=%v TruncationReason=%q, want truncated with %q", out.Truncated(), out.TruncationReason, TruncMaxIterations)
 	}
 	if out.Finalized {
-		t.Error("Finalized = true, want false — RunContinue never takes a reserved finalization turn")
+		t.Error("Finalized = true, want false — a continued run never takes a reserved finalization turn")
 	}
 	if len(reqs) != 1 {
 		t.Fatalf("completions = %d, want 1 — the truncation must not buy a finalization completion", len(reqs))

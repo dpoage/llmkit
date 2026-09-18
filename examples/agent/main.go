@@ -3,7 +3,7 @@
 // logging ToolStart/ToolEnd/AfterCompletion, a per-tool timeout, and —
 // behind --parallel — concurrent dispatch of the tool calls a single
 // completion requests. It doubles as a compile-time contract check for the
-// agent surface: agent.NewRunner, agent.Tool, agent.Hooks, WithToolTimeout,
+// agent surface: agent.NewRunner, agent.Func, agent.Hooks, WithToolTimeout,
 // and WithParallelTools.
 //
 // Usage:
@@ -20,7 +20,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -105,7 +104,17 @@ func run() error {
 		opts = append(opts, agent.WithParallelTools())
 	}
 
-	runner := agent.NewRunner(client, []agent.Tool{nowTool{}, addTool{}},
+	// now takes no arguments (struct{}); add's schema is derived from
+	// addArgs. agent.Func replaces the hand-written ToolDef + Run pairs.
+	now := agent.Func[struct{}]("now", "returns the current local date and time",
+		func(_ context.Context, _ struct{}) (string, error) {
+			return time.Now().Format(time.RFC3339), nil
+		})
+	add := agent.Func("add", "adds two numbers", func(_ context.Context, p addArgs) (string, error) {
+		return fmt.Sprintf("%g", p.A+p.B), nil
+	})
+
+	runner := agent.NewRunner(client, []agent.Tool{now, add},
 		"You are a helpful assistant. Use the provided tools whenever they would help answer.",
 		opts...)
 
@@ -123,7 +132,7 @@ func run() error {
 	}
 	u := outcome.Usage
 	fmt.Printf("usage:      input=%d output=%d over %d turn(s)\n", u.InputTokens, u.OutputTokens, outcome.Iterations)
-	if outcome.Truncated {
+	if outcome.Truncated() {
 		fmt.Println("truncated: ", outcome.TruncationReason)
 	}
 	return nil
@@ -150,40 +159,9 @@ func specFor(providerName, baseURL string) (provider.Spec, error) {
 	return spec, nil
 }
 
-// nowTool reports the current local time; it takes no arguments.
-type nowTool struct{}
-
-func (nowTool) Def() llmkit.ToolDef {
-	return llmkit.ToolDef{
-		Name:        "now",
-		Description: "returns the current local date and time",
-		Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
-	}
-}
-
-func (nowTool) Run(_ context.Context, _ json.RawMessage) (string, error) {
-	return time.Now().Format(time.RFC3339), nil
-}
-
-// addTool adds two numbers, decoding the model's raw JSON arguments with
-// agent.UnmarshalArgs.
-type addTool struct{}
-
-func (addTool) Def() llmkit.ToolDef {
-	return llmkit.ToolDef{
-		Name:        "add",
-		Description: "adds two numbers",
-		Parameters:  json.RawMessage(`{"type":"object","properties":{"a":{"type":"number"},"b":{"type":"number"}},"required":["a","b"]}`),
-	}
-}
-
-func (addTool) Run(_ context.Context, args json.RawMessage) (string, error) {
-	var p struct {
-		A float64 `json:"a"`
-		B float64 `json:"b"`
-	}
-	if err := agent.UnmarshalArgs(args, &p); err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%g", p.A+p.B), nil
+// addArgs are the arguments of the add tool; agent.SchemaOf derives the
+// advertised parameter schema from these fields.
+type addArgs struct {
+	A float64 `json:"a"`
+	B float64 `json:"b"`
 }

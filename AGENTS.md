@@ -173,8 +173,11 @@ accident.
 - **`llmkit/agent`** — the tool-calling harness: `Runner` loop with
   iteration/token budgets, history compaction, forced finalization,
   max-tokens continuation stitching, JSONL transcripts + offline
-  `ReplayClient`, schema-constrained `RunJSON`, and the synchronous
-  `Hooks` observer surface.
+  `ReplayClient`, schema derivation from Go types (`SchemaOf`/`Func`,
+  feeding `RunJSON`/`RunJSONAs`), multi-turn continuation via the
+  `Continue` run option, and the synchronous `Hooks` observer surface.
+  Tool-failure typing: `ToolHealthError` for infra failures,
+  `StopReasonError` for model refusal/safety stops.
 - **`llmkit/embed`** — `Embedder` interface with Ollama and
   OpenAI-compatible HTTP backends (retry, batching, timeouts) plus the
   content-hash `CachedEmbedder` decorator.

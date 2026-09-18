@@ -29,7 +29,7 @@ type hookRecorder struct {
 	healthTools []string
 	healthErrs  []*ToolHealthError
 	compactions []CompactionEvent
-	finalizes   []string
+	finalizes   []TruncationReason
 	repairs     int
 	streamErrs  []error
 }
@@ -93,8 +93,8 @@ func (h *hookRecorder) hooks() Hooks {
 			defer h.mu.Unlock()
 			h.repairs++
 		},
-		Finalize: func(_ context.Context, reason string) {
-			h.record("finalize:" + reason)
+		Finalize: func(_ context.Context, reason TruncationReason) {
+			h.record("finalize:" + string(reason))
 			h.mu.Lock()
 			defer h.mu.Unlock()
 			h.finalizes = append(h.finalizes, reason)
@@ -380,8 +380,8 @@ func TestHook_Finalize_FiresWithStopReason(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if !out.Truncated || out.TruncationReason != TruncMaxIterations {
-		t.Fatalf("Truncated=%v reason=%q, want TruncMaxIterations", out.Truncated, out.TruncationReason)
+	if !out.Truncated() || out.TruncationReason != TruncMaxIterations {
+		t.Fatalf("Truncated=%v reason=%q, want TruncMaxIterations", out.Truncated(), out.TruncationReason)
 	}
 	if len(rec.finalizes) != 1 || rec.finalizes[0] != TruncMaxIterations {
 		t.Fatalf("Finalize calls = %v, want exactly [TruncMaxIterations]", rec.finalizes)
