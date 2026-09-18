@@ -165,15 +165,12 @@ func (z *zeroDialTransport) client() *http.Client {
 // TestNew_RejectsEmptySecret pins the required-Secret contract: Secret is
 // the resolved credential, so an empty or whitespace-only value is a
 // caller bug. New must refuse it for every Type with an error wrapping
-// ErrInvalidRequest — uniformly, because the adapters disagree on a bare
-// empty Secret (Anthropic overrides an ambient env key with an empty
-// x-api-key or hard-errors with no env key at all, OpenAI sends no auth
-// header, Google fails inside genai construction) — and the error must
-// never echo the secret. The zero-dial transport proves the refusal
-// returns before any network activity, even against an unroutable
-// BaseURL. Message invariance (not a per-secret substring check, which is
-// vacuous for a secret like " " that trivially matches ordinary prose)
-// proves the error text cannot carry the secret's bytes.
+// ErrInvalidRequest, and the error must never echo the secret. The
+// zero-dial transport proves the refusal returns before any network
+// activity, even against an unroutable BaseURL. Message invariance (not
+// a per-secret substring check, which is vacuous for a secret like " "
+// that trivially matches ordinary prose) proves the error text cannot
+// carry the secret's bytes.
 func TestNew_RejectsEmptySecret(t *testing.T) {
 	secrets := []string{"", " ", "   ", "\t", "\n", "\t\n", " \t \n "}
 	for _, typ := range []Type{TypeAnthropic, TypeOpenAI, TypeOpenAICompatible, TypeGoogle} {
@@ -209,14 +206,11 @@ func TestNew_RejectsEmptySecret(t *testing.T) {
 }
 
 // TestNew_RejectsSecretWithSurroundingWhitespace pins the trimmed-Secret
-// contract: a Secret that differs from its own strings.TrimSpace — e.g.
-// "sk-abc\n", exactly the shape `cat`/`pass` produce — must be refused
-// before any adapter is built. Left unchecked, newline/CR padding fails
-// net/http's header-value check after the full retry budget elapses, but
-// space/tab padding is accepted by the vendors today — the receiver
-// strips surrounding OWS per RFC 7230 §3.2.4 — so New's refusal here is
-// a deliberate breaking refusal, not a fail-faster: a secret never
-// legitimately carries surrounding whitespace.
+// contract: New refuses a Secret that differs from its own
+// strings.TrimSpace — for example "sk-abc\n", " sk-abc", "sk-abc ",
+// "sk-abc\t", and "\tsk-abc\n" — with an error wrapping
+// ErrInvalidRequest that never echoes the value, and rejects it before
+// any adapter is constructed (zero dials).
 func TestNew_RejectsSecretWithSurroundingWhitespace(t *testing.T) {
 	for _, secret := range []string{"sk-abc\n", " sk-abc", "sk-abc ", "sk-abc\t", "\tsk-abc\n"} {
 		t.Run(fmt.Sprintf("%q", secret), func(t *testing.T) {
