@@ -130,8 +130,8 @@ type Spec struct {
 	// When SetupCmds is non-empty the CLI backend wraps the execution in
 	// /bin/sh: each command is shell-quoted and chained with "|| exit 125" so
 	// any setup failure exits with code 125. Exit 125 is intentional:
-	// internal/repro/interpret.go and patch.go both classify container exit
-	// 125/126/127 as an environment_error, NOT a bug demonstration — a failed
+	// a caller's verdict classification treats container exit
+	// 125/126/127 as an environment error, NOT a demonstrated result — a failed
 	// "npm ci --offline" must never be misread as a successful repro. The
 	// original Cmd is exec'd (via sh's exec builtin) so it retains its own
 	// exit code and signal mask.
@@ -246,7 +246,7 @@ type Result struct {
 	PrepDuration time.Duration
 
 	// WorkspaceCacheHit reports whether the pristine-workspace cache
-	// (internal/sandbox/workspace.go's wsCache) already held a pristine
+	// (the backend's wsCache) already held a pristine
 	// matching this repo's current HEAD + working-tree state, so this Exec
 	// skipped materialization and only cloned it. Always false when RepoDir
 	// is not a git work tree, since the cache is bypassed entirely there.
@@ -285,7 +285,7 @@ func (r Result) InfraKilled() bool {
 func (r Result) KillReason() string {
 	switch {
 	case r.WorkspaceQuotaExceeded:
-		return "workspace growth exceeded the configured quota (sandbox.workspace_growth_ceiling_mb)"
+		return "workspace growth exceeded the configured ceiling (see WithWorkspaceGrowthCeilingMB / WithBwrapWorkspaceGrowthCeilingMB)"
 	case r.TimedOut:
 		return "timed out"
 	default:

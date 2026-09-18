@@ -273,6 +273,57 @@ func TestPrepareWorkspaceSkipsGitignoredAndGit(t *testing.T) {
 	}
 }
 
+// TestGitWorktreeFilesContract pins the exported listing contract: tracked
+// files and untracked-not-ignored files are listed, gitignored files and .git
+// metadata are not, and a non-git directory yields (nil, false, nil).
+// Dependency-resolution callers consult this listing to learn what a sandbox
+// run will materialize, so it must match copyWorkspace's input exactly.
+func TestGitWorktreeFilesContract(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	// Non-git dir: isRepo=false, no error, no files.
+	plain := t.TempDir()
+	mustWrite(t, filepath.Join(plain, "file.txt"), "x\n", 0o644)
+	files, isRepo, err := GitWorktreeFiles(plain)
+	if err != nil || isRepo || files != nil {
+		t.Fatalf("GitWorktreeFiles(non-git) = %v, %v, %v; want nil, false, nil", files, isRepo, err)
+	}
+
+	src := t.TempDir()
+	mustWrite(t, filepath.Join(src, ".gitignore"), "/ignored-dir/\nignored.log\n", 0o644)
+	mustWrite(t, filepath.Join(src, "tracked.go"), "package main\n", 0o644)
+	mustMkdir(t, filepath.Join(src, "ignored-dir"))
+	mustWrite(t, filepath.Join(src, "ignored-dir", "cache.bin"), "stale\n", 0o644)
+	mustWrite(t, filepath.Join(src, "ignored.log"), "noise\n", 0o644)
+	gitInit(t, src)
+	// Written AFTER the commit so it is untracked-but-not-ignored: it must
+	// still be listed (working-tree fidelity for uncommitted source).
+	mustWrite(t, filepath.Join(src, "untracked.go"), "package main\n", 0o644)
+
+	files, isRepo, err = GitWorktreeFiles(src)
+	if err != nil {
+		t.Fatalf("GitWorktreeFiles: %v", err)
+	}
+	if !isRepo {
+		t.Fatal("isRepo = false for a git work tree")
+	}
+	got := make(map[string]bool, len(files))
+	for _, f := range files {
+		got[f] = true
+	}
+	for _, want := range []string{"tracked.go", "untracked.go", ".gitignore"} {
+		if !got[want] {
+			t.Errorf("%q missing from listing; got %v", want, files)
+		}
+	}
+	for _, unwanted := range []string{"ignored-dir/cache.bin", "ignored.log", ".git/HEAD"} {
+		if got[unwanted] {
+			t.Errorf("%q listed but should be excluded; got %v", unwanted, files)
+		}
+	}
+}
+
 // gitInit makes dir a git repo and commits its current tracked contents.
 func gitInit(t *testing.T, dir string) {
 	t.Helper()

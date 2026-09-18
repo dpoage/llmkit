@@ -78,7 +78,7 @@ func TestWorkspaceCacheKeyChangesOnDirtyStatus(t *testing.T) {
 }
 
 // TestWorkspaceCacheKeyBypassedForNonGitDir proves a non-git repoDir reports
-// isRepo=false with no error, matching gitWorktreeFiles' fallback contract —
+// isRepo=false with no error, matching GitWorktreeFiles' fallback contract —
 // the caller (CLI.prepareWorkspace) must bypass the cache entirely there.
 func TestWorkspaceCacheKeyBypassedForNonGitDir(t *testing.T) {
 	dir := t.TempDir()

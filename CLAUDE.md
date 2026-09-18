@@ -118,7 +118,8 @@ accident.
   no-isolation attended escape hatch that no kit default or example
   constructs). Workspace materialization with symlink-hardened writes,
   capped output capture, and a shared idle/growth-ceiling watchdog;
-  standard library only. Path containment for agent tools lives in the
+  standard library plus golang.org/x/sys (the reflink fast path). Path
+  containment for agent tools lives in the
   sibling `fsroot` package.
 - **`llmkit/embed`** — `Embedder` interface with Ollama and
   OpenAI-compatible HTTP backends (retry, batching, timeouts) plus the

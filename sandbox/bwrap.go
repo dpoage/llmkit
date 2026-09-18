@@ -36,14 +36,14 @@ const bwrapProbeTimeout = 5 * time.Second
 //     the one check that agrees with reality on all of them.
 func DetectBwrap() (ok bool, reason string) {
 	if runtime.GOOS != "linux" {
-		return false, fmt.Sprintf("bwrap backend requires Linux (running on %s); use sandbox.backend: cli (podman/docker) instead", runtime.GOOS)
+		return false, fmt.Sprintf("bwrap backend requires Linux (running on %s); use the container CLI backend (NewCLI, podman/docker) instead", runtime.GOOS)
 	}
 	path, err := exec.LookPath("bwrap")
 	if err != nil {
 		return false, "bwrap not found on PATH; install bubblewrap (e.g. `apt install bubblewrap` / `dnf install bubblewrap` / `pacman -S bubblewrap`)"
 	}
 	if err := probeBwrapUserns(path); err != nil {
-		return false, fmt.Sprintf("unprivileged user namespaces are unavailable (%v); check kernel.unprivileged_userns_clone, an AppArmor userns-restriction profile, or run as a user with CAP_SYS_ADMIN — or use sandbox.backend: cli (podman/docker) instead", err)
+		return false, fmt.Sprintf("unprivileged user namespaces are unavailable (%v); check kernel.unprivileged_userns_clone, an AppArmor userns-restriction profile, or run as a user with CAP_SYS_ADMIN — or use the container CLI backend (NewCLI, podman/docker) instead", err)
 	}
 	return true, ""
 }
@@ -123,7 +123,7 @@ type Bwrap struct {
 	defaultGrowthCeilingBytes int64
 	// allowUncapped permits Exec to proceed with no resource-limit
 	// enforcement when neither systemd-run --user --scope nor a delegated
-	// cgroup v2 subtree is available (sandbox.allow_uncapped). Default false:
+	// cgroup v2 subtree is available (the WithBwrapAllowUncapped option). Default false:
 	// Exec fails loudly instead of silently running uncapped.
 	allowUncapped bool
 	// toolchainBinds are extra read-only binds (beyond fixedROAllowlist)
@@ -199,7 +199,7 @@ func WithBwrapWorkspaceGrowthCeilingMB(mb int) BwrapOption {
 // WithBwrapAllowUncapped permits Exec to run without enforced resource
 // limits when no enforcement mechanism (systemd-run --user --scope or a
 // delegated cgroup v2 subtree) is available on this host, instead of
-// failing. Mirrors sandbox.allow_uncapped.
+// failing. Mirrors the WithBwrapAllowUncapped option.
 func WithBwrapAllowUncapped(allow bool) BwrapOption {
 	return func(s *Bwrap) { s.allowUncapped = allow }
 }
@@ -221,7 +221,7 @@ func WithBwrapToolchainPath(prepend string) BwrapOption {
 
 // NewBwrap constructs a Bwrap sandbox. It fails fast with the same
 // actionable reasons as DetectBwrap when the backend is not usable on this
-// host, so a misconfigured `sandbox.backend: bwrap` is caught at
+// host, so a misconfigured backend choice is caught at
 // construction time rather than on the first real run.
 func NewBwrap(opts ...BwrapOption) (*Bwrap, error) {
 	ok, reason := DetectBwrap()
@@ -255,7 +255,7 @@ func NewBwrap(opts ...BwrapOption) (*Bwrap, error) {
 	// "mkdir: command not found". Resolve the baseline from the host once
 	// per construction; on FHS hosts this is a no-op (empty baseline).
 	// Operator toolchainBinds win any ContainerPath collision — an operator
-	// pinning e.g. "bash" in sandbox.host_toolchains overrides the baseline
+	// pinning e.g. "bash" via WithBwrapToolchainBinds overrides the baseline
 	// resolution of the same name.
 	baseMounts, basePath := resolveBwrapBaseline(exec.LookPath, filepath.EvalSymlinks)
 	s.baselinePathAppend = basePath

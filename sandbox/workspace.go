@@ -189,7 +189,7 @@ func (c *wsCache) close() error {
 }
 
 // isGitWorkTree reports whether src looks like a usable git work tree: it has
-// a .git entry and git is on PATH. Shared by gitWorktreeFiles (which needs
+// a .git entry and git is on PATH. Shared by GitWorktreeFiles (which needs
 // the tracked/untracked file list) and workspaceCacheKey (which only needs
 // git's rev-parse/status output) so both agree on when to fall back to a full
 // copy / bypass the cache.
@@ -206,7 +206,7 @@ func isGitWorkTree(src string) bool {
 // --porcelain` (which captures dirty/untracked drift a bare commit hash
 // misses). isRepo is false (with a nil error) only when repoDir is not a git
 // work tree or git is unavailable — the caller then bypasses the cache
-// entirely, matching gitWorktreeFiles' fallback contract. When repoDir IS a
+// entirely, matching GitWorktreeFiles' fallback contract. When repoDir IS a
 // git work tree but a git command fails, the error is returned rather than
 // silently treated as a cache miss.
 //
@@ -253,7 +253,7 @@ func copyTree(src, dst string) error {
 }
 
 // cloneTree is copyTree's fast path for cloning a pristine cache entry
-// (internal/sandbox's wsCache) into a fresh per-run workspace: it copies
+// (the backends' wsCache) into a fresh per-run workspace: it copies
 // regular files via reflinkOrCopy, which prefers a copy-on-write reflink over
 // a full byte copy where the filesystem supports it.
 func cloneTree(src, dst string) error {
@@ -332,7 +332,7 @@ func copyTreeWith(src, dst string, copyRegular func(src, dst string, perm fs.Fil
 // vendor caches. When src is not a git repo (or git is unavailable) it falls
 // back to a full recursive copy so non-git checkouts still work.
 func copyWorkspace(src, dst string) error {
-	files, isRepo, err := gitWorktreeFiles(src)
+	files, isRepo, err := GitWorktreeFiles(src)
 	if err != nil {
 		// src IS a git work tree but listing failed. Falling back to a full copy
 		// here would silently reintroduce the gitignored stale build tree this
@@ -346,14 +346,20 @@ func copyWorkspace(src, dst string) error {
 	return copyTree(src, dst)
 }
 
-// gitWorktreeFiles returns the repo-relative paths git considers part of the
+// GitWorktreeFiles returns the repo-relative paths git considers part of the
 // work tree at src: tracked files plus untracked files that are not gitignored.
+// This is the EXACT listing copyWorkspace materializes into a run's workspace,
+// so a caller that needs to know what a sandbox run will see (e.g. a
+// dependency resolver checking whether a work-tree path such as node_modules
+// exists) consults the same implementation and cannot drift from what a run
+// actually copies.
+//
 // isRepo is false (with a nil error) only when src is not a git work tree or
-// git is not on PATH — the caller then falls back to a full copy. When src IS a
-// git work tree but `git ls-files` fails, the error is returned so the caller
-// fails loudly rather than silently full-copying gitignored build artifacts.
+// git is not on PATH — the caller then falls back to its own handling. When
+// src IS a git work tree but `git ls-files` fails, the error is returned so
+// the caller fails loudly rather than silently missing gitignored content.
 // Returned paths use the OS path separator.
-func gitWorktreeFiles(src string) (files []string, isRepo bool, err error) {
+func GitWorktreeFiles(src string) (files []string, isRepo bool, err error) {
 	if _, statErr := os.Stat(filepath.Join(src, ".git")); statErr != nil {
 		return nil, false, nil // not a git work tree: caller does a full copy
 	}

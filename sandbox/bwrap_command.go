@@ -11,8 +11,8 @@ import (
 // after backend defaults have been applied to a Spec. It mirrors runParams
 // (command.go) so the two backends stay structurally comparable, but carries
 // no containerName/image — bwrap has neither a daemon-tracked container nor
-// a meaningful Spec.Image (see capabilities.go's fingerprint-keyed probe
-// cache for how that's handled instead).
+// a meaningful Spec.Image (a capability-probe caller supplies its own
+// image-keyed probe cache for that).
 type bwrapParams struct {
 	// workspace is the host path of the prepared rw workspace bound at
 	// /workspace inside the sandbox.
@@ -151,7 +151,7 @@ var fixedROAllowlist = []string{
 //     bwrap's --size flag applies to the SINGLE --tmpfs invocation
 //     immediately following it, never cumulatively — hence it is repeated
 //     before each of the two --tmpfs flags above and below, both driven by
-//     the SAME p.scratchSizeBytes (sandbox.scratch_size_mb; <= 0 falls back
+//     the SAME p.scratchSizeBytes (the WithBwrapScratchSizeMB value; <= 0 falls back
 //     to fallbackScratchSizeMB).
 //   - --ro-bind-try allowlist   : ONLY the fixed allowlist (fixedROAllowlist)
 //     plus any resolved toolchain/extra RO mounts are bound in, read-only —

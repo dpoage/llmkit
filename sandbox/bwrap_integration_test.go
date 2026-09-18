@@ -3,7 +3,7 @@
 // Bwrap integration tests exercise the real bwrap binary and unprivileged
 // user namespaces. Run with:
 //
-//	go test -tags integration ./internal/sandbox/...
+//	go test -tags integration ./sandbox/...
 //
 // They are skipped automatically when bwrap is missing or unprivileged
 // userns are unavailable — see DetectBwrap.
@@ -546,7 +546,7 @@ func TestBwrapLiteralBinShResolves(t *testing.T) {
 // helper mounts. On store-based hosts DefaultContainerPath's FHS dirs hold
 // only sh and env, so without the construction-time baseline resolution the
 // exact production shapes below die with "mkdir: command not found":
-// deps.go's applyGoBuildScratch emits a bare `mkdir -p` SetupCmds entry,
+// a caller's dependency-prefetch setup emits a bare `mkdir -p` SetupCmds entry,
 // and agent plans routinely run `sh -c` scripts using coreutils/grep/sed.
 // (On FHS hosts the baseline resolves empty and this passes through the
 // allowlist binds instead — the test is meaningful on both layouts.)
@@ -557,7 +557,7 @@ func TestBwrapBaselineUtilitiesReachable(t *testing.T) {
 	res, err := s.Exec(context.Background(), Spec{
 		RepoDir: t.TempDir(),
 		Timeout: 15 * time.Second,
-		// The deps.go applyGoBuildScratch shape: a bare utility argv routed
+		// The dependency-prefetch shape: a bare utility argv routed
 		// through the /bin/sh setup wrapper, resolved via PATH.
 		SetupCmds: [][]string{{"mkdir", "-p", ".scratch"}},
 		// An agent-plan shape: coreutils + grep piped inside sh -c, plus the

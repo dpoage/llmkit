@@ -3,8 +3,8 @@ package sandbox
 // toolchain.go implements host toolchain provisioning: resolving named
 // toolchains (or explicit host directories) into read-only bind mounts, a
 // PATH prefix, and provenance fingerprints. This generalizes the existing
-// ROMount mechanism (previously used only for dependency caches, see
-// deps.go's modcache/pipcache/... mounts) to host-installed TOOLCHAINS
+// ROMount mechanism (previously used only for dependency-cache mounts) to
+// host-installed TOOLCHAINS
 // (node, python, cargo, ...) so a sandbox image that lacks a toolchain can
 // still run it: the host demonstrably has every toolchain it needs to
 // build/test its own targets daily, and mounting it read-only exposes that
@@ -18,10 +18,10 @@ package sandbox
 // dependencies (the symlink closure target's containing directory; for a
 // nix-store or asdf/nvm shim layout this is normally already a
 // self-contained, versioned directory). NEVER a secret or credential
-// directory. Operators configuring sandbox.host_toolchains are exposing
+// directory. Operators configuring host toolchains are exposing
 // their own PATH's resolution of that name (or an explicit directory they
 // name directly) to whatever untrusted, model-driven code the sandbox runs —
-// audit accordingly, exactly as for sandbox.local_mounts.
+// audit accordingly, exactly as for any operator-opted-in mount.
 //
 // # Resolution algorithm
 //
@@ -66,14 +66,14 @@ import (
 // hostToolchainMountRoot is the fixed container path prefix under which every
 // resolved host toolchain is mounted, one subdirectory per requested entry.
 // This keeps toolchain ContainerPaths from colliding with each other or with
-// the dependency-cache mounts in deps.go (/modcache, /pipcache, ...).
+// the conventional dependency-cache mount paths (/modcache, /pipcache, ...).
 const hostToolchainMountRoot = "/opt/llmkit-toolchains"
 
 // defaultContainerPath is appended after any resolved toolchain bin
 // directories when building the container's PATH override. It mirrors a
 // standard Linux distribution's default PATH so images that already ship
 // their own toolchains (and set no ENV PATH override) keep working exactly
-// as before when sandbox.host_toolchains is unconfigured or resolves nothing.
+// as before when no host toolchains are configured or resolve nothing.
 const DefaultContainerPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 // toolchainVersionProbeTimeout bounds the HOST-side `<bin> --version` probe

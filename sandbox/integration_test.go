@@ -2,7 +2,7 @@
 
 // Integration tests exercise the real container runtime. Run with:
 //
-//	go test -tags integration ./internal/sandbox/...
+//	go test -tags integration ./sandbox/...
 //
 // They are skipped automatically when no runtime is detected or the test image
 // cannot be pulled. Kept under ~60s total.

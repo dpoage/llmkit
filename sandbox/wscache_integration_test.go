@@ -5,7 +5,7 @@
 // through a real container runtime, and correctly invalidates on a new
 // commit. Run with:
 //
-//	go test -tags integration -run TestWorkspaceCacheHitAcrossExecs ./internal/sandbox/
+//	go test -tags integration -run TestWorkspaceCacheHitAcrossExecs ./sandbox/
 //
 // Requires a container runtime; skipped automatically when none is found.
 package sandbox

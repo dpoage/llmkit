@@ -72,7 +72,7 @@ const fallbackScratchSizeMB = 512
 //   - --network=<network>       : "none" by default, no egress.
 //   - --read-only               : read-only root filesystem...
 //   - --tmpfs /tmp              : ...with a writable scratch tmpfs sized by
-//     p.scratchSizeMB (sandbox.scratch_size_mb; <= 0 falls back to
+//     p.scratchSizeMB (the WithScratchSizeMB value; <= 0 falls back to
 //     fallbackScratchSizeMB) — big enough for host language toolchain caches
 //     (Go's cold build cache alone can run to hundreds of MB) but explicitly
 //     bounded rather than left to the host's free RAM.
@@ -231,10 +231,10 @@ func shellQuote(arg string) string {
 // command in order, aborting with exit 125 on any failure, then exec's the
 // original command. The result is intended as the -c argument to /bin/sh.
 //
-// Exit 125 is chosen deliberately: internal/repro/interpret.go and patch.go
-// both classify container exit 125/126/127 as environment_error, so a setup
+// Exit 125 is chosen deliberately: a caller's verdict classification
+// treats container exit 125/126/127 as an environment error, so a setup
 // failure (e.g. "npm ci --offline" cache miss) never surfaces as a false
-// bug demonstration.
+// demonstrated result.
 //
 // The trailing `exec "$@"` passes the original command (from sh's positional
 // parameters $1, $2, ...) with exec so the sh wrapper process is replaced by

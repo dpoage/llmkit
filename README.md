@@ -43,7 +43,8 @@ Shared LLM tooling extracted from `bugbot`, `known`, and `go-research`.
   no-isolation attended escape hatch that no kit default or example
   constructs). Workspace materialization with symlink-hardened writes,
   capped output capture, and a shared idle/growth-ceiling watchdog;
-  standard library only. Path containment for agent tools lives in the
+  standard library plus golang.org/x/sys (the reflink fast path). Path
+  containment for agent tools lives in the
   sibling `fsroot` package. Origin: `bugbot/internal/sandbox`.
 
 - **`embed`** — `Embedder` interface with Ollama and OpenAI-compatible HTTP

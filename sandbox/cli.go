@@ -193,8 +193,8 @@ func (s *CLI) Runtime() string { return s.runtime }
 
 // Limits returns the effective resource caps the backend applies to a Spec that
 // does not override them: the default CPU count, memory ceiling (MB), and pids
-// limit. Exposed so status/doctor and tests can confirm the configured
-// sandbox.cpus / sandbox.memory_mb actually reached the backend.
+// limit. Exposed so status/doctor and tests can confirm the
+// configured CPU / memory limits actually reached the backend.
 func (s *CLI) Limits() (cpus float64, memoryMB, pidsLimit int) {
 	return s.defaultCPUs, s.defaultMemory, s.pidsLimit
 }

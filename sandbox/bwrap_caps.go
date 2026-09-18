@@ -27,7 +27,7 @@ import (
 // When NEITHER is available, resource limits would otherwise be silently
 // dropped — exactly the failure mode acceptance criterion 4 forbids. The run
 // FAILS with an actionable error unless the operator explicitly opts into
-// sandbox.allow_uncapped.
+// the WithBwrapAllowUncapped option.
 
 // bwrapCapMethod names the resource-limit enforcement mechanism a Bwrap
 // backend resolved for the current host.
@@ -66,7 +66,7 @@ func detectBwrapCapMethod(ctx context.Context) bwrapCapMethod {
 // this host currently supports for the bwrap backend, for doctor's advisory
 // reporting: "enforced" (systemd-run --user --scope or cgroup v2 available,
 // so runs get their configured caps) or a reason why neither is available
-// (runs would fail unless sandbox.allow_uncapped is set — see errBwrapNoCapMethod).
+// (runs would fail unless the allow-uncapped option is set — see errBwrapNoCapMethod).
 func DescribeBwrapCapMethod(ctx context.Context) (label string, enforced bool) {
 	switch detectBwrapCapMethod(ctx) {
 	case bwrapCapSystemdRun:
@@ -74,7 +74,7 @@ func DescribeBwrapCapMethod(ctx context.Context) (label string, enforced bool) {
 	case bwrapCapCgroupV2:
 		return "delegated cgroup v2 subtree", true
 	default:
-		return "none (neither systemd-run --user --scope nor a delegated cgroup v2 subtree; runs fail unless sandbox.allow_uncapped is set)", false
+		return "none (neither systemd-run --user --scope nor a delegated cgroup v2 subtree; runs fail unless the allow-uncapped option (WithBwrapAllowUncapped) is set)", false
 	}
 }
 
@@ -136,7 +136,7 @@ func delegatedCgroupV2Dir() (string, bool) {
 // case) but neither enforcement mechanism is available and the operator has
 // not opted into running uncapped. It is a distinct type so callers/tests can
 // assert on it without string matching.
-var errBwrapNoCapMethod = errors.New("sandbox: bwrap backend found no resource-limit mechanism (systemd-run --user --scope or a delegated cgroup v2 subtree); set sandbox.allow_uncapped to run without enforced memory/CPU/pids limits")
+var errBwrapNoCapMethod = errors.New("sandbox: bwrap backend found no resource-limit mechanism (systemd-run --user --scope or a delegated cgroup v2 subtree); set WithBwrapAllowUncapped(true) to run without enforced memory/CPU/pids limits")
 
 // systemdRunWrapArgs prepends a systemd-run --user --scope invocation (with
 // MemoryMax/CPUQuota/TasksMax properties) around the given bwrap binary +
