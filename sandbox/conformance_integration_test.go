@@ -48,6 +48,17 @@ func newConformanceCLI(t *testing.T) *CLI {
 	return s
 }
 
+// runConformance runs the whole shared case table through one backend —
+// the real-backend legs call this once per constructed sandbox.
+func runConformance(t *testing.T, sb Sandbox, repoDir string) {
+	t.Helper()
+	for _, tc := range conformanceCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			runConformanceCase(t, sb, repoDir, tc)
+		})
+	}
+}
+
 func TestConformanceBwrap(t *testing.T) {
 	s := newConformanceBwrap(t)
 	runConformance(t, s, t.TempDir())

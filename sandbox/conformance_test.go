@@ -185,17 +185,6 @@ func runConformanceCase(t *testing.T, sb Sandbox, repoDir string, tc conformance
 	tc.check(t, res)
 }
 
-// runConformance runs the whole shared case table through one backend —
-// the real-backend legs call this once per constructed sandbox.
-func runConformance(t *testing.T, sb Sandbox, repoDir string) {
-	t.Helper()
-	for _, tc := range conformanceCases() {
-		t.Run(tc.name, func(t *testing.T) {
-			runConformanceCase(t, sb, repoDir, tc)
-		})
-	}
-}
-
 // TestConformanceMock runs the shared table against the Mock backend, one
 // scripted Mock per case. It is the untagged, always-on conformance leg and
 // documents the Result shapes a Mock user may script and rely on.

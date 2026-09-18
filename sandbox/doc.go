@@ -46,7 +46,7 @@
 // InfraKilled/KillReason, Captured, truncation flags); conformance_test.go
 // runs one shared case table through Mock and, under the integration tag,
 // through Bwrap and CLI to pin that contract.
-
+//
 // # Security posture
 //
 // Because the commands executed here originate from an LLM and run against

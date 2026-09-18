@@ -195,7 +195,9 @@ func TestProbeCapabilitiesMock(t *testing.T) {
 	})
 
 	t.Run("nil_sandbox_returns_unavailable", func(t *testing.T) {
-		cs := ProbeCapabilities(context.Background(), nil, "any", "", nil, nil, nil, testProbes)
+		// A real repoDir here: this subtest pins the sb==nil clause alone
+		// (the empty-repoDir clause has its own subtest below).
+		cs := ProbeCapabilities(context.Background(), nil, "any", t.TempDir(), nil, nil, nil, testProbes)
 		for _, e := range testProbes {
 			if _, ok := cs[e.Name]; !ok {
 				t.Errorf("entry %q missing from the returned set: %v", e.Name, cs)

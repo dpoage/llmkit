@@ -115,7 +115,19 @@ func (f *capFlight) wait() CapabilitySet {
 //     splits one logical configuration into two cache entries.
 //
 // Concurrent calls that compute the same key share one probe run (see
-// capFlight); the first caller to claim the key executes it.
+// capFlight): the first caller to claim the key executes it, and the rest
+// block until that shared run completes — under the FIRST claimant's ctx,
+// bounded by the probeTimeout ceiling — and its result is what gets cached.
+// If the probe panics inside a caller-supplied Interpret, the panic
+// propagates in the claimant while waiters receive the flight's nil
+// (all-unavailable) set, which then stays cached until
+// InvalidateCapabilityCache clears it.
+//
+// image is the container image Spec.Image on the CLI backend, so it must be
+// a real, pullable image there; on the Bwrap and HostExec backends there is
+// no image concept and it is only a cache-key label (Spec.Image is
+// ignored). A made-up label on the CLI backend makes every probe Exec fail
+// at the runtime, yielding all-false.
 //
 // repoDir gives the probe's Spec a valid RepoDir; it is only read (copied
 // into the probe's fresh workspace, never written). An empty repoDir — or a
