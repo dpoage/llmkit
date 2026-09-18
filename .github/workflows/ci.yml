@@ -29,6 +29,7 @@ jobs:
         run: |
           go vet -tags live ./provider/
           go vet -tags integration ./embed/
+          go vet -tags integration ./sandbox/
 
       - name: gofmt
         # Docs (CLAUDE.md / AGENTS.md Build & Test) promise a clean gofmt
@@ -61,3 +62,24 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.13.2
+
+  sandbox-integration:
+    name: sandbox integration (bwrap + container CLI)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: install bubblewrap
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+
+      - name: sandbox integration tests
+        # The bwrap suite runs when unprivileged user namespaces work; the
+        # CLI suite runs against the preinstalled docker. Both auto-skip on
+        # hosts where their backend is unavailable, so this job never fails
+        # on a runner capability change — it just exercises less.
+        run: go test -tags integration -count=1 ./sandbox/...
