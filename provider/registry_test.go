@@ -38,8 +38,8 @@ func TestNewClient_OpenAICompatibleSerializesToolCalls(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(multiBody))
 	})
-	spec := Spec{Type: TypeOpenAICompatible, BaseURL: base}
-	client, err := New(context.Background(), spec, "ollama", "llama3", "key", Options{})
+	spec := Spec{Type: TypeOpenAICompatible, BaseURL: base, Model: "llama3", Secret: "key"}
+	client, err := New(context.Background(), spec, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

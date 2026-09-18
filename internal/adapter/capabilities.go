@@ -54,3 +54,17 @@ func GateToolChoice(provider string, tc llmkit.ToolChoice, supported bool) error
 	}
 	return nil
 }
+
+// ApplyOverride resolves a capability override against an adapter's
+// table-derived profile: a nil override returns the profile unchanged;
+// otherwise the override receives the table profile and its return value
+// becomes the effective profile. Adapters call this once at construction,
+// so a closure can flip a single field while keeping the rest of the
+// table, and a closure that ignores its input replaces the profile
+// wholesale.
+func ApplyOverride(caps llmkit.Capabilities, override func(llmkit.Capabilities) llmkit.Capabilities) llmkit.Capabilities {
+	if override == nil {
+		return caps
+	}
+	return override(caps)
+}

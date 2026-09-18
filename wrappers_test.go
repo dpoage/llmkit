@@ -146,7 +146,7 @@ func TestRecorder_RecordsUsageOnSuccess(t *testing.T) {
 		events = append(events, ev)
 	})
 
-	client := WithRecorder(fc, rec, "finder", "anthropic", "claude-test")
+	client := WithRecorder(fc, rec, "anthropic", "claude-test")
 	if _, err := client.Complete(context.Background(), simpleRequest()); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestRecorder_RecordsUsageOnSuccess(t *testing.T) {
 		t.Fatalf("events = %d, want 1", len(events))
 	}
 	ev := events[0]
-	if ev.Role != "finder" || ev.Provider != "anthropic" || ev.Model != "claude-test" {
+	if ev.Provider != "anthropic" || ev.Model != "claude-test" {
 		t.Errorf("event tags = %+v", ev)
 	}
 	if ev.Usage.InputTokens != 100 || ev.Usage.OutputTokens != 50 {
@@ -167,7 +167,7 @@ func TestRecorder_NoRecordOnError(t *testing.T) {
 	var count int
 	rec := RecorderFunc(func(ev UsageEvent) { count++ })
 
-	client := WithRecorder(fc, rec, "finder", "p", "m")
+	client := WithRecorder(fc, rec, "p", "m")
 	if _, err := client.Complete(context.Background(), simpleRequest()); err == nil {
 		t.Fatal("expected error")
 	}

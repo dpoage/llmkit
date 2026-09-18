@@ -54,8 +54,10 @@ func TestCapabilityGates_ToolChoiceRejected(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name+"/"+string(tc.mode), func(t *testing.T) {
 			if tc.toolless {
-				f := false
-				tc.spec.Capabilities = &llmkit.Capabilities{ToolChoice: f}
+				tc.spec.Capabilities = func(c llmkit.Capabilities) llmkit.Capabilities {
+					c.ToolChoice = false
+					return c
+				}
 			}
 			wireCalled := false
 			base := newServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -64,7 +66,9 @@ func TestCapabilityGates_ToolChoiceRejected(t *testing.T) {
 				_, _ = w.Write([]byte(okBody(string(tc.spec.Type))))
 			})
 			tc.spec.BaseURL = base
-			client, err := New(context.Background(), tc.spec, "test", tc.model, "k", Options{})
+			tc.spec.Model = tc.model
+			tc.spec.Secret = "k"
+			client, err := New(context.Background(), tc.spec, Options{})
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
@@ -90,11 +94,16 @@ func TestCapabilityGates_ToolChoiceAutoAllowed(t *testing.T) {
 		_, _ = w.Write([]byte(okBody("google")))
 	})
 	spec := Spec{
-		Type:         TypeGoogle,
-		BaseURL:      base,
-		Capabilities: &llmkit.Capabilities{ToolChoice: false},
+		Type:    TypeGoogle,
+		BaseURL: base,
+		Model:   "gemini-2.0-flash-lite",
+		Secret:  "k",
+		Capabilities: func(c llmkit.Capabilities) llmkit.Capabilities {
+			c.ToolChoice = false
+			return c
+		},
 	}
-	client, err := New(context.Background(), spec, "test", "gemini-2.0-flash-lite", "k", Options{})
+	client, err := New(context.Background(), spec, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -130,7 +139,9 @@ func TestCapabilityGates_ThinkingSilentlyDropped(t *testing.T) {
 				_, _ = w.Write([]byte(okBody(string(tc.spec.Type))))
 			})
 			tc.spec.BaseURL = base
-			client, err := New(context.Background(), tc.spec, "test", tc.model, "k", Options{})
+			tc.spec.Model = tc.model
+			tc.spec.Secret = "k"
+			client, err := New(context.Background(), tc.spec, Options{})
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}

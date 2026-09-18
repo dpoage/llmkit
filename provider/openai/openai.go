@@ -43,21 +43,18 @@ type openaiAdapter struct {
 // boolean downgrades for object-valued additionalProperties, and the
 // "openai-compatible" provider label on errors.
 //
-// Capabilities, when non-nil, REPLACES the selected profile wholesale (all
-// fields, including ContextWindow). nil = profile default.
-//
-// StructuredOutput, when non-nil, overrides the profile's StructuredOutput
-// capability — applied after Capabilities, so it wins over an override that
-// carries the field. nil = profile default (true for first-party OpenAI,
-// false for openai-compatible).
+// Capabilities, when non-nil, receives the selected profile (first-party
+// table or openai-compatible) and returns the effective one; it is applied
+// once at construction. Flip a single field in a closure, or return a
+// fixed profile to pin exact values for models neither table knows.
+// nil = profile default.
 type Options struct {
 	APIKey     string
 	BaseURL    string       // optional; for testing or non-default endpoints
 	HTTPClient *http.Client // optional; for testing (httptest)
 
-	Compatible       bool
-	Capabilities     *llmkit.Capabilities
-	StructuredOutput *bool
+	Compatible   bool
+	Capabilities func(llmkit.Capabilities) llmkit.Capabilities
 }
 
 // New builds an OpenAI-backed Client. With a custom BaseURL it serves any
@@ -86,19 +83,7 @@ func New(model string, opts Options) llmkit.Client {
 		// subschema.
 		requireBoolAdditionalProps = true
 	}
-	if opts.Capabilities != nil {
-		// Caller-provided profile replaces whichever table was selected.
-		caps = *opts.Capabilities
-	}
-	// The conservative default for openai-compatible endpoints is
-	// StructuredOutput=false; the option can flip it on (e.g. for a
-	// MiniMax-style endpoint that supports it). The override is also applied
-	// to first-party OpenAI for symmetry — its default is already true, so
-	// flipping it off is the only meaningful change, and that flows through
-	// the same code path.
-	if opts.StructuredOutput != nil {
-		caps.StructuredOutput = *opts.StructuredOutput
-	}
+	caps = adapter.ApplyOverride(caps, opts.Capabilities)
 	return &openaiAdapter{
 		client:                     openai.NewClient(reqOpts...),
 		model:                      model,

@@ -94,8 +94,10 @@ accident.
   `WithSerializedToolCalls`), `StripThinkBlocks`, `DefaultMaxTokens`.
 - **`llmkit/provider`** — the single construction entry point: `Spec` +
   `Options` → `New` dispatches to an adapter and decorates it
-  serialize → recorder → retry. `Spec.Capabilities` overrides a model's
-  capability profile wholesale (including `ContextWindow`).
+  serialize → recorder → retry. `Spec.Capabilities`, when set, receives the
+  adapter's model-table profile and returns the effective one — flip a
+  single field or replace it wholesale (e.g. to pin `ContextWindow` for a
+  model the table doesn't know).
 - **`llmkit/provider/anthropic`, `llmkit/provider/openai`,
   `llmkit/provider/google`** — vendor-SDK adapters. `provider/openai` also
   serves any OpenAI-compatible endpoint (Ollama, vLLM, Groq, ...).
