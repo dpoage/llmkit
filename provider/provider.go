@@ -91,18 +91,23 @@ type Spec struct {
 	// SDK targets api.anthropic.com, the OpenAI SDK api.openai.com/v1, and
 	// the Google GenAI SDK generativelanguage.googleapis.com.
 	// TypeOpenAICompatible is the exception: it has no vendor default of
-	// its own — empty would silently target first-party api.openai.com —
-	// so New refuses it with an error wrapping ErrInvalidRequest.
+	// its own — empty would silently target first-party api.openai.com/v1
+	// — so New refuses it with an error wrapping ErrInvalidRequest.
 	BaseURL string
 	// Auth selects the credential mode; the zero value is API-key mode.
 	Auth Auth
 	// Secret is the resolved credential: an API key in AuthAPIKey mode, an
-	// OAuth bearer token in AuthOAuthToken mode. It must be non-empty — New
-	// refuses an empty or whitespace-only Secret with an error wrapping
-	// ErrInvalidRequest and never consults the environment for a fallback,
-	// so the Anthropic SDK's ambient ANTHROPIC_API_KEY fallback is
-	// unreachable through New. The caller obtains the Secret via its own
-	// config; New hands it to the SDK and never logs it.
+	// OAuth bearer token in AuthOAuthToken mode. It must equal its own
+	// strings.TrimSpace: New refuses an empty, whitespace-only, or
+	// whitespace-padded Secret with an error wrapping ErrInvalidRequest,
+	// and never consults the environment for a fallback, so the
+	// Anthropic SDK's ambient ANTHROPIC_API_KEY fallback is unreachable
+	// through New. For a credential-less endpoint — a local Ollama or
+	// vLLM server that ignores whatever Authorization/x-api-key header
+	// it receives — pass any non-empty placeholder; New only checks that
+	// Secret is present, never that the backend accepts it. The caller
+	// obtains the Secret via its own config; New hands it to the SDK and
+	// never logs it.
 	Secret string
 
 	// Capabilities tunes the adapter's model-table profile; nil keeps the
@@ -143,14 +148,15 @@ type Options struct {
 // safe and capability-driven.
 //
 // spec.Secret is the resolved credential (callers obtain it via their own
-// config); New performs no environment lookups — including the Anthropic
-// SDK's ambient ANTHROPIC_API_KEY fallback, which an empty Secret would
-// otherwise reach — so it stays testable without real keys. spec.Auth
-// routes the secret to the right credential field; unknown Auth values,
-// AuthOAuthToken on a non-Anthropic Type, an empty spec.Model, an empty or
-// whitespace-only spec.Secret, an empty spec.BaseURL on
-// TypeOpenAICompatible, and an unknown spec.Type are errors wrapping
-// ErrInvalidRequest.
+// config); New performs no environment lookups, so it stays testable
+// without real keys — even the Anthropic SDK's ambient ANTHROPIC_API_KEY
+// fallback never fires, because New's own guard rejects a non-conforming
+// Secret before any adapter is constructed. spec.Auth routes the secret
+// to the right credential field; unknown Auth values, AuthOAuthToken on
+// a non-Anthropic Type, an empty spec.Model, a spec.Secret that is
+// empty, whitespace-only, or differs from its own strings.TrimSpace, an
+// empty spec.BaseURL on TypeOpenAICompatible, and an unknown spec.Type
+// are errors wrapping ErrInvalidRequest.
 func New(ctx context.Context, spec Spec, opts Options) (llmkit.Client, error) {
 	switch spec.Auth {
 	case AuthAPIKey, AuthOAuthToken:
@@ -168,13 +174,26 @@ func New(ctx context.Context, spec Spec, opts Options) (llmkit.Client, error) {
 	if spec.Model == "" {
 		return nil, fmt.Errorf("llmkit: model must not be empty for provider %q: %w", spec.Type, llmkit.ErrInvalidRequest)
 	}
-	// Secret is the resolved credential, so empty or whitespace-only means
-	// the caller resolved nothing. Refuse it uniformly: left unchecked, the
-	// adapters diverge (the Anthropic SDK falls back to a host
-	// ANTHROPIC_API_KEY, the OpenAI adapter sends an empty Bearer). The
-	// error never echoes the secret.
-	if strings.TrimSpace(spec.Secret) == "" {
-		return nil, fmt.Errorf("llmkit: secret must not be empty for provider %q: %w", spec.Type, llmkit.ErrInvalidRequest)
+	// Secret is the resolved credential, so a value that isn't its own
+	// strings.TrimSpace means the caller resolved nothing usable: empty,
+	// whitespace-only, or padded (e.g. "sk-abc\n", as delivered by
+	// `cat`/`pass`) — the last form passes every adapter's own validation
+	// and only fails net/http's header-value check on the first wire
+	// attempt, after the full retry budget. Refuse all three here,
+	// uniformly and before any adapter is built: left unchecked, a bare
+	// empty Secret does not behave the same way across adapters. Anthropic:
+	// option.WithAPIKey sets the x-api-key header even to "", so it
+	// overrides rather than falls through to a host ANTHROPIC_API_KEY; with
+	// no ANTHROPIC_API_KEY set at all, the SDK's own credential chain
+	// instead hard-errors before any request ("no Anthropic credentials
+	// found"). OpenAI and openai-compatible send no Authorization header
+	// at all for "" (a credential-less server just accepts the call); only
+	// a whitespace-only Secret produces the visibly-empty "Bearer" form.
+	// Google fails at client construction, inside google.golang.org/genai
+	// (client.go), with "api key is required for Google AI backend". The
+	// error here never echoes the secret.
+	if trimmed := strings.TrimSpace(spec.Secret); trimmed == "" || trimmed != spec.Secret {
+		return nil, fmt.Errorf("llmkit: secret must be a non-empty value with no leading or trailing whitespace for provider %q: %w", spec.Type, llmkit.ErrInvalidRequest)
 	}
 	// An openai-compatible Type with no BaseURL would silently target the
 	// first-party OpenAI host, so the endpoint must be given explicitly.
