@@ -101,17 +101,25 @@ type Spec struct {
 	// Auth selects the credential mode; the zero value is API-key mode.
 	Auth Auth
 	// Secret is the resolved credential: an API key in AuthAPIKey mode, an
-	// OAuth bearer token in AuthOAuthToken mode. It must be non-empty and
-	// equal to its own strings.TrimSpace: New refuses an empty, whitespace-only, or
-	// whitespace-padded Secret with an error wrapping ErrInvalidRequest,
-	// and never consults the environment for a fallback, so the
-	// Anthropic SDK's ambient ANTHROPIC_API_KEY fallback is unreachable
-	// through New. For a credential-less endpoint — a local Ollama or
-	// vLLM server that ignores whatever Authorization/x-api-key header
-	// it receives — pass any non-empty placeholder; New only checks that
+	// OAuth bearer token in AuthOAuthToken mode. New refuses a Secret
+	// that is empty or differs from its own strings.TrimSpace, with an
+	// error wrapping ErrInvalidRequest that names the field and never
+	// echoes the value. No vendor issues a credential with surrounding
+	// whitespace, and such a value is almost always a copy/paste or
+	// `cat`/`pass` artifact; refusing it at construction turns a
+	// confusing runtime failure into an immediate, actionable one.
+	// Space- or tab-padded secrets could previously reach a vendor and
+	// authenticate, so this is a deliberate breaking refusal. New never
+	// reads the environment for credentials; because this guard runs
+	// before any adapter is constructed, the vendor SDKs' own env-var
+	// credential chains (ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN,
+	// OPENAI_API_KEY, GOOGLE_API_KEY, GEMINI_API_KEY) are never
+	// consulted through New. For a credential-less endpoint — a local
+	// Ollama or vLLM server that ignores whatever credential it
+	// receives — pass any non-empty placeholder; New only checks that
 	// Secret is present, never that the backend accepts it. The caller
-	// obtains the Secret via its own config; New hands it to the SDK and
-	// never logs it.
+	// obtains the Secret via its own config; New hands it to the SDK
+	// and never logs it.
 	Secret string
 
 	// Capabilities tunes the adapter's model-table profile; nil keeps the
@@ -178,37 +186,13 @@ func New(ctx context.Context, spec Spec, opts Options) (llmkit.Client, error) {
 	if spec.Model == "" {
 		return nil, fmt.Errorf("llmkit: model must not be empty for provider %q: %w", spec.Type, llmkit.ErrInvalidRequest)
 	}
-	// Secret is the resolved credential, so a value that isn't its own
-	// strings.TrimSpace means the caller resolved nothing usable: empty,
-	// whitespace-only, or padded (e.g. "sk-abc\n", as delivered by
-	// `cat`/`pass`). Newline/CR padding fails net/http's header-value
-	// check on the first wire attempt, after the full retry budget
-	// elapses — but space/tab padding ("sk-abc ", " sk-abc", "sk-abc\t")
-	// is accepted by the vendors today: the receiver strips surrounding
-	// OWS per RFC 7230 §3.2.4 and the request succeeds. Refusing it here
-	// is a deliberate breaking refusal, not a fail-faster: a secret never
-	// legitimately carries surrounding whitespace, so New rejects the
-	// shape outright rather than only catching the one padding form the
-	// network would have caught anyway. Refuse all three here, uniformly
-	// and before any adapter is built: left unchecked, a bare empty
-	// Secret does not behave the same way across adapters. Anthropic:
-	// option.WithAPIKey sets the x-api-key header even to "", so it
-	// overrides rather than falls through to a host ANTHROPIC_API_KEY;
-	// only when the SDK finds no credential in its chain at all
-	// (ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, ...) does it instead
-	// hard-error before any request ("no Anthropic credentials found") —
-	// e.g. with ANTHROPIC_AUTH_TOKEN set and ANTHROPIC_API_KEY unset, a
-	// request is issued with an empty x-api-key/Authorization pair
-	// instead. OpenAI and openai-compatible send no Authorization header
-	// at all for "" (a credential-less server just accepts the call);
-	// only a space-only Secret produces the visibly-empty "Bearer" form —
-	// a whitespace-only Secret containing a tab or newline instead fails
-	// net/http's header-value check before any request is sent. Google
-	// fails at client construction, inside google.golang.org/genai
-	// (client.go), with "api key is required for Google AI backend", but
-	// only when GOOGLE_API_KEY and GEMINI_API_KEY are both unset; with
-	// either set, client construction and the subsequent Complete both
-	// succeed using the ambient key. The error here never echoes the
+	// New refuses a Secret that is empty or differs from its own
+	// strings.TrimSpace. No vendor issues a credential with surrounding
+	// whitespace, and such a value is almost always a copy/paste or
+	// `cat`/`pass` artifact; refusing it here turns a confusing runtime
+	// failure into an immediate, actionable one. Space- and tab-padded
+	// secrets could previously reach a vendor and authenticate, so this
+	// is a deliberate breaking refusal. The error never echoes the
 	// secret.
 	if trimmed := strings.TrimSpace(spec.Secret); trimmed == "" || trimmed != spec.Secret {
 		return nil, fmt.Errorf("llmkit: secret must be a non-empty value with no leading or trailing whitespace for provider %q: %w", spec.Type, llmkit.ErrInvalidRequest)
