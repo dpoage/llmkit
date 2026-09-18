@@ -89,7 +89,11 @@ type Spec struct {
 	// BaseURL overrides the vendor endpoint; mainly for tests, proxies, and
 	// self-hosted gateways. Empty means the vendor default: the Anthropic
 	// SDK targets api.anthropic.com, the OpenAI SDK api.openai.com/v1, and
-	// the Google GenAI SDK generativelanguage.googleapis.com.
+	// the Google GenAI SDK generativelanguage.googleapis.com. The SDKs
+	// themselves (not New) also honor ANTHROPIC_BASE_URL, OPENAI_BASE_URL,
+	// and GOOGLE_GEMINI_BASE_URL when BaseURL is empty, so an unset
+	// Spec.BaseURL can still route the caller's Secret to an
+	// ambient-configured host.
 	// TypeOpenAICompatible is the exception: it has no vendor default of
 	// its own — empty would silently target first-party api.openai.com/v1
 	// — so New refuses it with an error wrapping ErrInvalidRequest.
@@ -97,8 +101,8 @@ type Spec struct {
 	// Auth selects the credential mode; the zero value is API-key mode.
 	Auth Auth
 	// Secret is the resolved credential: an API key in AuthAPIKey mode, an
-	// OAuth bearer token in AuthOAuthToken mode. It must equal its own
-	// strings.TrimSpace: New refuses an empty, whitespace-only, or
+	// OAuth bearer token in AuthOAuthToken mode. It must be non-empty and
+	// equal to its own strings.TrimSpace: New refuses an empty, whitespace-only, or
 	// whitespace-padded Secret with an error wrapping ErrInvalidRequest,
 	// and never consults the environment for a fallback, so the
 	// Anthropic SDK's ambient ANTHROPIC_API_KEY fallback is unreachable
@@ -177,21 +181,35 @@ func New(ctx context.Context, spec Spec, opts Options) (llmkit.Client, error) {
 	// Secret is the resolved credential, so a value that isn't its own
 	// strings.TrimSpace means the caller resolved nothing usable: empty,
 	// whitespace-only, or padded (e.g. "sk-abc\n", as delivered by
-	// `cat`/`pass`) — the last form passes every adapter's own validation
-	// and only fails net/http's header-value check on the first wire
-	// attempt, after the full retry budget. Refuse all three here,
-	// uniformly and before any adapter is built: left unchecked, a bare
-	// empty Secret does not behave the same way across adapters. Anthropic:
+	// `cat`/`pass`). Newline/CR padding fails net/http's header-value
+	// check on the first wire attempt, after the full retry budget
+	// elapses — but space/tab padding ("sk-abc ", " sk-abc", "sk-abc\t")
+	// is accepted by the vendors today: the receiver strips surrounding
+	// OWS per RFC 7230 §3.2.4 and the request succeeds. Refusing it here
+	// is a deliberate breaking refusal, not a fail-faster: a secret never
+	// legitimately carries surrounding whitespace, so New rejects the
+	// shape outright rather than only catching the one padding form the
+	// network would have caught anyway. Refuse all three here, uniformly
+	// and before any adapter is built: left unchecked, a bare empty
+	// Secret does not behave the same way across adapters. Anthropic:
 	// option.WithAPIKey sets the x-api-key header even to "", so it
-	// overrides rather than falls through to a host ANTHROPIC_API_KEY; with
-	// no ANTHROPIC_API_KEY set at all, the SDK's own credential chain
-	// instead hard-errors before any request ("no Anthropic credentials
-	// found"). OpenAI and openai-compatible send no Authorization header
-	// at all for "" (a credential-less server just accepts the call); only
-	// a whitespace-only Secret produces the visibly-empty "Bearer" form.
-	// Google fails at client construction, inside google.golang.org/genai
-	// (client.go), with "api key is required for Google AI backend". The
-	// error here never echoes the secret.
+	// overrides rather than falls through to a host ANTHROPIC_API_KEY;
+	// only when the SDK finds no credential in its chain at all
+	// (ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, ...) does it instead
+	// hard-error before any request ("no Anthropic credentials found") —
+	// e.g. with ANTHROPIC_AUTH_TOKEN set and ANTHROPIC_API_KEY unset, a
+	// request is issued with an empty x-api-key/Authorization pair
+	// instead. OpenAI and openai-compatible send no Authorization header
+	// at all for "" (a credential-less server just accepts the call);
+	// only a space-only Secret produces the visibly-empty "Bearer" form —
+	// a whitespace-only Secret containing a tab or newline instead fails
+	// net/http's header-value check before any request is sent. Google
+	// fails at client construction, inside google.golang.org/genai
+	// (client.go), with "api key is required for Google AI backend", but
+	// only when GOOGLE_API_KEY and GEMINI_API_KEY are both unset; with
+	// either set, client construction and the subsequent Complete both
+	// succeed using the ambient key. The error here never echoes the
+	// secret.
 	if trimmed := strings.TrimSpace(spec.Secret); trimmed == "" || trimmed != spec.Secret {
 		return nil, fmt.Errorf("llmkit: secret must be a non-empty value with no leading or trailing whitespace for provider %q: %w", spec.Type, llmkit.ErrInvalidRequest)
 	}
