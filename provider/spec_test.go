@@ -330,8 +330,14 @@ func (t *hostCapturingTransport) observed() *url.URL {
 func TestNew_VendorHosts(t *testing.T) {
 	for _, name := range []string{"ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "GOOGLE_GEMINI_BASE_URL"} {
 		if old, had := os.LookupEnv(name); had {
-			os.Unsetenv(name)
-			t.Cleanup(func() { os.Setenv(name, old) })
+			if err := os.Unsetenv(name); err != nil {
+				t.Fatalf("unsetenv %s: %v", name, err)
+			}
+			t.Cleanup(func() {
+				if err := os.Setenv(name, old); err != nil {
+					t.Errorf("restore %s: %v", name, err)
+				}
+			})
 		}
 	}
 
