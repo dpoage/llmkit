@@ -92,6 +92,14 @@ type bwrapParams struct {
 // (e.g. /etc/ssl/certs -> /etc/static/ssl/certs), needed so the /etc/ssl
 // bind above resolves. On FHS hosts none of the three exist and the
 // --ro-bind-try is a no-op.
+//
+// /etc/alternatives is Debian/Ubuntu's update-alternatives indirection:
+// /usr/bin/awk -> /etc/alternatives/awk -> /usr/bin/gawk (likewise which,
+// editor, pager, java, python-config, ...). Without it those symlinks dangle
+// inside the sandbox and every alternatives-managed tool fails with
+// "not found" — the ubuntu-latest CI runner lacks `which` exactly this way.
+// The directory holds only dpkg-managed symlinks (no secrets), so binding it
+// read-only widens nothing that /usr does not already expose.
 var fixedROAllowlist = []string{
 	"/usr",
 	"/lib",
@@ -102,6 +110,7 @@ var fixedROAllowlist = []string{
 	"/etc/static",
 	"/nix/store",
 	"/gnu/store",
+	"/etc/alternatives",
 }
 
 // buildBwrapArgs constructs the argv passed to the bwrap binary for a single
