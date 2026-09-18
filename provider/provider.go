@@ -110,11 +110,7 @@ type Spec struct {
 	// confusing runtime failure into an immediate, actionable one.
 	// Space- or tab-padded secrets could previously reach a vendor and
 	// authenticate, so this is a deliberate breaking refusal. New never
-	// reads the environment for credentials; because this guard runs
-	// before any adapter is constructed, the vendor SDKs' own env-var
-	// credential chains (ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN,
-	// OPENAI_API_KEY, GOOGLE_API_KEY, GEMINI_API_KEY) are never
-	// consulted through New. For a credential-less endpoint — a local
+	// reads the environment for credentials. For a credential-less endpoint — a local
 	// Ollama or vLLM server that ignores whatever credential it
 	// receives — pass any non-empty placeholder; New only checks that
 	// Secret is present, never that the backend accepts it. The caller
@@ -161,9 +157,7 @@ type Options struct {
 //
 // spec.Secret is the resolved credential (callers obtain it via their own
 // config); New performs no environment lookups, so it stays testable
-// without real keys — even the Anthropic SDK's ambient ANTHROPIC_API_KEY
-// fallback never fires, because New's own guard rejects a non-conforming
-// Secret before any adapter is constructed. spec.Auth routes the secret
+// without real keys. spec.Auth routes the secret
 // to the right credential field; unknown Auth values, AuthOAuthToken on
 // a non-Anthropic Type, an empty spec.Model, a spec.Secret that is
 // empty, whitespace-only, or differs from its own strings.TrimSpace, an
