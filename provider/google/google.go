@@ -24,19 +24,16 @@ type googleAdapter struct {
 
 // Options configures a Gemini adapter.
 //
-// Capabilities, when non-nil, REPLACES the adapter's model-table profile
-// wholesale (all fields, including ContextWindow). nil = model-table default.
-//
-// StructuredOutput, when non-nil, overrides the adapter's built-in default
-// (true) — applied after Capabilities, so it wins over an override that
-// carries the field. nil = default.
+// Capabilities, when non-nil, receives the adapter's model-table profile
+// and returns the effective one; it is applied once at construction. Flip
+// a single field in a closure, or return a fixed profile to pin exact
+// values for models the table doesn't know. nil = model-table default.
 type Options struct {
 	APIKey     string
 	BaseURL    string       // optional; for testing or non-default endpoints
 	HTTPClient *http.Client // optional; for testing (httptest)
 
-	Capabilities     *llmkit.Capabilities
-	StructuredOutput *bool
+	Capabilities func(llmkit.Capabilities) llmkit.Capabilities
 }
 
 // New builds a Gemini-backed Client. genai's only built-in retry path is for
@@ -58,14 +55,7 @@ func New(ctx context.Context, model string, opts Options) (llmkit.Client, error)
 		return nil, llmkit.NewAPIError("google", 0, 0, llmkit.ErrInvalidRequest,
 			"failed to construct genai client: "+err.Error(), err)
 	}
-	caps := googleCapabilities(model)
-	if opts.Capabilities != nil {
-		// Caller-provided profile replaces the model table wholesale.
-		caps = *opts.Capabilities
-	}
-	if opts.StructuredOutput != nil {
-		caps.StructuredOutput = *opts.StructuredOutput
-	}
+	caps := adapter.ApplyOverride(googleCapabilities(model), opts.Capabilities)
 	return &googleAdapter{
 		client: client,
 		model:  model,

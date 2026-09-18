@@ -30,20 +30,17 @@ type anthropicAdapter struct {
 // the anthropic-beta: oauth-2025-04-20 header and must NOT also set x-api-key
 // (the Anthropic API rejects requests that carry both credentials).
 //
-// Capabilities, when non-nil, REPLACES the adapter's model-table profile
-// wholesale (all fields, including ContextWindow). nil = model-table default.
-//
-// StructuredOutput, when non-nil, overrides the adapter's built-in default
-// (true) — applied after Capabilities, so it wins over an override that
-// carries the field. nil = default.
+// Capabilities, when non-nil, receives the adapter's model-table profile
+// and returns the effective one; it is applied once at construction. Flip
+// a single field in a closure, or return a fixed profile to pin exact
+// values for models the table doesn't know. nil = model-table default.
 type Options struct {
 	APIKey     string
 	AuthToken  string       // OAuth bearer token; mutually exclusive with APIKey
 	BaseURL    string       // optional; for testing or proxies
 	HTTPClient *http.Client // optional; for testing (httptest)
 
-	Capabilities     *llmkit.Capabilities
-	StructuredOutput *bool
+	Capabilities func(llmkit.Capabilities) llmkit.Capabilities
 }
 
 // New builds an Anthropic-backed Client. The vendor SDK's built-in retries are
@@ -84,14 +81,7 @@ func New(model string, opts Options) llmkit.Client {
 	if opts.HTTPClient != nil {
 		reqOpts = append(reqOpts, option.WithHTTPClient(opts.HTTPClient))
 	}
-	caps := anthropicCapabilities(model)
-	if opts.Capabilities != nil {
-		// Caller-provided profile replaces the model table wholesale.
-		caps = *opts.Capabilities
-	}
-	if opts.StructuredOutput != nil {
-		caps.StructuredOutput = *opts.StructuredOutput
-	}
+	caps := adapter.ApplyOverride(anthropicCapabilities(model), opts.Capabilities)
 	return &anthropicAdapter{
 		client: anthropic.NewClient(reqOpts...),
 		model:  model,

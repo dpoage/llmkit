@@ -32,7 +32,15 @@ func childMap(t *testing.T, m map[string]any, key string) map[string]any {
 	return c
 }
 
-func ptr(b bool) *bool { return &b }
+// structuredOutputOverride returns a Capabilities override that flips
+// StructuredOutput to b while keeping every other value of the selected
+// profile.
+func structuredOutputOverride(b bool) func(llmkit.Capabilities) llmkit.Capabilities {
+	return func(c llmkit.Capabilities) llmkit.Capabilities {
+		c.StructuredOutput = b
+		return c
+	}
+}
 
 // captureBody starts a server that records the request body as a decoded map and
 // replies with a minimal successful completion.
@@ -54,10 +62,10 @@ func TestSchemaCompat_OpenAICompatible_DowngradesResponseFormat(t *testing.T) {
 	var captured map[string]any
 	base := captureBody(t, &captured)
 	adapter := New("llama-test", Options{
-		APIKey:           "k",
-		BaseURL:          base,
-		Compatible:       true,
-		StructuredOutput: ptr(true),
+		APIKey:       "k",
+		BaseURL:      base,
+		Compatible:   true,
+		Capabilities: structuredOutputOverride(true),
 	})
 	req := simpleRequest()
 	req.ResponseSchema = mapSchemaForTest
@@ -81,10 +89,10 @@ func TestSchemaCompat_OpenAICompatible_DowngradesToolParameters(t *testing.T) {
 	var captured map[string]any
 	base := captureBody(t, &captured)
 	adapter := New("llama-test", Options{
-		APIKey:           "k",
-		BaseURL:          base,
-		Compatible:       true,
-		StructuredOutput: ptr(true),
+		APIKey:       "k",
+		BaseURL:      base,
+		Compatible:   true,
+		Capabilities: structuredOutputOverride(true),
 	})
 	req := simpleRequest()
 	req.Tools = []llmkit.ToolDef{{Name: "sandbox_exec", Parameters: mapSchemaForTest}}

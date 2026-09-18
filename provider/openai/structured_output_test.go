@@ -112,10 +112,10 @@ func TestStructuredOutput_OpenAICompatible_AttachesResponseFormat(t *testing.T) 
 		_, _ = w.Write([]byte(mockTextBody("ok", 1, 1)))
 	})
 	adapter := New("llama-test", Options{
-		APIKey:           "k",
-		BaseURL:          base,
-		Compatible:       true,
-		StructuredOutput: ptr(true),
+		APIKey:       "k",
+		BaseURL:      base,
+		Compatible:   true,
+		Capabilities: structuredOutputOverride(true),
 	})
 	req := simpleRequest()
 	req.ResponseSchema = schemaForTest
@@ -143,9 +143,9 @@ func TestStructuredOutput_OpenAI_GatedByCapability(t *testing.T) {
 		_, _ = w.Write([]byte(mockTextBody("ok", 1, 1)))
 	})
 	adapter := New("gpt-test", Options{
-		APIKey:           "k",
-		BaseURL:          base,
-		StructuredOutput: ptr(false),
+		APIKey:       "k",
+		BaseURL:      base,
+		Capabilities: structuredOutputOverride(false),
 	})
 	req := simpleRequest()
 	req.ResponseSchema = schemaForTest

@@ -22,7 +22,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"mime"
@@ -30,17 +29,9 @@ import (
 	"path/filepath"
 
 	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/examples/internal/envcfg"
 	"github.com/dpoage/llmkit/provider"
 )
-
-var errUsage = errors.New(`missing environment:
-  LLMKIT_PROVIDER  anthropic | openai | openai-compatible | google
-  LLMKIT_MODEL     model name, e.g. claude-sonnet-4-5 or gpt-4o-mini
-  LLMKIT_API_KEY   provider API key (any placeholder for a local endpoint)
-  LLMKIT_BASE_URL  optional base URL for OpenAI-compatible endpoints
-
-set the variables above, then re-run:
-  go run ./examples/basic [--image path/to/photo.jpg]`)
 
 func main() {
 	if err := run(); err != nil {
@@ -53,20 +44,19 @@ func run() error {
 	imagePath := flag.String("image", "", "optional image file to include in the user message")
 	flag.Parse()
 
-	providerName := os.Getenv("LLMKIT_PROVIDER")
-	model := os.Getenv("LLMKIT_MODEL")
-	apiKey := os.Getenv("LLMKIT_API_KEY")
-	baseURL := os.Getenv("LLMKIT_BASE_URL")
-	if providerName == "" || model == "" || apiKey == "" {
-		return errUsage
-	}
+	spec, err := envcfg.Load(`missing environment:
+  LLMKIT_PROVIDER  anthropic | openai | openai-compatible | google
+  LLMKIT_MODEL     model name, e.g. claude-sonnet-4-5 or gpt-4o-mini
+  LLMKIT_API_KEY   provider API key (any placeholder for a local endpoint)
+  LLMKIT_BASE_URL  optional base URL for OpenAI-compatible endpoints
 
-	spec, err := specFor(providerName, baseURL)
+set the variables above, then re-run:
+  go run ./examples/basic [--image path/to/photo.jpg]`)
 	if err != nil {
 		return err
 	}
 
-	client, err := provider.New(context.Background(), spec, providerName, model, apiKey, provider.Options{})
+	client, err := provider.New(context.Background(), spec, provider.Options{})
 	if err != nil {
 		return fmt.Errorf("build client: %w", err)
 	}
@@ -79,7 +69,7 @@ func run() error {
 		}
 		caps := client.Capabilities()
 		if !caps.Images {
-			return fmt.Errorf("model %s reports Capabilities.Images=false — the flag is advisory (llmkit sends the block anyway and the provider may reject the request), so this example refuses to send it; re-run without --image or pick another model", model)
+			return fmt.Errorf("model %s reports Capabilities.Images=false — the flag is advisory (llmkit sends the block anyway and the provider may reject the request), so this example refuses to send it; re-run without --image or pick another model", spec.Model)
 		}
 		msg.Content = append(msg.Content, block)
 	}
@@ -97,27 +87,6 @@ func run() error {
 		u.InputTokens, u.OutputTokens, u.CacheReadInputTokens, u.CacheCreationInputTokens)
 	fmt.Println("stop reason:", resp.StopReason)
 	return nil
-}
-
-// specFor maps the provider name onto provider.Type with a friendly error
-// listing the accepted values. BaseURL is empty unless the caller set
-// LLMKIT_BASE_URL (used by openai-compatible and useful for proxies).
-func specFor(providerName, baseURL string) (provider.Spec, error) {
-	var spec provider.Spec
-	switch providerName {
-	case "anthropic":
-		spec.Type = provider.TypeAnthropic
-	case "openai":
-		spec.Type = provider.TypeOpenAI
-	case "openai-compatible":
-		spec.Type = provider.TypeOpenAICompatible
-	case "google":
-		spec.Type = provider.TypeGoogle
-	default:
-		return provider.Spec{}, fmt.Errorf("unknown LLMKIT_PROVIDER %q: expected anthropic, openai, openai-compatible, or google", providerName)
-	}
-	spec.BaseURL = baseURL
-	return spec, nil
 }
 
 // imageBlock reads an image file into an inline BlockImage content block.
