@@ -5,6 +5,7 @@ package openai
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -42,15 +43,20 @@ type openaiAdapter struct {
 // boolean downgrades for object-valued additionalProperties, and the
 // "openai-compatible" provider label on errors.
 //
+// Capabilities, when non-nil, REPLACES the selected profile wholesale (all
+// fields, including ContextWindow). nil = profile default.
+//
 // StructuredOutput, when non-nil, overrides the profile's StructuredOutput
-// capability. nil = profile default (true for first-party OpenAI, false for
-// openai-compatible).
+// capability — applied after Capabilities, so it wins over an override that
+// carries the field. nil = profile default (true for first-party OpenAI,
+// false for openai-compatible).
 type Options struct {
 	APIKey     string
 	BaseURL    string       // optional; for testing or non-default endpoints
 	HTTPClient *http.Client // optional; for testing (httptest)
 
 	Compatible       bool
+	Capabilities     *llmkit.Capabilities
 	StructuredOutput *bool
 }
 
@@ -79,6 +85,10 @@ func New(model string, opts Options) llmkit.Client {
 		// adapter.CoerceBoolAdditionalProperties. First-party OpenAI keeps the
 		// subschema.
 		requireBoolAdditionalProps = true
+	}
+	if opts.Capabilities != nil {
+		// Caller-provided profile replaces whichever table was selected.
+		caps = *opts.Capabilities
 	}
 	// The conservative default for openai-compatible endpoints is
 	// StructuredOutput=false; the option can flip it on (e.g. for a
@@ -116,18 +126,36 @@ func (o *openaiAdapter) buildParams(req llmkit.Request) (openai.ChatCompletionNe
 	params := openai.ChatCompletionNewParams{
 		Model: shared.ChatModel(o.model),
 	}
-	if req.MaxTokens > 0 {
-		params.MaxCompletionTokens = openai.Int(int64(req.MaxTokens))
+	maxTokens := req.MaxTokens
+	if maxTokens <= 0 {
+		// Uniform rule: the same documented default on every adapter instead
+		// of relying on each backend's unset behavior.
+		maxTokens = llmkit.DefaultMaxTokens
 	}
+	params.MaxCompletionTokens = openai.Int(int64(maxTokens))
 	if req.Temperature != nil {
 		params.Temperature = openai.Float(*req.Temperature)
 	}
+	if len(req.StopSequences) > 0 {
+		params.Stop = openai.ChatCompletionNewParamsStopUnion{OfStringArray: req.StopSequences}
+	}
+	if req.TopP != nil {
+		params.TopP = openai.Float(*req.TopP)
+	}
+	if req.Seed != nil {
+		params.Seed = openai.Int(*req.Seed)
+	}
+	// Request.TopK: the Chat Completions API has no top_k parameter, so it
+	// is dropped here and documented via Capabilities.TopK = false.
+	// Request.Thinking: not mapped onto reasoning_effort (a coarse
+	// low/medium/high dial, not a token budget), so it is dropped and
+	// documented via Capabilities.Thinking = false.
 
 	msgs := make([]openai.ChatCompletionMessageParamUnion, 0, len(req.Messages)+1)
 	if req.System != "" {
 		msgs = append(msgs, openai.SystemMessage(req.System))
 	}
-	converted, err := toOpenAIMessages(req.Messages)
+	converted, err := toOpenAIMessages(o.provider, req.Messages)
 	if err != nil {
 		return openai.ChatCompletionNewParams{}, err
 	}
@@ -155,6 +183,13 @@ func (o *openaiAdapter) buildParams(req llmkit.Request) (openai.ChatCompletionNe
 			tools = append(tools, openai.ChatCompletionFunctionTool(fn))
 		}
 		params.Tools = tools
+	}
+
+	// Request.ToolChoice. Auto (and the zero value) is the provider default
+	// and is never serialized. Unlike Anthropic, no synthetic forcing
+	// competes here: response_format coexists with tool_choice.
+	if err := o.applyToolChoice(&params, req.ToolChoice); err != nil {
+		return openai.ChatCompletionNewParams{}, err
 	}
 
 	// Schema-constrained output. Honored even when tools are present
@@ -198,19 +233,87 @@ func (o *openaiAdapter) buildParams(req llmkit.Request) (openai.ChatCompletionNe
 	return params, nil
 }
 
-func toOpenAIMessages(msgs []llmkit.Message) ([]openai.ChatCompletionMessageParamUnion, error) {
+// applyToolChoice maps the normalized tool-choice request onto the Chat
+// Completions tool_choice parameter.
+func (o *openaiAdapter) applyToolChoice(params *openai.ChatCompletionNewParams, tc llmkit.ToolChoice) error {
+	// Capability gate: models without function calling (o1-mini/o1-preview
+	// — see openAICapabilities) report ToolChoice=false, and every explicit
+	// steering mode is then REJECTED before the wire call. Silently dropping
+	// "none" would escalate permissions (the model stays free to call the
+	// offered tools) and dropping "required"/"tool" would silently degrade;
+	// auto and the zero value are the provider default and pass. An
+	// unrecognized mode falls through so the mapper below produces its
+	// precise unknown-mode error.
+	if err := adapter.GateToolChoice(o.provider, tc, o.caps.ToolChoice); err != nil {
+		return err
+	}
+	switch tc.Mode {
+	case "", llmkit.ToolChoiceAuto:
+		return nil
+	case llmkit.ToolChoiceNone:
+		params.ToolChoice = openai.ChatCompletionToolChoiceOptionUnionParam{
+			OfAuto: openai.String("none"),
+		}
+	case llmkit.ToolChoiceRequired:
+		params.ToolChoice = openai.ChatCompletionToolChoiceOptionUnionParam{
+			OfAuto: openai.String("required"),
+		}
+	case llmkit.ToolChoiceTool:
+		if tc.Name == "" {
+			return llmkit.NewAPIError(o.provider, 0, 0, llmkit.ErrInvalidRequest,
+				"ToolChoice.Mode=tool requires ToolChoice.Name", nil)
+		}
+		params.ToolChoice = openai.ChatCompletionToolChoiceOptionUnionParam{
+			OfFunctionToolChoice: &openai.ChatCompletionNamedToolChoiceParam{
+				Function: openai.ChatCompletionNamedToolChoiceFunctionParam{Name: tc.Name},
+			},
+		}
+	default:
+		return llmkit.NewAPIError(o.provider, 0, 0, llmkit.ErrInvalidRequest,
+			"unknown ToolChoice.Mode "+string(tc.Mode), nil)
+	}
+	return nil
+}
+
+// toOpenAIMessages converts normalized messages into Chat Completions
+// messages. Content blocks map in order: text → text part, image →
+// image_url part, document → file part; assistant and tool-result messages
+// carry their concatenated text.
+//
+// Per-role block rule (ValidateMessageBlocks, before any mapping):
+// user text/image/document; assistant text/thinking (no thinking is
+// re-emitted on OpenAI — Capabilities.Thinking=false); system and
+// tool-result text only. Violations are ErrInvalidRequest. Image/document source validation happens
+// here, BEFORE any wire call.
+func toOpenAIMessages(provider string, msgs []llmkit.Message) ([]openai.ChatCompletionMessageParamUnion, error) {
 	out := make([]openai.ChatCompletionMessageParamUnion, 0, len(msgs))
 	for _, m := range msgs {
+		// Per-role block-kind rule + media source rule, before any mapping.
+		// Without this, an image in a system/tool-result/assistant message
+		// would be silently dropped by m.Text().
+		if err := adapter.ValidateMessageBlocks(provider, m); err != nil {
+			return nil, err
+		}
 		switch m.Role {
 		case llmkit.RoleSystem:
-			out = append(out, openai.SystemMessage(m.Content))
+			out = append(out, openai.SystemMessage(m.Text()))
 		case llmkit.RoleUser:
-			out = append(out, openai.UserMessage(m.Content))
+			parts, err := openAIUserParts(m)
+			if err != nil {
+				return nil, err
+			}
+			if len(parts) == 1 && parts[0].OfText != nil {
+				// Common text-only form: keep the flat string content the
+				// API (and compatible backends) have always accepted.
+				out = append(out, openai.UserMessage(parts[0].OfText.Text))
+			} else {
+				out = append(out, openai.UserMessage(parts))
+			}
 		case llmkit.RoleAssistant:
 			am := openai.ChatCompletionAssistantMessageParam{}
-			if m.Content != "" {
+			if text := m.Text(); text != "" {
 				am.Content = openai.ChatCompletionAssistantMessageParamContentUnion{
-					OfString: openai.String(m.Content),
+					OfString: openai.String(text),
 				}
 			}
 			for _, tc := range m.ToolCalls {
@@ -230,7 +333,7 @@ func toOpenAIMessages(msgs []llmkit.Message) ([]openai.ChatCompletionMessagePara
 			}
 			out = append(out, openai.ChatCompletionMessageParamUnion{OfAssistant: &am})
 		case llmkit.RoleToolResult:
-			out = append(out, openai.ToolMessage(m.Content, m.ToolCallID))
+			out = append(out, openai.ToolMessage(m.Text(), m.ToolCallID))
 		default:
 			return nil, llmkit.NewAPIError("openai", 0, 0, llmkit.ErrInvalidRequest,
 				"unknown message role "+string(m.Role), nil)
@@ -239,11 +342,86 @@ func toOpenAIMessages(msgs []llmkit.Message) ([]openai.ChatCompletionMessagePara
 	return out, nil
 }
 
+// dataURI renders inline block bytes as an RFC-2397 data URL, the form the
+// image_url and file content parts accept for embedded media.
+func dataURI(mediaType string, data []byte) string {
+	return "data:" + mediaType + ";base64," + base64.StdEncoding.EncodeToString(data)
+}
+
+// openAIUserParts maps a user message's content blocks onto Chat Completions
+// content parts: image → image_url part (data: URI for inline bytes, URL
+// verbatim), document → file part (file_data as a data: URI). Document URLs
+// are rejected: the Chat Completions file part has no URL source. A message
+// with no blocks yields one empty text part so the wire shape of a
+// previously-valid empty user turn is preserved.
+func openAIUserParts(m llmkit.Message) ([]openai.ChatCompletionContentPartUnionParam, error) {
+	parts := make([]openai.ChatCompletionContentPartUnionParam, 0, len(m.Content))
+	for _, b := range m.Content {
+		switch b.Kind {
+		case llmkit.BlockText:
+			parts = append(parts, openai.ChatCompletionContentPartUnionParam{
+				OfText: &openai.ChatCompletionContentPartTextParam{Text: b.Text},
+			})
+		case llmkit.BlockImage:
+			if err := adapter.ValidateMediaBlock("openai", b); err != nil {
+				return nil, err
+			}
+			url := b.URL
+			if len(b.Data) > 0 {
+				url = dataURI(b.MediaType, b.Data)
+			}
+			parts = append(parts, openai.ChatCompletionContentPartUnionParam{
+				OfImageURL: &openai.ChatCompletionContentPartImageParam{
+					ImageURL: openai.ChatCompletionContentPartImageImageURLParam{URL: url},
+				},
+			})
+		case llmkit.BlockDocument:
+			if err := adapter.ValidateMediaBlock("openai", b); err != nil {
+				return nil, err
+			}
+			if b.URL != "" {
+				return nil, llmkit.NewAPIError("openai", 0, 0, llmkit.ErrInvalidRequest,
+					"document block: the Chat Completions file part accepts inline data only, not URLs", nil)
+			}
+			filename := b.Title
+			if filename == "" {
+				filename = "document"
+			}
+			parts = append(parts, openai.ChatCompletionContentPartUnionParam{
+				OfFile: &openai.ChatCompletionContentPartFileParam{
+					File: openai.ChatCompletionContentPartFileFileParam{
+						FileData: openai.String(dataURI(b.MediaType, b.Data)),
+						Filename: openai.String(filename),
+					},
+				},
+			})
+		}
+	}
+	if len(parts) == 0 {
+		parts = append(parts, openai.ChatCompletionContentPartUnionParam{
+			OfText: &openai.ChatCompletionContentPartTextParam{Text: ""},
+		})
+	}
+	return parts, nil
+}
+
 func (o *openaiAdapter) toResponse(cc *openai.ChatCompletion) llmkit.Response {
 	var resp llmkit.Response
 	if len(cc.Choices) > 0 {
 		choice := cc.Choices[0]
-		resp.Text = choice.Message.Content
+		// message.refusal: when the model declines on policy grounds OpenAI
+		// puts the explanation here and leaves content empty. Surface it as
+		// the response text with StopRefusal, so a caller sees WHY the turn
+		// ended instead of an empty StopEndTurn.
+		refused := choice.Message.Refusal != ""
+		if refused {
+			resp.Text = choice.Message.Refusal
+		} else {
+			resp.Text = choice.Message.Content
+		}
+		if resp.Text != "" {
+			resp.Blocks = append(resp.Blocks, llmkit.Block{Kind: llmkit.BlockText, Text: resp.Text})
+		}
 		for _, tc := range choice.Message.ToolCalls {
 			// Only function tool calls carry an arguments payload we surface.
 			resp.ToolCalls = append(resp.ToolCalls, llmkit.ToolCall{
@@ -252,7 +430,11 @@ func (o *openaiAdapter) toResponse(cc *openai.ChatCompletion) llmkit.Response {
 				Arguments: json.RawMessage(tc.Function.Arguments),
 			})
 		}
-		resp.StopReason = mapOpenAIStop(choice.FinishReason, len(resp.ToolCalls) > 0)
+		if refused {
+			resp.StopReason = llmkit.StopRefusal
+		} else {
+			resp.StopReason = mapOpenAIStop(choice.FinishReason, len(resp.ToolCalls) > 0)
+		}
 	}
 	// prompt_tokens already INCLUDES cached tokens (OpenAI convention), which
 	// matches the normalized Usage semantics directly. Caching is automatic
@@ -277,7 +459,7 @@ func mapOpenAIStop(reason string, hasToolCalls bool) llmkit.StopReason {
 	case "length":
 		return llmkit.StopMaxTokens
 	case "content_filter":
-		return llmkit.StopError
+		return llmkit.StopContentFilter
 	default:
 		// Some OpenAI-compatible servers return tool calls with an empty or
 		// nonstandard finish_reason; trust the presence of tool calls.
@@ -296,58 +478,96 @@ func (o *openaiAdapter) normalizeErr(err error) error {
 	return llmkit.NewAPIError(o.provider, 0, 0, llmkit.ErrServer, err.Error(), err)
 }
 
-// openAICapabilities returns the capability profile for first-party OpenAI
-// models. Context window is per-model where known, with a 128k default for
-// unrecognized models.
-func openAICapabilities(model string) llmkit.Capabilities {
+// Sources (vendor docs consulted for this table):
+//   - https://platform.openai.com/docs/models — per-model context windows:
+//     gpt-5 / gpt-5-mini / gpt-5-nano 400,000; gpt-4.1 / -mini / -nano
+//     1,047,576; gpt-4.5-preview 128,000; gpt-4o / gpt-4o-mini 128,000;
+//     o1 / o3 / o3-mini / o4-mini 200,000 with o1-mini and o1-preview at
+//     128,000; gpt-4-turbo (incl. the gpt-4-0125-preview and gpt-4-1106-*
+//     snapshots) 128,000; gpt-4 8,192; gpt-4-32k 32,768; gpt-3.5-turbo
+//     16,385.
+//   - https://platform.openai.com/docs/guides/prompt-caching — automatic
+//     prompt caching exists only for models introduced from Aug 2024 on
+//     (gpt-4o and later, o1 and later); the gpt-4 / gpt-4-turbo /
+//     gpt-3.5-turbo families predate it.
+//   - https://platform.openai.com/docs/guides/structured-outputs plus the
+//     per-model pages — structured outputs are unsupported on gpt-4,
+//     gpt-4-32k, gpt-4-turbo, and gpt-3.5-turbo; o1-mini and o1-preview
+//     support neither structured outputs nor function calling at all
+//     (https://platform.openai.com/docs/models/o1-mini), so their
+//     ToolChoice and ParallelToolCalls are false too.
+//
+// The table is matched by LONGEST key with a "-" segment boundary
+// (adapter.MatchesModelFamily), so "gpt-4-turbo" and "gpt-4.1" win over the
+// shorter "gpt-4" key, "o1-mini" wins over "o1", and the dotted sibling
+// "gpt-4.5" needs — and has — its own key. Only the fields that genuinely
+// vary by model are stored per entry (window + the
+// parallel/caching/structured/tool-choice bools); everything else is shared
+// Chat Completions API behavior (see firstPartyCaps).
+//
+// An unknown first-party model reports ContextWindow 0 — unknown is never
+// fabricated into a number (the old 128k fallback overstated gpt-4's 8k
+// window) — while the feature bools keep the API-level defaults: an
+// unrecognized name on the first-party endpoint is most likely a NEW model
+// with the modern feature set, and the server is the final validator. Pin
+// exact values for unknown models via Options.Capabilities.
+type openAIModelCaps struct {
+	prefix string
+	caps   llmkit.Capabilities
+}
+
+// firstPartyCaps fills a first-party profile: the API-level defaults with
+// the per-model fields supplied by the caller.
+func firstPartyCaps(window int, parallel, caching, structured, toolChoice bool) llmkit.Capabilities {
 	return llmkit.Capabilities{
-		ContextWindow:     openAIContextWindow(model),
-		ParallelToolCalls: true,
-		PromptCaching:     true,
-		StructuredOutput:  true,
+		ContextWindow:     window,
+		ParallelToolCalls: parallel,
+		PromptCaching:     caching,
+		StructuredOutput:  structured,
+		Thinking:          false, // reasoning_effort is a coarse dial, not a budget — never mapped
+		ToolChoice:        toolChoice,
+		Images:            true,
+		Documents:         true,
+		StopSequences:     true,
+		TopP:              true,
+		TopK:              false, // Chat Completions has no top_k
+		Seed:              true,
 	}
 }
 
-// openAIContextWindow returns the known context-window size for a first-party
-// OpenAI model. Unrecognized models get the 128k default which covers the
-// current GPT-4o family.
-func openAIContextWindow(model string) int {
-	switch model {
-	case "gpt-3.5-turbo", "gpt-3.5-turbo-0125":
-		return 16_385
-	case "gpt-3.5-turbo-16k":
-		return 16_385
-	case "gpt-4", "gpt-4-0613":
-		return 8_192
-	case "gpt-4-32k", "gpt-4-32k-0613":
-		return 32_768
-	case "gpt-4-turbo", "gpt-4-turbo-2024-04-09", "gpt-4-turbo-preview":
-		return 128_000
-	case "gpt-4o", "gpt-4o-2024-05-13", "gpt-4o-2024-08-06", "gpt-4o-2024-11-20":
-		return 128_000
-	case "gpt-4o-mini", "gpt-4o-mini-2024-07-18":
-		return 128_000
-	case "o1", "o1-2024-12-17":
-		return 200_000
-	case "o1-mini", "o1-mini-2024-09-12":
-		return 128_000
-	case "o1-preview", "o1-preview-2024-09-12":
-		return 128_000
-	case "o3", "o3-2025-04-16":
-		return 200_000
-	case "o3-mini", "o3-mini-2025-01-31":
-		return 200_000
-	case "o4-mini", "o4-mini-2025-04-16":
-		return 200_000
-	case "gpt-4.1", "gpt-4.1-2025-04-14":
-		return 1_047_576
-	case "gpt-4.1-mini", "gpt-4.1-mini-2025-04-14":
-		return 1_047_576
-	case "gpt-4.1-nano", "gpt-4.1-nano-2025-04-14":
-		return 1_047_576
-	default:
-		return 128_000
+var openAIModelTable = []openAIModelCaps{
+	{"gpt-5", firstPartyCaps(400_000, true, true, true, true)},
+	{"gpt-4.1", firstPartyCaps(1_047_576, true, true, true, true)},
+	// gpt-4.5: a dotted sibling of gpt-4 — under segment matching it can
+	// never inherit the gpt-4 entry, so it carries its own key.
+	{"gpt-4.5", firstPartyCaps(128_000, true, true, true, true)},
+	{"gpt-4o", firstPartyCaps(128_000, true, true, true, true)},
+	{"gpt-4-turbo", firstPartyCaps(128_000, true, false, false, true)},
+	// The GPT-4 Turbo Preview snapshots (128k, parallel function calling
+	// since the 1106 generation) — without these keys the 8,192 gpt-4
+	// entry would swallow them via the "-" continuation.
+	{"gpt-4-0125", firstPartyCaps(128_000, true, false, false, true)},
+	{"gpt-4-1106", firstPartyCaps(128_000, true, false, false, true)},
+	// gpt-4-vision-preview: the retired vision variant of the 1106 Turbo
+	// generation (128k, parallel function calling) — without its own key it
+	// would inherit the 8,192 gpt-4 entry.
+	{"gpt-4-vision", firstPartyCaps(128_000, true, false, false, true)},
+	{"gpt-4-32k", firstPartyCaps(32_768, false, false, false, true)},
+	{"gpt-4", firstPartyCaps(8_192, false, false, false, true)},
+	{"gpt-3.5-turbo", firstPartyCaps(16_385, true, false, false, true)},
+	{"o1-mini", firstPartyCaps(128_000, false, true, false, false)},
+	{"o1-preview", firstPartyCaps(128_000, false, true, false, false)},
+	{"o1", firstPartyCaps(200_000, true, true, true, true)},
+	{"o3", firstPartyCaps(200_000, true, true, true, true)},
+	{"o4-mini", firstPartyCaps(200_000, true, true, true, true)},
+}
+
+func openAICapabilities(model string) llmkit.Capabilities {
+	best := adapter.BestMatchingFamily(model, openAIModelTable, func(e openAIModelCaps) string { return e.prefix })
+	if best >= 0 {
+		return openAIModelTable[best].caps
 	}
+	return firstPartyCaps(0, true, true, true, true)
 }
 
 // openAICompatibleCapabilities returns a conservative profile for arbitrary
@@ -358,6 +578,11 @@ func openAIContextWindow(model string) int {
 // endpoint reports it (e.g. MiniMax), so cache hits are ledgered even with
 // PromptCaching=false. Callers can override.
 //
+// Thinking is false: this adapter does not map Request.Thinking onto
+// reasoning_effort. TopK is false: the Chat Completions API has no top_k.
+// Tool choice, images, documents, stop sequences, top_p, and seed are part
+// of the base Chat Completions contract and are sent when requested.
+//
 // The model parameter is accepted for symmetry with other capability
 // constructors; no per-model lookup is available for arbitrary endpoints,
 // so ContextWindow is left at 0 (unknown).
@@ -367,5 +592,13 @@ func openAICompatibleCapabilities(model string) llmkit.Capabilities {
 		ParallelToolCalls: false,
 		PromptCaching:     false,
 		StructuredOutput:  false,
+		Thinking:          false,
+		ToolChoice:        true,
+		Images:            true,
+		Documents:         true,
+		StopSequences:     true,
+		TopP:              true,
+		TopK:              false,
+		Seed:              true,
 	}
 }

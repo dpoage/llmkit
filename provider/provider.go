@@ -33,9 +33,24 @@ const (
 // Auth selects the credential mode: empty string or "api_key" → standard API
 // key (x-api-key header); "oauth-token" → OAuth bearer-token (Anthropic only).
 //
-// StructuredOutput, when non-nil, overrides the adapter's built-in default.
-// nil = use the adapter default (true for first-party providers, false for
-// openai-compatible endpoints).
+// Capabilities, when non-nil, REPLACES the adapter's model-table profile
+// wholesale — every field, including ContextWindow. Use it to pin exact
+// values for models the adapter's table doesn't know (adapters report
+// ContextWindow 0 for unknown models; llmkit never fabricates a window).
+// The override is plumbed into the adapter itself, so wire behavior follows
+// the effective profile, not just the reported one — concretely: on a
+// profile with Thinking=false the thinking config is dropped silently; on a
+// profile with ToolChoice=false every explicit Request.ToolChoice mode is
+// rejected with ErrInvalidRequest before the wire call (auto stays
+// allowed); StructuredOutput=false gates response_format (OpenAI) and the
+// synthetic forced-output tool (Anthropic) off, and ParallelToolCalls=false
+// installs the tool-call serializer.
+//
+// Composition with StructuredOutput: the adapter's model table is applied
+// first, then a non-nil Capabilities replaces it wholesale, then a non-nil
+// StructuredOutput sets that single field — so StructuredOutput keeps the
+// last word even when Capabilities is provided. nil on both leaves the
+// adapter's table untouched.
 type Spec struct {
 	Type    Type
 	BaseURL string // optional; for testing or non-default endpoints
@@ -44,6 +59,10 @@ type Spec struct {
 	// StructuredOutput overrides the adapter's StructuredOutput capability.
 	// nil = adapter default.
 	StructuredOutput *bool
+
+	// Capabilities overrides the adapter's capability profile wholesale.
+	// nil = adapter default.
+	Capabilities *llmkit.Capabilities
 }
 
 // Options tunes client construction. The zero value is valid: it uses default
@@ -101,6 +120,7 @@ func New(ctx context.Context, spec Spec, providerName, model, apiKey string, opt
 			aopts.APIKey = apiKey
 		}
 		aopts.StructuredOutput = spec.StructuredOutput
+		aopts.Capabilities = spec.Capabilities
 		adapter = anthropic.New(model, aopts)
 	case TypeOpenAI:
 		adapter = openai.New(model, openai.Options{
@@ -108,6 +128,7 @@ func New(ctx context.Context, spec Spec, providerName, model, apiKey string, opt
 			BaseURL:          spec.BaseURL,
 			HTTPClient:       opts.HTTPClient,
 			StructuredOutput: spec.StructuredOutput,
+			Capabilities:     spec.Capabilities,
 		})
 	case TypeOpenAICompatible:
 		adapter = openai.New(model, openai.Options{
@@ -116,6 +137,7 @@ func New(ctx context.Context, spec Spec, providerName, model, apiKey string, opt
 			HTTPClient:       opts.HTTPClient,
 			Compatible:       true,
 			StructuredOutput: spec.StructuredOutput,
+			Capabilities:     spec.Capabilities,
 		})
 	case TypeGoogle:
 		ga, err := google.New(ctx, model, google.Options{
@@ -123,6 +145,7 @@ func New(ctx context.Context, spec Spec, providerName, model, apiKey string, opt
 			BaseURL:          spec.BaseURL,
 			HTTPClient:       opts.HTTPClient,
 			StructuredOutput: spec.StructuredOutput,
+			Capabilities:     spec.Capabilities,
 		})
 		if err != nil {
 			return nil, err

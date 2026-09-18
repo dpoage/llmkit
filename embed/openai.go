@@ -23,6 +23,8 @@ type OpenAICompatibleEmbedder struct {
 	model      string
 	apiKey     string
 	client     *http.Client
+	retry      RetryConfig
+	maxBatch   int
 	dimensions int
 	mu         sync.RWMutex // guards dimensions
 }
@@ -37,7 +39,9 @@ func NewOpenAICompatibleEmbedder(cfg Config) (*OpenAICompatibleEmbedder, error) 
 		baseURL:    strings.TrimRight(cfg.URL, "/"),
 		model:      cfg.Model,
 		apiKey:     cfg.APIKey,
-		client:     &http.Client{},
+		client:     cfg.httpClient(),
+		retry:      cfg.retryPolicy(),
+		maxBatch:   cfg.MaxBatch,
 		dimensions: cfg.Dimensions,
 	}, nil
 }
@@ -67,22 +71,50 @@ type openaiError struct {
 
 // Embed returns the embedding for a single text.
 func (o *OpenAICompatibleEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
-	results, err := o.doEmbed(ctx, []string{text})
+	var out []float32
+	err := retryDo(ctx, o.retry, func() error {
+		res, err := o.doEmbed(ctx, []string{text})
+		if err == nil {
+			out = res[0]
+		}
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
-	if len(results) == 0 {
+	if out == nil {
 		return nil, fmt.Errorf("openai-compatible: empty embeddings response")
 	}
-	return results[0], nil
+	return out, nil
 }
 
-// EmbedBatch returns embeddings for multiple texts in a single API call.
+// EmbedBatch returns embeddings for multiple texts, splitting the input into
+// requests of at most MaxBatch texts (no splitting when MaxBatch is zero).
+// Results are index-aligned with the input; a failed chunk fails the whole
+// call.
 func (o *OpenAICompatibleEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
 	}
-	return o.doEmbed(ctx, texts)
+	out := make([][]float32, 0, len(texts))
+	for start := 0; start < len(texts); {
+		n := batchChunkSize(len(texts)-start, o.maxBatch)
+		chunk := texts[start : start+n]
+		var res [][]float32
+		err := retryDo(ctx, o.retry, func() error {
+			r, err := o.doEmbed(ctx, chunk)
+			if err == nil {
+				res = r
+			}
+			return err
+		})
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, res...)
+		start += n
+	}
+	return out, nil
 }
 
 // Dimensions returns the vector dimensionality. Like OllamaEmbedder, this
@@ -121,7 +153,7 @@ func (o *OpenAICompatibleEmbedder) doEmbed(ctx context.Context, texts []string) 
 	if err != nil {
 		return nil, fmt.Errorf("openai-compatible: request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -129,7 +161,7 @@ func (o *OpenAICompatibleEmbedder) doEmbed(ctx context.Context, texts []string) 
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("openai-compatible: HTTP %d: %s", resp.StatusCode, truncate(string(respBody), 200))
+		return nil, newStatusError("openai-compatible", resp.StatusCode, resp.Header.Get("Retry-After"), string(respBody))
 	}
 
 	var result openaiResponse
@@ -139,15 +171,20 @@ func (o *OpenAICompatibleEmbedder) doEmbed(ctx context.Context, texts []string) 
 	if result.Error != nil {
 		return nil, fmt.Errorf("openai-compatible: API error: %s", result.Error.Message)
 	}
-	if len(result.Data) == 0 {
-		return nil, fmt.Errorf("openai-compatible: empty data in response")
+	if len(result.Data) != len(texts) {
+		return nil, fmt.Errorf("openai-compatible: expected %d embeddings, got %d", len(texts), len(result.Data))
 	}
 
-	// The response may not be sorted by index. Build by index.
-	out := make([][]float32, len(result.Data))
+	// The response may not be sorted by index. Build by index, rejecting
+	// out-of-range and duplicate indices; together with the count check
+	// above this guarantees every slot is filled.
+	out := make([][]float32, len(texts))
 	for _, d := range result.Data {
-		if d.Index < 0 || d.Index >= len(out) {
+		if d.Index < 0 || d.Index >= len(texts) {
 			return nil, fmt.Errorf("openai-compatible: unexpected index %d for batch size %d", d.Index, len(texts))
+		}
+		if out[d.Index] != nil {
+			return nil, fmt.Errorf("openai-compatible: duplicate embedding at index %d", d.Index)
 		}
 		f32 := make([]float32, len(d.Embedding))
 		for j, v := range d.Embedding {
@@ -156,19 +193,9 @@ func (o *OpenAICompatibleEmbedder) doEmbed(ctx context.Context, texts []string) 
 		out[d.Index] = f32
 	}
 
-	// Verify every slot was populated.
-	for i, emb := range out {
-		if emb == nil {
-			return nil, fmt.Errorf("openai-compatible: missing embedding at index %d", i)
-		}
+	if err := checkDimensions("openai-compatible", out, &o.dimensions, &o.mu); err != nil {
+		return nil, err
 	}
-
-	// Auto-detect dimensions.
-	o.mu.Lock()
-	if o.dimensions == 0 && len(out[0]) > 0 {
-		o.dimensions = len(out[0])
-	}
-	o.mu.Unlock()
 
 	return out, nil
 }

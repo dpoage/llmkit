@@ -9,6 +9,7 @@ package embed
 import (
 	"context"
 	"fmt"
+	"sync"
 )
 
 // Embedder generates vector embeddings from text.
@@ -17,7 +18,12 @@ type Embedder interface {
 	Embed(ctx context.Context, text string) ([]float32, error)
 
 	// EmbedBatch returns embedding vectors for multiple texts.
-	// Implementations should batch the request when the backend supports it.
+	//
+	// Results are index-aligned with the input: len(result) == len(texts)
+	// and result[i] embeds texts[i]. Duplicate texts are not deduplicated —
+	// each occurrence is embedded independently. Implementations may split
+	// the batch into multiple requests; a failed request fails the whole
+	// call (no partial results).
 	EmbedBatch(ctx context.Context, texts []string) ([][]float32, error)
 
 	// Dimensions returns the dimensionality of the embedding vectors
@@ -50,8 +56,38 @@ func NewEmbedder(cfg Config) (Embedder, error) {
 	}
 
 	if cfg.CacheEnabled {
-		emb = NewCachedEmbedder(emb)
+		emb = NewCachedEmbedder(emb, cfg.CacheSize)
 	}
 
 	return emb, nil
+}
+
+// batchChunkSize caps remaining at maxBatch when chunking is enabled
+// (maxBatch > 0); otherwise the whole remainder goes in one request.
+func batchChunkSize(remaining, maxBatch int) int {
+	if maxBatch <= 0 || remaining < maxBatch {
+		return remaining
+	}
+	return maxBatch
+}
+
+// checkDimensions enforces vector-dimension consistency for a converted
+// response. expected is cfg.Dimensions when > 0; otherwise it is detected
+// from the first non-empty vector and recorded under *dims (if still zero).
+// Every vector in every call must match, so a later mismatch — configured
+// or against the first detected value — is an error.
+func checkDimensions(backend string, out [][]float32, dims *int, mu *sync.RWMutex) error {
+	mu.Lock()
+	defer mu.Unlock()
+	expected := *dims
+	if expected == 0 && len(out) > 0 && len(out[0]) > 0 {
+		expected = len(out[0])
+		*dims = expected
+	}
+	for i, v := range out {
+		if len(v) != expected {
+			return fmt.Errorf("%s: embedding dimension mismatch at index %d: got %d, want %d", backend, i, len(v), expected)
+		}
+	}
+	return nil
 }

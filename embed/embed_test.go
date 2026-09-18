@@ -42,7 +42,7 @@ func TestOllamaEmbedder_Embed(t *testing.T) {
 			Embeddings: [][]float64{want},
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
@@ -87,13 +87,13 @@ func TestOllamaEmbedder_EmbedBatch(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req ollamaRequest
-		json.NewDecoder(r.Body).Decode(&req)
+		_ = json.NewDecoder(r.Body).Decode(&req)
 
 		resp := ollamaResponse{
 			Model:      "nomic-embed-text",
 			Embeddings: embeddings,
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
@@ -143,7 +143,7 @@ func TestOllamaEmbedder_EmbedBatch_Empty(t *testing.T) {
 func TestOllamaEmbedder_HTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte(`{"error": "model not found"}`))
+		_, _ = w.Write([]byte(`{"error": "model not found"}`))
 	}))
 	defer srv.Close()
 
@@ -249,7 +249,7 @@ func TestOpenAIEmbedder_Embed(t *testing.T) {
 		}
 
 		var req openaiRequest
-		json.NewDecoder(r.Body).Decode(&req)
+		_ = json.NewDecoder(r.Body).Decode(&req)
 		if req.Model != "text-embedding-3-small" {
 			t.Errorf("expected model text-embedding-3-small, got %s", req.Model)
 		}
@@ -263,7 +263,7 @@ func TestOpenAIEmbedder_Embed(t *testing.T) {
 				{Embedding: want, Index: 0},
 			},
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
@@ -302,7 +302,7 @@ func TestOpenAIEmbedder_Embed(t *testing.T) {
 func TestOpenAIEmbedder_EmbedBatch(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req openaiRequest
-		json.NewDecoder(r.Body).Decode(&req)
+		_ = json.NewDecoder(r.Body).Decode(&req)
 
 		data := make([]openaiEmbedding, len(req.Input))
 		for i := range req.Input {
@@ -316,7 +316,7 @@ func TestOpenAIEmbedder_EmbedBatch(t *testing.T) {
 			Model: "text-embedding-3-small",
 			Data:  data,
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
@@ -351,7 +351,7 @@ func TestOpenAIEmbedder_EmbedBatch_UnorderedResponse(t *testing.T) {
 				{Embedding: []float64{0.5}, Index: 1},
 			},
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
@@ -408,7 +408,7 @@ func TestOpenAIEmbedder_APIError(t *testing.T) {
 				Type:    "invalid_request_error",
 			},
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
@@ -430,7 +430,7 @@ func TestOpenAIEmbedder_APIError(t *testing.T) {
 func TestOpenAIEmbedder_HTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`{"error": {"message": "invalid api key"}}`))
+		_, _ = w.Write([]byte(`{"error": {"message": "invalid api key"}}`))
 	}))
 	defer srv.Close()
 
@@ -460,7 +460,7 @@ func TestOpenAIEmbedder_NoAuthHeader_WithoutAPIKey(t *testing.T) {
 				{Embedding: []float64{0.1}, Index: 0},
 			},
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
@@ -499,7 +499,7 @@ func TestCachedEmbedder_Embed(t *testing.T) {
 		},
 	}
 
-	cached := NewCachedEmbedder(inner)
+	cached := NewCachedEmbedder(inner, 0)
 
 	// First call should hit the inner embedder.
 	result1, err := cached.Embed(context.Background(), "hello")
@@ -554,7 +554,7 @@ func TestCachedEmbedder_EmbedBatch(t *testing.T) {
 		},
 	}
 
-	cached := NewCachedEmbedder(inner)
+	cached := NewCachedEmbedder(inner, 0)
 
 	// First batch call.
 	results1, err := cached.EmbedBatch(context.Background(), []string{"a", "b", "c"})
@@ -592,7 +592,7 @@ func TestCachedEmbedder_EmbedBatch(t *testing.T) {
 
 func TestCachedEmbedder_EmbedBatch_Empty(t *testing.T) {
 	inner := &fakeEmbedder{dims: 2, model: "test-model"}
-	cached := NewCachedEmbedder(inner)
+	cached := NewCachedEmbedder(inner, 0)
 
 	results, err := cached.EmbedBatch(context.Background(), nil)
 	if err != nil {
@@ -612,8 +612,8 @@ func TestCachedEmbedder_Clear(t *testing.T) {
 		},
 	}
 
-	cached := NewCachedEmbedder(inner)
-	cached.Embed(context.Background(), "hello")
+	cached := NewCachedEmbedder(inner, 0)
+	_, _ = cached.Embed(context.Background(), "hello")
 
 	if cached.Len() != 1 {
 		t.Fatalf("cache Len() = %d, want 1", cached.Len())
@@ -627,7 +627,7 @@ func TestCachedEmbedder_Clear(t *testing.T) {
 
 func TestCachedEmbedder_DelegatesMethods(t *testing.T) {
 	inner := &fakeEmbedder{dims: 384, model: "nomic-embed-text"}
-	cached := NewCachedEmbedder(inner)
+	cached := NewCachedEmbedder(inner, 0)
 
 	if cached.Dimensions() != 384 {
 		t.Errorf("Dimensions() = %d, want 384", cached.Dimensions())
@@ -769,7 +769,10 @@ func TestConfig_Validate(t *testing.T) {
 
 func TestLoadConfig_Defaults(t *testing.T) {
 	// Ensure no test env vars are set.
-	cfg := LoadConfig("LLMKIT_TEST_UNSET")
+	cfg, err := LoadConfig("LLMKIT_TEST_UNSET")
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
 	if cfg.Embedder != "ollama" {
 		t.Errorf("default Embedder = %q, want %q", cfg.Embedder, "ollama")
 	}
@@ -789,7 +792,10 @@ func TestLoadConfig_EnvOverrides(t *testing.T) {
 	t.Setenv("MYAPP_EMBED_DIMENSIONS", "1536")
 	t.Setenv("MYAPP_EMBED_CACHE", "true")
 
-	cfg := LoadConfig("MYAPP")
+	cfg, err := LoadConfig("MYAPP")
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
 
 	if cfg.Embedder != "openai-compatible" {
 		t.Errorf("Embedder = %q, want %q", cfg.Embedder, "openai-compatible")
@@ -812,11 +818,14 @@ func TestLoadConfig_EnvOverrides(t *testing.T) {
 }
 
 func TestLoadConfig_PrefixIsCaseInsensitive(t *testing.T) {
-	t.Setenv("KNOWN_EMBEDDER", "ollama")
-	t.Setenv("KNOWN_EMBED_MODEL", "nomic-embed-text")
-	t.Setenv("KNOWN_EMBED_URL", "http://localhost:11434")
+	t.Setenv("LLMKIT_EMBEDDER", "ollama")
+	t.Setenv("LLMKIT_EMBED_MODEL", "nomic-embed-text")
+	t.Setenv("LLMKIT_EMBED_URL", "http://localhost:11434")
 
-	cfg := LoadConfig("known") // lowercase prefix should work
+	cfg, err := LoadConfig("llmkit") // lowercase prefix should work
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
 
 	if cfg.Embedder != "ollama" {
 		t.Errorf("Embedder = %q, want ollama", cfg.Embedder)

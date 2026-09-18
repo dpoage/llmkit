@@ -125,3 +125,100 @@ bd prime                # Refresh Beads context
 
 **Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
 <!-- END BEADS CODEX SETUP -->
+
+## Build & Test
+
+Go module `github.com/dpoage/llmkit` (Go version pinned by `go.mod`). The
+full gate — CI (`.github/workflows/ci.yml`) runs exactly this on push/PR:
+
+```bash
+go build ./...
+go vet ./...
+go vet -tags live ./provider/      # the `live` real-API probe must keep compiling
+go vet -tags integration ./embed/  # the `integration` Ollama test must keep compiling
+go test -race -count=1 ./...
+golangci-lint run ./...            # config: .golangci.yml (v2 schema, conservative set)
+gofmt -l .                         # must print nothing
+```
+The tag-gated suites RUN (not just compile) outside CI, when their
+backends exist: `go test -tags live ./provider/` exercises the real-API
+probe and skips itself unless the `LLM_LIVE_*` environment variables are
+set; `go test -tags integration ./embed/` needs a local Ollama (default
+localhost:11434).
+
+`examples/` are runnable contract checks (also compiled by
+`go build ./...`): `go run ./examples/basic`, `go run ./examples/agent`,
+`go run ./examples/structured`. All three no-op with a usage message and
+exit 1 unless `LLMKIT_PROVIDER`, `LLMKIT_MODEL`, and `LLMKIT_API_KEY` are
+set (`LLMKIT_BASE_URL` optional), so they never touch the network by
+accident.
+
+## Architecture Overview
+
+- **`llmkit`** (root) — the normalized vocabulary: `Message`/`Block` content
+  model, `Request`/`Response`/`Usage`/`Capabilities`, sentinel errors +
+  `APIError`, decorator wrappers (`WithRetry`, `WithRecorder`,
+  `WithSerializedToolCalls`), `StripThinkBlocks`, `DefaultMaxTokens`.
+- **`llmkit/provider`** — the single construction entry point: `Spec` +
+  `Options` → `New` dispatches to an adapter and decorates it
+  serialize → recorder → retry. `Spec.Capabilities` overrides a model's
+  capability profile wholesale (including `ContextWindow`).
+- **`llmkit/provider/anthropic`, `llmkit/provider/openai`,
+  `llmkit/provider/google`** — vendor-SDK adapters. `provider/openai` also
+  serves any OpenAI-compatible endpoint (Ollama, vLLM, Groq, ...).
+- **`llmkit/internal/adapter`** — helpers shared by the three adapters
+  (status classification, error normalization, schema parsing); internal,
+  not public API.
+- **`llmkit/agent`** — the tool-calling harness: `Runner` loop with
+  iteration/token budgets, history compaction, forced finalization,
+  max-tokens continuation stitching, JSONL transcripts + offline
+  `ReplayClient`, schema-constrained `RunJSON`, and the synchronous
+  `Hooks` observer surface.
+- **`llmkit/embed`** — `Embedder` interface with Ollama and
+  OpenAI-compatible HTTP backends (retry, batching, timeouts) plus the
+  content-hash `CachedEmbedder` decorator.
+- **`examples/`** — one runnable program per major surface (single
+  completion + blocks/capabilities; agent loop + hooks; RunJSON).
+
+## Conventions & Patterns
+
+- **Error normalization**: adapters classify provider failures through
+  `llmkit.NewAPIError` into the sentinel kinds `ErrRateLimited`, `ErrAuth`,
+  `ErrContextTooLong`, `ErrInvalidRequest`, `ErrServer`, `ErrOverloaded`;
+  match with `errors.Is`. `APIError` preserves the HTTP status and any
+  `Retry-After` hint, and unwraps to both the sentinel and the underlying
+  SDK error.
+- **Usage convention**: `Usage.InputTokens` is the TOTAL prompt size — it
+  INCLUDES cache-read and cache-creation tokens; the cache fields are
+  informational subsets of it (the Anthropic adapter sums them in). Budget
+  math that wants cache reads discounted uses
+  `Usage.ChargeableTokens(weight)`.
+- **No streaming**: `Client` is one synchronous
+  `Complete(ctx, Request) (Response, error)` plus `Capabilities()`.
+- **Per-role block rule**: user messages carry text/image/document blocks;
+  assistant messages text/thinking (plus `ToolCalls`); system and
+  tool-result messages text only. Every adapter enforces this BEFORE any
+  wire call — violations return an error wrapping `ErrInvalidRequest`.
+- **MaxTokens**: a zero or negative `Request.MaxTokens` resolves to
+  `llmkit.DefaultMaxTokens` (4096) on every adapter; explicit values pass
+  through verbatim.
+- **Capabilities**: adapters report `ContextWindow 0` for models outside
+  their per-model table — never a fabricated number. Enforcement is
+  uneven, and callers should know which is which: `Thinking=false` and
+  `StructuredOutput=false` are hard gates (the request's thinking config /
+  response schema is dropped silently), an explicit `Request.ToolChoice`
+  mode against `Capabilities.ToolChoice=false` is refused before the wire
+  call with `ErrInvalidRequest` (silently dropping `none` would let the
+  model call forbidden tools), while `Images`/`Documents` are ADVISORY
+  today — no adapter reads them, the blocks are sent regardless, and the
+  provider may reject the request. Gate your own image/document input on
+  the capability (see `examples/basic`).
+- **Hooks are synchronous**: every `agent.Hooks` callback runs inline on
+  the goroutine that reaches the fire point — a slow hook stalls the run.
+  `ToolEvent.Step`, `CompactionEvent.Step`, and the transcript's
+  `Event.Step` carry the SAME 1-based number for a turn, so consumers can
+  join on Step.
+- **Tool concurrency**: `Tool.Run` may be invoked concurrently — within one
+  run under `WithParallelTools`, and across concurrent `Runner.Run` calls
+  (a Runner is safe for concurrent use) — so tools and hook functions must
+  be safe for concurrent use.

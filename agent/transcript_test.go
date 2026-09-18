@@ -53,7 +53,7 @@ func TestTranscript_RoundTrip(t *testing.T) {
 	}
 }
 
-func TestReplayClient_ReproducesRun(t *testing.T) {
+func TestReplayClient_ReplaysRun(t *testing.T) {
 	// Record a run.
 	fc := newFakeClient(
 		toolResp("c1", "echo", `{"v":"hi"}`, 10, 4),

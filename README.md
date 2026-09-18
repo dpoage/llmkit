@@ -6,6 +6,7 @@ Shared LLM tooling extracted from `bugbot`, `known`, and `go-research`.
 
 - **`llmkit`** (root) — provider-agnostic client abstraction: one synchronous
   `Complete(ctx, Request) (Response, error)` plus a `Capabilities()` probe;
+  a content-block `Message` model (text, image, document, thinking),
   normalized errors (`APIError` + sentinel kinds), usage accounting with
   prompt-cache conventions, stop-reason normalization, `<think>`-block
   stripping, and decorator wrappers: retry (exponential backoff + jitter,
@@ -28,20 +29,41 @@ Shared LLM tooling extracted from `bugbot`, `known`, and `go-research`.
 - **`llmkit/agent`** — tool-calling harness over `llmkit.Client`: `Runner` with
   iteration/token budgets, history compaction, forced finalization,
   max-tokens continuation stitching, JSONL transcripts with offline
-  `ReplayClient`, schema-constrained `RunJSON`. Tools implement
-  `Tool{Def, Run}`; tool errors feed back to the model, infra failures
-  surface via `ToolHealthError`. Origin: `bugbot/internal/agent` (harness
-  only; bugbot's concrete tools stay in bugbot).
+  `ReplayClient`, schema-constrained `RunJSON`, synchronous lifecycle
+  `Hooks`, per-tool timeouts, and optional parallel tool dispatch. Tools
+  implement `Tool{Def, Run}`; tool errors feed back to the model, infra
+  failures surface via `ToolHealthError`. Origin: `bugbot/internal/agent`
+  (harness only; bugbot's concrete tools stay in bugbot).
 
 - **`embed`** — `Embedder` interface with Ollama and OpenAI-compatible HTTP
   backends plus an in-memory caching decorator. Local ONNX inference (hugot)
   intentionally NOT included — it drags the ONNX/GoMLX dependency tree;
   implement `Embedder` in your app if you need it. Origin: `known/embed`.
 
+## Examples
+
+`examples/` contains three runnable programs, one per major surface: a
+plain completion with content blocks and capability gating (`basic`), a
+tool-calling agent with hooks (`agent`), and schema-constrained output via
+`RunJSON` (`structured`). All three read
+`LLMKIT_PROVIDER`/`LLMKIT_MODEL`/`LLMKIT_API_KEY` (plus optional
+`LLMKIT_BASE_URL`) and print a usage message instead of touching the
+network when the environment is unset:
+
+```bash
+go run ./examples/basic --image photo.jpg
+go run ./examples/agent --parallel
+go run ./examples/structured
+```
+
 ## Design decisions
 
-- Message model: flat `Message{Role, Content, ToolCalls, ToolCallID, IsError}`
-  (bugbot's), not content-block unions (go-research's). See the root package docs.
+- Message model: content-block `Message{Role, Content []Block, ...}` — text,
+  image, document, and opaque provider thinking blocks (Anthropic thinking
+  signatures round-trip verbatim; foreign-provider thinking is dropped).
+  `llmkit.TextMessage(role, s)` / `Message.Text()` keep the common
+  text-only case one line; `Block.Data` is base64 in JSONL transcripts.
+  See the root package docs.
 - No streaming: none of the three donor projects used it; the interface stays
   synchronous until a consumer needs otherwise.
 - Official vendor SDKs (anthropic-sdk-go, openai-go, google genai) rather than

@@ -9,8 +9,8 @@ import (
 
 // TestWithTranscriptKey_EmbeddedInFilename verifies WithTranscriptKey embeds
 // the caller-supplied key between the autosave timestamp and the task slug —
-// the exact filename shape internal/tui/transcript.go's discoverTranscript
-// relies on to join a transcript file back to its store row by an EXACT
+// the exact filename shape a caller's transcript-discovery helper relies on
+// to join a transcript file back to its store row by an EXACT
 // substring match ("-<key>-") instead of a timestamp-window guess.
 func TestWithTranscriptKey_EmbeddedInFilename(t *testing.T) {
 	dir := t.TempDir()
@@ -39,7 +39,7 @@ func TestWithTranscriptKey_EmbeddedInFilename(t *testing.T) {
 
 // TestWithTranscriptKey_EmptyKeyIsNoOp verifies an empty key (the zero value,
 // and what every pre-existing caller that has no stable ID to mint up front
-// passes implicitly by never calling WithTranscriptKey) reproduces the
+// passes implicitly by never calling WithTranscriptKey) yields the
 // original "<timestamp>-<slug>.jsonl" filename shape byte-for-byte — no
 // double dash, no empty segment — so existing keyless-caller
 // autosave behavior is unaffected.

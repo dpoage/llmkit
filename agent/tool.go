@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/dpoage/llmkit"
 )
@@ -20,9 +19,13 @@ import (
 // for tool-level problems (bad arguments, file not found); never use them to
 // signal that the loop should abort.
 //
-// Run must honor ctx cancellation. Implementations are invoked sequentially
-// within a single run, so they need not be safe for concurrent calls from one
-// Runner; but a Tool shared across concurrent Runners must be.
+// Run must honor ctx cancellation. Run MAY BE INVOKED CONCURRENTLY: within a
+// single run when the Runner was constructed with [WithParallelTools] (one
+// goroutine per tool call in a turn), and across simultaneous Run calls on
+// one Runner (a Runner is safe for concurrent Run calls). A Tool used under
+// either arrangement must be safe for concurrent calls — unsynchronized state
+// data-races rather than erroring, and races surface as silently wrong tool
+// results. See the [Runner] concurrency paragraph and [WithParallelTools].
 type Tool interface {
 	// Def returns the tool's declaration (name, description, JSON-schema
 	// parameters) as advertised to the model.
@@ -46,25 +49,6 @@ func toolError(err error) string {
 func UnmarshalArgs(raw json.RawMessage, dst any) error {
 	if err := json.Unmarshal(raw, dst); err != nil {
 		return fmt.Errorf("invalid arguments: %w", err)
-	}
-	return nil
-}
-
-// requireField returns an error if val (trimmed) is empty. name is the
-// human-readable field name that appears in the error message.
-func requireField(name, val string) error {
-	if strings.TrimSpace(val) == "" {
-		return fmt.Errorf("%s is required", name)
-	}
-	return nil
-}
-
-// requireLineNumber returns an error if n is less than 1. The error message
-// follows the convention established by the existing tools ("line must be a
-// 1-based line number").
-func requireLineNumber(n int) error {
-	if n < 1 {
-		return fmt.Errorf("line must be a 1-based line number, got %d", n)
 	}
 	return nil
 }
@@ -102,17 +86,13 @@ func (ts toolSet) lookup(name string) (Tool, bool) {
 // ToolHealthError marks a tool failure as a GENUINE harness-tooling/infra
 // problem (missing container runtime, crashed language server) versus an
 // ordinary model-recoverable error (bad args, file-not-found). The runner
-// records it as a health signal IN ADDITION to feeding the error text back to
-// the model via the existing toolError path; plain tool errors do not surface
-// to the health sink.
-//
-// Severity classifies the impact (critical/high/medium/low). Reason is a
-// short human-readable label suitable for a progress event; the original
-// underlying error (if any) is wrapped via [ToolHealthError.Unwrap] so callers
-// may still inspect it with [errors.As]/[errors.Is].
+// reports it through [Hooks.ToolHealth] IN ADDITION to feeding the error text
+// back to the model via the existing toolError path; plain tool errors do not
+// reach the hook. Reason is a short human-readable label for the failure
+// class; callers that need impact ranking can bucket on it. Err is the
+// original underlying error, if any, reachable via [ToolHealthError.Unwrap]
+// so callers may inspect it with [errors.As]/[errors.Is].
 type ToolHealthError struct {
-	// Severity classifies the impact of the failure.
-	Severity Severity
 	// Reason is a short human-readable label (no leading "ERROR: "; the
 	// runner's toolError prefix is applied separately when the model is
 	// informed).

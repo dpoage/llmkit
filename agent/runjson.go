@@ -66,7 +66,7 @@ func (r *Runner) RunJSON(ctx context.Context, task string, schema json.RawMessag
 // without a nil check.
 //
 // This is the opt-in continuation entry point: it exists so a multi-round
-// revision loop (see internal/repro/repro.go Attempt) can have round N+1's
+// revision loop can have round N+1's
 // feedback land in the SAME conversation as round N's tool-driven
 // investigation, instead of discarding that investigation and asking the
 // model to re-orient from a truncated summary alone. maybeCompact still
@@ -99,8 +99,8 @@ func (r *Runner) runJSON(ctx context.Context, seed []llmkit.Message, task string
 
 	// Strip + deep schema validation first (cheap, schema-aware): this catches
 	// valid-JSON-but-contract-violating output that a typed unmarshal silently
-	// tolerates — a bad enum (severity "blocker"), a candidate missing its
-	// nested "evidence", an empty required string, an empty repro "files" map.
+	// tolerates — a bad enum value, a missing required nested object, an
+	// empty required string, an empty free-form map field.
 	// Only after the body satisfies the full schema do we attempt the typed
 	// unmarshal: an early unmarshal of a wrong-shaped body yields a misleading
 	// "cannot unmarshal …" error, where the schema violation is the actionable
@@ -114,7 +114,7 @@ func (r *Runner) runJSON(ctx context.Context, seed []llmkit.Message, task string
 	// final JSON with prose ("Based on my investigation… {…}") or leave a
 	// mangled head, both of which fail the leading-value parse above. Before
 	// burning the repair round-trip — a tools-less, HISTORY-LESS single
-	// completion that must reproduce the whole answer blind and often
+	// completion that must rebuild the whole answer blind and often
 	// fabricates — scan the cleaned output for the first embedded JSON value
 	// that ALREADY satisfies the schema. The schema is the arbiter, so an
 	// incidental json-ish fragment in the prose cannot hijack the answer.
@@ -150,7 +150,7 @@ func (r *Runner) runJSON(ctx context.Context, seed []llmkit.Message, task string
 	repairOutcome, rerr := r.repair(ctx, outcome.Transcript, repair, schema)
 	// repair() reopened the streamed transcript (O_APPEND) to record its
 	// turn; close that fd here so it does not outlive the call. Over a long
-	// backlog run every repaired finding would otherwise leak one fd until a
+	// backlog run every repaired call would otherwise leak one fd until a
 	// GC finalizer happened to run. Deferred so it fires on all paths below.
 	if repairOutcome.Transcript != nil {
 		defer repairOutcome.Transcript.closeStream()
@@ -311,18 +311,18 @@ func stripBody(text string) (string, error) {
 //
 //   - type — object/array/string/integer/number/boolean/null (integer accepts
 //     only integral numbers; number accepts any).
-//   - required — at EVERY object level, not just the root (a candidate missing
-//     its "evidence", a plan missing "cmd").
+//   - required — at EVERY object level, not just the root (a required
+//     nested object or string missing).
 //   - properties — recursively.
-//   - additionalProperties — false rejects unknown keys; a subschema validates
-//     the values of free-form maps (the repro/patch "files" object keyed by
-//     path with string values).
+//   - additionalProperties — false rejects unknown keys; a subschema
+//     validates the values of free-form maps (an object keyed by path
+//     with string values).
 //   - items — recursively, for every array element.
-//   - enum — exact membership (a severity of "blocker", a confidence of
-//     "Medium").
+//   - enum — exact membership (a confidence level of "high", a status of
+//     "open").
 //   - minItems / minProperties / minLength / maxLength / minimum / maximum.
 //
-// Errors are path-qualified (e.g. candidates[0].severity) so the RunJSON
+// Errors are path-qualified (e.g. results[0].confidence) so the RunJSON
 // repair round-trip can tell the model exactly what to fix. This is the
 // harness-side guarantee that every agent->phase JSON boundary is bounded by
 // its declared schema even when the provider's StructuredOutput capability is

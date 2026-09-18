@@ -21,6 +21,8 @@ type OllamaEmbedder struct {
 	baseURL    string
 	model      string
 	client     *http.Client
+	retry      RetryConfig
+	maxBatch   int
 	dimensions int
 	mu         sync.RWMutex // guards dimensions
 }
@@ -33,7 +35,9 @@ func NewOllamaEmbedder(cfg Config) (*OllamaEmbedder, error) {
 	return &OllamaEmbedder{
 		baseURL:    strings.TrimRight(cfg.URL, "/"),
 		model:      cfg.Model,
-		client:     &http.Client{},
+		client:     cfg.httpClient(),
+		retry:      cfg.retryPolicy(),
+		maxBatch:   cfg.MaxBatch,
 		dimensions: cfg.Dimensions,
 	}, nil
 }
@@ -52,22 +56,50 @@ type ollamaResponse struct {
 
 // Embed returns the embedding for a single text.
 func (o *OllamaEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
-	results, err := o.doEmbed(ctx, text)
+	var out [][]float32
+	err := retryDo(ctx, o.retry, func() error {
+		res, err := o.doEmbed(ctx, text)
+		if err == nil {
+			out = res
+		}
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
-	if len(results) == 0 {
+	if len(out) == 0 {
 		return nil, fmt.Errorf("ollama: empty embeddings response")
 	}
-	return results[0], nil
+	return out[0], nil
 }
 
-// EmbedBatch returns embeddings for multiple texts in a single API call.
+// EmbedBatch returns embeddings for multiple texts, splitting the input into
+// requests of at most MaxBatch texts (no splitting when MaxBatch is zero).
+// Results are index-aligned with the input; a failed chunk fails the whole
+// call.
 func (o *OllamaEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
 	}
-	return o.doEmbed(ctx, texts)
+	out := make([][]float32, 0, len(texts))
+	for start := 0; start < len(texts); {
+		n := batchChunkSize(len(texts)-start, o.maxBatch)
+		chunk := texts[start : start+n]
+		var res [][]float32
+		err := retryDo(ctx, o.retry, func() error {
+			r, err := o.doEmbed(ctx, chunk)
+			if err == nil {
+				res = r
+			}
+			return err
+		})
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, res...)
+		start += n
+	}
+	return out, nil
 }
 
 // Dimensions returns the vector dimensionality. If not configured up front,
@@ -104,7 +136,7 @@ func (o *OllamaEmbedder) doEmbed(ctx context.Context, input any) ([][]float32, e
 	if err != nil {
 		return nil, fmt.Errorf("ollama: request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -112,18 +144,25 @@ func (o *OllamaEmbedder) doEmbed(ctx context.Context, input any) ([][]float32, e
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("ollama: HTTP %d: %s", resp.StatusCode, truncate(string(respBody), 200))
+		return nil, newStatusError("ollama", resp.StatusCode, resp.Header.Get("Retry-After"), string(respBody))
 	}
 
 	var result ollamaResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("ollama: decode response: %w", err)
 	}
-	if len(result.Embeddings) == 0 {
-		return nil, fmt.Errorf("ollama: empty embeddings in response")
+	// The server must return exactly one embedding per input; a wrong
+	// count would silently misattribute vectors to texts.
+	expected := 1
+	if texts, ok := input.([]string); ok {
+		expected = len(texts)
+	}
+	if len(result.Embeddings) != expected {
+		return nil, fmt.Errorf("ollama: expected %d embeddings, got %d", expected, len(result.Embeddings))
 	}
 
-	// Convert float64 -> float32 and auto-detect dimensions.
+	// Convert float64 -> float32, enforce dimension consistency, and
+	// auto-detect dimensions from the first non-empty response.
 	out := make([][]float32, len(result.Embeddings))
 	for i, emb := range result.Embeddings {
 		f32 := make([]float32, len(emb))
@@ -132,13 +171,9 @@ func (o *OllamaEmbedder) doEmbed(ctx context.Context, input any) ([][]float32, e
 		}
 		out[i] = f32
 	}
-
-	// Auto-detect dimensions from first non-empty response.
-	o.mu.Lock()
-	if o.dimensions == 0 && len(out[0]) > 0 {
-		o.dimensions = len(out[0])
+	if err := checkDimensions("ollama", out, &o.dimensions, &o.mu); err != nil {
+		return nil, err
 	}
-	o.mu.Unlock()
 
 	return out, nil
 }

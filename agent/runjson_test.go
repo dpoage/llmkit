@@ -13,32 +13,31 @@ import (
 	"github.com/dpoage/llmkit"
 )
 
-type finding struct {
-	File    string `json:"file"`
-	Message string `json:"message"`
+type item struct {
+	Path string `json:"path"`
+	Note string `json:"note"`
 }
 
-// findingWithRefuted is the production finding shape — it has a boolean
-// "refuted" field that the historical finding struct omits. The native
-// schema tests use this struct so the schema's required=["file","message",
-// "refuted"] check actually exercises the missing-required-field branch
-// of validateSchema.
-type findingWithRefuted struct {
-	File    string `json:"file"`
-	Message string `json:"message"`
-	Refuted bool   `json:"refuted"`
+// itemWithResolved is the caller schema shape the native-schema tests use —
+// it has a boolean "resolved" field the simpler item struct omits, so the
+// schema's required=["path","note","resolved"] check actually exercises the
+// missing-required-field branch of validateSchema.
+type itemWithResolved struct {
+	Path     string `json:"path"`
+	Note     string `json:"note"`
+	Resolved bool   `json:"resolved"`
 }
 
 func TestRunJSON_DirectParse(t *testing.T) {
-	fc := newFakeClient(textResp(`{"file":"a.go","message":"bug"}`, 5, 5))
+	fc := newFakeClient(textResp(`{"path":"a.go","note":"fix imports"}`, 5, 5))
 	r := NewRunner(fc, nil, "sys")
 
-	var got finding
-	out, err := r.RunJSON(context.Background(), "find a bug", nil, &got)
+	var got item
+	out, err := r.RunJSON(context.Background(), "summarize the report", nil, &got)
 	if err != nil {
 		t.Fatalf("RunJSON: %v", err)
 	}
-	if got.File != "a.go" || got.Message != "bug" {
+	if got.Path != "a.go" || got.Note != "fix imports" {
 		t.Errorf("parsed = %+v", got)
 	}
 	if out.Iterations != 1 {
@@ -49,21 +48,21 @@ func TestRunJSON_DirectParse(t *testing.T) {
 // TestRunJSONContinue_PreservesPriorConversation is the core continuation
 // contract: a second RunJSONContinue call must NOT reseed the
 // conversation — it must append its task onto the FULL history of the prior
-// round (including round 1's tool-driven investigation), not just round 1's
+// round (including round 1's tool-driven analysis), not just round 1's
 // final answer. This is what lets a revision round's feedback land in the
-// same conversation the model already investigated in, instead of asking it
+// same conversation the model already analyzed in, instead of asking it
 // to re-orient from scratch.
 func TestRunJSONContinue_PreservesPriorConversation(t *testing.T) {
 	fc := newFakeClient(
 		toolResp("c1", "echo", `{"v":"orient"}`, 10, 4),
-		textResp(`{"file":"a.go","message":"round1"}`, 8, 3),
-		textResp(`{"file":"a.go","message":"round2"}`, 8, 3),
+		textResp(`{"path":"a.go","note":"round1"}`, 8, 3),
+		textResp(`{"path":"a.go","note":"round2"}`, 8, 3),
 	)
 	tools := []Tool{echoTool{name: "echo"}}
 	r := NewRunner(fc, tools, "sys")
 
-	var got1 finding
-	out1, err := r.RunJSON(context.Background(), "investigate and report", nil, &got1)
+	var got1 item
+	out1, err := r.RunJSON(context.Background(), "analyze and report", nil, &got1)
 	if err != nil {
 		t.Fatalf("round1 RunJSON: %v", err)
 	}
@@ -76,7 +75,7 @@ func TestRunJSONContinue_PreservesPriorConversation(t *testing.T) {
 		t.Fatalf("round1 Outcome.Messages = %d entries, want %d (user, assistant tool-call, tool-result, assistant final)", len(out1.Messages), want)
 	}
 
-	var got2 finding
+	var got2 item
 	out2, err := r.RunJSONContinue(context.Background(), out1, "feedback: fix it", nil, &got2)
 	if err != nil {
 		t.Fatalf("round2 RunJSONContinue: %v", err)
@@ -84,7 +83,7 @@ func TestRunJSONContinue_PreservesPriorConversation(t *testing.T) {
 	// Exactly one more completion was needed: continuation means the model
 	// did NOT re-issue the orientation tool call it already made in round 1.
 	if len(fc.requests) != 3 {
-		t.Fatalf("round2 issued %d total requests, want 3 (round1's 2 plus round2's 1) -- extra requests mean round 2 re-investigated instead of continuing", len(fc.requests))
+		t.Fatalf("round2 issued %d total requests, want 3 (round1's 2 plus round2's 1) -- extra requests mean round 2 re-analyzed instead of continuing", len(fc.requests))
 	}
 	round2Req := fc.requests[2]
 	if len(round2Req.Messages) != len(out1.Messages)+1 {
@@ -92,10 +91,10 @@ func TestRunJSONContinue_PreservesPriorConversation(t *testing.T) {
 	}
 	// Round 2's request must carry round 1's messages verbatim as a prefix --
 	// specifically the tool call and tool result, proving the model literally
-	// saw its own prior investigation rather than a reseeded conversation.
+	// saw its own prior analysis rather than a reseeded conversation.
 	for i, want := range out1.Messages {
 		got := round2Req.Messages[i]
-		if got.Role != want.Role || got.Content != want.Content || got.ToolCallID != want.ToolCallID {
+		if got.Role != want.Role || got.Text() != want.Text() || got.ToolCallID != want.ToolCallID {
 			t.Errorf("round2 request message %d = %+v, want round1 history entry %+v", i, got, want)
 		}
 	}
@@ -109,10 +108,10 @@ func TestRunJSONContinue_PreservesPriorConversation(t *testing.T) {
 		}
 	}
 	if !sawToolCall || !sawToolResult {
-		t.Errorf("round2 request missing round1's investigation: sawToolCall=%v sawToolResult=%v", sawToolCall, sawToolResult)
+		t.Errorf("round2 request missing round1's analysis: sawToolCall=%v sawToolResult=%v", sawToolCall, sawToolResult)
 	}
-	if got2.Message != "round2" {
-		t.Errorf("round2 parsed = %+v, want message=round2", got2)
+	if got2.Note != "round2" {
+		t.Errorf("round2 parsed = %+v, want note=round2", got2)
 	}
 	if out2 == nil {
 		t.Fatal("round2 Outcome is nil")
@@ -123,11 +122,11 @@ func TestRunJSONContinue_PreservesPriorConversation(t *testing.T) {
 // Outcome is a safe no-op fallback to plain reseeding, so a caller need not
 // special-case round 1 with a nil check before calling RunJSONContinue.
 func TestRunJSONContinue_NilPrevDegradesToReseed(t *testing.T) {
-	fc := newFakeClient(textResp(`{"file":"a.go","message":"bug"}`, 5, 5))
+	fc := newFakeClient(textResp(`{"path":"a.go","note":"fix imports"}`, 5, 5))
 	r := NewRunner(fc, nil, "sys")
 
-	var got finding
-	if _, err := r.RunJSONContinue(context.Background(), nil, "find a bug", nil, &got); err != nil {
+	var got item
+	if _, err := r.RunJSONContinue(context.Background(), nil, "summarize the report", nil, &got); err != nil {
 		t.Fatalf("RunJSONContinue with nil prev: %v", err)
 	}
 	if len(fc.requests) != 1 {
@@ -136,20 +135,20 @@ func TestRunJSONContinue_NilPrevDegradesToReseed(t *testing.T) {
 	if len(fc.requests[0].Messages) != 1 {
 		t.Errorf("request messages = %d, want 1 (reseeded, no prior history)", len(fc.requests[0].Messages))
 	}
-	if got.File != "a.go" {
+	if got.Path != "a.go" {
 		t.Errorf("parsed = %+v", got)
 	}
 }
 
 func TestRunJSON_StripsMarkdownFences(t *testing.T) {
-	fc := newFakeClient(textResp("```json\n{\"file\":\"b.go\",\"message\":\"x\"}\n```", 5, 5))
+	fc := newFakeClient(textResp("```json\n{\"path\":\"b.go\",\"note\":\"x\"}\n```", 5, 5))
 	r := NewRunner(fc, nil, "sys")
 
-	var got finding
+	var got item
 	if _, err := r.RunJSON(context.Background(), "task", nil, &got); err != nil {
 		t.Fatalf("RunJSON: %v", err)
 	}
-	if got.File != "b.go" {
+	if got.Path != "b.go" {
 		t.Errorf("parsed = %+v", got)
 	}
 }
@@ -158,16 +157,16 @@ func TestRunJSON_RepairSucceeds(t *testing.T) {
 	// First answer is not JSON; repair round-trip returns valid JSON.
 	fc := newFakeClient(
 		textResp("here is the answer: not json at all", 5, 5),
-		textResp(`{"file":"c.go","message":"fixed"}`, 5, 5),
+		textResp(`{"path":"c.go","note":"fixed"}`, 5, 5),
 	)
 	r := NewRunner(fc, nil, "sys")
 
-	var got finding
+	var got item
 	out, err := r.RunJSON(context.Background(), "task", json.RawMessage(`{"type":"object"}`), &got)
 	if err != nil {
 		t.Fatalf("RunJSON should succeed after repair: %v", err)
 	}
-	if got.File != "c.go" {
+	if got.Path != "c.go" {
 		t.Errorf("parsed = %+v", got)
 	}
 	// Two completions happened (original + repair). The repair Run is fresh, so
@@ -176,7 +175,7 @@ func TestRunJSON_RepairSucceeds(t *testing.T) {
 		t.Errorf("client calls = %d, want 2", len(fc.requests))
 	}
 	// The repair prompt must mention the parse failure.
-	repairTask := fc.requests[1].Messages[0].Content
+	repairTask := fc.requests[1].Messages[0].Text()
 	if !strings.Contains(repairTask, "failed to parse") {
 		t.Errorf("repair prompt missing parse-failure note:\n%s", repairTask)
 	}
@@ -203,16 +202,16 @@ func TestRunJSON_RepairAppendsToStreamedTranscript(t *testing.T) {
 	dir := t.TempDir()
 	fc := newFakeClient(
 		textResp("here is the answer: not json at all", 5, 5),
-		textResp(`{"file":"c.go","message":"fixed"}`, 5, 5),
+		textResp(`{"path":"c.go","note":"fixed"}`, 5, 5),
 	)
 	r := NewRunner(fc, nil, "sys", WithTranscriptDir(dir))
 
-	var got finding
+	var got item
 	out, err := r.RunJSON(context.Background(), "task", json.RawMessage(`{"type":"object"}`), &got)
 	if err != nil {
 		t.Fatalf("RunJSON should succeed after repair: %v", err)
 	}
-	if got.File != "c.go" {
+	if got.Path != "c.go" {
 		t.Errorf("parsed = %+v", got)
 	}
 
@@ -246,7 +245,7 @@ func TestRunJSON_RepairAppendsToStreamedTranscript(t *testing.T) {
 		if ev.Kind == EventAssistant && ev.Text == "here is the answer: not json at all" {
 			mainIdx = i
 		}
-		if ev.Kind == EventAssistant && ev.Text == `{"file":"c.go","message":"fixed"}` {
+		if ev.Kind == EventAssistant && ev.Text == `{"path":"c.go","note":"fixed"}` {
 			repairIdx = i
 		}
 	}
@@ -273,7 +272,7 @@ func TestRunJSON_RepairFails(t *testing.T) {
 	)
 	r := NewRunner(fc, nil, "sys")
 
-	var got finding
+	var got item
 	_, err := r.RunJSON(context.Background(), "task", nil, &got)
 	if err == nil {
 		t.Fatal("expected error after failed repair")
@@ -284,30 +283,30 @@ func TestRunJSON_RepairFails(t *testing.T) {
 }
 
 // TestRunJSON_ForcedFinalization proves that when an agent exhausts its
-// iteration cap mid-investigation (always calling tools, never finishing),
+// iteration cap mid-analysis (always calling tools, never finishing),
 // RunJSON's reserved finalization turn still recovers the JSON answer instead of
 // failing on dangling exploration prose. This is the core fix for agents that
 // hit MaxIterations on a large task.
 func TestRunJSON_ForcedFinalization(t *testing.T) {
 	const maxIter = 3
 	steps := make([]scriptStep, 0, maxIter+1)
-	// The model investigates every turn up to the cap, never producing an answer.
+	// The model analyzes every turn up to the cap, never producing an answer.
 	for i := 0; i < maxIter; i++ {
 		steps = append(steps, toolResp("c", "echo", `{"v":"x"}`, 1, 1))
 	}
 	// The reserved finalization turn: tools are dropped, and the model finally
 	// emits the JSON.
-	steps = append(steps, textResp(`{"file":"z.go","message":"found it"}`, 2, 2))
+	steps = append(steps, textResp(`{"path":"z.go","note":"found it"}`, 2, 2))
 
 	fc := newFakeClient(steps...)
 	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys", WithLimits(Limits{MaxIterations: maxIter}))
 
-	var got finding
+	var got item
 	out, err := r.RunJSON(context.Background(), "audit", json.RawMessage(`{"type":"object"}`), &got)
 	if err != nil {
 		t.Fatalf("RunJSON should recover via finalization: %v", err)
 	}
-	if got.File != "z.go" || got.Message != "found it" {
+	if got.Path != "z.go" || got.Note != "found it" {
 		t.Errorf("parsed = %+v, want the finalization JSON", got)
 	}
 	if !out.Finalized {
@@ -320,7 +319,7 @@ func TestRunJSON_ForcedFinalization(t *testing.T) {
 	}
 	// The finalization user message must have been injected.
 	lastMsg := finalReq.Messages[len(finalReq.Messages)-1]
-	if lastMsg.Role != llmkit.RoleUser || !strings.Contains(lastMsg.Content, "STOP investigating") {
+	if lastMsg.Role != llmkit.RoleUser || !strings.Contains(lastMsg.Text(), "STOP investigating") {
 		t.Errorf("finalization message missing; last message = %+v", lastMsg)
 	}
 }
@@ -336,16 +335,16 @@ func TestRunJSON_ForcedFinalizationFiresOnce(t *testing.T) {
 		// finalization turn: still not JSON.
 		textResp("still just prose, sorry", 1, 1),
 		// repair round-trip (a fresh run): now valid JSON.
-		textResp(`{"file":"r.go","message":"repaired"}`, 1, 1),
+		textResp(`{"path":"r.go","note":"repaired"}`, 1, 1),
 	}
 	fc := newFakeClient(steps...)
 	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys", WithLimits(Limits{MaxIterations: maxIter}))
 
-	var got finding
+	var got item
 	if _, err := r.RunJSON(context.Background(), "audit", nil, &got); err != nil {
 		t.Fatalf("RunJSON: %v", err)
 	}
-	if got.File != "r.go" {
+	if got.Path != "r.go" {
 		t.Errorf("parsed = %+v, want repaired JSON", got)
 	}
 }
@@ -356,17 +355,17 @@ func TestRunJSON_ForcedFinalizationFiresOnce(t *testing.T) {
 func TestRunJSON_MaxTokensContinuation(t *testing.T) {
 	t.Run("continuation completes truncated JSON", func(t *testing.T) {
 		fc := newFakeClient(
-			maxTokensResp(`{"file":"a.go","mess`, 5, 5), // cut off mid-object
-			textResp(`age":"done"}`, 5, 5),              // continuation finishes it
+			maxTokensResp(`{"path":"a.go","not`, 5, 5), // cut off mid-object
+			textResp(`e":"done"}`, 5, 5),               // continuation finishes it
 		)
 		r := NewRunner(fc, nil, "sys")
 
-		var got finding
+		var got item
 		out, err := r.RunJSON(context.Background(), "task", nil, &got)
 		if err != nil {
 			t.Fatalf("RunJSON should stitch continuation: %v", err)
 		}
-		if got.File != "a.go" || got.Message != "done" {
+		if got.Path != "a.go" || got.Note != "done" {
 			t.Errorf("parsed = %+v, want stitched JSON", got)
 		}
 		// Both completions must have happened within the same run.
@@ -379,20 +378,20 @@ func TestRunJSON_MaxTokensContinuation(t *testing.T) {
 	t.Run("continuation that repeats the prefix is stitched without corruption", func(t *testing.T) {
 		// The model ignores "continue from where you stopped" and restarts, repeating
 		// the head of the first half before emitting the rest. A naive head+cont
-		// concatenation would double `{"file":"a.go","mess` and break the JSON; the
+		// concatenation would double `{"path":"a.go","not` and break the JSON; the
 		// stitch must trim the repeated prefix.
 		fc := newFakeClient(
-			maxTokensResp(`{"file":"a.go","mess`, 5, 5),        // cut off mid-object
-			textResp(`{"file":"a.go","message":"done"}`, 5, 5), // restart: repeats prefix, then finishes
+			maxTokensResp(`{"path":"a.go","not`, 5, 5),      // cut off mid-object
+			textResp(`{"path":"a.go","note":"done"}`, 5, 5), // restart: repeats prefix, then finishes
 		)
 		r := NewRunner(fc, nil, "sys")
 
-		var got finding
+		var got item
 		_, err := r.RunJSON(context.Background(), "task", nil, &got)
 		if err != nil {
 			t.Fatalf("RunJSON should stitch a repeated-prefix continuation: %v", err)
 		}
-		if got.File != "a.go" || got.Message != "done" {
+		if got.Path != "a.go" || got.Note != "done" {
 			t.Errorf("parsed = %+v, want stitched JSON with the duplicated prefix trimmed", got)
 		}
 	})
@@ -402,15 +401,15 @@ func TestRunJSON_MaxTokensContinuation(t *testing.T) {
 		// form valid JSON; after the repair round-trip also truncates, the error
 		// must name the truncation.
 		fc := newFakeClient(
-			maxTokensResp(`{"file":"a.go"`, 5, 5),
+			maxTokensResp(`{"path":"a.go"`, 5, 5),
 			maxTokensResp(` ,"more`, 5, 5),
 			// repair round-trip:
-			maxTokensResp(`{"file":"a.go"`, 5, 5),
+			maxTokensResp(`{"path":"a.go"`, 5, 5),
 			maxTokensResp(` ,"more`, 5, 5),
 		)
 		r := NewRunner(fc, nil, "sys")
 
-		var got finding
+		var got item
 		_, err := r.RunJSON(context.Background(), "task", nil, &got)
 		if err == nil {
 			t.Fatal("expected error when JSON never completes")
@@ -426,16 +425,16 @@ func TestRunJSON_MaxTokensContinuation(t *testing.T) {
 // and the repair attempt, while leaving the raw transcript untouched.
 func TestRunJSON_StripsThinkBlocks(t *testing.T) {
 	t.Run("first attempt, think before json", func(t *testing.T) {
-		raw := "<think>the cfg may be nil here</think>\n{\"file\":\"a.go\",\"message\":\"bug\"}"
+		raw := "<think>the cfg may be nil here</think>\n{\"path\":\"a.go\",\"note\":\"fix imports\"}"
 		fc := newFakeClient(textResp(raw, 5, 5))
 		r := NewRunner(fc, nil, "sys")
 
-		var got finding
+		var got item
 		out, err := r.RunJSON(context.Background(), "task", nil, &got)
 		if err != nil {
 			t.Fatalf("RunJSON: %v", err)
 		}
-		if got.File != "a.go" || got.Message != "bug" {
+		if got.Path != "a.go" || got.Note != "fix imports" {
 			t.Errorf("parsed = %+v", got)
 		}
 		if out.Iterations != 1 {
@@ -451,15 +450,15 @@ func TestRunJSON_StripsThinkBlocks(t *testing.T) {
 	})
 
 	t.Run("think plus fenced json", func(t *testing.T) {
-		raw := "<think>reasoning</think>\n```json\n{\"file\":\"b.go\",\"message\":\"x\"}\n```"
+		raw := "<think>reasoning</think>\n```json\n{\"path\":\"b.go\",\"note\":\"x\"}\n```"
 		fc := newFakeClient(textResp(raw, 5, 5))
 		r := NewRunner(fc, nil, "sys")
 
-		var got finding
+		var got item
 		if _, err := r.RunJSON(context.Background(), "task", nil, &got); err != nil {
 			t.Fatalf("RunJSON: %v", err)
 		}
-		if got.File != "b.go" {
+		if got.Path != "b.go" {
 			t.Errorf("parsed = %+v", got)
 		}
 	})
@@ -469,30 +468,30 @@ func TestRunJSON_StripsThinkBlocks(t *testing.T) {
 		// block. The repair must succeed, exercising stripping on the repair path.
 		fc := newFakeClient(
 			textResp("not json", 5, 5),
-			textResp("<think>ok, valid json now</think>\n{\"file\":\"c.go\",\"message\":\"fixed\"}", 5, 5),
+			textResp("<think>ok, valid json now</think>\n{\"path\":\"c.go\",\"note\":\"fixed\"}", 5, 5),
 		)
 		r := NewRunner(fc, nil, "sys")
 
-		var got finding
+		var got item
 		if _, err := r.RunJSON(context.Background(), "task", nil, &got); err != nil {
 			t.Fatalf("RunJSON should succeed after repair: %v", err)
 		}
-		if got.File != "c.go" {
+		if got.Path != "c.go" {
 			t.Errorf("parsed = %+v", got)
 		}
 	})
 
 	t.Run("literal think token inside json value survives", func(t *testing.T) {
-		raw := `{"file":"d.go","message":"saw <think> in the source"}`
+		raw := `{"path":"d.go","note":"saw <think> in the source"}`
 		fc := newFakeClient(textResp(raw, 5, 5))
 		r := NewRunner(fc, nil, "sys")
 
-		var got finding
+		var got item
 		if _, err := r.RunJSON(context.Background(), "task", nil, &got); err != nil {
 			t.Fatalf("RunJSON: %v", err)
 		}
-		if got.Message != "saw <think> in the source" {
-			t.Errorf("message corrupted: %q", got.Message)
+		if got.Note != "saw <think> in the source" {
+			t.Errorf("message corrupted: %q", got.Note)
 		}
 	})
 }
@@ -509,17 +508,17 @@ func TestRunJSON_MiniMaxM27Reasoning(t *testing.T) {
 	raw := "<think>\nThe function is named `add` but uses `-`:\n" +
 		"```go\nfunc add(a, b int) int { return a - b }\n```\n" +
 		"That is a logic error: the wrong operator is used.\n</think>\n\n" +
-		"```json\n{\"file\":\"add.go\",\"message\":\"add() subtracts instead of adding\"}\n```"
+		"```json\n{\"path\":\"add.go\",\"note\":\"add() subtracts instead of adding\"}\n```"
 	fc := newFakeClient(textResp(raw, 5, 5))
 	r := NewRunner(fc, nil, "sys")
 
-	var got finding
+	var got item
 	out, err := r.RunJSON(context.Background(), "task", nil, &got)
 	if err != nil {
 		t.Fatalf("RunJSON on real MiniMax-M2.7 shape: %v", err)
 	}
-	if got.File != "add.go" || got.Message != "add() subtracts instead of adding" {
-		t.Errorf("parsed = %+v, want the add.go finding", got)
+	if got.Path != "add.go" || got.Note != "add() subtracts instead of adding" {
+		t.Errorf("parsed = %+v, want the add.go item", got)
 	}
 	// The whole point of agent-layer tolerance: a reasoning model's think block +
 	// fenced answer must parse without burning the repair round-trip.
@@ -606,7 +605,7 @@ func TestRunJSON_BudgetPoolFinalizesAndParses(t *testing.T) {
 	// finalization turn after the pool is exhausted.
 	c := &budgetCutClient{
 		finalAt:   3,
-		finalText: `{"file":"x.go","message":"recovered"}`,
+		finalText: `{"path":"x.go","note":"recovered"}`,
 		perCall:   60,
 		chargeFn:  func() { pool.Add(60) },
 	}
@@ -615,12 +614,12 @@ func TestRunJSON_BudgetPoolFinalizesAndParses(t *testing.T) {
 		TokenBudget:   -1,
 		BudgetCheck:   pool.Check,
 	}))
-	var got finding
+	var got item
 	out, err := r.RunJSON(context.Background(), "audit", json.RawMessage(`{"type":"object"}`), &got)
 	if err != nil {
 		t.Fatalf("RunJSON should recover via budget-pressured finalization: %v", err)
 	}
-	if got.File != "x.go" || got.Message != "recovered" {
+	if got.Path != "x.go" || got.Note != "recovered" {
 		t.Errorf("parsed = %+v, want the finalization JSON", got)
 	}
 	if !out.Finalized {
@@ -639,17 +638,17 @@ func TestRunJSON_PerRunTokenBudgetFinalizesAndParses(t *testing.T) {
 	const perRunBudget int64 = 100
 	// 2 tool calls each spend 60 (cumulative 120 > 100), then on the 3rd
 	// pre-turn check overBudget fires, finalization turn takes the 3rd call.
-	c := &budgetCutClient{finalAt: 3, finalText: `{"file":"y.go","message":"ok"}`, perCall: 30}
+	c := &budgetCutClient{finalAt: 3, finalText: `{"path":"y.go","note":"ok"}`, perCall: 30}
 	r := NewRunner(c, []Tool{echoTool{name: "echo"}}, "sys", WithLimits(Limits{
 		MaxIterations: maxIter,
 		TokenBudget:   perRunBudget,
 	}))
-	var got finding
+	var got item
 	out, err := r.RunJSON(context.Background(), "audit", json.RawMessage(`{"type":"object"}`), &got)
 	if err != nil {
 		t.Fatalf("RunJSON should recover via per-run-budget finalization: %v", err)
 	}
-	if got.File != "y.go" {
+	if got.Path != "y.go" {
 		t.Errorf("parsed = %+v, want the finalization JSON", got)
 	}
 	if !out.Finalized {
@@ -679,7 +678,7 @@ func TestRunJSON_BudgetFinalizeEmptyStillClassified(t *testing.T) {
 		TokenBudget:   -1,
 		BudgetCheck:   pool.Check,
 	}))
-	var got finding
+	var got item
 	_, err := r.RunJSON(context.Background(), "audit", json.RawMessage(`{"type":"object"}`), &got)
 	if err == nil {
 		t.Fatal("RunJSON should fail to parse empty finalization output")
@@ -743,22 +742,22 @@ func TestRunJSON_RunPathNoExtraCall(t *testing.T) {
 	}
 }
 
-// findWithCandidatesSchema is a JSON schema in the "find a bug" answer shape
+// itemsSchema is a JSON schema in the "summarize the report" answer shape
 // used by production callers. It exercises the
 // "object root + required top-level fields" branch of validateSchema.
-const findWithCandidatesSchema = `{
+const itemsSchema = `{
   "type": "object",
-  "required": ["file", "message", "refuted"],
+  "required": ["path", "note", "resolved"],
   "properties": {
-    "file": {"type": "string"},
-    "message": {"type": "string"},
-    "refuted": {"type": "boolean"}
+    "path": {"type": "string"},
+    "note": {"type": "string"},
+    "resolved": {"type": "boolean"}
   }
 }`
 
-// validFindingJSON is one well-shaped answer to the schema above. Reused by
+// validItemJSON is one well-shaped answer to the schema above. Reused by
 // the cap-on and validation-triggered-repair tests.
-const validFindingJSON = `{"file":"a.go","message":"bug","refuted":false}`
+const validItemJSON = `{"path":"a.go","note":"fix imports","resolved":false}`
 
 // TestRunJSON_NoCapPassthrough asserts the agent-layer gate: when the client
 // reports StructuredOutput==false, the wire request carries NO
@@ -767,16 +766,16 @@ const validFindingJSON = `{"file":"a.go","message":"bug","refuted":false}`
 // acceptance criterion: "RunJSON sends ResponseSchema only when
 // StructuredOutput cap set".
 func TestRunJSON_NoCapPassthrough(t *testing.T) {
-	fc := newFakeClient(textResp(validFindingJSON, 5, 5))
+	fc := newFakeClient(textResp(validItemJSON, 5, 5))
 	// caps is the zero value: StructuredOutput is false.
 	r := NewRunner(fc, nil, "sys")
 
-	var got findingWithRefuted
-	out, err := r.RunJSON(context.Background(), "task", json.RawMessage(findWithCandidatesSchema), &got)
+	var got itemWithResolved
+	out, err := r.RunJSON(context.Background(), "task", json.RawMessage(itemsSchema), &got)
 	if err != nil {
 		t.Fatalf("RunJSON: %v", err)
 	}
-	if got.File != "a.go" {
+	if got.Path != "a.go" {
 		t.Errorf("parsed = %+v", got)
 	}
 	if len(fc.requests) != 1 {
@@ -795,21 +794,21 @@ func TestRunJSON_NoCapPassthrough(t *testing.T) {
 // ResponseSchema on the wire, so the adapter can apply grammar-constrained
 // decoding. This is the "CAP ON" half of the acceptance criterion.
 func TestRunJSON_CapOnCarriesSchema(t *testing.T) {
-	fc := newFakeClient(textResp(validFindingJSON, 5, 5))
+	fc := newFakeClient(textResp(validItemJSON, 5, 5))
 	fc.caps = llmkit.Capabilities{StructuredOutput: true}
 	r := NewRunner(fc, nil, "sys")
 
-	var got findingWithRefuted
-	if _, err := r.RunJSON(context.Background(), "task", json.RawMessage(findWithCandidatesSchema), &got); err != nil {
+	var got itemWithResolved
+	if _, err := r.RunJSON(context.Background(), "task", json.RawMessage(itemsSchema), &got); err != nil {
 		t.Fatalf("RunJSON: %v", err)
 	}
-	if got.File != "a.go" {
+	if got.Path != "a.go" {
 		t.Errorf("parsed = %+v", got)
 	}
 	if len(fc.requests) != 1 {
 		t.Errorf("client calls = %d, want 1", len(fc.requests))
 	}
-	if got := string(fc.requests[0].ResponseSchema); got != findWithCandidatesSchema {
+	if got := string(fc.requests[0].ResponseSchema); got != itemsSchema {
 		t.Errorf("ResponseSchema on wire = %s, want the schema verbatim", got)
 	}
 }
@@ -825,23 +824,23 @@ func TestRunJSON_CapOnCarriesSchema(t *testing.T) {
 func TestRunJSON_ValidationTriggersRepair(t *testing.T) {
 	// First answer is a bare JSON array — parses, but validateSchema
 	// detects the root-type mismatch against the schema's "object" type.
-	// The inner object is ALSO schema-invalid (missing required "refuted")
+	// The inner object is ALSO schema-invalid (missing required "resolved")
 	// so the rescue scan (rescueBody) cannot salvage it and the repair path
 	// genuinely fires. Repair returns a correct-shape object.
 	fc := newFakeClient(
-		textResp(`[{"file":"a.go","message":"bug"}]`, 5, 5),
-		textResp(validFindingJSON, 5, 5),
+		textResp(`[{"path":"a.go","note":"fix imports"}]`, 5, 5),
+		textResp(validItemJSON, 5, 5),
 	)
 	fc.caps = llmkit.Capabilities{StructuredOutput: true}
 	r := NewRunner(fc, nil, "sys")
 
-	var got findingWithRefuted
-	out, err := r.RunJSON(context.Background(), "task", json.RawMessage(findWithCandidatesSchema), &got)
+	var got itemWithResolved
+	out, err := r.RunJSON(context.Background(), "task", json.RawMessage(itemsSchema), &got)
 	if err != nil {
 		t.Fatalf("RunJSON should succeed after shape-repair: %v", err)
 	}
-	if got.File != "a.go" || got.Message != "bug" || got.Refuted != false {
-		t.Errorf("parsed = %+v, want the valid finding", got)
+	if got.Path != "a.go" || got.Note != "fix imports" || got.Resolved != false {
+		t.Errorf("parsed = %+v, want the valid item", got)
 	}
 	// First call ran the main loop with schema; second call is the
 	// single-completion repair. Total: 2 requests.
@@ -856,13 +855,13 @@ func TestRunJSON_ValidationTriggersRepair(t *testing.T) {
 	}
 	// The repair request MUST carry the schema (capability on) so the
 	// adapter applies grammar-constrained decoding.
-	if string(repairReq.ResponseSchema) != findWithCandidatesSchema {
+	if string(repairReq.ResponseSchema) != itemsSchema {
 		t.Errorf("repair ResponseSchema = %s, want the schema verbatim", string(repairReq.ResponseSchema))
 	}
 	// The repair prompt must mention the parse/shape failure so the model
 	// knows why its previous output was rejected.
-	if !strings.Contains(repairReq.Messages[0].Content, "failed to parse") {
-		t.Errorf("repair prompt missing parse-failure note:\n%s", repairReq.Messages[0].Content)
+	if !strings.Contains(repairReq.Messages[0].Text(), "failed to parse") {
+		t.Errorf("repair prompt missing parse-failure note:\n%s", repairReq.Messages[0].Text())
 	}
 	_ = out
 }
@@ -872,20 +871,20 @@ func TestRunJSON_ValidationTriggersRepair(t *testing.T) {
 // of validateSchema (object root, type matches, but a required key is
 // absent). The repair should still fire and ultimately succeed.
 func TestRunJSON_ValidationTriggersRepair_MissingRequired(t *testing.T) {
-	// First answer is an object missing the schema-required "refuted" key.
+	// First answer is an object missing the schema-required "resolved" key.
 	// Repair returns a correct-shape object.
 	fc := newFakeClient(
-		textResp(`{"file":"a.go","message":"bug"}`, 5, 5),
-		textResp(validFindingJSON, 5, 5),
+		textResp(`{"path":"a.go","note":"fix imports"}`, 5, 5),
+		textResp(validItemJSON, 5, 5),
 	)
 	fc.caps = llmkit.Capabilities{StructuredOutput: true}
 	r := NewRunner(fc, nil, "sys")
 
-	var got findingWithRefuted
-	if _, err := r.RunJSON(context.Background(), "task", json.RawMessage(findWithCandidatesSchema), &got); err != nil {
+	var got itemWithResolved
+	if _, err := r.RunJSON(context.Background(), "task", json.RawMessage(itemsSchema), &got); err != nil {
 		t.Fatalf("RunJSON should succeed after missing-required repair: %v", err)
 	}
-	if got.File != "a.go" {
+	if got.Path != "a.go" {
 		t.Errorf("parsed = %+v", got)
 	}
 	if len(fc.requests) != 2 {
@@ -895,22 +894,22 @@ func TestRunJSON_ValidationTriggersRepair_MissingRequired(t *testing.T) {
 
 // TestRunJSON_RescuesProseWrappedAnswer covers the dominant live
 // failure mode: a weak model prefixing the final JSON with prose ("Based on
-// my investigation, ... {plan}"), which fails stripBody's leading-value
+// my analysis, ... {plan}"), which fails stripBody's leading-value
 // parse ("invalid character 'B' looking for beginning of value"). The
 // schema-guided rescue scan must extract the embedded schema-valid object
 // and succeed WITHOUT spending the repair round-trip.
 func TestRunJSON_RescuesProseWrappedAnswer(t *testing.T) {
 	fc := newFakeClient(
-		textResp("Based on my investigation, the bug is clear. Here is the finding:\n"+validFindingJSON, 5, 5),
+		textResp("Based on my analysis, the answer is ready. Here is the result:\n"+validItemJSON, 5, 5),
 	)
 	r := NewRunner(fc, nil, "sys")
 
-	var got findingWithRefuted
-	if _, err := r.RunJSON(context.Background(), "task", json.RawMessage(findWithCandidatesSchema), &got); err != nil {
+	var got itemWithResolved
+	if _, err := r.RunJSON(context.Background(), "task", json.RawMessage(itemsSchema), &got); err != nil {
 		t.Fatalf("RunJSON should rescue a prose-wrapped schema-valid answer: %v", err)
 	}
-	if got.File != "a.go" || got.Message != "bug" {
-		t.Errorf("parsed = %+v, want the valid finding", got)
+	if got.Path != "a.go" || got.Note != "fix imports" {
+		t.Errorf("parsed = %+v, want the valid item", got)
 	}
 	if len(fc.requests) != 1 {
 		t.Errorf("client calls = %d, want 1 (rescue must not spend the repair round-trip)", len(fc.requests))
@@ -919,19 +918,19 @@ func TestRunJSON_RescuesProseWrappedAnswer(t *testing.T) {
 
 // TestRunJSON_RescuesInnerObjectFromWrappedArray: a bare-array wrap of a
 // schema-valid object is rescued to that inner object — the schema is the
-// arbiter of WHICH embedded candidate is the answer, so the array root
+// arbiter of WHICH embedded result is the answer, so the array root
 // (schema-invalid) is skipped and the inner object accepted, with no repair.
 func TestRunJSON_RescuesInnerObjectFromWrappedArray(t *testing.T) {
 	fc := newFakeClient(
-		textResp(`[`+validFindingJSON+`]`, 5, 5),
+		textResp(`[`+validItemJSON+`]`, 5, 5),
 	)
 	r := NewRunner(fc, nil, "sys")
 
-	var got findingWithRefuted
-	if _, err := r.RunJSON(context.Background(), "task", json.RawMessage(findWithCandidatesSchema), &got); err != nil {
+	var got itemWithResolved
+	if _, err := r.RunJSON(context.Background(), "task", json.RawMessage(itemsSchema), &got); err != nil {
 		t.Fatalf("RunJSON should rescue the inner object of a wrapped array: %v", err)
 	}
-	if got.File != "a.go" {
+	if got.Path != "a.go" {
 		t.Errorf("parsed = %+v", got)
 	}
 	if len(fc.requests) != 1 {
@@ -941,19 +940,19 @@ func TestRunJSON_RescuesInnerObjectFromWrappedArray(t *testing.T) {
 
 // TestRunJSON_MangledHeadStillRepairs pins the rescue's boundary using the
 // live 2026-07-17 the_cloud shape: a final answer whose JSON head was
-// swallowed (`": {"repro/x_test.go": "...
+// swallowed (`": {"x_test.go": "...
 // "}, "cmd": [...]`) leaves NO complete embedded value that satisfies the
 // schema — the leading string literal and the bare files map both fail — so
 // the rescue must NOT fire and the repair round-trip proceeds as before.
 func TestRunJSON_MangledHeadStillRepairs(t *testing.T) {
 	fc := newFakeClient(
-		textResp(`": {"file": "a.go"}, "message": "bug", "refuted": false}`, 5, 5),
-		textResp(validFindingJSON, 5, 5),
+		textResp(`": {"path": "a.go"}, "note": "x", "resolved": false}`, 5, 5),
+		textResp(validItemJSON, 5, 5),
 	)
 	r := NewRunner(fc, nil, "sys")
 
-	var got findingWithRefuted
-	if _, err := r.RunJSON(context.Background(), "task", json.RawMessage(findWithCandidatesSchema), &got); err != nil {
+	var got itemWithResolved
+	if _, err := r.RunJSON(context.Background(), "task", json.RawMessage(itemsSchema), &got); err != nil {
 		t.Fatalf("RunJSON should succeed via repair: %v", err)
 	}
 	if len(fc.requests) != 2 {
@@ -967,15 +966,15 @@ func TestRunJSON_MangledHeadStillRepairs(t *testing.T) {
 func TestRunJSON_RepairOutputRescuedFromProse(t *testing.T) {
 	fc := newFakeClient(
 		textResp("no json here at all", 5, 5),
-		textResp("Sure! Here is the corrected JSON:\n"+validFindingJSON, 5, 5),
+		textResp("Sure! Here is the corrected JSON:\n"+validItemJSON, 5, 5),
 	)
 	r := NewRunner(fc, nil, "sys")
 
-	var got findingWithRefuted
-	if _, err := r.RunJSON(context.Background(), "task", json.RawMessage(findWithCandidatesSchema), &got); err != nil {
+	var got itemWithResolved
+	if _, err := r.RunJSON(context.Background(), "task", json.RawMessage(itemsSchema), &got); err != nil {
 		t.Fatalf("RunJSON should rescue the repair's prose-wrapped answer: %v", err)
 	}
-	if got.File != "a.go" {
+	if got.Path != "a.go" {
 		t.Errorf("parsed = %+v", got)
 	}
 	if len(fc.requests) != 2 {
@@ -991,14 +990,14 @@ func TestRunJSON_RepairStillWrongShape(t *testing.T) {
 	// First answer is a bare array (wrong shape). Repair also returns a
 	// bare array. Both calls have the same shape violation.
 	fc := newFakeClient(
-		textResp(`[{"file":"a.go"}]`, 5, 5),
-		textResp(`[{"file":"a.go"}]`, 5, 5),
+		textResp(`[{"path":"a.go"}]`, 5, 5),
+		textResp(`[{"path":"a.go"}]`, 5, 5),
 	)
 	fc.caps = llmkit.Capabilities{StructuredOutput: true}
 	r := NewRunner(fc, nil, "sys")
 
-	var got findingWithRefuted
-	_, err := r.RunJSON(context.Background(), "task", json.RawMessage(findWithCandidatesSchema), &got)
+	var got itemWithResolved
+	_, err := r.RunJSON(context.Background(), "task", json.RawMessage(itemsSchema), &got)
 	if err == nil {
 		t.Fatal("expected error after still-wrong repair")
 	}
@@ -1026,7 +1025,7 @@ func TestRunJSON_ParseFailureWrapsSentinel(t *testing.T) {
 			textResp("still garbage", 5, 5),
 		)
 		r := NewRunner(fc, nil, "sys")
-		var got finding
+		var got item
 		_, err := r.RunJSON(context.Background(), "task", nil, &got)
 		if err == nil {
 			t.Fatal("expected error after failed repair")
@@ -1043,13 +1042,13 @@ func TestRunJSON_ParseFailureWrapsSentinel(t *testing.T) {
 		// A bare array where the schema requires an object: valid JSON, wrong
 		// shape — exercises the validateSchema wrap site, not the unmarshal one.
 		fc := newFakeClient(
-			textResp(`[{"file":"a.go"}]`, 5, 5),
-			textResp(`[{"file":"a.go"}]`, 5, 5),
+			textResp(`[{"path":"a.go"}]`, 5, 5),
+			textResp(`[{"path":"a.go"}]`, 5, 5),
 		)
 		fc.caps = llmkit.Capabilities{StructuredOutput: true}
 		r := NewRunner(fc, nil, "sys")
-		var got findingWithRefuted
-		_, err := r.RunJSON(context.Background(), "task", json.RawMessage(findWithCandidatesSchema), &got)
+		var got itemWithResolved
+		_, err := r.RunJSON(context.Background(), "task", json.RawMessage(itemsSchema), &got)
 		if err == nil {
 			t.Fatal("expected schema-violation error")
 		}
@@ -1064,7 +1063,7 @@ func TestRunJSON_ParseFailureWrapsSentinel(t *testing.T) {
 		boom := errors.New("connection reset")
 		fc := newFakeClient(scriptStep{err: boom})
 		r := NewRunner(fc, nil, "sys")
-		var got finding
+		var got item
 		_, err := r.RunJSON(context.Background(), "task", nil, &got)
 		if err == nil {
 			t.Fatal("expected infra error")
@@ -1078,34 +1077,34 @@ func TestRunJSON_ParseFailureWrapsSentinel(t *testing.T) {
 	})
 }
 
-// deepCandidatesSchema mirrors a production caller schema's nested shape: an
-// object with a "candidates" array of objects carrying an enum severity, an
-// integer line with a minimum, a min-length evidence string, and
+// deepResultsSchema mirrors a production caller schema's nested shape: an
+// object with a "results" array of objects carrying an enum confidence, an
+// integer line with a minimum, a min-length summary string, and
 // additionalProperties:false. It exercises every branch validateSchema adds
 // over the old shallow root check.
-const deepCandidatesSchema = `{
+const deepResultsSchema = `{
   "type":"object",
   "properties":{
-    "candidates":{
+    "results":{
       "type":"array",
       "items":{
         "type":"object",
         "properties":{
-          "file":{"type":"string","minLength":1},
+          "path":{"type":"string","minLength":1},
           "line":{"type":"integer","minimum":1},
-          "severity":{"type":"string","enum":["critical","high","medium","low"]},
-          "evidence":{"type":"string","minLength":1}
+          "confidence":{"type":"string","enum":["high","medium","low"]},
+          "summary":{"type":"string","minLength":1}
         },
-        "required":["file","line","severity","evidence"],
+        "required":["path","line","confidence","summary"],
         "additionalProperties":false
       }
     }
   },
-  "required":["candidates"],
+  "required":["results"],
   "additionalProperties":false
 }`
 
-// filesMapSchema mirrors the repro/patch "files" contract: an object whose
+// filesMapSchema mirrors a free-form string-map contract: an object whose
 // values are constrained by an additionalProperties subschema (string) and
 // which must hold at least one entry (minProperties).
 const filesMapSchema = `{
@@ -1117,23 +1116,23 @@ const filesMapSchema = `{
   "additionalProperties":false
 }`
 
-// oneCandidate wraps a single candidate body in the {"candidates":[...]} root
+// oneResult wraps a single result body in the {"results":[...]} root
 // so test cases can focus on the one field under test.
-func oneCandidate(fields string) string {
-	return `{"candidates":[` + fields + `]}`
+func oneResult(fields string) string {
+	return `{"results":[` + fields + `]}`
 }
 
-// validCandidate is one well-shaped candidate object for deepCandidatesSchema.
-const validCandidate = `{"file":"a.go","line":7,"severity":"high","evidence":"x"}`
+// validResult is one well-shaped result object for deepResultsSchema.
+const validResult = `{"path":"a.go","line":7,"confidence":"high","summary":"x"}`
 
 // TestValidateSchema pins down the deep validator's contract: the historical
 // root-level cases (preserved verbatim error phrasing) plus the nested
 // type/required/enum/minimum/minLength/additionalProperties/minItems/
 // minProperties branches that the old shallow check ignored.
 func TestValidateSchema(t *testing.T) {
-	deep := json.RawMessage(deepCandidatesSchema)
+	deep := json.RawMessage(deepResultsSchema)
 	files := json.RawMessage(filesMapSchema)
-	root := json.RawMessage(findWithCandidatesSchema)
+	root := json.RawMessage(itemsSchema)
 	cases := []struct {
 		name    string
 		schema  json.RawMessage
@@ -1143,37 +1142,37 @@ func TestValidateSchema(t *testing.T) {
 	}{
 		// --- preserved root-level behavior ---
 		{name: "nil schema is a no-op", schema: nil, body: `not even json`},
-		{name: "matching object with all required passes", schema: root, body: validFindingJSON},
-		{name: "root type mismatch: bare array", schema: root, body: `[{"file":"a.go"}]`,
+		{name: "matching object with all required passes", schema: root, body: validItemJSON},
+		{name: "root type mismatch: bare array", schema: root, body: `[{"path":"a.go"}]`,
 			wantErr: true, wantMsg: "root JSON type"},
-		{name: "root missing required field", schema: root, body: `{"file":"a.go","message":"bug"}`,
-			wantErr: true, wantMsg: `root object missing required field "refuted"`},
+		{name: "root missing required field", schema: root, body: `{"path":"a.go","note":"fix imports"}`,
+			wantErr: true, wantMsg: `root object missing required field "resolved"`},
 		{name: "schema requires nothing: any object passes", schema: json.RawMessage(`{"type":"object"}`), body: `{}`},
 		{name: "schema with no type: any value passes", schema: json.RawMessage(`{}`), body: `42`},
 		// --- deep: nested object/array recursion ---
-		{name: "valid nested candidate passes", schema: deep, body: oneCandidate(validCandidate)},
-		{name: "empty candidates array passes (found nothing)", schema: deep, body: `{"candidates":[]}`},
+		{name: "valid nested result passes", schema: deep, body: oneResult(validResult)},
+		{name: "empty results array passes (found nothing)", schema: deep, body: `{"results":[]}`},
 		{name: "nested missing required field", schema: deep,
-			body:    oneCandidate(`{"file":"a.go","line":7,"severity":"high"}`),
-			wantErr: true, wantMsg: `candidates[0]: missing required field "evidence"`},
+			body:    oneResult(`{"path":"a.go","line":7,"confidence":"high"}`),
+			wantErr: true, wantMsg: `results[0]: missing required field "summary"`},
 		{name: "nested bad enum", schema: deep,
-			body:    oneCandidate(`{"file":"a.go","line":7,"severity":"blocker","evidence":"x"}`),
-			wantErr: true, wantMsg: `candidates[0].severity: value "blocker" is not one of the allowed values`},
+			body:    oneResult(`{"path":"a.go","line":7,"confidence":"urgent","summary":"x"}`),
+			wantErr: true, wantMsg: `results[0].confidence: value "urgent" is not one of the allowed values`},
 		{name: "nested wrong type (string where integer)", schema: deep,
-			body:    oneCandidate(`{"file":"a.go","line":"7","severity":"high","evidence":"x"}`),
-			wantErr: true, wantMsg: `candidates[0].line: JSON type "string" does not match schema type "integer"`},
+			body:    oneResult(`{"path":"a.go","line":"7","confidence":"high","summary":"x"}`),
+			wantErr: true, wantMsg: `results[0].line: JSON type "string" does not match schema type "integer"`},
 		{name: "integer keyword rejects a fractional number", schema: deep,
-			body:    oneCandidate(`{"file":"a.go","line":7.5,"severity":"high","evidence":"x"}`),
-			wantErr: true, wantMsg: `candidates[0].line: JSON type "number" does not match schema type "integer"`},
+			body:    oneResult(`{"path":"a.go","line":7.5,"confidence":"high","summary":"x"}`),
+			wantErr: true, wantMsg: `results[0].line: JSON type "number" does not match schema type "integer"`},
 		{name: "minimum violation", schema: deep,
-			body:    oneCandidate(`{"file":"a.go","line":0,"severity":"high","evidence":"x"}`),
-			wantErr: true, wantMsg: `candidates[0].line: value 0 is below the minimum 1`},
+			body:    oneResult(`{"path":"a.go","line":0,"confidence":"high","summary":"x"}`),
+			wantErr: true, wantMsg: `results[0].line: value 0 is below the minimum 1`},
 		{name: "minLength violation on required string", schema: deep,
-			body:    oneCandidate(`{"file":"a.go","line":7,"severity":"high","evidence":""}`),
-			wantErr: true, wantMsg: `candidates[0].evidence: string length 0 is below the minimum 1`},
+			body:    oneResult(`{"path":"a.go","line":7,"confidence":"high","summary":""}`),
+			wantErr: true, wantMsg: `results[0].summary: string length 0 is below the minimum 1`},
 		{name: "additionalProperties:false rejects an unknown key", schema: deep,
-			body:    oneCandidate(`{"file":"a.go","line":7,"severity":"high","evidence":"x","cwe":"CWE-20"}`),
-			wantErr: true, wantMsg: `candidates[0]: unexpected property "cwe"`},
+			body:    oneResult(`{"path":"a.go","line":7,"confidence":"high","summary":"x","cwe":"CWE-20"}`),
+			wantErr: true, wantMsg: `results[0]: unexpected property "cwe"`},
 		// --- deep: free-form map (additionalProperties subschema + minProperties) ---
 		{name: "files map with string values passes", schema: files, body: `{"files":{"a_test.go":"package a"}}`},
 		{name: "files map empty violates minProperties", schema: files, body: `{"files":{}}`,
@@ -1202,43 +1201,43 @@ func TestValidateSchema(t *testing.T) {
 // TestRunJSON_DeepValidationTriggersRepair is the headline regression for the
 // deep validator: an answer that is valid JSON, the right ROOT shape, AND
 // unmarshals cleanly into the typed struct — but carries a CONTRACT violation
-// the old shallow root check could never see (an out-of-enum severity). The
+// the old shallow root check could never see (an out-of-enum confidence). The
 // strengthened validateSchema rejects it and routes the call through the single
 // repair round-trip, which returns a schema-valid answer.
 func TestRunJSON_DeepValidationTriggersRepair(t *testing.T) {
 	const enumSchema = `{
   "type":"object",
-  "required":["severity"],
-  "properties":{"severity":{"type":"string","enum":["high","low"]}},
+  "required":["status"],
+  "properties":{"status":{"type":"string","enum":["open","closed"]}},
   "additionalProperties":false
 }`
-	type sev struct {
-		Severity string `json:"severity"`
+	type statusRec struct {
+		Status string `json:"status"`
 	}
 	// First answer: a wrong-enum value. It parses, has the required root key,
-	// and unmarshals into sev{Severity:"blocker"} without error — exactly the
+	// and unmarshals into statusRec{Status:"urgent"} without error — exactly the
 	// silent corruption the shallow check let through. Repair returns a valid
 	// enum value.
 	fc := newFakeClient(
-		textResp(`{"severity":"blocker"}`, 5, 5),
-		textResp(`{"severity":"high"}`, 5, 5),
+		textResp(`{"status":"archived"}`, 5, 5),
+		textResp(`{"status":"open"}`, 5, 5),
 	)
 	fc.caps = llmkit.Capabilities{StructuredOutput: true}
 	r := NewRunner(fc, nil, "sys")
 
-	var got sev
+	var got statusRec
 	if _, err := r.RunJSON(context.Background(), "task", json.RawMessage(enumSchema), &got); err != nil {
 		t.Fatalf("RunJSON should succeed after deep-validation repair: %v", err)
 	}
-	if got.Severity != "high" {
-		t.Errorf("parsed severity = %q, want %q (the repaired value)", got.Severity, "high")
+	if got.Status != "open" {
+		t.Errorf("parsed status = %q, want %q (the repaired value)", got.Status, "open")
 	}
 	if len(fc.requests) != 2 {
 		t.Fatalf("client calls = %d, want 2 (main + repair)", len(fc.requests))
 	}
 	// The repair prompt must name the enum violation so the model can fix it.
-	if !strings.Contains(fc.requests[1].Messages[0].Content, "allowed values") {
-		t.Errorf("repair prompt missing the enum-violation detail:\n%s", fc.requests[1].Messages[0].Content)
+	if !strings.Contains(fc.requests[1].Messages[0].Text(), "allowed values") {
+		t.Errorf("repair prompt missing the enum-violation detail:\n%s", fc.requests[1].Messages[0].Text())
 	}
 }
 
@@ -1252,16 +1251,16 @@ func TestRunJSON_TrailingCommaNoRepair(t *testing.T) {
 	// consume the (unscripted) second slot and produce "(unscripted)", which
 	// would itself fail to parse and cause an error.
 	fc := newFakeClient(
-		textResp(`{"file":"a.go","message":"bug","refuted":false},`, 5, 5),
+		textResp(`{"path":"a.go","note":"fix imports","resolved":false},`, 5, 5),
 	)
 	r := NewRunner(fc, nil, "sys")
 
-	var got findingWithRefuted
-	out, err := r.RunJSON(context.Background(), "task", json.RawMessage(findWithCandidatesSchema), &got)
+	var got itemWithResolved
+	out, err := r.RunJSON(context.Background(), "task", json.RawMessage(itemsSchema), &got)
 	if err != nil {
 		t.Fatalf("RunJSON: %v", err)
 	}
-	if got.File != "a.go" || got.Message != "bug" || got.Refuted {
+	if got.Path != "a.go" || got.Note != "fix imports" || got.Resolved {
 		t.Errorf("parsed = %+v", got)
 	}
 	// Single completion: proves no repair round-trip happened.
@@ -1274,18 +1273,18 @@ func TestRunJSON_TrailingCommaNoRepair(t *testing.T) {
 // TestRunJSON_DoubleValueParsesFirst proves that when the model emits two
 // concatenated JSON objects, RunJSON parses and returns the first one.
 func TestRunJSON_DoubleValueParsesFirst(t *testing.T) {
-	first := `{"file":"first.go","message":"first bug","refuted":false}`
-	second := `{"file":"second.go","message":"second bug","refuted":true}`
+	first := `{"path":"first.go","note":"first","resolved":false}`
+	second := `{"path":"second.go","note":"second","resolved":true}`
 	fc := newFakeClient(
 		textResp(first+second, 5, 5),
 	)
 	r := NewRunner(fc, nil, "sys")
 
-	var got findingWithRefuted
-	if _, err := r.RunJSON(context.Background(), "task", json.RawMessage(findWithCandidatesSchema), &got); err != nil {
+	var got itemWithResolved
+	if _, err := r.RunJSON(context.Background(), "task", json.RawMessage(itemsSchema), &got); err != nil {
 		t.Fatalf("RunJSON: %v", err)
 	}
-	if got.File != "first.go" || got.Message != "first bug" || got.Refuted {
+	if got.Path != "first.go" || got.Note != "first" || got.Resolved {
 		t.Errorf("parsed = %+v, want first object", got)
 	}
 	if fc.callCount() != 1 {
@@ -1328,7 +1327,7 @@ func TestRunJSON_EmptyBodyErrors(t *testing.T) {
 	)
 	r := NewRunner(fc, nil, "sys")
 
-	var got finding
+	var got item
 	_, err := r.RunJSON(context.Background(), "task", nil, &got)
 	if err == nil {
 		t.Fatal("expected error for empty body")
@@ -1346,16 +1345,16 @@ func TestRunJSON_EmptyTurnNudgeRecovers(t *testing.T) {
 	fc := newFakeClient(
 		thinkOnlyResp("let me plan this out...", 10, 5),
 		toolResp("c1", "echo", `{"v":"orient"}`, 10, 4),
-		textResp(`{"file":"a.go","message":"bug"}`, 8, 3),
+		textResp(`{"path":"a.go","note":"fix imports"}`, 8, 3),
 	)
 	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys")
 
-	var got finding
-	out, err := r.RunJSON(context.Background(), "find a bug", nil, &got)
+	var got item
+	out, err := r.RunJSON(context.Background(), "summarize the report", nil, &got)
 	if err != nil {
 		t.Fatalf("RunJSON: %v", err)
 	}
-	if got.File != "a.go" || got.Message != "bug" {
+	if got.Path != "a.go" || got.Note != "fix imports" {
 		t.Errorf("parsed = %+v", got)
 	}
 	// 3 completions: think-only nudge, tool call, final answer.
@@ -1364,7 +1363,7 @@ func TestRunJSON_EmptyTurnNudgeRecovers(t *testing.T) {
 	}
 	foundNudge := false
 	for _, m := range out.Messages {
-		if m.Role == llmkit.RoleUser && m.Content == emptyTurnNudge {
+		if m.Role == llmkit.RoleUser && m.Text() == emptyTurnNudge {
 			foundNudge = true
 		}
 	}
@@ -1383,16 +1382,16 @@ func TestRunJSON_EmptyTurnNudgeCapExhausted(t *testing.T) {
 		thinkOnlyResp("first thought", 10, 5),
 		thinkOnlyResp("second thought", 10, 5),
 		thinkOnlyResp("third thought", 10, 5),
-		textResp(`{"file":"a.go","message":"repaired"}`, 5, 5),
+		textResp(`{"path":"a.go","note":"repaired"}`, 5, 5),
 	)
 	r := NewRunner(fc, nil, "sys")
 
-	var got finding
-	out, err := r.RunJSON(context.Background(), "find a bug", nil, &got)
+	var got item
+	out, err := r.RunJSON(context.Background(), "summarize the report", nil, &got)
 	if err != nil {
 		t.Fatalf("RunJSON: %v", err)
 	}
-	if got.File != "a.go" || got.Message != "repaired" {
+	if got.Path != "a.go" || got.Note != "repaired" {
 		t.Errorf("parsed = %+v", got)
 	}
 	if fc.callCount() != 4 {
@@ -1400,7 +1399,7 @@ func TestRunJSON_EmptyTurnNudgeCapExhausted(t *testing.T) {
 	}
 	nudgeCount := 0
 	for _, m := range out.Messages {
-		if m.Role == llmkit.RoleUser && m.Content == emptyTurnNudge {
+		if m.Role == llmkit.RoleUser && m.Text() == emptyTurnNudge {
 			nudgeCount++
 		}
 	}

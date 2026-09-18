@@ -14,13 +14,17 @@ func breakpointRequest() llmkit.Request {
 	return llmkit.Request{
 		System: "you are a careful bug finder",
 		Messages: []llmkit.Message{
-			{Role: llmkit.RoleUser, Content: "audit these files"},
-			{Role: llmkit.RoleAssistant, Content: "reading", ToolCalls: []llmkit.ToolCall{
-				{ID: "c1", Name: "read_file", Arguments: json.RawMessage(`{"path":"a.go"}`)},
-				{ID: "c2", Name: "read_file", Arguments: json.RawMessage(`{"path":"b.go"}`)},
-			}},
-			{Role: llmkit.RoleToolResult, ToolCallID: "c1", Content: "package a"},
-			{Role: llmkit.RoleToolResult, ToolCallID: "c2", Content: "package b"},
+			llmkit.TextMessage(llmkit.RoleUser, "audit these files"),
+			func() llmkit.Message {
+				am := llmkit.TextMessage(llmkit.RoleAssistant, "reading")
+				am.ToolCalls = []llmkit.ToolCall{
+					{ID: "c1", Name: "read_file", Arguments: json.RawMessage(`{"path":"a.go"}`)},
+					{ID: "c2", Name: "read_file", Arguments: json.RawMessage(`{"path":"b.go"}`)},
+				}
+				return am
+			}(),
+			{Role: llmkit.RoleToolResult, ToolCallID: "c1", Content: []llmkit.Block{{Kind: llmkit.BlockText, Text: "package a"}}},
+			{Role: llmkit.RoleToolResult, ToolCallID: "c2", Content: []llmkit.Block{{Kind: llmkit.BlockText, Text: "package b"}}},
 		},
 		Tools: []llmkit.ToolDef{
 			{Name: "read_file", Parameters: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`)},
@@ -126,7 +130,7 @@ func TestAnthropic_CacheBreakpoints_MinimalRequest(t *testing.T) {
 	a := New("claude-test", Options{APIKey: "k"}).(*anthropicAdapter)
 	params, err := a.buildParams(llmkit.Request{
 		System:    "sys",
-		Messages:  []llmkit.Message{{Role: llmkit.RoleUser, Content: "hello"}},
+		Messages:  []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "hello")},
 		MaxTokens: 16,
 	})
 	if err != nil {
