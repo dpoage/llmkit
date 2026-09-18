@@ -26,6 +26,11 @@ func TestNew_RejectsUnknownAuth(t *testing.T) {
 			if !errors.Is(err, llmkit.ErrInvalidRequest) {
 				t.Fatalf("error = %v, want ErrInvalidRequest", err)
 			}
+			for _, want := range []string{string(auth), "Auth"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not mention %q", err, want)
+				}
+			}
 		})
 	}
 }
@@ -109,4 +114,30 @@ func TestNew_RecorderProviderTag(t *testing.T) {
 			t.Errorf("event tags = %q/%q, want my-config-key/gpt-test", ev.Provider, ev.Model)
 		}
 	})
+}
+
+// TestNew_RejectsOAuthOnNonAnthropic pins the Auth-scope rule: OAuth
+// bearer-token authentication is implemented only by the Anthropic adapter,
+// so AuthOAuthToken on any other Type must be refused with
+// ErrInvalidRequest — never silently downgraded to API-key mode (the
+// failure this pins: the token would ride the other adapter's API-key
+// header).
+func TestNew_RejectsOAuthOnNonAnthropic(t *testing.T) {
+	for _, typ := range []Type{TypeOpenAI, TypeOpenAICompatible, TypeGoogle} {
+		t.Run(string(typ), func(t *testing.T) {
+			spec := Spec{Type: typ, Model: "gpt-test", Secret: "bearer-secret", Auth: AuthOAuthToken}
+			client, err := New(context.Background(), spec, Options{})
+			if client != nil {
+				t.Fatal("New returned a client for AuthOAuthToken on a non-Anthropic Type")
+			}
+			if !errors.Is(err, llmkit.ErrInvalidRequest) {
+				t.Fatalf("error = %v, want ErrInvalidRequest", err)
+			}
+			for _, want := range []string{string(AuthOAuthToken), string(typ), string(TypeAnthropic)} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not mention %q", err, want)
+				}
+			}
+		})
+	}
 }

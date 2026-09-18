@@ -15,7 +15,7 @@ import (
 //
 //	LLMKIT_PROVIDER  required; anthropic | openai | openai-compatible | google
 //	LLMKIT_MODEL     required; the model identifier
-//	LLMKIT_API_KEY   required; the credential (API key or OAuth token)
+//	LLMKIT_API_KEY   required; the provider API key
 //	LLMKIT_BASE_URL  optional; for openai-compatible endpoints and proxies
 //
 // When a required variable is missing or the provider name is unknown, the

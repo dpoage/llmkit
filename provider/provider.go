@@ -39,6 +39,10 @@ const (
 	AuthOAuthToken Auth = "oauth-token"
 )
 
+// validTypes is the single source of the accepted provider-name list in
+// ParseType's and New's errors, so the two cannot drift.
+const validTypes = `"anthropic", "openai", "openai-compatible", or "google"`
+
 // ParseType maps a provider name onto a Type. The error names the bad
 // value and lists every accepted one, so a bad config value is actionable
 // without reading this package.
@@ -47,8 +51,7 @@ func ParseType(s string) (Type, error) {
 	case TypeAnthropic, TypeOpenAI, TypeOpenAICompatible, TypeGoogle:
 		return t, nil
 	default:
-		return "", fmt.Errorf("llmkit: unknown provider type %q: expected %q, %q, %q, or %q",
-			s, TypeAnthropic, TypeOpenAI, TypeOpenAICompatible, TypeGoogle)
+		return "", fmt.Errorf("llmkit: unknown provider type %q: expected %s", s, validTypes)
 	}
 }
 
@@ -58,9 +61,10 @@ func ParseType(s string) (Type, error) {
 //
 // Auth selects the credential mode. The zero value AuthAPIKey sends Secret
 // as a standard API key (x-api-key header); AuthOAuthToken sends it as an
-// OAuth bearer token (Authorization header — Anthropic only). Any other
-// value is refused by New with an error wrapping ErrInvalidRequest; there
-// is no silent fallback to API-key mode.
+// OAuth bearer token (Authorization header) and is Anthropic-only — New
+// refuses AuthOAuthToken on any other Type with an error wrapping
+// ErrInvalidRequest. Any other Auth value is likewise refused; there is no
+// silent fallback to API-key mode.
 //
 // Capabilities, when non-nil, tunes the adapter's model-table profile: the
 // function receives the table-derived profile and returns the effective
@@ -130,17 +134,25 @@ type Options struct {
 // spec.Secret is the resolved credential (callers obtain it via their own
 // config); New performs no environment lookups, so it stays testable
 // without real keys. spec.Auth routes the secret to the right credential
-// field; unknown Auth values, an empty spec.Model, and an unknown
-// spec.Type are errors wrapping ErrInvalidRequest.
+// field; unknown Auth values, AuthOAuthToken on a non-Anthropic Type, an
+// empty spec.Model, and an unknown spec.Type are errors wrapping
+// ErrInvalidRequest.
 func New(ctx context.Context, spec Spec, opts Options) (llmkit.Client, error) {
-	if spec.Model == "" {
-		return nil, fmt.Errorf("llmkit: model must not be empty for provider %q: %w", spec.Type, llmkit.ErrInvalidRequest)
-	}
 	switch spec.Auth {
 	case AuthAPIKey, AuthOAuthToken:
 	default:
 		return nil, fmt.Errorf("llmkit: unknown Auth %q for provider %q (want AuthAPIKey or AuthOAuthToken): %w",
 			string(spec.Auth), spec.Type, llmkit.ErrInvalidRequest)
+	}
+	if spec.Auth == AuthOAuthToken && spec.Type != TypeAnthropic {
+		// OAuth bearer-token authentication is implemented only by the
+		// Anthropic adapter; routing Secret to another adapter's API-key
+		// field would silently downgrade the credential.
+		return nil, fmt.Errorf("llmkit: Auth %q is only supported for provider %q, not %q: %w",
+			spec.Auth, TypeAnthropic, spec.Type, llmkit.ErrInvalidRequest)
+	}
+	if spec.Model == "" {
+		return nil, fmt.Errorf("llmkit: model must not be empty for provider %q: %w", spec.Type, llmkit.ErrInvalidRequest)
 	}
 
 	var adapter llmkit.Client
@@ -187,8 +199,8 @@ func New(ctx context.Context, spec Spec, opts Options) (llmkit.Client, error) {
 		}
 		adapter = ga
 	default:
-		return nil, fmt.Errorf("llmkit: unsupported provider type %q: expected %q, %q, %q, or %q (see ParseType): %w",
-			spec.Type, TypeAnthropic, TypeOpenAI, TypeOpenAICompatible, TypeGoogle, llmkit.ErrInvalidRequest)
+		return nil, fmt.Errorf("llmkit: unsupported provider type %q: expected %s (see ParseType): %w",
+			spec.Type, validTypes, llmkit.ErrInvalidRequest)
 	}
 
 	retryCfg := opts.Retry
