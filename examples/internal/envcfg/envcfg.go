@@ -16,7 +16,7 @@ import (
 //	LLMKIT_PROVIDER  required; anthropic | openai | openai-compatible | google
 //	LLMKIT_MODEL     required; the model identifier
 //	LLMKIT_API_KEY   required; the provider API key
-//	LLMKIT_BASE_URL  optional; for openai-compatible endpoints and proxies
+//	LLMKIT_BASE_URL  required for openai-compatible, optional otherwise; for testing, proxies, and self-hosted gateways
 //
 // When a required variable is missing or the provider name is unknown, the
 // returned error carries the usage string the caller passed in, so each
