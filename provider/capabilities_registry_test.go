@@ -40,7 +40,7 @@ func TestCapabilities_SpecOverride_ReplacesTableWholesale(t *testing.T) {
 	}{
 		{"anthropic", Spec{Type: TypeAnthropic}, "claude-opus-4-5"},
 		{"openai", Spec{Type: TypeOpenAI}, "gpt-5"},
-		{"openai-compatible", Spec{Type: TypeOpenAICompatible}, "llama3"},
+		{"openai-compatible", Spec{Type: TypeOpenAICompatible, BaseURL: "http://example.invalid"}, "llama3"},
 		{"google", Spec{Type: TypeGoogle}, "gemini-2.5-pro"},
 	}
 	for _, tc := range cases {
@@ -73,7 +73,7 @@ func TestCapabilities_SpecOverride_ClosureSeesTableProfile(t *testing.T) {
 	}{
 		{"anthropic", Spec{Type: TypeAnthropic}, "claude-opus-4-5"},
 		{"openai", Spec{Type: TypeOpenAI}, "gpt-5"},
-		{"openai-compatible", Spec{Type: TypeOpenAICompatible}, "llama3"},
+		{"openai-compatible", Spec{Type: TypeOpenAICompatible, BaseURL: "http://example.invalid"}, "llama3"},
 		{"google", Spec{Type: TypeGoogle}, "gemini-2.5-pro"},
 	}
 	for _, tc := range cases {
@@ -157,7 +157,7 @@ func TestCapabilities_NilSpec_KeepsTableProfile(t *testing.T) {
 		{"anthropic unknown model", Spec{Type: TypeAnthropic}, "mystery-claude", anthropicProfile(0, true)},
 		{"openai table entry", Spec{Type: TypeOpenAI}, "gpt-4", openAIFirstParty(8_192, false, false, false, true)},
 		{"openai unknown model", Spec{Type: TypeOpenAI}, "mystery-gpt", openAIFirstParty(0, true, true, true, true)},
-		{"openai-compatible", Spec{Type: TypeOpenAICompatible}, "llama3", compatible},
+		{"openai-compatible", Spec{Type: TypeOpenAICompatible, BaseURL: "http://example.invalid"}, "llama3", compatible},
 		{"google table entry", Spec{Type: TypeGoogle}, "gemini-2.0-flash-lite", googleProfile(1_048_576, false, false)},
 	}
 	for _, tc := range cases {

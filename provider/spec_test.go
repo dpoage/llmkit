@@ -3,10 +3,12 @@ package provider
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/dpoage/llmkit"
 )
@@ -137,6 +139,92 @@ func TestNew_RejectsOAuthOnNonAnthropic(t *testing.T) {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("error %q does not mention %q", err, want)
 				}
+			}
+		})
+	}
+}
+
+// TestNew_RejectsEmptySecret pins the required-Secret contract: Secret is
+// the resolved credential, so an empty or whitespace-only value is a caller
+// bug. New must refuse it for every Type with an error wrapping
+// ErrInvalidRequest — uniformly, because the adapters disagree on empty
+// secrets (ambient-env fallback, empty Bearer, hard error) — and the error
+// must never echo the secret. The unroutable BaseURL plus the elapsed-time
+// bound prove the refusal returns before any network activity.
+func TestNew_RejectsEmptySecret(t *testing.T) {
+	for _, typ := range []Type{TypeAnthropic, TypeOpenAI, TypeOpenAICompatible, TypeGoogle} {
+		for _, secret := range []string{"", "   ", "\t\n"} {
+			t.Run(string(typ)+"/"+fmt.Sprintf("%q", secret), func(t *testing.T) {
+				spec := Spec{Type: typ, Model: "test-model", Secret: secret, BaseURL: "http://10.255.255.1:1"}
+				start := time.Now()
+				client, err := New(context.Background(), spec, Options{})
+				if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+					t.Fatalf("New took %s; a refusal path must not touch the network", elapsed)
+				}
+				if client != nil {
+					t.Fatal("New returned a client for an empty Secret")
+				}
+				if !errors.Is(err, llmkit.ErrInvalidRequest) {
+					t.Errorf("error = %v, want ErrInvalidRequest", err)
+				}
+				if !strings.Contains(err.Error(), "secret") {
+					t.Errorf("error %q must name the field", err)
+				}
+				if secret != "" && strings.Contains(err.Error(), secret) {
+					t.Errorf("error %q must not echo the secret", err)
+				}
+			})
+		}
+	}
+}
+
+// TestNew_RejectsOpenAICompatibleEmptyBaseURL pins the BaseURL rule: an
+// openai-compatible Type with an empty BaseURL would silently target the
+// first-party OpenAI host, so New refuses it with ErrInvalidRequest and a
+// message saying the endpoint must be given. The elapsed-time bound proves
+// the refusal returns before any dial could begin.
+func TestNew_RejectsOpenAICompatibleEmptyBaseURL(t *testing.T) {
+	spec := Spec{Type: TypeOpenAICompatible, Model: "test-model", Secret: "k"}
+	start := time.Now()
+	client, err := New(context.Background(), spec, Options{})
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf("New took %s; a refusal path must not touch the network", elapsed)
+	}
+	if client != nil {
+		t.Fatal("New returned a client for an openai-compatible Spec with an empty BaseURL")
+	}
+	if !errors.Is(err, llmkit.ErrInvalidRequest) {
+		t.Errorf("error = %v, want ErrInvalidRequest", err)
+	}
+	if !strings.Contains(err.Error(), "endpoint must be given") {
+		t.Errorf("error %q must say the endpoint must be given", err)
+	}
+}
+
+// TestNew_BaseURLRules pins the per-Type BaseURL semantics: openai-compatible
+// requires an explicit endpoint, while the three vendor Types construct fine
+// against their SDK defaults. New never dials — the unroutable BaseURL in
+// the accepted case would hang visibly if it did.
+func TestNew_BaseURLRules(t *testing.T) {
+	t.Run("openai-compatible accepts explicit BaseURL", func(t *testing.T) {
+		spec := Spec{Type: TypeOpenAICompatible, Model: "test-model", Secret: "k", BaseURL: "http://10.255.255.1:1"}
+		client, err := New(context.Background(), spec, Options{})
+		if err != nil {
+			t.Fatalf("New with explicit BaseURL: %v", err)
+		}
+		if client == nil {
+			t.Fatal("New returned a nil client")
+		}
+	})
+	for _, typ := range []Type{TypeAnthropic, TypeOpenAI, TypeGoogle} {
+		t.Run(string(typ)+" constructs with empty BaseURL", func(t *testing.T) {
+			spec := Spec{Type: typ, Model: "test-model", Secret: "k"}
+			client, err := New(context.Background(), spec, Options{})
+			if err != nil {
+				t.Fatalf("New with empty BaseURL: %v", err)
+			}
+			if client == nil {
+				t.Fatal("New returned a nil client")
 			}
 		})
 	}

@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/provider/anthropic"
@@ -85,13 +86,23 @@ type Spec struct {
 	// Model is the model identifier (e.g. "claude-sonnet-4-5"). Empty is
 	// refused by New.
 	Model string
-	// BaseURL is optional; for testing or non-default endpoints.
+	// BaseURL overrides the vendor endpoint; mainly for tests, proxies, and
+	// self-hosted gateways. Empty means the vendor default: the Anthropic
+	// SDK targets api.anthropic.com, the OpenAI SDK api.openai.com/v1, and
+	// the Google GenAI SDK generativelanguage.googleapis.com.
+	// TypeOpenAICompatible is the exception: it has no vendor default of
+	// its own — empty would silently target first-party api.openai.com —
+	// so New refuses it with an error wrapping ErrInvalidRequest.
 	BaseURL string
 	// Auth selects the credential mode; the zero value is API-key mode.
 	Auth Auth
 	// Secret is the resolved credential: an API key in AuthAPIKey mode, an
-	// OAuth bearer token in AuthOAuthToken mode. The caller obtains it via
-	// its own config; New hands it to the SDK and never logs it.
+	// OAuth bearer token in AuthOAuthToken mode. It must be non-empty — New
+	// refuses an empty or whitespace-only Secret with an error wrapping
+	// ErrInvalidRequest and never consults the environment for a fallback,
+	// so the Anthropic SDK's ambient ANTHROPIC_API_KEY fallback is
+	// unreachable through New. The caller obtains the Secret via its own
+	// config; New hands it to the SDK and never logs it.
 	Secret string
 
 	// Capabilities tunes the adapter's model-table profile; nil keeps the
@@ -132,10 +143,13 @@ type Options struct {
 // safe and capability-driven.
 //
 // spec.Secret is the resolved credential (callers obtain it via their own
-// config); New performs no environment lookups, so it stays testable
-// without real keys. spec.Auth routes the secret to the right credential
-// field; unknown Auth values, AuthOAuthToken on a non-Anthropic Type, an
-// empty spec.Model, and an unknown spec.Type are errors wrapping
+// config); New performs no environment lookups — including the Anthropic
+// SDK's ambient ANTHROPIC_API_KEY fallback, which an empty Secret would
+// otherwise reach — so it stays testable without real keys. spec.Auth
+// routes the secret to the right credential field; unknown Auth values,
+// AuthOAuthToken on a non-Anthropic Type, an empty spec.Model, an empty or
+// whitespace-only spec.Secret, an empty spec.BaseURL on
+// TypeOpenAICompatible, and an unknown spec.Type are errors wrapping
 // ErrInvalidRequest.
 func New(ctx context.Context, spec Spec, opts Options) (llmkit.Client, error) {
 	switch spec.Auth {
@@ -153,6 +167,19 @@ func New(ctx context.Context, spec Spec, opts Options) (llmkit.Client, error) {
 	}
 	if spec.Model == "" {
 		return nil, fmt.Errorf("llmkit: model must not be empty for provider %q: %w", spec.Type, llmkit.ErrInvalidRequest)
+	}
+	// Secret is the resolved credential, so empty or whitespace-only means
+	// the caller resolved nothing. Refuse it uniformly: left unchecked, the
+	// adapters diverge (the Anthropic SDK falls back to a host
+	// ANTHROPIC_API_KEY, the OpenAI adapter sends an empty Bearer). The
+	// error never echoes the secret.
+	if strings.TrimSpace(spec.Secret) == "" {
+		return nil, fmt.Errorf("llmkit: secret must not be empty for provider %q: %w", spec.Type, llmkit.ErrInvalidRequest)
+	}
+	// An openai-compatible Type with no BaseURL would silently target the
+	// first-party OpenAI host, so the endpoint must be given explicitly.
+	if spec.Type == TypeOpenAICompatible && spec.BaseURL == "" {
+		return nil, fmt.Errorf("llmkit: base URL must not be empty for provider %q: the endpoint must be given: %w", spec.Type, llmkit.ErrInvalidRequest)
 	}
 
 	var adapter llmkit.Client
