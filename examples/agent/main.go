@@ -11,7 +11,7 @@
 //	export LLMKIT_PROVIDER=openai   # anthropic | openai | openai-compatible | google
 //	export LLMKIT_MODEL=gpt-4o-mini
 //	export LLMKIT_API_KEY=sk-...
-//	export LLMKIT_BASE_URL=...      # optional; e.g. a local OpenAI-compatible endpoint
+//	export LLMKIT_BASE_URL=...      # required for openai-compatible, optional otherwise; e.g. a local endpoint
 //	go run ./examples/agent [--parallel] [--task "..."]
 //
 // Without the environment variables set, the program prints usage and exits
@@ -49,7 +49,7 @@ func run() error {
   LLMKIT_PROVIDER  anthropic | openai | openai-compatible | google
   LLMKIT_MODEL     model name, e.g. claude-sonnet-4-5 or gpt-4o-mini
   LLMKIT_API_KEY   provider API key (any placeholder for a local endpoint)
-  LLMKIT_BASE_URL  optional base URL for OpenAI-compatible endpoints
+  LLMKIT_BASE_URL  required for openai-compatible, optional otherwise; e.g. a local endpoint
 
 set the variables above, then re-run:
   go run ./examples/agent [--parallel] [--task "..."]`)
