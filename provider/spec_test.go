@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -210,9 +211,12 @@ func TestNew_RejectsEmptySecret(t *testing.T) {
 // TestNew_RejectsSecretWithSurroundingWhitespace pins the trimmed-Secret
 // contract: a Secret that differs from its own strings.TrimSpace — e.g.
 // "sk-abc\n", exactly the shape `cat`/`pass` produce — must be refused
-// before any adapter is built. Left unchecked this shape passes every
-// adapter's own validation and only fails net/http's header-value check
-// on the first wire attempt, after the full retry budget elapses.
+// before any adapter is built. Left unchecked, newline/CR padding fails
+// net/http's header-value check after the full retry budget elapses, but
+// space/tab padding is accepted by the vendors today — the receiver
+// strips surrounding OWS per RFC 7230 §3.2.4 — so New's refusal here is
+// a deliberate breaking refusal, not a fail-faster: a secret never
+// legitimately carries surrounding whitespace.
 func TestNew_RejectsSecretWithSurroundingWhitespace(t *testing.T) {
 	for _, secret := range []string{"sk-abc\n", " sk-abc", "sk-abc ", "sk-abc\t", "\tsk-abc\n"} {
 		t.Run(fmt.Sprintf("%q", secret), func(t *testing.T) {
@@ -312,14 +316,31 @@ func (t *hostCapturingTransport) observed() *url.URL {
 }
 
 // TestNew_VendorHosts pins the vendor-default endpoint each Type resolves
-// to with an empty spec.BaseURL — the claim the package godoc makes. It
-// binds a RoundTripper and reads the resolved req.URL instead of trusting
-// the godoc prose, so an SDK bump that silently changes the default host
-// fails this test rather than only being caught by reading source.
+// to with an empty spec.BaseURL — the claim the package godoc makes. All
+// three SDKs also honor a base-URL environment variable (ANTHROPIC_BASE_URL,
+// OPENAI_BASE_URL, GOOGLE_GEMINI_BASE_URL) when BaseURL is empty, so the
+// test unsets all three first (restoring them on cleanup): it pins the
+// SDKs' compiled-in defaults regardless of the operator's own environment,
+// not whatever an ambient override happens to say. Setting a var to the
+// empty string instead of unsetting it is not equivalent here — the
+// Anthropic and OpenAI SDKs key off os.LookupEnv's ok result, not the
+// value, so an empty-but-present var still overrides the default with an
+// empty base URL — which is why this uses os.Unsetenv rather than
+// t.Setenv (t.Setenv has no unset form). It binds a RoundTripper and reads
+// the resolved req.URL instead of trusting the godoc prose, so an SDK
+// bump that silently changes the default host fails this test rather
+// than only being caught by reading source.
 // Retry is capped at one attempt: the transport always fails the round
 // trip, and the shared retry wrapper would otherwise spend several
 // seconds backing off a failure this test induces on purpose.
 func TestNew_VendorHosts(t *testing.T) {
+	for _, name := range []string{"ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "GOOGLE_GEMINI_BASE_URL"} {
+		if old, had := os.LookupEnv(name); had {
+			os.Unsetenv(name)
+			t.Cleanup(func() { os.Setenv(name, old) })
+		}
+	}
+
 	for _, tc := range []struct {
 		typ  Type
 		host string
