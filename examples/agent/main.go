@@ -3,7 +3,7 @@
 // logging ToolStart/ToolEnd/AfterCompletion, a per-tool timeout, and —
 // behind --parallel — concurrent dispatch of the tool calls a single
 // completion requests. It doubles as a compile-time contract check for the
-// agent surface: agent.NewRunner, agent.Tool, agent.Hooks, WithToolTimeout,
+// agent surface: agent.NewRunner, agent.Func, agent.Hooks, WithToolTimeout,
 // and WithParallelTools.
 //
 // Usage:
@@ -20,8 +20,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -30,17 +28,9 @@ import (
 
 	"github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/agent"
+	"github.com/dpoage/llmkit/examples/internal/envcfg"
 	"github.com/dpoage/llmkit/provider"
 )
-
-var errUsage = errors.New(`missing environment:
-  LLMKIT_PROVIDER  anthropic | openai | openai-compatible | google
-  LLMKIT_MODEL     model name, e.g. claude-sonnet-4-5 or gpt-4o-mini
-  LLMKIT_API_KEY   provider API key (any placeholder for a local endpoint)
-  LLMKIT_BASE_URL  optional base URL for OpenAI-compatible endpoints
-
-set the variables above, then re-run:
-  go run ./examples/agent [--parallel] [--task "..."]`)
 
 func main() {
 	if err := run(); err != nil {
@@ -55,20 +45,19 @@ func run() error {
 		"the task to give the agent")
 	flag.Parse()
 
-	providerName := os.Getenv("LLMKIT_PROVIDER")
-	model := os.Getenv("LLMKIT_MODEL")
-	apiKey := os.Getenv("LLMKIT_API_KEY")
-	baseURL := os.Getenv("LLMKIT_BASE_URL")
-	if providerName == "" || model == "" || apiKey == "" {
-		return errUsage
-	}
+	spec, err := envcfg.Load(`missing environment:
+  LLMKIT_PROVIDER  anthropic | openai | openai-compatible | google
+  LLMKIT_MODEL     model name, e.g. claude-sonnet-4-5 or gpt-4o-mini
+  LLMKIT_API_KEY   provider API key (any placeholder for a local endpoint)
+  LLMKIT_BASE_URL  optional base URL for OpenAI-compatible endpoints
 
-	spec, err := specFor(providerName, baseURL)
+set the variables above, then re-run:
+  go run ./examples/agent [--parallel] [--task "..."]`)
 	if err != nil {
 		return err
 	}
 
-	client, err := provider.New(context.Background(), spec, providerName, model, apiKey, provider.Options{})
+	client, err := provider.New(context.Background(), spec, provider.Options{})
 	if err != nil {
 		return fmt.Errorf("build client: %w", err)
 	}
@@ -105,7 +94,17 @@ func run() error {
 		opts = append(opts, agent.WithParallelTools())
 	}
 
-	runner := agent.NewRunner(client, []agent.Tool{nowTool{}, addTool{}},
+	// now takes no arguments (struct{}); add's schema is derived from
+	// addArgs. agent.Func replaces the hand-written ToolDef + Run pairs.
+	now := agent.Func[struct{}]("now", "returns the current local date and time",
+		func(_ context.Context, _ struct{}) (string, error) {
+			return time.Now().Format(time.RFC3339), nil
+		})
+	add := agent.Func("add", "adds two numbers", func(_ context.Context, p addArgs) (string, error) {
+		return fmt.Sprintf("%g", p.A+p.B), nil
+	})
+
+	runner := agent.NewRunner(client, []agent.Tool{now, add},
 		"You are a helpful assistant. Use the provided tools whenever they would help answer.",
 		opts...)
 
@@ -123,67 +122,15 @@ func run() error {
 	}
 	u := outcome.Usage
 	fmt.Printf("usage:      input=%d output=%d over %d turn(s)\n", u.InputTokens, u.OutputTokens, outcome.Iterations)
-	if outcome.Truncated {
+	if outcome.Truncated() {
 		fmt.Println("truncated: ", outcome.TruncationReason)
 	}
 	return nil
 }
 
-// specFor maps the provider name onto provider.Type with a friendly error
-// listing the accepted values. BaseURL is empty unless the caller set
-// LLMKIT_BASE_URL (used by openai-compatible and useful for proxies).
-func specFor(providerName, baseURL string) (provider.Spec, error) {
-	var spec provider.Spec
-	switch providerName {
-	case "anthropic":
-		spec.Type = provider.TypeAnthropic
-	case "openai":
-		spec.Type = provider.TypeOpenAI
-	case "openai-compatible":
-		spec.Type = provider.TypeOpenAICompatible
-	case "google":
-		spec.Type = provider.TypeGoogle
-	default:
-		return provider.Spec{}, fmt.Errorf("unknown LLMKIT_PROVIDER %q: expected anthropic, openai, openai-compatible, or google", providerName)
-	}
-	spec.BaseURL = baseURL
-	return spec, nil
-}
-
-// nowTool reports the current local time; it takes no arguments.
-type nowTool struct{}
-
-func (nowTool) Def() llmkit.ToolDef {
-	return llmkit.ToolDef{
-		Name:        "now",
-		Description: "returns the current local date and time",
-		Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
-	}
-}
-
-func (nowTool) Run(_ context.Context, _ json.RawMessage) (string, error) {
-	return time.Now().Format(time.RFC3339), nil
-}
-
-// addTool adds two numbers, decoding the model's raw JSON arguments with
-// agent.UnmarshalArgs.
-type addTool struct{}
-
-func (addTool) Def() llmkit.ToolDef {
-	return llmkit.ToolDef{
-		Name:        "add",
-		Description: "adds two numbers",
-		Parameters:  json.RawMessage(`{"type":"object","properties":{"a":{"type":"number"},"b":{"type":"number"}},"required":["a","b"]}`),
-	}
-}
-
-func (addTool) Run(_ context.Context, args json.RawMessage) (string, error) {
-	var p struct {
-		A float64 `json:"a"`
-		B float64 `json:"b"`
-	}
-	if err := agent.UnmarshalArgs(args, &p); err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%g", p.A+p.B), nil
+// addArgs are the arguments of the add tool; agent.SchemaOf derives the
+// advertised parameter schema from these fields.
+type addArgs struct {
+	A float64 `json:"a"`
+	B float64 `json:"b"`
 }

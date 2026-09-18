@@ -96,19 +96,19 @@ func requireLiveEnv(t *testing.T) liveEnv {
 func newLiveClient(t *testing.T, env liveEnv, rec llmkit.Recorder) llmkit.Client {
 	t.Helper()
 
+	// Resolve the API key from the environment directly — the live test owns
+	// its own key lookup so the provider package stays free of config imports.
 	spec := Spec{
 		Type:    TypeOpenAICompatible,
 		BaseURL: env.baseURL,
+		Model:   env.model,
+		Secret:  os.Getenv(liveAPIKeyEnvVar),
 	}
-
-	// Resolve the API key from the environment directly — the live test owns
-	// its own key lookup so the provider package stays free of config imports.
-	apiKey := os.Getenv(liveAPIKeyEnvVar)
-	if apiKey == "" {
+	if spec.Secret == "" {
 		t.Fatalf("resolve live api key: env var %q is unset", liveAPIKeyEnvVar)
 	}
-	client, err := New(context.Background(), spec, "live", env.model, apiKey, Options{
-		Role:     "finder",
+	client, err := New(context.Background(), spec, Options{
+		Provider: "live",
 		Recorder: rec,
 	})
 	if err != nil {
@@ -237,8 +237,8 @@ func TestLive_ToolRoundTrip(t *testing.T) {
 
 // TestLive_UsageRecorded asserts usage accounting flows through WithRecorder on
 // the production construction path: New wraps the adapter with the
-// recorder, so a real completion must emit a UsageEvent tagged with the role,
-// provider name, and model.
+// recorder, so a real completion must emit a UsageEvent tagged with the
+// provider and model.
 func TestLive_UsageRecorded(t *testing.T) {
 	env := requireLiveEnv(t)
 
@@ -260,9 +260,6 @@ func TestLive_UsageRecorded(t *testing.T) {
 		t.Fatalf("recorder got %d events, want 1", len(events))
 	}
 	ev := events[0]
-	if ev.Role != "finder" {
-		t.Errorf("UsageEvent.Role = %q, want %q", ev.Role, "finder")
-	}
 	if ev.Provider != "live" {
 		t.Errorf("UsageEvent.Provider = %q, want %q", ev.Provider, "live")
 	}

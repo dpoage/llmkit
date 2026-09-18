@@ -39,7 +39,7 @@ func TestRun_CleanFinish(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if out.Truncated {
+	if out.Truncated() {
 		t.Errorf("expected not truncated, got reason %q", out.TruncationReason)
 	}
 	if out.FinalText != "done" {
@@ -148,8 +148,8 @@ func TestRun_MaxIterations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if !out.Truncated || out.TruncationReason != TruncMaxIterations {
-		t.Errorf("expected max_iterations truncation, got truncated=%v reason=%q", out.Truncated, out.TruncationReason)
+	if !out.Truncated() || out.TruncationReason != TruncMaxIterations {
+		t.Errorf("expected max_iterations truncation, got truncated=%v reason=%q", out.Truncated(), out.TruncationReason)
 	}
 	if out.Iterations != 3 {
 		t.Errorf("Iterations = %d, want 3", out.Iterations)
@@ -168,8 +168,8 @@ func TestRun_TokenBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if !out.Truncated || out.TruncationReason != TruncTokenBudget {
-		t.Errorf("expected token_budget truncation, got truncated=%v reason=%q", out.Truncated, out.TruncationReason)
+	if !out.Truncated() || out.TruncationReason != TruncTokenBudget {
+		t.Errorf("expected token_budget truncation, got truncated=%v reason=%q", out.Truncated(), out.TruncationReason)
 	}
 	// Only the first completion should have run.
 	if fc.callCount() != 1 {
@@ -204,8 +204,8 @@ func TestRun_MaxTokens(t *testing.T) {
 		t.Errorf("Iterations = %d, want 2 (continuation counts)", out.Iterations)
 	}
 	// A completed continuation is a clean finish, not a truncation.
-	if out.Truncated {
-		t.Errorf("Truncated = true, want false after a successful continuation")
+	if out.Truncated() {
+		t.Errorf("Truncated() = true, want false after a successful continuation")
 	}
 }
 
@@ -539,16 +539,16 @@ func stopErrorResp(text string, in, out int64) scriptStep {
 }
 
 // TestRun_StopErrorYieldsTypedError verifies that a final turn that
-// ends with StopError and no tool calls must surface *ErrStopReason, never a
+// ends with StopError and no tool calls must surface *StopReasonError, never a
 // clean Outcome that records refusal prose as the answer.
 func TestRun_StopErrorYieldsTypedError(t *testing.T) {
 	fc := newFakeClient(stopErrorResp("I cannot help with that.", 10, 5))
 	r := NewRunner(fc, nil, "sys")
 
 	out, err := r.Run(context.Background(), "task")
-	var stopErr *ErrStopReason
+	var stopErr *StopReasonError
 	if !errors.As(err, &stopErr) {
-		t.Fatalf("Run error = %v, want *ErrStopReason", err)
+		t.Fatalf("Run error = %v, want *StopReasonError", err)
 	}
 	if stopErr.StopReason != llmkit.StopError {
 		t.Errorf("StopReason = %q, want %q", stopErr.StopReason, llmkit.StopError)
@@ -575,9 +575,9 @@ func TestRun_StopErrorAfterToolsYieldsTypedError(t *testing.T) {
 	r := NewRunner(fc, nil, "sys")
 
 	_, err := r.Run(context.Background(), "task")
-	var stopErr *ErrStopReason
+	var stopErr *StopReasonError
 	if !errors.As(err, &stopErr) {
-		t.Fatalf("Run error = %v, want *ErrStopReason", err)
+		t.Fatalf("Run error = %v, want *StopReasonError", err)
 	}
 	if stopErr.Outcome.Iterations != 2 {
 		t.Errorf("Iterations = %d, want 2", stopErr.Outcome.Iterations)

@@ -67,11 +67,11 @@ func newToolSet(tools []Tool) toolSet {
 	ts := toolSet{byName: make(map[string]Tool, len(tools))}
 	seen := make(map[string]bool, len(tools))
 	for _, t := range tools {
-		name := t.Def().Name
-		ts.byName[name] = t
-		if !seen[name] {
-			ts.defs = append(ts.defs, t.Def())
-			seen[name] = true
+		def := t.Def()
+		ts.byName[def.Name] = t
+		if !seen[def.Name] {
+			ts.defs = append(ts.defs, def)
+			seen[def.Name] = true
 		}
 	}
 	return ts

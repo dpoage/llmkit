@@ -1,0 +1,388 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/dpoage/llmkit"
+)
+
+// sameTurn asserts two messages are the same conversation turn for wire
+// purposes: role, visible text, the answered tool call, any requested tool
+// calls, and the error mark.
+func sameTurn(t *testing.T, label string, got, want llmkit.Message) {
+	t.Helper()
+	if got.Role != want.Role {
+		t.Errorf("%s: role = %v, want %v", label, got.Role, want.Role)
+	}
+	if got.Text() != want.Text() {
+		t.Errorf("%s: text = %q, want %q", label, got.Text(), want.Text())
+	}
+	if got.ToolCallID != want.ToolCallID {
+		t.Errorf("%s: ToolCallID = %q, want %q", label, got.ToolCallID, want.ToolCallID)
+	}
+	if got.IsError != want.IsError {
+		t.Errorf("%s: IsError = %v, want %v", label, got.IsError, want.IsError)
+	}
+	if !reflect.DeepEqual(got.ToolCalls, want.ToolCalls) {
+		t.Errorf("%s: ToolCalls = %+v, want %+v", label, got.ToolCalls, want.ToolCalls)
+	}
+}
+
+// TestContinue_PreservesPriorConversation is the plain-Run continuation
+// contract: turn 2's outgoing request must carry turn 1's full history
+// element-wise as a prefix, followed by exactly ONE new user message holding
+// the task — not a reseeded conversation.
+func TestContinue_PreservesPriorConversation(t *testing.T) {
+	fc := newFakeClient(
+		toolResp("c1", "echo", `{"v":"orient"}`, 10, 4),
+		textResp("round one answer", 8, 3),
+		textResp("round two answer", 8, 3),
+	)
+	// Advertise structured output so the capability gate in complete() would
+	// actually attach a schema to the request if Run passed one —
+	// without this the ResponseSchema==nil assertion below is vacuous.
+	fc.caps = llmkit.Capabilities{StructuredOutput: true}
+	var turn2Req []llmkit.Message
+	var sawSchema string
+	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys", WithHooks(Hooks{
+		BeforeCompletion: func(_ context.Context, _ int, req *llmkit.Request) {
+			turn2Req = append([]llmkit.Message(nil), req.Messages...)
+			if req.ResponseSchema != nil {
+				sawSchema = string(req.ResponseSchema)
+			}
+		},
+	}))
+
+	out1, err := r.Run(context.Background(), "first task")
+	if err != nil {
+		t.Fatalf("turn 1 Run: %v", err)
+	}
+	if len(out1.Messages) != 4 {
+		t.Fatalf("turn 1 Messages = %d entries, want 4 (user, assistant tool-call, tool-result, assistant final)", len(out1.Messages))
+	}
+
+	out2, err := r.Run(context.Background(), "second task", Continue(out1))
+	if err != nil {
+		t.Fatalf("turn 2 Run: %v", err)
+	}
+	if sawSchema != "" {
+		t.Errorf("a completion carried ResponseSchema %s, want nil on every completion — Run passes no schema (plain-Run semantics)", sawSchema)
+	}
+	if len(turn2Req) != len(out1.Messages)+1 {
+		t.Fatalf("turn 2 request has %d messages, want %d (turn 1 history + one new user turn) -- fewer means a reseed, more means duplicated history", len(turn2Req), len(out1.Messages)+1)
+	}
+	for i, want := range out1.Messages {
+		sameTurn(t, fmt.Sprintf("turn 2 request message %d", i), turn2Req[i], want)
+	}
+	last := turn2Req[len(turn2Req)-1]
+	if last.Role != llmkit.RoleUser || last.Text() != "second task" {
+		t.Errorf("turn 2 request last message = %v %q, want user %q", last.Role, last.Text(), "second task")
+	}
+	if out2.FinalText != "round two answer" {
+		t.Errorf("turn 2 FinalText = %q, want %q", out2.FinalText, "round two answer")
+	}
+}
+
+// TestContinue_NilPrevMatchesRun pins the degradation contract: a nil prev
+// and an empty prev produce byte-for-byte the same outgoing request plain Run
+// would, so a caller can pass Continue unconditionally.
+func TestContinue_NilPrevMatchesRun(t *testing.T) {
+	task := "same task every time"
+	newRunner := func(fc *fakeClient) *Runner {
+		return NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys")
+	}
+
+	fcRun := newFakeClient(textResp("ans", 5, 2))
+	if _, err := newRunner(fcRun).Run(context.Background(), task); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	fcNil := newFakeClient(textResp("ans", 5, 2))
+	if _, err := newRunner(fcNil).Run(context.Background(), task, Continue(nil)); err != nil {
+		t.Fatalf("Run(Continue(nil)): %v", err)
+	}
+
+	fcEmpty := newFakeClient(textResp("ans", 5, 2))
+	if _, err := newRunner(fcEmpty).Run(context.Background(), task, Continue(&Outcome{})); err != nil {
+		t.Fatalf("Run(Continue(empty)): %v", err)
+	}
+
+	for name, fc := range map[string]*fakeClient{"nil prev": fcNil, "empty prev": fcEmpty} {
+		got, want := fc.requests[0], fcRun.requests[0]
+		if got.System != want.System {
+			t.Errorf("%s: System = %q, want %q", name, got.System, want.System)
+		}
+		if len(got.Tools) != len(want.Tools) {
+			t.Errorf("%s: Tools = %d, want %d", name, len(got.Tools), len(want.Tools))
+		}
+		if len(got.Messages) != len(want.Messages) {
+			t.Fatalf("%s: Messages = %d, want %d (identical to Run)", name, len(got.Messages), len(want.Messages))
+		}
+		for i := range want.Messages {
+			sameTurn(t, fmt.Sprintf("%s message %d", name, i), got.Messages[i], want.Messages[i])
+		}
+	}
+}
+
+// TestContinue_AfterStopError verifies the documented StopReasonError
+// recovery: the partial Outcome attached to the error threads into
+// Continue(prev), the refusal assistant turn stays in the history the model
+// sees, and the next turn completes normally.
+func TestContinue_AfterStopError(t *testing.T) {
+	fc := newFakeClient(
+		stopErrorResp("I cannot help with that.", 10, 5),
+		textResp("happy to help now", 8, 3),
+	)
+	r := NewRunner(fc, nil, "sys")
+
+	_, err := r.Run(context.Background(), "do the thing")
+	var stopErr *StopReasonError
+	if !errors.As(err, &stopErr) {
+		t.Fatalf("Run error = %v, want *StopReasonError", err)
+	}
+
+	out2, err := r.Run(context.Background(), "please reconsider", Continue(stopErr.Outcome))
+	if err != nil {
+		t.Fatalf("Run(Continue(prev)) after stop error: %v", err)
+	}
+	if out2.FinalText != "happy to help now" {
+		t.Errorf("FinalText = %q, want %q", out2.FinalText, "happy to help now")
+	}
+	if len(fc.requests) != 2 {
+		t.Fatalf("requests = %d, want 2", len(fc.requests))
+	}
+	msgs := fc.requests[1].Messages
+	if len(msgs) != 3 {
+		t.Fatalf("turn 2 request has %d messages, want 3 (task, refusal turn, new task)", len(msgs))
+	}
+	if msgs[1].Role != llmkit.RoleAssistant || msgs[1].Text() != "I cannot help with that." {
+		t.Errorf("turn 2 request message 1 = %v %q, want the refusal assistant turn", msgs[1].Role, msgs[1].Text())
+	}
+	if msgs[2].Role != llmkit.RoleUser || msgs[2].Text() != "please reconsider" {
+		t.Errorf("turn 2 request message 2 = %v %q, want user %q", msgs[2].Role, msgs[2].Text(), "please reconsider")
+	}
+}
+
+// danglingPrev builds a prior Outcome whose history ends with an assistant
+// turn carrying two tool calls, followed by answers for only the first
+// withOrphanAnswers of them — the shape a context-cancelled run returns.
+func danglingPrev(t *testing.T, answered int) *Outcome {
+	t.Helper()
+	calls := []llmkit.ToolCall{
+		{ID: "t1", Name: "echo", Arguments: json.RawMessage(`{"v":"1"}`)},
+		{ID: "t2", Name: "echo", Arguments: json.RawMessage(`{"v":"2"}`)},
+	}
+	asst := llmkit.Message{
+		Role:      llmkit.RoleAssistant,
+		Content:   []llmkit.Block{{Kind: llmkit.BlockText, Text: "calling two tools"}},
+		ToolCalls: calls,
+	}
+	msgs := []llmkit.Message{
+		llmkit.TextMessage(llmkit.RoleUser, "earlier task"),
+		llmkit.TextMessage(llmkit.RoleAssistant, "earlier answer"),
+		asst,
+	}
+	for i := 0; i < answered; i++ {
+		res := llmkit.TextMessage(llmkit.RoleToolResult, fmt.Sprintf("result %d", i+1))
+		res.ToolCallID = calls[i].ID
+		msgs = append(msgs, res)
+	}
+	return &Outcome{Messages: msgs}
+}
+
+// TestContinue_TrimsDanglingToolTurnSeed pins the seed-hygiene rule: a
+// continued seed whose trailing assistant turn carries tool calls not all
+// answered by later tool results is trimmed from that assistant turn onward
+// before the wire request, while everything before it stays intact and the
+// caller's Outcome is never mutated.
+func TestContinue_TrimsDanglingToolTurnSeed(t *testing.T) {
+	fc := newFakeClient(textResp("continued", 10, 5))
+	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys")
+
+	prev := danglingPrev(t, 1) // t1 answered, t2 dangling
+	out, err := r.Run(context.Background(), "next task", Continue(prev))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out.FinalText != "continued" {
+		t.Errorf("FinalText = %q, want %q", out.FinalText, "continued")
+	}
+
+	// The wire request must hold the intact prefix plus the new task — and
+	// neither the dangling assistant turn nor its orphan result.
+	if len(fc.requests) != 1 {
+		t.Fatalf("requests = %d, want 1", len(fc.requests))
+	}
+	msgs := fc.requests[0].Messages
+	if len(msgs) != 3 {
+		t.Fatalf("request has %d messages, want 3 (intact prefix of 2 + new task); the dangling turn was not trimmed", len(msgs))
+	}
+	sameTurn(t, "request message 0", msgs[0], prev.Messages[0])
+	sameTurn(t, "request message 1", msgs[1], prev.Messages[1])
+	for i, m := range msgs {
+		if len(m.ToolCalls) > 0 {
+			t.Errorf("request message %d still carries tool calls %+v", i, m.ToolCalls)
+		}
+		if m.Role == llmkit.RoleToolResult {
+			t.Errorf("request message %d is an orphan tool result (ToolCallID %q)", i, m.ToolCallID)
+		}
+	}
+
+	// The caller's Outcome must be untouched: trimming happens on the run's
+	// own copy, never on prev.Messages.
+	if len(prev.Messages) != 4 {
+		t.Fatalf("prev.Messages = %d entries after Run, want 4 (caller's history must not be mutated)", len(prev.Messages))
+	}
+	if prev.Messages[3].ToolCallID != "t1" {
+		t.Errorf("prev.Messages[3] = %+v, want the t1 tool result the caller stored", prev.Messages[3])
+	}
+}
+
+// TestContinue_KeepsCompleteToolTurnSeed is the no-trim counterpart: when
+// every trailing tool call IS answered, the continued request must still carry
+// the assistant tool-call turn and all of its results.
+func TestContinue_KeepsCompleteToolTurnSeed(t *testing.T) {
+	fc := newFakeClient(textResp("continued", 10, 5))
+	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys")
+
+	prev := danglingPrev(t, 2) // both calls answered — nothing to trim
+	if _, err := r.Run(context.Background(), "next task", Continue(prev)); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	msgs := fc.requests[0].Messages
+	if len(msgs) != len(prev.Messages)+1 {
+		t.Fatalf("request has %d messages, want %d -- a complete trailing tool turn must NOT be trimmed", len(msgs), len(prev.Messages)+1)
+	}
+	for i, want := range prev.Messages {
+		sameTurn(t, fmt.Sprintf("request message %d", i), msgs[i], want)
+	}
+	if msgs[len(msgs)-1].Text() != "next task" {
+		t.Errorf("request last message = %q, want the new task", msgs[len(msgs)-1].Text())
+	}
+}
+
+// TestContinue_CompactionNamesToolFromSeed pins the toolNameByID rebuild:
+// when compaction fires on a continued history, a PRIOR run's tool result must
+// stub with its real tool name, not the generic "tool" fallback — which is
+// what an empty map at first-turn compaction would produce.
+func TestContinue_CompactionNamesToolFromSeed(t *testing.T) {
+	blob := strings.Repeat("data line\n", 800) // ~8 KB per tool result
+
+	// Hand-built prior-run history: five big tool turns (oldest first), so the
+	// recent-4 window leaves exactly t1's result prunable.
+	var seed []llmkit.Message
+	seed = append(seed, llmkit.TextMessage(llmkit.RoleUser, "prior task"))
+	for i := 1; i <= 5; i++ {
+		seed = append(seed, llmkit.Message{
+			Role: llmkit.RoleAssistant,
+			ToolCalls: []llmkit.ToolCall{{
+				ID:        fmt.Sprintf("t%d", i),
+				Name:      "big",
+				Arguments: json.RawMessage(`{}`),
+			}},
+		})
+		res := llmkit.TextMessage(llmkit.RoleToolResult, blob)
+		res.ToolCallID = fmt.Sprintf("t%d", i)
+		seed = append(seed, res)
+	}
+	prev := &Outcome{Messages: seed}
+
+	fc := newFakeClient(textResp("continued", 10, 5))
+	// Threshold ~1.5k tokens (bytes/4): the ~40 KB seed history crosses it on
+	// the first turn of the continuation.
+	r := NewRunner(fc, nil, "sys", WithLimits(Limits{HistoryTokenBudget: 1500}))
+
+	if _, err := r.Run(context.Background(), "next task", Continue(prev)); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(fc.requests) != 1 {
+		t.Fatalf("requests = %d, want 1", len(fc.requests))
+	}
+
+	var stubbed string
+	found := false
+	for _, m := range fc.requests[0].Messages {
+		if m.Role == llmkit.RoleToolResult && m.ToolCallID == "t1" {
+			found = true
+			stubbed = m.Text()
+		}
+	}
+	if !found {
+		t.Fatal("t1's tool result is missing from the wire request -- compaction never fired, the test is vacuous")
+	}
+	if !strings.HasPrefix(stubbed, compactStubPrefix) {
+		t.Fatalf("t1 result was not stubbed (got %d bytes of raw content) -- compaction never fired, the test is vacuous", len(stubbed))
+	}
+	if !strings.Contains(stubbed, ": big,") {
+		t.Errorf("stub = %q, want it to name the tool %q -- the seed's tool calls were not rebuilt into toolNameByID", stubbed, "big")
+	}
+	// And the untouched tail must still be intact.
+	for _, m := range fc.requests[0].Messages {
+		if m.Role == llmkit.RoleToolResult && m.ToolCallID == "t5" && m.Text() != blob {
+			t.Errorf("t5 result was mutated: %d bytes, want the original %d", len(m.Text()), len(blob))
+		}
+	}
+	// The caller's seed is never mutated in place.
+	if prev.Messages[2].Text() != blob {
+		t.Error("prev.Messages t1 result was mutated in place")
+	}
+}
+
+// TestContinue_MaxIterationsTruncationStaysPlainRun pins plain-Run
+// truncation semantics on the continuation path: exhausting MaxIterations
+// stops truncated WITHOUT a reserved finalization turn — one completion only,
+// Finalized stays false, and no injected finalize prompt or response schema
+// ever reaches the wire.
+func TestContinue_MaxIterationsTruncationStaysPlainRun(t *testing.T) {
+	fc := newFakeClient(
+		toolResp("c1", "echo", `{"v":"1"}`, 5, 2),
+		textResp("unreachable", 5, 2), // a finalization turn would consume this
+	)
+	// Structured output advertised so a mistakenly passed schema would reach
+	// req.ResponseSchema instead of being silently capability-gated away.
+	fc.caps = llmkit.Capabilities{StructuredOutput: true}
+	var reqs []llmkit.Request
+	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys",
+		WithLimits(Limits{MaxIterations: 1}),
+		WithHooks(Hooks{
+			BeforeCompletion: func(_ context.Context, _ int, req *llmkit.Request) {
+				reqs = append(reqs, *req)
+			},
+		}))
+
+	prev := &Outcome{Messages: []llmkit.Message{
+		llmkit.TextMessage(llmkit.RoleUser, "prior task"),
+		llmkit.TextMessage(llmkit.RoleAssistant, "prior answer"),
+	}}
+	out, err := r.Run(context.Background(), "tool task", Continue(prev))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !out.Truncated() || out.TruncationReason != TruncMaxIterations {
+		t.Errorf("Truncated=%v TruncationReason=%q, want truncated with %q", out.Truncated(), out.TruncationReason, TruncMaxIterations)
+	}
+	if out.Finalized {
+		t.Error("Finalized = true, want false — a continued run never takes a reserved finalization turn")
+	}
+	if len(reqs) != 1 {
+		t.Fatalf("completions = %d, want 1 — the truncation must not buy a finalization completion", len(reqs))
+	}
+	allowed := map[string]bool{"prior task": true, "tool task": true}
+	for i, req := range reqs {
+		if req.ResponseSchema != nil {
+			t.Errorf("request %d carried ResponseSchema %s, want nil (plain Run semantics)", i, req.ResponseSchema)
+		}
+		for _, m := range req.Messages {
+			if m.Role == llmkit.RoleUser && !allowed[m.Text()] {
+				t.Errorf("request %d carries injected user message %q — a finalize prompt reached the wire", i, m.Text())
+			}
+		}
+	}
+}

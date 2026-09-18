@@ -20,10 +20,11 @@
 //
 // The loop enforces two limits: [Limits.MaxIterations] (model turns) and
 // [Limits.TokenBudget] (cumulative input+output tokens from [llmkit.Usage]).
-// Exceeding either stops the loop cleanly, returning an [Outcome] with
-// Truncated set and the last assistant text preserved — partial results are
-// data, not errors. Only context cancellation and infra failures return a
-// non-nil error from [Runner.Run].
+// Exceeding either stops the loop cleanly, returning an [Outcome] with a
+// non-empty [Outcome.TruncationReason] and the last assistant text
+// preserved — partial results are data, not errors. Only context
+// cancellation, infra failures, and [StopReasonError] return a non-nil error
+// from [Runner.Run].
 //
 // # Transcripts
 //
@@ -114,29 +115,33 @@ func (l Limits) resolve() Limits {
 	return out
 }
 
+// TruncationReason explains why a run stopped before the model finished its
+// turn. The zero value ("") means the run was not truncated; see
+// [Outcome.Truncated].
+type TruncationReason string
+
 // Truncation reasons recorded in [Outcome.TruncationReason].
 const (
 	// TruncMaxIterations means the run hit the iteration cap before the model
 	// produced a final (non-tool) answer.
-	TruncMaxIterations = "max_iterations"
+	TruncMaxIterations TruncationReason = "max_iterations"
 	// TruncTokenBudget means cumulative token usage exceeded the budget.
-	TruncTokenBudget = "token_budget"
+	TruncTokenBudget TruncationReason = "token_budget"
 	// TruncBudgetPool means a shared budget pool (via Limits.BudgetCheck) was
 	// exhausted before this run's own per-run budget, so the run stopped
 	// pre-turn. It is distinct from TruncTokenBudget so the caller can tell a
 	// run that was stopped by the run-spanning ceiling ("budget-stopped") from
 	// one that merely exhausted its own allowance.
-	TruncBudgetPool = "budget_pool"
+	TruncBudgetPool TruncationReason = "budget_pool"
 )
 
 // Outcome is the result of a [Runner.Run]. A truncated run is still a valid
 // outcome: FinalText holds whatever the model produced last, and the Transcript
 // captures the full interaction.
 //
-// Invariant: Truncated == true implies TruncationReason != "". This is enforced
-// by [Runner.finishTruncated], the sole point that sets Truncated. Callers that
-// construct an Outcome directly (e.g. tests) should satisfy this or call
-// [Outcome.Validate] to surface a violation early.
+// A truncated outcome is exactly one whose TruncationReason is non-empty (see
+// [Outcome.Truncated]); the type makes any other encoding unrepresentable.
+// finishTruncated is the sole point that sets it.
 type Outcome struct {
 	// FinalText is the model's last assistant text. On a clean finish it is the
 	// model's answer; on truncation it is the most recent assistant text (which
@@ -147,13 +152,10 @@ type Outcome struct {
 	// text carried over from an earlier turn — callers must not present it as
 	// the model's answer.
 	FinalTextSet bool
-	// Truncated reports whether the run stopped because it hit a limit rather
-	// than the model finishing its turn. When true, TruncationReason MUST be
-	// non-empty (one of the Trunc* constants).
-	Truncated bool
-	// TruncationReason is one of the Trunc* constants when Truncated is true,
-	// otherwise empty.
-	TruncationReason string
+	// TruncationReason is set when the run stopped because it hit a limit
+	// rather than the model finishing its turn: one of the Trunc* constants.
+	// Empty means the model finished cleanly.
+	TruncationReason TruncationReason
 	// Iterations is the number of completed model turns.
 	Iterations int
 	// Usage is cumulative token consumption across the run.
@@ -172,31 +174,26 @@ type Outcome struct {
 	// Messages is the full conversation state (system-less: user/assistant/
 	// tool-result turns only) at the point the run returned, including the
 	// seed task, every tool call/result, and the final assistant turn. It is
-	// opaque plumbing for [Runner.RunJSONContinue]: a caller driving a
-	// multi-round revision loop threads a round's Outcome back in as the next
-	// round's starting history so the model keeps its prior investigation
-	// instead of re-orienting from scratch. Callers that don't continue a
-	// conversation (the common case) can ignore this field entirely.
+	// opaque plumbing for [Continue]: a caller driving a multi-round revision
+	// loop — or a chat REPL — threads a round's Outcome back in as the next
+	// round's starting history so the model keeps its prior turns instead of
+	// re-orienting from scratch.
+	// Callers that don't continue a conversation (the common case) can ignore
+	// this field entirely.
 	Messages []llmkit.Message
 }
 
-// Validate checks the Outcome's internal invariants. It returns a non-nil error
-// when Truncated is true but TruncationReason is empty, which would leave
-// callers unable to distinguish stop causes.
-func (o *Outcome) Validate() error {
-	if o.Truncated && o.TruncationReason == "" {
-		return fmt.Errorf("agent: Outcome invariant violated: Truncated is true but TruncationReason is empty")
-	}
-	return nil
-}
+// Truncated reports whether the run stopped because it hit a limit rather
+// than the model finishing its turn — i.e. whether TruncationReason is set.
+func (o *Outcome) Truncated() bool { return o.TruncationReason != "" }
 
-// ErrStopReason is returned by [Runner.Run] when the model's final turn ended
+// StopReasonError is returned by [Runner.Run] when the model's final turn ended
 // with [llmkit.StopError] (refusal, safety filter, recitation) and no tool calls.
 // Before this error existed the loop treated such turns as clean completions,
 // recording refusal prose — or stale text from an earlier turn — as the answer
 // (observed in production). The partial Outcome is attached so callers can
 // still inspect usage and the transcript.
-type ErrStopReason struct {
+type StopReasonError struct {
 	// StopReason is the provider stop reason that ended the run.
 	StopReason llmkit.StopReason
 	// Text is whatever text the refusing turn carried (often refusal prose).
@@ -205,6 +202,6 @@ type ErrStopReason struct {
 	Outcome *Outcome
 }
 
-func (e *ErrStopReason) Error() string {
+func (e *StopReasonError) Error() string {
 	return fmt.Sprintf("agent: model stopped without tool calls: stop reason %q", e.StopReason)
 }

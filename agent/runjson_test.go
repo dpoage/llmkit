@@ -45,14 +45,14 @@ func TestRunJSON_DirectParse(t *testing.T) {
 	}
 }
 
-// TestRunJSONContinue_PreservesPriorConversation is the core continuation
-// contract: a second RunJSONContinue call must NOT reseed the
+// TestRunJSON_ContinuePreservesPriorConversation is the core continuation
+// contract: a second Continue-seeded RunJSON call must NOT reseed the
 // conversation — it must append its task onto the FULL history of the prior
 // round (including round 1's tool-driven analysis), not just round 1's
 // final answer. This is what lets a revision round's feedback land in the
 // same conversation the model already analyzed in, instead of asking it
 // to re-orient from scratch.
-func TestRunJSONContinue_PreservesPriorConversation(t *testing.T) {
+func TestRunJSON_ContinuePreservesPriorConversation(t *testing.T) {
 	fc := newFakeClient(
 		toolResp("c1", "echo", `{"v":"orient"}`, 10, 4),
 		textResp(`{"path":"a.go","note":"round1"}`, 8, 3),
@@ -70,15 +70,15 @@ func TestRunJSONContinue_PreservesPriorConversation(t *testing.T) {
 		t.Fatalf("round1 issued %d requests, want 2 (orient + final)", len(fc.requests))
 	}
 	// Round 1's Outcome must carry the full conversation (seed + tool call +
-	// tool result + final assistant answer) for RunJSONContinue to build on.
+	// tool result + final assistant answer) for the continued round to build on.
 	if want := 4; len(out1.Messages) != want {
 		t.Fatalf("round1 Outcome.Messages = %d entries, want %d (user, assistant tool-call, tool-result, assistant final)", len(out1.Messages), want)
 	}
 
 	var got2 item
-	out2, err := r.RunJSONContinue(context.Background(), out1, "feedback: fix it", nil, &got2)
+	out2, err := r.RunJSON(context.Background(), "feedback: fix it", nil, &got2, Continue(out1))
 	if err != nil {
-		t.Fatalf("round2 RunJSONContinue: %v", err)
+		t.Fatalf("round2 RunJSON: %v", err)
 	}
 	// Exactly one more completion was needed: continuation means the model
 	// did NOT re-issue the orientation tool call it already made in round 1.
@@ -118,16 +118,16 @@ func TestRunJSONContinue_PreservesPriorConversation(t *testing.T) {
 	}
 }
 
-// TestRunJSONContinue_NilPrevDegradesToReseed verifies that a nil prev
+// TestRunJSON_ContinueNilPrevDegradesToReseed verifies that a nil prev
 // Outcome is a safe no-op fallback to plain reseeding, so a caller need not
-// special-case round 1 with a nil check before calling RunJSONContinue.
-func TestRunJSONContinue_NilPrevDegradesToReseed(t *testing.T) {
+// special-case round 1 with a nil check before calling RunJSON with Continue.
+func TestRunJSON_ContinueNilPrevDegradesToReseed(t *testing.T) {
 	fc := newFakeClient(textResp(`{"path":"a.go","note":"fix imports"}`, 5, 5))
 	r := NewRunner(fc, nil, "sys")
 
 	var got item
-	if _, err := r.RunJSONContinue(context.Background(), nil, "summarize the report", nil, &got); err != nil {
-		t.Fatalf("RunJSONContinue with nil prev: %v", err)
+	if _, err := r.RunJSON(context.Background(), "summarize the report", nil, &got, Continue(nil)); err != nil {
+		t.Fatalf("RunJSON(Continue(nil)) with nil prev: %v", err)
 	}
 	if len(fc.requests) != 1 {
 		t.Fatalf("requests = %d, want 1", len(fc.requests))
@@ -661,7 +661,7 @@ func TestRunJSON_PerRunTokenBudgetFinalizesAndParses(t *testing.T) {
 
 // TestRunJSON_BudgetFinalizeEmptyStillClassified covers the OR-clause of the
 // bead: when the finalization turn itself yields no parseable JSON, the
-// outcome is still cleanly classified as a budget stop (Truncated + budget
+// outcome is still cleanly classified as a budget stop (TruncationReason + budget
 // reason), not a silently-empty result. The caller's budgetStopped(outcome)
 // must return true.
 func TestRunJSON_BudgetFinalizeEmptyStillClassified(t *testing.T) {
@@ -698,8 +698,8 @@ func TestRunJSON_BudgetFinalizeEmptyStillClassified(t *testing.T) {
 		BudgetCheck:   pool.Check,
 	}))
 	out, _ := r2.run(context.Background(), nil, "audit", finalizationPrompt(json.RawMessage(`{"type":"object"}`)), nil)
-	if !out.Truncated {
-		t.Error("Outcome.Truncated = false, want true (budget stop should still mark truncated)")
+	if !out.Truncated() {
+		t.Error("Outcome.Truncated() = false, want true (budget stop should still mark truncated)")
 	}
 	if out.TruncationReason != TruncBudgetPool {
 		t.Errorf("TruncationReason = %q, want %q (so caller classifies as budget-stopped, not parse-failed)", out.TruncationReason, TruncBudgetPool)

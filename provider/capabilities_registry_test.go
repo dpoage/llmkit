@@ -12,8 +12,8 @@ import (
 // adapter's table defaults on every field, so a DeepEqual against
 // client.Capabilities() proves the Spec.Capabilities override REPLACED the
 // table wholesale — any field that falls through from the table fails.
-func overrideEveryField() *llmkit.Capabilities {
-	return &llmkit.Capabilities{
+func overrideEveryField() llmkit.Capabilities {
+	return llmkit.Capabilities{
 		ContextWindow:     123_456,
 		ParallelToolCalls: false,
 		PromptCaching:     false,
@@ -45,12 +45,14 @@ func TestCapabilities_SpecOverride_ReplacesTableWholesale(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tc.spec.Capabilities = overrideEveryField()
-			client, err := New(context.Background(), tc.spec, "test", tc.model, "k", Options{})
+			tc.spec.Model = tc.model
+			tc.spec.Secret = "k"
+			tc.spec.Capabilities = func(llmkit.Capabilities) llmkit.Capabilities { return overrideEveryField() }
+			client, err := New(context.Background(), tc.spec, Options{})
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
-			want := *overrideEveryField()
+			want := overrideEveryField()
 			if got := client.Capabilities(); !reflect.DeepEqual(got, want) {
 				t.Errorf("Capabilities() =\n  %+v\nwant the Spec.Capabilities override wholesale:\n  %+v", got, want)
 			}
@@ -58,16 +60,13 @@ func TestCapabilities_SpecOverride_ReplacesTableWholesale(t *testing.T) {
 	}
 }
 
-// TestCapabilities_SpecOverride_ComposesWithStructuredOutput pins the
-// documented composition order: the adapter table first, Spec.Capabilities
-// replaces it wholesale, and Spec.StructuredOutput is applied LAST so the
-// field-level override wins even over an override that carries the field.
-func TestCapabilities_SpecOverride_ComposesWithStructuredOutput(t *testing.T) {
-	// The same four-provider table as the wholesale test: the composition
-	// order (table -> Capabilities wholesale -> StructuredOutput last) is
-	// contract surface on EVERY adapter, so skipping one in New must fail
-	// here.
-	providers := []struct {
+// TestCapabilities_SpecOverride_ClosureSeesTableProfile pins the override
+// contract: the closure receives the adapter's table-derived profile as
+// input — not a zero Capabilities — and its return value is the effective
+// profile, so a one-field flip keeps the rest of the table while a closure
+// that ignores its input replaces the profile wholesale.
+func TestCapabilities_SpecOverride_ClosureSeesTableProfile(t *testing.T) {
+	cases := []struct {
 		name  string
 		spec  Spec
 		model string
@@ -77,34 +76,35 @@ func TestCapabilities_SpecOverride_ComposesWithStructuredOutput(t *testing.T) {
 		{"openai-compatible", Spec{Type: TypeOpenAICompatible}, "llama3"},
 		{"google", Spec{Type: TypeGoogle}, "gemini-2.5-pro"},
 	}
-	for _, tc := range providers {
-		t.Run(tc.name+"/option wins over override", func(t *testing.T) {
-			tc.spec.Capabilities = overrideEveryField() // StructuredOutput: false
-			tc.spec.StructuredOutput = ptr(true)
-			client, err := New(context.Background(), tc.spec, "test", tc.model, "k", Options{})
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.spec.Model = tc.model
+			tc.spec.Secret = "k"
+			base, err := New(context.Background(), tc.spec, Options{})
+			if err != nil {
+				t.Fatalf("New (no override): %v", err)
+			}
+			table := base.Capabilities()
+
+			var saw llmkit.Capabilities
+			tc.spec.Capabilities = func(c llmkit.Capabilities) llmkit.Capabilities {
+				saw = c
+				c.StructuredOutput = !c.StructuredOutput
+				return c
+			}
+			client, err := New(context.Background(), tc.spec, Options{})
 			if err != nil {
 				t.Fatalf("New: %v", err)
+			}
+			if !reflect.DeepEqual(saw, table) {
+				t.Errorf("override input =\n  %+v\nwant the adapter table profile\n  %+v", saw, table)
 			}
 			got := client.Capabilities()
-			if !got.StructuredOutput {
-				t.Error("Capabilities().StructuredOutput = false, want true (Spec.StructuredOutput applied last)")
+			if got.StructuredOutput == table.StructuredOutput {
+				t.Errorf("Capabilities().StructuredOutput = %t, want the closure's flipped value (its return is the effective profile)", got.StructuredOutput)
 			}
-			// ...and the rest of the override still holds.
-			if got.ContextWindow != 123_456 {
-				t.Errorf("ContextWindow = %d, want 123456 (override must still apply)", got.ContextWindow)
-			}
-		})
-		t.Run(tc.name+"/option can force it off", func(t *testing.T) {
-			ov := overrideEveryField()
-			ov.StructuredOutput = true
-			tc.spec.Capabilities = ov
-			tc.spec.StructuredOutput = ptr(false)
-			client, err := New(context.Background(), tc.spec, "test", tc.model, "k", Options{})
-			if err != nil {
-				t.Fatalf("New: %v", err)
-			}
-			if client.Capabilities().StructuredOutput {
-				t.Error("Capabilities().StructuredOutput = true, want false (explicit off wins)")
+			if got.ContextWindow != table.ContextWindow {
+				t.Errorf("ContextWindow = %d, want %d (a one-field flip must keep the rest of the table)", got.ContextWindow, table.ContextWindow)
 			}
 		})
 	}
@@ -162,7 +162,9 @@ func TestCapabilities_NilSpec_KeepsTableProfile(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			client, err := New(context.Background(), tc.spec, "test", tc.model, "k", Options{})
+			tc.spec.Model = tc.model
+			tc.spec.Secret = "k"
+			client, err := New(context.Background(), tc.spec, Options{})
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}

@@ -84,7 +84,8 @@ dedicated `sandbox-integration` job.
 
 `examples/` are runnable contract checks (also compiled by
 `go build ./...`): `go run ./examples/basic`, `go run ./examples/agent`,
-`go run ./examples/structured`. All three no-op with a usage message and
+`go run ./examples/structured`, `go run ./examples/chat`. All four no-op with
+a usage message and
 exit 1 unless `LLMKIT_PROVIDER`, `LLMKIT_MODEL`, and `LLMKIT_API_KEY` are
 set (`LLMKIT_BASE_URL` optional), so they never touch the network by
 accident.
@@ -97,8 +98,10 @@ accident.
   `WithSerializedToolCalls`), `StripThinkBlocks`, `DefaultMaxTokens`.
 - **`llmkit/provider`** — the single construction entry point: `Spec` +
   `Options` → `New` dispatches to an adapter and decorates it
-  serialize → recorder → retry. `Spec.Capabilities` overrides a model's
-  capability profile wholesale (including `ContextWindow`).
+  serialize → recorder → retry. `Spec.Capabilities`, when set, receives the
+  adapter's model-table profile and returns the effective one — flip a
+  single field or replace it wholesale (e.g. to pin `ContextWindow` for a
+  model the table doesn't know).
 - **`llmkit/provider/anthropic`, `llmkit/provider/openai`,
   `llmkit/provider/google`** — vendor-SDK adapters. `provider/openai` also
   serves any OpenAI-compatible endpoint (Ollama, vLLM, Groq, ...).

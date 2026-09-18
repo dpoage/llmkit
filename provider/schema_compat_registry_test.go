@@ -49,12 +49,13 @@ func captureBody(t *testing.T, captured *map[string]any) string {
 func TestSchemaCompat_Registry_OpenAICompatibleEnablesDowngrade(t *testing.T) {
 	var captured map[string]any
 	base := captureBody(t, &captured)
-	on := true
 	client, err := New(context.Background(), Spec{
-		Type:             TypeOpenAICompatible,
-		BaseURL:          base,
-		StructuredOutput: &on,
-	}, "minimax", "MiniMax-M3", "k", Options{})
+		Type:         TypeOpenAICompatible,
+		BaseURL:      base,
+		Model:        "MiniMax-M3",
+		Secret:       "k",
+		Capabilities: structuredOutputOverride(true),
+	}, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

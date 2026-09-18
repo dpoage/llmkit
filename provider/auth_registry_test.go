@@ -28,8 +28,10 @@ func TestNewClient_AnthropicAPIKeyMode(t *testing.T) {
 	provider := Spec{
 		Type:    TypeAnthropic,
 		BaseURL: base,
+		Model:   "claude-test",
+		Secret:  "sk-ant-via-registry",
 	}
-	client, err := New(context.Background(), provider, "claude", "claude-test", "sk-ant-via-registry", Options{})
+	client, err := New(context.Background(), provider, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -61,12 +63,13 @@ func TestNewClient_AnthropicOAuthMode(t *testing.T) {
 
 	provider := Spec{
 		Type:    TypeAnthropic,
-		Auth:    "oauth-token",
+		Auth:    AuthOAuthToken,
 		BaseURL: base,
+		Model:   "claude-test",
+		Secret:  "claude-oauth-registry-token",
 	}
-	// The secret (bearer token) is passed as the apiKey argument; New routes
-	// it to AuthToken because provider.Auth == "oauth-token".
-	client, err := New(context.Background(), provider, "claude-oauth", "claude-test", "claude-oauth-registry-token", Options{})
+	// New routes Secret to AuthToken because provider.Auth == AuthOAuthToken.
+	client, err := New(context.Background(), provider, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
