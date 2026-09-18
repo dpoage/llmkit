@@ -66,7 +66,9 @@ func detectBwrapCapMethod(ctx context.Context) bwrapCapMethod {
 // this host currently supports for the bwrap backend, for doctor's advisory
 // reporting: "enforced" (systemd-run --user --scope or cgroup v2 available,
 // so runs get their configured caps) or a reason why neither is available
-// (runs would fail unless the allow-uncapped option is set — see errBwrapNoCapMethod).
+// (runs would fail unless the allow-uncapped option is set — see ErrBwrapNoCapMethod).
+// The label names the mechanism only; remediation guidance belongs to the
+// caller, which wraps ErrBwrapNoCapMethod with its own operator-facing hint.
 func DescribeBwrapCapMethod(ctx context.Context) (label string, enforced bool) {
 	switch detectBwrapCapMethod(ctx) {
 	case bwrapCapSystemdRun:
@@ -74,7 +76,7 @@ func DescribeBwrapCapMethod(ctx context.Context) (label string, enforced bool) {
 	case bwrapCapCgroupV2:
 		return "delegated cgroup v2 subtree", true
 	default:
-		return "none (neither systemd-run --user --scope nor a delegated cgroup v2 subtree; runs fail unless the allow-uncapped option (WithBwrapAllowUncapped) is set)", false
+		return "none (neither systemd-run --user --scope nor a delegated cgroup v2 subtree)", false
 	}
 }
 
@@ -132,11 +134,12 @@ func delegatedCgroupV2Dir() (string, bool) {
 	return dir, true
 }
 
-// errBwrapNoCapMethod is returned when resource limits were requested (the normal
-// case) but neither enforcement mechanism is available and the operator has
-// not opted into running uncapped. It is a distinct type so callers/tests can
-// assert on it without string matching.
-var errBwrapNoCapMethod = errors.New("sandbox: bwrap backend found no resource-limit mechanism (systemd-run --user --scope or a delegated cgroup v2 subtree); set WithBwrapAllowUncapped(true) to run without enforced memory/CPU/pids limits")
+// ErrBwrapNoCapMethod is returned (possibly wrapped) by NewBwrap and Bwrap.Exec
+// when resource limits were requested (the normal case) but neither enforcement
+// mechanism is available and the operator has not opted into running uncapped
+// via WithBwrapAllowUncapped. Callers match it with errors.Is to attach their
+// own remediation (e.g. a config key) instead of string matching.
+var ErrBwrapNoCapMethod = errors.New("sandbox: bwrap backend found no resource-limit mechanism (systemd-run --user --scope or a delegated cgroup v2 subtree); set WithBwrapAllowUncapped(true) to run without enforced memory/CPU/pids limits")
 
 // systemdRunWrapArgs prepends a systemd-run --user --scope invocation (with
 // MemoryMax/CPUQuota/TasksMax properties) around the given bwrap binary +
@@ -185,3 +188,7 @@ func cgroupV2Limits(cpus float64, memoryMB, pidsLimit int) (memory, cpuMax, pids
 	}
 	return
 }
+
+// detectCapMethod is the seam Exec uses to probe the host's enforcement
+// mechanism; tests override it to force the "none" path deterministically.
+var detectCapMethod = detectBwrapCapMethod

@@ -2,9 +2,13 @@ package sandbox
 
 import (
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSystemdRunWrapArgs(t *testing.T) {
@@ -95,5 +99,31 @@ func TestDetectBwrapCapMethodNeverPanics(t *testing.T) {
 	method := detectBwrapCapMethod(ctx)
 	if method != bwrapCapNone && method != bwrapCapSystemdRun && method != bwrapCapCgroupV2 {
 		t.Errorf("unexpected cap method %v", method)
+	}
+}
+
+// TestBwrapExec_NoCapMethod_IsSentinel pins the exported contract: when no
+// enforcement mechanism exists and uncapped runs are not allowed, Exec's error
+// matches ErrBwrapNoCapMethod via errors.Is, so callers can attach their own
+// remediation without string matching.
+func TestBwrapExec_NoCapMethod_IsSentinel(t *testing.T) {
+	prev := detectCapMethod
+	detectCapMethod = func(context.Context) bwrapCapMethod { return bwrapCapNone }
+	t.Cleanup(func() { detectCapMethod = prev })
+
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, "f.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := &Bwrap{bwrapPath: "/nonexistent/bwrap", defaultTimeout: time.Second}
+	_, err := s.Exec(context.Background(), Spec{RepoDir: repo, Cmd: []string{"true"}})
+	if !errors.Is(err, ErrBwrapNoCapMethod) {
+		t.Fatalf("Exec error = %v, want errors.Is ErrBwrapNoCapMethod", err)
+	}
+
+	WithBwrapAllowUncapped(true)(s)
+	_, err = s.Exec(context.Background(), Spec{RepoDir: repo, Cmd: []string{"true"}})
+	if errors.Is(err, ErrBwrapNoCapMethod) {
+		t.Fatalf("with allow-uncapped, Exec must not return ErrBwrapNoCapMethod; got %v", err)
 	}
 }
