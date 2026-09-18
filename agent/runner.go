@@ -149,6 +149,11 @@ func (r *Runner) Run(ctx context.Context, task string) (*Outcome, error) {
 // is dropped before the run starts — see [trimDanglingToolTurn] — so the wire
 // request is always well-formed.
 //
+// Trimming can leave two consecutive user turns on the wire (the cancelled
+// tool turn is dropped whole, so nothing answers between them), and a seed
+// ending with the empty-turn nudge does the same; the in-tree adapters send
+// consecutive user messages as-is and the providers accept or coalesce them.
+//
 // Like Run, there is no context-window management: a caller driving a long
 // conversation must bound the history itself, using the client's
 // [llmkit.Capabilities].ContextWindow and [EstimateHistoryTokens]. There is

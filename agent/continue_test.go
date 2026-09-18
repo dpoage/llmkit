@@ -44,10 +44,18 @@ func TestRunContinue_PreservesPriorConversation(t *testing.T) {
 		textResp("round one answer", 8, 3),
 		textResp("round two answer", 8, 3),
 	)
+	// Advertise structured output so the capability gate in complete() would
+	// actually attach a schema to the request if RunContinue passed one —
+	// without this the ResponseSchema==nil assertion below is vacuous.
+	fc.caps = llmkit.Capabilities{StructuredOutput: true}
 	var turn2Req []llmkit.Message
+	var sawSchema string
 	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys", WithHooks(Hooks{
 		BeforeCompletion: func(_ context.Context, _ int, req *llmkit.Request) {
 			turn2Req = append([]llmkit.Message(nil), req.Messages...)
+			if req.ResponseSchema != nil {
+				sawSchema = string(req.ResponseSchema)
+			}
 		},
 	}))
 
@@ -62,6 +70,9 @@ func TestRunContinue_PreservesPriorConversation(t *testing.T) {
 	out2, err := r.RunContinue(context.Background(), out1, "second task")
 	if err != nil {
 		t.Fatalf("turn 2 RunContinue: %v", err)
+	}
+	if sawSchema != "" {
+		t.Errorf("a completion carried ResponseSchema %s, want nil on every completion — Run and RunContinue pass no schema (plain-Run semantics)", sawSchema)
 	}
 	if len(turn2Req) != len(out1.Messages)+1 {
 		t.Fatalf("turn 2 request has %d messages, want %d (turn 1 history + one new user turn) -- fewer means a reseed, more means duplicated history", len(turn2Req), len(out1.Messages)+1)
@@ -321,5 +332,57 @@ func TestRunContinue_CompactionNamesToolFromSeed(t *testing.T) {
 	// The caller's seed is never mutated in place.
 	if prev.Messages[2].Text() != blob {
 		t.Error("prev.Messages t1 result was mutated in place")
+	}
+}
+
+// TestRunContinue_MaxIterationsTruncationStaysPlainRun pins plain-Run
+// truncation semantics on the continuation path: exhausting MaxIterations
+// stops truncated WITHOUT a reserved finalization turn — one completion only,
+// Finalized stays false, and no injected finalize prompt or response schema
+// ever reaches the wire.
+func TestRunContinue_MaxIterationsTruncationStaysPlainRun(t *testing.T) {
+	fc := newFakeClient(
+		toolResp("c1", "echo", `{"v":"1"}`, 5, 2),
+		textResp("unreachable", 5, 2), // a finalization turn would consume this
+	)
+	// Structured output advertised so a mistakenly passed schema would reach
+	// req.ResponseSchema instead of being silently capability-gated away.
+	fc.caps = llmkit.Capabilities{StructuredOutput: true}
+	var reqs []llmkit.Request
+	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys",
+		WithLimits(Limits{MaxIterations: 1}),
+		WithHooks(Hooks{
+			BeforeCompletion: func(_ context.Context, _ int, req *llmkit.Request) {
+				reqs = append(reqs, *req)
+			},
+		}))
+
+	prev := &Outcome{Messages: []llmkit.Message{
+		llmkit.TextMessage(llmkit.RoleUser, "prior task"),
+		llmkit.TextMessage(llmkit.RoleAssistant, "prior answer"),
+	}}
+	out, err := r.RunContinue(context.Background(), prev, "tool task")
+	if err != nil {
+		t.Fatalf("RunContinue: %v", err)
+	}
+	if !out.Truncated || out.TruncationReason != TruncMaxIterations {
+		t.Errorf("Truncated=%v TruncationReason=%q, want truncated with %q", out.Truncated, out.TruncationReason, TruncMaxIterations)
+	}
+	if out.Finalized {
+		t.Error("Finalized = true, want false — RunContinue never takes a reserved finalization turn")
+	}
+	if len(reqs) != 1 {
+		t.Fatalf("completions = %d, want 1 — the truncation must not buy a finalization completion", len(reqs))
+	}
+	allowed := map[string]bool{"prior task": true, "tool task": true}
+	for i, req := range reqs {
+		if req.ResponseSchema != nil {
+			t.Errorf("request %d carried ResponseSchema %s, want nil (plain Run semantics)", i, req.ResponseSchema)
+		}
+		for _, m := range req.Messages {
+			if m.Role == llmkit.RoleUser && !allowed[m.Text()] {
+				t.Errorf("request %d carries injected user message %q — a finalize prompt reached the wire", i, m.Text())
+			}
+		}
 	}
 }
