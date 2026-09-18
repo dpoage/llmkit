@@ -15,7 +15,7 @@ import (
 
 // Runner drives an [llmkit.Client] through a tool-call loop. Construct one per
 // agent role with that role's system prompt and tool set, then call
-// [Runner.Run] (or [Runner.RunJSON]) per task.
+// [Runner.Run], [Runner.RunContinue], or [Runner.RunJSON] per task.
 //
 // A Runner is safe for concurrent use: every field is fixed at construction,
 // and all mutable state (conversation, transcript, budget accounting,
@@ -130,12 +130,49 @@ func (r *Runner) Run(ctx context.Context, task string) (*Outcome, error) {
 	return r.run(ctx, nil, task, "", nil)
 }
 
+// RunContinue behaves exactly like [Runner.Run] except it CONTINUES a prior
+// conversation instead of reseeding one: prev.Messages (the Messages field of
+// an earlier Run/RunContinue call's Outcome, on this same Runner) becomes the
+// starting history, and task is appended as a NEW user turn rather than
+// becoming the conversation's sole seed message. A nil prev, or a prev with no
+// Messages, degrades to plain reseeding — identical to Run — so a first-turn
+// caller can use this method unconditionally without a nil check.
+//
+// The same-Runner contract from [Runner.RunJSONContinue] applies: prev must
+// come from a run of THIS Runner — the system prompt and the tool set must
+// match the seed — and Limits apply per call: WithLimits iteration and token
+// budgets are re-armed fresh for each RunContinue (a [BudgetPool] via
+// [Limits.BudgetCheck] already spans runs).
+//
+// If the seed's final assistant turn carries tool calls that were never
+// answered (the history a context-cancelled run returns), that trailing turn
+// is dropped before the run starts — see [trimDanglingToolTurn] — so the wire
+// request is always well-formed.
+//
+// Like Run, there is no context-window management: a caller driving a long
+// conversation must bound the history itself, using the client's
+// [llmkit.Capabilities].ContextWindow and [EstimateHistoryTokens]. There is
+// likewise no streaming and no persistence across processes.
+//
+// When an earlier call returned [ErrStopReason] (model refusal/safety stop),
+// the attached err.Outcome may be threaded back in here: the refusal turn
+// stays in the history and the conversation proceeds from it.
+func (r *Runner) RunContinue(ctx context.Context, prev *Outcome, task string) (*Outcome, error) {
+	var seed []llmkit.Message
+	if prev != nil {
+		seed = prev.Messages
+	}
+	return r.run(ctx, seed, task, "", nil)
+}
+
 // run is the shared loop body. seed, when non-nil, is a prior conversation to
 // continue: task is appended as a NEW user turn onto seed instead of becoming
-// the conversation's sole seed message. The public Run and the default
-// RunJSON path pass seed == nil (reseed every call, today's behavior);
-// [Runner.RunJSONContinue] passes a prior Outcome's Messages so a revision
-// round lands in the SAME conversation as the investigation that produced it.
+// the conversation's sole seed message. Run passes seed == nil (reseed every
+// call); [Runner.RunJSONContinue] and [Runner.RunContinue] pass a prior
+// Outcome's Messages (nil or empty degrades to reseeding) so the next round
+// lands in the SAME conversation as the one that produced it. Before the task
+// is appended, a seed whose trailing assistant turn carries unanswered tool
+// calls is trimmed — see [trimDanglingToolTurn].
 //
 // finalizePrompt, when non-empty, enables forced finalization: when a stop
 // condition fires (iteration cap, per-run token budget, or shared budget
@@ -175,6 +212,7 @@ func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task, finalizeP
 
 	var messages []llmkit.Message
 	if len(seed) > 0 {
+		seed = trimDanglingToolTurn(seed)
 		messages = make([]llmkit.Message, 0, len(seed)+1)
 		messages = append(messages, seed...)
 		messages = append(messages, llmkit.TextMessage(llmkit.RoleUser, task))
@@ -194,7 +232,17 @@ func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task, finalizeP
 	// History-compaction state. toolNameByID lets a tool-result stub name the
 	// tool it answered; compactThreshold re-arms upward after each firing so
 	// compaction is bounded and never thrashes the prompt cache turn-over-turn.
+	// On a continued run the map starts from the seed's assistant tool calls,
+	// so a PRIOR run's results also stub with their real tool names instead of
+	// the generic fallback (see [compactStub]).
 	toolNameByID := map[string]string{}
+	for _, m := range messages {
+		if m.Role == llmkit.RoleAssistant {
+			for _, call := range m.ToolCalls {
+				toolNameByID[call.ID] = call.Name
+			}
+		}
+	}
 	compactThreshold := r.limits.HistoryTokenBudget
 
 	// emptyTurnNudges counts how many empty/think-only turns have already
@@ -338,6 +386,42 @@ func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task, finalizeP
 
 	tr.closeStream()
 	return outcome, nil
+}
+
+// trimDanglingToolTurn returns seed with a dangling trailing assistant
+// tool-call turn removed, so a conversation continued from a context-cancelled
+// run never ends a wire request with an unanswered tool call (Anthropic
+// rejects it; other providers misbehave). Only the seed's LAST assistant turn
+// is checked — the loop answers every earlier turn's calls before moving on,
+// so only a cancelled turn can dangle, and only at the tail. If that turn's
+// ToolCalls are not all answered by the RoleToolResult messages after it,
+// everything from that assistant turn to the end of the seed is dropped: a
+// half-executed turn has no model-visible meaning to salvage. The input is
+// never mutated; run() copies the returned subslice into its own conversation
+// before appending anything.
+func trimDanglingToolTurn(seed []llmkit.Message) []llmkit.Message {
+	last := -1
+	for i := len(seed) - 1; i >= 0; i-- {
+		if seed[i].Role == llmkit.RoleAssistant {
+			last = i
+			break
+		}
+	}
+	if last < 0 || len(seed[last].ToolCalls) == 0 {
+		return seed
+	}
+	answered := make(map[string]bool, len(seed[last].ToolCalls))
+	for _, m := range seed[last+1:] {
+		if m.Role == llmkit.RoleToolResult && m.ToolCallID != "" {
+			answered[m.ToolCallID] = true
+		}
+	}
+	for _, call := range seed[last].ToolCalls {
+		if !answered[call.ID] {
+			return seed[:last]
+		}
+	}
+	return seed
 }
 
 // finalizeAndTruncate is the single reserved finalization turn used by EVERY

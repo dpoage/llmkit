@@ -42,10 +42,11 @@ Shared LLM tooling extracted from `bugbot`, `known`, and `go-research`.
 
 ## Examples
 
-`examples/` contains three runnable programs, one per major surface: a
+`examples/` contains four runnable programs, one per major surface: a
 plain completion with content blocks and capability gating (`basic`), a
-tool-calling agent with hooks (`agent`), and schema-constrained output via
-`RunJSON` (`structured`). All three read
+tool-calling agent with hooks (`agent`), schema-constrained output via
+`RunJSON` (`structured`), and a multi-turn chat REPL on `RunContinue`
+(`chat`). All four read
 `LLMKIT_PROVIDER`/`LLMKIT_MODEL`/`LLMKIT_API_KEY` (plus optional
 `LLMKIT_BASE_URL`) and print a usage message instead of touching the
 network when the environment is unset:
@@ -54,6 +55,7 @@ network when the environment is unset:
 go run ./examples/basic --image photo.jpg
 go run ./examples/agent --parallel
 go run ./examples/structured
+go run ./examples/chat
 ```
 
 ## Design decisions

@@ -80,7 +80,8 @@ localhost:11434).
 
 `examples/` are runnable contract checks (also compiled by
 `go build ./...`): `go run ./examples/basic`, `go run ./examples/agent`,
-`go run ./examples/structured`. All three no-op with a usage message and
+`go run ./examples/structured`, `go run ./examples/chat`. All four no-op with
+a usage message and
 exit 1 unless `LLMKIT_PROVIDER`, `LLMKIT_MODEL`, and `LLMKIT_API_KEY` are
 set (`LLMKIT_BASE_URL` optional), so they never touch the network by
 accident.
