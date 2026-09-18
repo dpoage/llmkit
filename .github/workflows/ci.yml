@@ -77,6 +77,13 @@ jobs:
       - name: install bubblewrap
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
 
+      - name: allow unprivileged user namespaces
+        # Ubuntu 24.04 runners ship an AppArmor restriction that denies
+        # unprivileged userns the capabilities bwrap needs (loopback setup
+        # fails with RTM_NEWADDR EPERM). Lift it so the bwrap suite executes
+        # rather than skipping.
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - name: sandbox integration tests
         # The bwrap suite runs when unprivileged user namespaces work; the
         # CLI suite runs against the preinstalled docker. Both auto-skip on
