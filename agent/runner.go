@@ -118,7 +118,8 @@ func NewRunner(client llmkit.Client, tools []Tool, systemPrompt string, opts ...
 //
 // Limit exhaustion is not an error: it returns an [Outcome] with a non-empty
 // [Outcome.TruncationReason] and the last assistant text preserved. Only
-// context cancellation and client/IO failures return a non-nil error. The
+// context cancellation, client/IO failures, or [StopReasonError] return a
+// non-nil error. The
 // returned Outcome's Transcript
 // is always non-nil, even on error, capturing whatever happened before the
 // failure.

@@ -23,7 +23,8 @@
 // Exceeding either stops the loop cleanly, returning an [Outcome] with a
 // non-empty [Outcome.TruncationReason] and the last assistant text
 // preserved — partial results are data, not errors. Only context
-// cancellation and infra failures return a non-nil error from [Runner.Run].
+// cancellation, infra failures, and [StopReasonError] return a non-nil error
+// from [Runner.Run].
 //
 // # Transcripts
 //

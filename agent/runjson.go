@@ -61,6 +61,17 @@ func (r *Runner) RunJSON(ctx context.Context, task string, schema json.RawMessag
 	return r.runJSON(ctx, cfg.seed, task, schema, out)
 }
 
+// RunJSONAs is [Runner.RunJSON] with the schema derived from T via [SchemaOf]
+// and the validated answer unmarshaled into a fresh T. Everything else —
+// prompt embedding, capability-gated native structured output, the single
+// repair round-trip, [Continue], truncation semantics — behaves exactly as in
+// RunJSON; the T parameter replaces the hand-written schema/out pointer pair.
+func RunJSONAs[T any](ctx context.Context, r *Runner, task string, opts ...RunOption) (T, *Outcome, error) {
+	var out T
+	outcome, err := r.RunJSON(ctx, task, SchemaOf[T](), &out, opts...)
+	return out, outcome, err
+}
+
 // runJSON is the shared implementation behind RunJSON. seed is nil (reseed
 // every call) or a prior Outcome's Messages ([Continue]).
 func (r *Runner) runJSON(ctx context.Context, seed []llmkit.Message, task string, schema json.RawMessage, out any) (*Outcome, error) {

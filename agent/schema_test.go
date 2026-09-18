@@ -77,12 +77,12 @@ func TestSchemaOf_InlinesNestedStructs(t *testing.T) {
 	// Required is derived from the missing-omitempty rule at every level.
 	rootReq := mustStrings(t, doc["required"])
 	if got, want := strings.Join(rootReq, ","), "path,inner,year"; got != want {
-		t.Errorf("root required = %v, want %s (entries has omitempty; the rest do not)", rootReq, want)
+		t.Errorf("root required = %v, want %s (entries has omitempty; the rest do not)", got, want)
 	}
 	inner := doc["properties"].(map[string]any)["inner"].(map[string]any)
 	innerReq := mustStrings(t, inner["required"])
 	if got, want := strings.Join(innerReq, ","), "name,limit"; got != want {
-		t.Errorf("inner required = %v, want %s — nested constraints must not be dropped", innerReq, want)
+		t.Errorf("inner required = %v, want %s — nested constraints must not be dropped", got, want)
 	}
 }
 
@@ -105,6 +105,7 @@ func TestSchemaOf_NestedConstraintsEnforcedByValidator(t *testing.T) {
 	if !strings.Contains(err.Error(), "inner") || !strings.Contains(err.Error(), `missing required field "name"`) {
 		t.Errorf("error = %v, want it to name the violated nested path (inner, required field name)", err)
 	}
+
 	if err := validateSchema(schema, []byte(`{"path":"a.go","inner":{"name":"x","limit":3},"year":999}`)); err == nil {
 		t.Error("year=999 accepted — the jsonschema minimum tag was not enforced")
 	}
@@ -120,6 +121,30 @@ func TestSchemaOf_MinimumTag(t *testing.T) {
 	}
 }
 
+// schemaPointers pins the pointer and any field mapping: *T maps to T's
+// schema verbatim (not "null"-typed) and any maps to `true`; both stay
+// required (no omitempty).
+type schemaPointers struct {
+	Inner *schemaInner `json:"inner"`
+	Any   any          `json:"any"`
+}
+
+func TestSchemaOf_PointerAndAnyMapping(t *testing.T) {
+	doc := decodeSchema(t, SchemaOf[schemaPointers]())
+	props := doc["properties"].(map[string]any)
+	inner := props["inner"].(map[string]any)
+	if inner["type"] != "object" {
+		t.Errorf("*schemaInner mapped to %v, want the plain object schema of schemaInner (non-nullable)", inner)
+	}
+	if props["any"] != true {
+		t.Errorf("any mapped to %v, want the accept-everything schema true", props["any"])
+	}
+	req := strings.Join(mustStrings(t, doc["required"]), ",")
+	if req != "inner,any" {
+		t.Errorf("required = %q, want inner,any — pointer and any fields are required like any other", req)
+	}
+}
+
 // TestSchemaOf_NonStructPanics pins the programming-error contract: deriving
 // a schema from a non-struct type is a mistake that must surface loudly at
 // the first call, not produce a degenerate schema.
@@ -130,6 +155,60 @@ func TestSchemaOf_NonStructPanics(t *testing.T) {
 		}
 	}()
 	SchemaOf[string]()
+}
+
+// --- recursive types --------------------------------------------------------
+//
+// SchemaOf must reject cycles BEFORE the reflector sees them: inlined
+// schemas cannot express recursion and invopop dies with a fatal,
+// unrecoverable stack overflow (not a recoverable panic) on one.
+
+type cyclicNode struct {
+	Children []*cyclicNode `json:"children,omitempty"`
+}
+
+type cyclicA struct {
+	B *cyclicB `json:"b"`
+}
+
+type cyclicB struct {
+	A []*cyclicA `json:"a,omitempty"`
+}
+
+type cyclicMap struct {
+	Next map[string]*cyclicMap `json:"next"`
+}
+
+func TestSchemaOf_RecursiveTypePanics(t *testing.T) {
+	t.Run("direct", func(t *testing.T) {
+		assertSchemaCyclePanic(t, "cyclicNode", func() { SchemaOf[cyclicNode]() })
+	})
+	t.Run("indirect", func(t *testing.T) {
+		assertSchemaCyclePanic(t, "cyclicA", func() { SchemaOf[cyclicA]() })
+	})
+	t.Run("map value", func(t *testing.T) {
+		assertSchemaCyclePanic(t, "cyclicMap", func() { SchemaOf[cyclicMap]() })
+	})
+}
+
+// assertSchemaCyclePanic asserts fn panics with the documented cycle message
+// naming both the root and the cyclic type.
+func assertSchemaCyclePanic(t *testing.T, root string, fn func()) {
+	t.Helper()
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatalf("SchemaOf[%s] did not panic — a recursive type would fatal-overflow the reflector", root)
+		}
+		msg, ok := r.(string)
+		if !ok {
+			t.Fatalf("panic value %v is not a string", r)
+		}
+		if !strings.Contains(msg, "recursive type") || !strings.Contains(msg, root) {
+			t.Errorf("panic = %q, want the cycle message naming %s", msg, root)
+		}
+	}()
+	fn()
 }
 
 // TestFunc_RoundTripThroughRunner exercises the full Func path with the fake
@@ -187,6 +266,17 @@ func TestFunc_RoundTripThroughRunner(t *testing.T) {
 type addArgs struct {
 	A float64 `json:"a"`
 	B float64 `json:"b"`
+}
+
+// TestFunc_NilFnPanics pins the construction-time contract: a nil fn is a
+// programming error surfaced at Func, not later as a tool-call panic.
+func TestFunc_NilFnPanics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("Func with nil fn did not panic")
+		}
+	}()
+	Func[addArgs]("add", "adds two numbers", nil)
 }
 
 // TestFunc_BadArgsFeedModelError pins the error contract: malformed model
