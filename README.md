@@ -37,6 +37,26 @@ Shared LLM tooling extracted from `bugbot`, `known`, and `go-research`.
   surface via `ToolHealthError`. Origin: `bugbot/internal/agent`
   (harness only; bugbot's concrete tools stay in bugbot).
 
+- **`llmkit/sandbox`** — isolated execution of untrusted, model-generated
+  commands against repo snapshots: one
+  `Sandbox.Exec(ctx, Spec) (Result, error)` over the Bubblewrap backend
+  (Linux, unprivileged user namespaces), a container CLI backend
+  (podman/docker), and a scriptable `Mock` (plus `HostExec`, the documented
+  no-isolation attended escape hatch that no kit default or example
+  constructs). Workspace materialization with symlink-hardened writes,
+  capped output capture, and a shared idle/growth-ceiling watchdog;
+  standard library plus golang.org/x/sys (the reflink fast path). Path
+  containment for agent tools lives in the
+  sibling `fsroot` package. Origin: `bugbot/internal/sandbox`.
+
+- **`llmkit/fsroot`** — tool-anchored path containment for agent tools:
+  `NewFSRoot(dir)` + `Resolve(rel)` reject absolute paths, `..` escapes, and
+  symlink escapes (checked via the longest existing prefix), returning
+  `ErrPathEscape`; `EvalExistingPrefixPath` is the shared symlink-resolution
+  helper. Deliberately separate from `sandbox`'s post-exec workspace write
+  hardening (different threat model). Standard library only. Origin:
+  `bugbot/internal/agenttools/{fsroot,pathutil}.go`.
+
 - **`embed`** — `Embedder` interface with Ollama and OpenAI-compatible HTTP
   backends plus an in-memory caching decorator. Local ONNX inference (hugot)
   intentionally NOT included — it drags the ONNX/GoMLX dependency tree;
