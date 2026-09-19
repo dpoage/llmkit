@@ -213,6 +213,15 @@ in its message.
   `Text(task)` (blocks only when the task is empty). Attachments never
   appear on nudges, finalization, or repair turns; the adapters validate
   block kinds.
+  Mid-run steering (`NewSteering`, `WithSteering`) queues user turns from
+  any goroutine: `Steer` lands before the next model call, after the
+  current turn's tool results; `FollowUp` lands when the run would
+  otherwise end, and at that finish both deliver in enqueue order. Queued
+  turns are ordinary user messages in the transcript and
+  `Outcome.Messages`; a limit stop leaves them queued (`Pending` reports
+  the count) and `Continue` with the same handle delivers them on the next
+  run; a refusal stop delivers nothing. A handle serves one run at a time;
+  a second concurrent run fails with `ErrSteeringInUse`.
   `Outcome.FinalText` holds the final completion's text (empty when that
   completion produced none). `WithBudgetPool` makes the Runner check a
   shared `BudgetPool` before every model call and charge it after every
@@ -261,7 +270,8 @@ in its message.
 - **`examples/`** — one runnable program per major surface: `basic` (single
   completion + blocks/capabilities), `agent` (agent loop + hooks),
   `structured` (`RunJSONAs` schema-constrained output), `chat` (multi-turn
-  REPL continued via the `Continue` run option).
+  REPL with mid-run steering via the `Steering` handle, continued via the
+  `Continue` run option).
 
 ## Conventions & Patterns
 
