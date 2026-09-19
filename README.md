@@ -92,7 +92,7 @@ works on any client: a client that cannot stream gets deltas synthesized from
 one `Complete`, and `resp` is the same normalized `Response` either way.
 
 ```go
-req := llmkit.Request{Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "Count to five.")}}
+req := llmkit.Request{Messages: []llmkit.Message{llmkit.UserMessage(llmkit.Text("Count to five."))}}
 resp, err = llmkit.Stream(context.Background(), client, req,
 	func(d llmkit.Delta) error { fmt.Print(d.Text); return nil })
 ```
