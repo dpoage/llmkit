@@ -845,3 +845,137 @@ func tinyPDF() []byte {
 	fmt.Fprintf(&b, "trailer<</Size %d/Root 1 0 R>>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, xref)
 	return b.Bytes()
 }
+
+// --- streaming acceptance -----------------------------------------------------
+
+// streamTextCase is the shared body of the per-lane streaming acceptance
+// tests: a tiny prompt streamed through the production client stack via
+// llmkit.Stream must deliver more than one DeltaText (true incremental
+// delivery, not one synthesized fragment), and the final Response must
+// have the Complete shape — fragments concatenate to response text,
+// usage is accounted, and the turn ends with StopEndTurn.
+func streamTextCase(t *testing.T, lane string) {
+	sess := livetest.Resolve(t, lane)
+	lc := newLiveClient(t, sess)
+	req := llmkit.Request{
+		Messages:  []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "Count from one to five in words.")},
+		MaxTokens: defaultLiveMaxTokens,
+	}
+	var texts []string
+	resp, err := llmkit.Stream(lc.ctx, lc.cl, req, func(d llmkit.Delta) error {
+		if d.Kind == llmkit.DeltaText {
+			texts = append(texts, d.Text)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	if len(texts) <= 1 {
+		t.Fatalf("got %d text delta(s), want true incremental delivery", len(texts))
+	}
+	streamed := llmkit.StripThinkBlocks(strings.Join(texts, ""))
+	if strings.TrimSpace(streamed) == "" || streamed != llmkit.StripThinkBlocks(resp.Text) {
+		t.Fatalf("fragments %q do not concatenate to the response text %q", streamed, resp.Text)
+	}
+	if resp.Usage.InputTokens <= 0 || resp.Usage.OutputTokens <= 0 {
+		t.Fatalf("usage not accounted on the streamed response: %+v", resp.Usage)
+	}
+	if resp.StopReason != llmkit.StopEndTurn {
+		t.Fatalf("stop reason = %q, want %q", resp.StopReason, llmkit.StopEndTurn)
+	}
+	t.Logf("lane %s: %d text deltas, %q, usage %+v", lane, len(texts), streamed, resp.Usage)
+}
+
+// TestLiveCompatStreamText runs the streaming acceptance case on the
+// openai-compatible lane (MiniMax-M3 in CI). The case counts DeltaText
+// fragments only and requires more than one; reasoning_content deltas
+// are not asserted here.
+func TestLiveCompatStreamText(t *testing.T) {
+	streamTextCase(t, "compat")
+}
+
+// TestLiveOpenAIStreamText runs the streaming acceptance case on the
+// first-party OpenAI lane; skips without LLMKIT_LIVE_OPENAI_* credentials.
+func TestLiveOpenAIStreamText(t *testing.T) {
+	streamTextCase(t, "openai")
+}
+
+// TestLiveAnthropicStreaming: a standalone lane test (the case registry
+// stays untouched) that exercises the anthropic lane's StreamingClient
+// path through the production construction chain — text fragments must
+// arrive incrementally, the joined fragments must equal the final
+// Response.Text, and usage must be populated. Skips with the lane when
+// no credentials are configured.
+func TestLiveAnthropicStreaming(t *testing.T) {
+	sess := livetest.Resolve(t, "anthropic")
+	lc := newLiveClient(t, sess)
+
+	req := llmkit.Request{
+		Messages:  []llmkit.Message{llmkit.UserMessage(llmkit.Text("Reply with exactly: streaming works"))},
+		MaxTokens: 64,
+	}
+	sc, ok := lc.cl.(llmkit.StreamingClient)
+	if !ok {
+		redFatal(t, lc.sess, "provider.New client does not implement StreamingClient")
+	}
+	var joined strings.Builder
+	fragments := 0
+	resp, err := sc.Stream(lc.ctx, req, func(d llmkit.Delta) error {
+		if d.Kind == llmkit.DeltaText {
+			fragments++
+			joined.WriteString(d.Text)
+		}
+		return nil
+	})
+	if err != nil {
+		redFatal(t, lc.sess, "Stream: %v", err)
+	}
+	if fragments == 0 {
+		redFatal(t, lc.sess, "no text deltas delivered")
+	}
+	if resp.Text != joined.String() {
+		t.Errorf("final Text %q != joined fragments %q", resp.Text, joined.String())
+	}
+	if resp.Usage.InputTokens == 0 || resp.Usage.OutputTokens == 0 {
+		t.Errorf("usage not populated: %+v", resp.Usage)
+	}
+}
+
+// TestLiveGoogleStream runs the google lane's streaming path against
+// the live API through the same production construction as the matrix:
+// llmkit.Stream must deliver at least one delta over the SSE endpoint,
+// and the aggregated Response must carry text, accounted usage, and
+// StopEndTurn — the same outcome the lane's text_usage case asserts for
+// Complete. Skips without the google-lane credentials, like every matrix
+// case.
+func TestLiveGoogleStream(t *testing.T) {
+	sess := livetest.Resolve(t, "google")
+	lc := newLiveClient(t, sess)
+	lc.caseName = "stream_text"
+
+	var deltas int
+	resp, err := llmkit.Stream(lc.ctx, lc.cl, llmkit.Request{
+		Messages:  []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "Reply with exactly: OK")},
+		MaxTokens: defaultLiveMaxTokens,
+	}, func(llmkit.Delta) error {
+		deltas++
+		return nil
+	})
+	if err != nil {
+		redFatal(t, sess, "stream: %v", err)
+	}
+	if deltas == 0 {
+		redFatal(t, sess, "stream delivered no deltas")
+	}
+	if strings.TrimSpace(llmkit.StripThinkBlocks(resp.Text)) == "" {
+		redFatal(t, sess, "empty streamed text: %q", resp.Text)
+	}
+	if resp.Usage.InputTokens <= 0 || resp.Usage.OutputTokens <= 0 {
+		redFatal(t, sess, "streamed usage not accounted: %+v", resp.Usage)
+	}
+	if resp.StopReason != llmkit.StopEndTurn {
+		redFatal(t, sess, "stop reason = %q, want %q", resp.StopReason, llmkit.StopEndTurn)
+	}
+	lc.finish(resp, err)
+}

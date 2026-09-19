@@ -101,22 +101,23 @@ func (a *anthropicAdapter) Complete(ctx context.Context, req llmkit.Request) (ll
 	if err != nil {
 		return llmkit.Response{}, a.normalizeErr(err)
 	}
-	resp := a.toResponse(msg)
-	// When we forced a synthetic structured-output tool, the model replies
-	// with a tool_use block carrying the schema-conformant JSON. Convert
-	// that single tool call into Response.Text so downstream layers see JSON
-	// text instead of a tool call they have no handler for.
+	return a.finalize(req, a.toResponse(msg)), nil
+}
+
+// finalize coerces the synthetic structured-output tool's lone call into
+// Response.Text and StopEndTurn: the call's Arguments become Text
+// (downstream layers have no handler for the synthetic tool), and
+// Anthropic's "tool_use" stop reason for the forced call would otherwise
+// mis-classify the completion. Complete and Stream both go through this
+// step so the same wire exchange returns identical Responses.
+func (a *anthropicAdapter) finalize(req llmkit.Request, resp llmkit.Response) llmkit.Response {
 	if toolName, ok := structuredOutputToolName(req, a.caps); ok &&
 		len(resp.ToolCalls) == 1 && resp.ToolCalls[0].Name == toolName {
 		resp.Text = string(resp.ToolCalls[0].Arguments)
 		resp.ToolCalls = nil
-		// Anthropic's stop_reason for a forced tool call is "tool_use",
-		// which would mis-classify the response downstream; coerce to
-		// StopEndTurn ("end_turn") so the run loop treats it as a normal
-		// completion.
 		resp.StopReason = llmkit.StopEndTurn
 	}
-	return resp, nil
+	return resp
 }
 
 func (a *anthropicAdapter) buildParams(req llmkit.Request) (anthropic.MessageNewParams, error) {

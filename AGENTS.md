@@ -240,7 +240,8 @@ in its message.
   `ToolResult`, `ToolError`; `TextMessage` stays),
   `Request`/`Response`/`Usage`/`Capabilities`, sentinel errors +
   `APIError`, decorator wrappers (`WithRetry`, `WithRecorder`,
-  `WithSerializedToolCalls`), `StripThinkBlocks`, `DefaultMaxTokens`.
+  `WithSerializedToolCalls`), streaming (`Delta`, `StreamingClient`,
+  `Stream` over any `Client`), `StripThinkBlocks`, `DefaultMaxTokens`.
 - **`llmkit/provider`** — the single construction entry point: `Spec` +
   `Options` → `New` dispatches to an adapter and decorates it
   serialize → recorder → retry. Vendor-SDK adapters live under
@@ -250,7 +251,10 @@ in its message.
   Groq, ...). `Spec.Capabilities`, when set, receives the adapter's
   model-table profile and returns the effective one — flip a single field
   or replace it wholesale (e.g. to pin `ContextWindow` for a model the
-  table doesn't know).
+  table doesn't know). Every adapter implements `StreamingClient`; its
+  `Stream` reuses the adapter's params builder and Complete's normalizer
+  tail, mapping the vendor's SSE events onto `Delta` fragments in wire
+  order.
 - **`llmkit/internal/adapter`** — helpers shared by the three adapters
   (status classification, error normalization, schema parsing); internal,
   not public API.
@@ -277,6 +281,15 @@ in its message.
   `Text(task)` (blocks only when the task is empty). Attachments never
   appear on nudges, finalization, or repair turns; the adapters validate
   block kinds.
+  `Steering` (`NewSteering`, `WithSteering`) queues user turns into a
+  running loop from any goroutine. `Steer` delivers before the next model
+  call, after the current turn's tool results. `FollowUp` delivers when
+  the run would otherwise end; at that point both kinds deliver in enqueue
+  order and the loop continues. Queued turns are ordinary user messages in
+  the transcript and `Outcome.Messages`. A limit stop leaves them queued
+  (`Pending` reports the count); `Continue` with the same handle delivers
+  them on the next run. A refusal stop delivers nothing. One handle serves
+  one run at a time; a second concurrent run fails with `ErrSteeringInUse`.
   `Outcome.FinalText` holds the final completion's text (empty when that
   completion produced none). `WithBudgetPool` makes the Runner check a
   shared `BudgetPool` before every model call and charge it after every
@@ -284,6 +297,10 @@ in its message.
   call's error result in both dispatch modes (sequential and
   `WithParallelTools`); hook panics propagate to the caller. The `RunJSON`
   repair turn continues the parent run's transcript step numbering.
+  `Hooks.Delta`, when set, streams every completion through `llmkit.Stream` —
+  native streaming when the client implements `StreamingClient`, deltas
+  synthesized from the finished `Response` otherwise — leaving the
+  transcript, history, and usage paths unchanged.
   Tool-failure typing: `ToolHealthError` for infra failures,
   `StopReasonError` for model refusal/safety stops.
 - **`llmkit/sandbox`** — isolated execution of untrusted, model-generated
@@ -321,7 +338,8 @@ in its message.
 - **`examples/`** — one runnable program per major surface: `basic` (single
   completion + blocks/capabilities), `agent` (agent loop + hooks),
   `structured` (`RunJSONAs` schema-constrained output), `chat` (multi-turn
-  REPL continued via the `Continue` run option).
+  REPL with mid-run steering via the `Steering` handle, continued via the
+  `Continue` run option).
 
 ## Conventions & Patterns
 
@@ -337,8 +355,15 @@ in its message.
   informational subsets of it (the Anthropic adapter sums them in). Budget
   math that wants cache reads discounted uses
   `Usage.ChargeableTokens(weight)`.
-- **No streaming**: `Client` is one synchronous
-  `Complete(ctx, Request) (Response, error)` plus `Capabilities()`.
+- **Streaming**: `Client` remains one synchronous `Complete(ctx, Request)
+  (Response, error)` plus `Capabilities()`. A client that can also stream
+  implements `StreamingClient`; `llmkit.Stream(ctx, c, req, fn)` works on
+  any client — delegating to `Stream` when available, otherwise
+  synthesizing deltas (text/thinking in block order, then tool calls) from
+  `Complete` — so callers never special-case a non-streaming backend.
+  Decorators compose over both paths: `WithRetry` stops retrying once a
+  delta is delivered, `WithRecorder` records the final response's usage,
+  and `WithSerializedToolCalls` forwards only Index-0 tool-call deltas.
 - **Per-role block rule**: user messages carry text/image/document blocks;
   assistant messages text/thinking (plus `ToolCalls`); system and
   tool-result messages text only. Every adapter enforces this BEFORE any

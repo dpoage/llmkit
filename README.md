@@ -42,6 +42,10 @@ embeddings. Extracted from `bugbot`, `known`, and `go-research`.
   image or document blocks to the task turn. `Outcome.FinalText` holds the
   final completion's text; `WithBudgetPool` charges a shared `BudgetPool`;
   tool panics become that call's error result (hook panics propagate).
+  `Steering` (`NewSteering`, `WithSteering`) queues user turns mid-run from
+  any goroutine: `Steer` lands before the next model call, `FollowUp` when
+  the run would otherwise end; a limit stop leaves them queued
+  (`Pending`) and `Continue` with the same handle delivers them next run.
   Tools implement `Tool{Def, Run}` or come from `Func`; tool errors feed
   back to the model, infra failures surface via `ToolHealthError`. Origin:
   `bugbot/internal/agent` (harness only).
@@ -89,8 +93,9 @@ embeddings. Extracted from `bugbot`, `known`, and `go-research`.
 `examples/` contains four runnable programs, one per major surface: a
 plain completion with content blocks and capability gating (`basic`), a
 tool-calling agent with hooks (`agent`), schema-constrained output via
-`RunJSONAs` (`structured`), and a multi-turn chat REPL on `Run(...,
-Continue(prev))` (`chat`). All four read
+`RunJSONAs` (`structured`), and a multi-turn chat REPL with mid-run
+steering on `Run(..., Continue(prev), WithSteering(...))` (`chat`). All
+four read
 `LLMKIT_PROVIDER`/`LLMKIT_MODEL`/`LLMKIT_API_KEY` (`LLMKIT_BASE_URL` required for
 openai-compatible, optional otherwise) and print a usage message instead of touching the
 network when the environment is unset:
@@ -126,8 +131,13 @@ compat lane.
   message's text blocks.
   `Block.Data` is base64 in JSONL transcripts, and `Block` fields marshal
   snake_case with `omitempty`. See the root package docs.
-- No streaming: none of the three donor projects used it; the interface stays
-  synchronous until a consumer needs otherwise.
+- Streaming without special cases: `Client` stays synchronous; clients that
+  can also stream implement `StreamingClient`, and `llmkit.Stream` gives any
+  client a delta stream — native when available, otherwise synthesized from
+  one `Complete` (same normalized `Response` either way). The decorators
+  compose: retry stops at the first delivered delta, the recorder books the
+  final usage, and the tool-call serializer forwards only the first call's
+  fragments.
 - Official vendor SDKs (anthropic-sdk-go, openai-go, google genai) rather than
   hand-rolled wire types.
 
