@@ -3,12 +3,14 @@ package embed
 import (
 	"context"
 	"encoding/json"
+	"github.com/dpoage/llmkit"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // =============================================================================
@@ -781,6 +783,13 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	}
 	if cfg.CacheEnabled {
 		t.Error("default CacheEnabled should be false")
+	}
+	if cfg.Retry.Jitter != llmkit.DefaultRetryConfig().Jitter {
+		t.Errorf("default Jitter = %v, want kit default %v", cfg.Retry.Jitter, llmkit.DefaultRetryConfig().Jitter)
+	}
+	p := cfg.retryPolicy()
+	if p.MaxAttempts != 3 || p.RequestTimeout != 60*time.Second {
+		t.Errorf("resolved default attempts/timeout = %d/%v, want 3/60s (embed bounds)", p.MaxAttempts, p.RequestTimeout)
 	}
 }
 

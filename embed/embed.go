@@ -8,6 +8,7 @@ package embed
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 )
@@ -71,16 +72,26 @@ func batchChunkSize(remaining, maxBatch int) int {
 	return maxBatch
 }
 
+// ErrEmptyVector is returned, wrapped with backend context, when dimension
+// auto-detection (Config.Dimensions == 0) encounters a zero-length embedding
+// vector. Such a vector carries no dimensional information: accepting it
+// would silently hand callers an empty result while leaving the embedder's
+// dimensionality undetected. Test with errors.Is.
+var ErrEmptyVector = errors.New("empty embedding vector")
+
 // checkDimensions enforces vector-dimension consistency for a converted
 // response. expected is cfg.Dimensions when > 0; otherwise it is detected
-// from the first non-empty vector and recorded under *dims (if still zero).
-// Every vector in every call must match, so a later mismatch — configured
-// or against the first detected value — is an error.
+// from the first vector and recorded under *dims (if still zero). Every
+// vector in every call must match, so a later mismatch — configured or
+// against the first detected value — is an error.
 func checkDimensions(backend string, out [][]float32, dims *int, mu *sync.RWMutex) error {
 	mu.Lock()
 	defer mu.Unlock()
 	expected := *dims
-	if expected == 0 && len(out) > 0 && len(out[0]) > 0 {
+	if expected == 0 && len(out) > 0 {
+		if len(out[0]) == 0 {
+			return fmt.Errorf("%s: vector at index 0: %w", backend, ErrEmptyVector)
+		}
 		expected = len(out[0])
 		*dims = expected
 	}

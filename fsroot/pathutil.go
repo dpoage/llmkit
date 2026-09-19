@@ -2,17 +2,13 @@ package fsroot
 
 import "path/filepath"
 
-// EvalExistingPrefixPath resolves symlinks on the longest prefix of p that
-// exists on disk, then re-appends the non-existent tail. This lets callers
-// validate containment even when the final path component does not yet exist,
-// while still catching a symlinked intermediate directory that escapes a root.
-//
-// It is the single authoritative implementation shared by FSRoot's
-// in-root traversal guard and by external traversal guards over other
-// configured roots (e.g. dependency-source directories). Keeping one copy
-// ensures any hardening applied to this path hits every security boundary
-// simultaneously.
-func EvalExistingPrefixPath(p string) (string, error) {
+// evalExistingPrefixPath resolves symlinks on the longest prefix of p that
+// exists on disk, then re-appends the non-existent tail. FSRoot.Resolve uses
+// it to validate containment even when the final path component does not yet
+// exist, while still catching a symlinked intermediate directory that escapes
+// the root. Keeping one copy ensures any hardening applied to this walk is
+// the one containment check relies on.
+func evalExistingPrefixPath(p string) (string, error) {
 	// Walk from the full path up toward the filesystem root, finding the longest
 	// prefix that EvalSymlinks can resolve.
 	tail := ""

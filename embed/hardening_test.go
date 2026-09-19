@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/dpoage/llmkit"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,17 +18,17 @@ import (
 )
 
 // fastRetry is a deterministic, near-instant retry policy for tests.
-var fastRetry = RetryConfig{
+var fastRetry = llmkit.RetryConfig{
 	MaxAttempts: 3,
 	BaseDelay:   time.Millisecond,
 	MaxDelay:    5 * time.Millisecond,
 }
 
 // =============================================================================
-// Timeout Enforcement
+// Per-Attempt RequestTimeout Enforcement
 // =============================================================================
 
-func TestOllamaEmbedder_TimeoutEnforced(t *testing.T) {
+func TestOllamaEmbedder_RequestTimeoutEnforced(t *testing.T) {
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -39,8 +41,7 @@ func TestOllamaEmbedder_TimeoutEnforced(t *testing.T) {
 		Embedder: "ollama",
 		Model:    "m",
 		URL:      srv.URL,
-		Timeout:  50 * time.Millisecond,
-		Retry:    RetryConfig{MaxAttempts: 1},
+		Retry:    llmkit.RetryConfig{MaxAttempts: 1, RequestTimeout: 50 * time.Millisecond},
 	})
 	if err != nil {
 		t.Fatalf("NewOllamaEmbedder: %v", err)
@@ -64,7 +65,7 @@ func TestOllamaEmbedder_TimeoutEnforced(t *testing.T) {
 	}
 }
 
-func TestOpenAIEmbedder_TimeoutEnforced(t *testing.T) {
+func TestOpenAIEmbedder_RequestTimeoutEnforced(t *testing.T) {
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -77,8 +78,7 @@ func TestOpenAIEmbedder_TimeoutEnforced(t *testing.T) {
 		Embedder: "openai-compatible",
 		Model:    "m",
 		URL:      srv.URL,
-		Timeout:  50 * time.Millisecond,
-		Retry:    RetryConfig{MaxAttempts: 1},
+		Retry:    llmkit.RetryConfig{MaxAttempts: 1, RequestTimeout: 50 * time.Millisecond},
 	})
 	if err != nil {
 		t.Fatalf("NewOpenAICompatibleEmbedder: %v", err)
@@ -198,7 +198,7 @@ func TestOllamaEmbedder_RetryAfterSeconds_Honored(t *testing.T) {
 		Embedder: "ollama",
 		Model:    "m",
 		URL:      srv.URL,
-		Retry:    RetryConfig{MaxAttempts: 3, BaseDelay: 30 * time.Second, MaxDelay: 30 * time.Second},
+		Retry:    llmkit.RetryConfig{MaxAttempts: 3, BaseDelay: 30 * time.Second, MaxDelay: 30 * time.Second},
 	})
 	if err != nil {
 		t.Fatalf("NewOllamaEmbedder: %v", err)
@@ -232,7 +232,7 @@ func TestOpenAIEmbedder_RetryAfterHTTPDate_Honored(t *testing.T) {
 		Embedder: "openai-compatible",
 		Model:    "m",
 		URL:      srv.URL,
-		Retry:    RetryConfig{MaxAttempts: 3, BaseDelay: 30 * time.Second, MaxDelay: 30 * time.Second},
+		Retry:    llmkit.RetryConfig{MaxAttempts: 3, BaseDelay: 30 * time.Second, MaxDelay: 30 * time.Second},
 	})
 	if err != nil {
 		t.Fatalf("NewOpenAICompatibleEmbedder: %v", err)
@@ -307,7 +307,7 @@ func TestOllamaEmbedder_EmbedBatch_Chunking(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	emb, err := NewOllamaEmbedder(Config{Embedder: "ollama", Model: "m", URL: srv.URL, MaxBatch: 2, Retry: RetryConfig{MaxAttempts: 1}})
+	emb, err := NewOllamaEmbedder(Config{Embedder: "ollama", Model: "m", URL: srv.URL, MaxBatch: 2, Retry: llmkit.RetryConfig{MaxAttempts: 1}})
 	if err != nil {
 		t.Fatalf("NewOllamaEmbedder: %v", err)
 	}
@@ -362,7 +362,7 @@ func TestOpenAIEmbedder_EmbedBatch_Chunking(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	emb, err := NewOpenAICompatibleEmbedder(Config{Embedder: "openai-compatible", Model: "m", URL: srv.URL, MaxBatch: 2, Retry: RetryConfig{MaxAttempts: 1}})
+	emb, err := NewOpenAICompatibleEmbedder(Config{Embedder: "openai-compatible", Model: "m", URL: srv.URL, MaxBatch: 2, Retry: llmkit.RetryConfig{MaxAttempts: 1}})
 	if err != nil {
 		t.Fatalf("NewOpenAICompatibleEmbedder: %v", err)
 	}
@@ -408,7 +408,7 @@ func TestOllamaEmbedder_EmbedBatch_ChunkFailureFailsWholeCall(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	emb, err := NewOllamaEmbedder(Config{Embedder: "ollama", Model: "m", URL: srv.URL, MaxBatch: 2, Retry: RetryConfig{MaxAttempts: 1}})
+	emb, err := NewOllamaEmbedder(Config{Embedder: "ollama", Model: "m", URL: srv.URL, MaxBatch: 2, Retry: llmkit.RetryConfig{MaxAttempts: 1}})
 	if err != nil {
 		t.Fatalf("NewOllamaEmbedder: %v", err)
 	}
@@ -432,11 +432,14 @@ func TestCachedEmbedder_LRU_EvictionOrderAndCounters(t *testing.T) {
 	}}
 	c := NewCachedEmbedder(inner, 2)
 
-	assertStats := func(wantHits, wantMisses, wantSize int64) {
+	assertStats := func(wantHits, wantMisses int64, wantLen int) {
 		t.Helper()
 		st := c.Stats()
-		if st.Hits != wantHits || st.Misses != wantMisses || st.Size != wantSize {
-			t.Fatalf("Stats = {Hits:%d Misses:%d Size:%d}, want {%d %d %d}", st.Hits, st.Misses, st.Size, wantHits, wantMisses, wantSize)
+		if st.Hits != wantHits || st.Misses != wantMisses {
+			t.Fatalf("Stats = {Hits:%d Misses:%d}, want {%d %d}", st.Hits, st.Misses, wantHits, wantMisses)
+		}
+		if got := c.Len(); got != wantLen {
+			t.Fatalf("Len = %d, want %d", got, wantLen)
 		}
 	}
 
@@ -526,16 +529,13 @@ func TestCachedEmbedder_ConcurrentAccess(t *testing.T) {
 	if st.Hits+st.Misses == 0 {
 		t.Error("expected nonzero counters after concurrent use")
 	}
-	if st.Size > 8 {
-		t.Errorf("Size = %d, want <= 8 (bound enforced under concurrency)", st.Size)
-	}
-	if int(st.Size) != c.Len() {
-		t.Errorf("Stats.Size = %d, Len = %d; disagree", st.Size, c.Len())
+	if got := c.Len(); got > 8 {
+		t.Errorf("Len = %d, want <= 8 (bound enforced under concurrency)", got)
 	}
 
 	c.Clear()
-	if st := c.Stats(); st.Size != 0 {
-		t.Errorf("Size after Clear = %d, want 0", st.Size)
+	if got := c.Len(); got != 0 {
+		t.Errorf("Len after Clear = %d, want 0", got)
 	}
 	if st := c.Stats(); st.Hits+st.Misses == 0 {
 		t.Error("Clear must keep lifetime counters")
@@ -554,7 +554,7 @@ func TestOllamaEmbedder_DimensionMismatch_Configured(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	emb, err := NewOllamaEmbedder(Config{Embedder: "ollama", Model: "m", URL: srv.URL, Dimensions: 3, Retry: RetryConfig{MaxAttempts: 1}})
+	emb, err := NewOllamaEmbedder(Config{Embedder: "ollama", Model: "m", URL: srv.URL, Dimensions: 3, Retry: llmkit.RetryConfig{MaxAttempts: 1}})
 	if err != nil {
 		t.Fatalf("NewOllamaEmbedder: %v", err)
 	}
@@ -585,7 +585,7 @@ func TestOpenAIEmbedder_DimensionMismatch_AutoDetect(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	emb, err := NewOpenAICompatibleEmbedder(Config{Embedder: "openai-compatible", Model: "m", URL: srv.URL, Retry: RetryConfig{MaxAttempts: 1}})
+	emb, err := NewOpenAICompatibleEmbedder(Config{Embedder: "openai-compatible", Model: "m", URL: srv.URL, Retry: llmkit.RetryConfig{MaxAttempts: 1}})
 	if err != nil {
 		t.Fatalf("NewOpenAICompatibleEmbedder: %v", err)
 	}
@@ -656,7 +656,7 @@ func TestOpenAIEmbedder_EmbedBatch_CountMismatch(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			emb, err := NewOpenAICompatibleEmbedder(Config{Embedder: "openai-compatible", Model: "m", URL: srv.URL, Retry: RetryConfig{MaxAttempts: 1}})
+			emb, err := NewOpenAICompatibleEmbedder(Config{Embedder: "openai-compatible", Model: "m", URL: srv.URL, Retry: llmkit.RetryConfig{MaxAttempts: 1}})
 			if err != nil {
 				t.Fatalf("NewOpenAICompatibleEmbedder: %v", err)
 			}
@@ -682,14 +682,14 @@ func TestOpenAIEmbedder_HTTPClientInjection(t *testing.T) {
 		jsonEncode(w, openaiResponse{Data: []openaiEmbedding{{Embedding: []float64{0.1}, Index: 0}}})
 	})
 
-	// A client with its own short timeout is used as-is: the slow server
-	// must trip it.
+	// An injected client keeps its own timeout policy: 50ms beats the slow
+	// server.
 	timedClient := &http.Client{Timeout: 50 * time.Millisecond}
 	srv1 := httptest.NewServer(respond)
 	defer srv1.Close()
 	emb1, err := NewOpenAICompatibleEmbedder(Config{
 		Embedder: "openai-compatible", Model: "m", URL: srv1.URL,
-		HTTPClient: timedClient, Timeout: 5 * time.Second, Retry: RetryConfig{MaxAttempts: 1},
+		HTTPClient: timedClient, Retry: llmkit.RetryConfig{MaxAttempts: 1, RequestTimeout: 5 * time.Second},
 	})
 	if err != nil {
 		t.Fatalf("NewOpenAICompatibleEmbedder: %v", err)
@@ -701,20 +701,23 @@ func TestOpenAIEmbedder_HTTPClientInjection(t *testing.T) {
 		t.Errorf("Embed took %v; injected client timeout not in effect", elapsed)
 	}
 
-	// A client without a timeout is NOT topped up by Config.Timeout: the
-	// slow request must succeed despite Timeout=50ms.
+	// The per-attempt RequestTimeout bounds injected clients too: an
+	// untimed client cannot make an attempt unbounded.
 	untimedClient := &http.Client{}
 	srv2 := httptest.NewServer(respond)
 	defer srv2.Close()
 	emb2, err := NewOpenAICompatibleEmbedder(Config{
 		Embedder: "openai-compatible", Model: "m", URL: srv2.URL,
-		HTTPClient: untimedClient, Timeout: 50 * time.Millisecond, Retry: RetryConfig{MaxAttempts: 1},
+		HTTPClient: untimedClient, Retry: llmkit.RetryConfig{MaxAttempts: 1, RequestTimeout: 50 * time.Millisecond},
 	})
 	if err != nil {
 		t.Fatalf("NewOpenAICompatibleEmbedder: %v", err)
 	}
-	if _, err := emb2.Embed(context.Background(), "x"); err != nil {
-		t.Errorf("Embed with injected untimed client: %v (Timeout must not be applied on top)", err)
+	start = time.Now()
+	if _, err := emb2.Embed(context.Background(), "x"); err == nil {
+		t.Error("expected the per-attempt RequestTimeout to bound the injected untimed client")
+	} else if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("Embed took %v; RequestTimeout not enforced on injected client", elapsed)
 	}
 }
 
@@ -744,7 +747,7 @@ func TestLoadConfig_InvalidValues(t *testing.T) {
 			if !strings.Contains(err.Error(), tt.varb) {
 				t.Errorf("error %q must name the offending variable %s", err, tt.varb)
 			}
-			if cfg != (Config{}) {
+			if !reflect.DeepEqual(cfg, Config{}) {
 				t.Errorf("Config on error = %+v, want zero", cfg)
 			}
 		})
@@ -760,8 +763,8 @@ func TestLoadConfig_NewFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if cfg.Timeout != 30*time.Second {
-		t.Errorf("Timeout = %v, want 30s", cfg.Timeout)
+	if cfg.Retry.RequestTimeout != 30*time.Second {
+		t.Errorf("Retry.RequestTimeout = %v, want 30s", cfg.Retry.RequestTimeout)
 	}
 	if cfg.MaxBatch != 10 {
 		t.Errorf("MaxBatch = %d, want 10", cfg.MaxBatch)
@@ -861,7 +864,7 @@ func TestOllamaEmbedder_EmbedBatch_CountMismatch(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			emb, err := NewOllamaEmbedder(Config{Embedder: "ollama", Model: "m", URL: srv.URL, Retry: RetryConfig{MaxAttempts: 1}})
+			emb, err := NewOllamaEmbedder(Config{Embedder: "ollama", Model: "m", URL: srv.URL, Retry: llmkit.RetryConfig{MaxAttempts: 1}})
 			if err != nil {
 				t.Fatalf("NewOllamaEmbedder: %v", err)
 			}
@@ -882,7 +885,7 @@ func TestOllamaEmbedder_EmbedBatch_CountMismatch(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	emb, err := NewOllamaEmbedder(Config{Embedder: "ollama", Model: "m", URL: srv.URL, Retry: RetryConfig{MaxAttempts: 1}})
+	emb, err := NewOllamaEmbedder(Config{Embedder: "ollama", Model: "m", URL: srv.URL, Retry: llmkit.RetryConfig{MaxAttempts: 1}})
 	if err != nil {
 		t.Fatalf("NewOllamaEmbedder: %v", err)
 	}
@@ -931,7 +934,7 @@ func TestRetry_MaxAttemptsOnlyPolicy_Bounded(t *testing.T) {
 		Embedder: "ollama",
 		Model:    "m",
 		URL:      srv.URL,
-		Retry:    RetryConfig{MaxAttempts: 4},
+		Retry:    llmkit.RetryConfig{MaxAttempts: 4},
 	})
 	if err != nil {
 		t.Fatalf("NewOllamaEmbedder: %v", err)
@@ -950,19 +953,31 @@ func TestRetry_MaxAttemptsOnlyPolicy_Bounded(t *testing.T) {
 }
 
 func TestRetry_PolicyNormalization(t *testing.T) {
-	p := Config{Retry: RetryConfig{MaxAttempts: 5}}.retryPolicy()
-	def := DefaultRetryConfig()
-	if p.Jitter != def.Jitter {
-		t.Errorf("MaxAttempts-only policy Jitter = %v, want default %v", p.Jitter, def.Jitter)
+	p := Config{Retry: llmkit.RetryConfig{MaxAttempts: 5}}.retryPolicy()
+	def := llmkit.DefaultRetryConfig()
+	if p.MaxAttempts != 5 {
+		t.Errorf("explicit MaxAttempts = %d, want 5 (kept)", p.MaxAttempts)
 	}
 	if p.BaseDelay != def.BaseDelay || p.MaxDelay != def.MaxDelay {
-		t.Errorf("MaxAttempts-only policy = %+v, want delays normalized from defaults", p)
+		t.Errorf("MaxAttempts-only policy = %+v, want unset delays filled from llmkit defaults", p)
 	}
-	// Literal pin: the default policy must include 20% jitter, so a
-	// DefaultRetryConfig that drops Jitter fails here rather than silently
-	// making the default unreachable via Config{}.
-	if got := (Config{}).retryPolicy(); got != (RetryConfig{MaxAttempts: 3, BaseDelay: 500 * time.Millisecond, MaxDelay: 30 * time.Second, Jitter: 0.2}) {
-		t.Errorf("Config{}.retryPolicy() = %+v, want the documented default {3, 500ms, 30s, 0.2}", got)
+	if p.RequestTimeout != 60*time.Second {
+		t.Errorf("RequestTimeout = %v, want 60s (embed default)", p.RequestTimeout)
+	}
+	// Jitter is taken literally: a hand-built policy that leaves it zero is
+	// deterministic, never silently defaulted to 20%.
+	if p.Jitter != 0 {
+		t.Errorf("Jitter = %v, want 0 (explicit zero means no jitter)", p.Jitter)
+	}
+	// Literal pin: the zero policy resolves to the embed bounds — 3
+	// attempts and a 60s per-attempt timeout — with kit-default delays and
+	// Jitter left at 0.
+	got := (Config{}).retryPolicy()
+	if got.MaxAttempts != 3 || got.RequestTimeout != 60*time.Second {
+		t.Errorf("zero policy attempts/timeout = %d/%v, want 3/60s (embed bounds)", got.MaxAttempts, got.RequestTimeout)
+	}
+	if got.BaseDelay != def.BaseDelay || got.MaxDelay != def.MaxDelay || got.Jitter != 0 {
+		t.Errorf("Config{}.retryPolicy() = %+v, want kit-default delays with Jitter left at 0", got)
 	}
 
 	// Retry-After is capped at MaxDelay even under a normalized policy
@@ -976,34 +991,22 @@ func TestRetry_PolicyNormalization(t *testing.T) {
 		t.Errorf("exponential backoff = %v, want in (0, %v]", d, def.MaxDelay)
 	}
 
-	if got := (Config{Retry: RetryConfig{MaxAttempts: 3, Jitter: 5}}).retryPolicy().Jitter; got != 1 {
-		t.Errorf("Jitter 5 clamped to %v, want 1", got)
-	}
-	if got := (Config{Retry: RetryConfig{MaxAttempts: 3, Jitter: -2}}).retryPolicy().Jitter; got != 0.2 {
-		t.Errorf("Jitter -2 filled to %v, want default 0.2", got)
-	}
-
 	// Zero BaseDelay must stay zero (immediate retry), never be mistaken
 	// for int64 overflow.
-	if d := backoffDelay(RetryConfig{BaseDelay: 0}, 3, 0, false); d != 0 {
+	if d := backoffDelay(llmkit.RetryConfig{BaseDelay: 0}, 3, 0, false); d != 0 {
 		t.Errorf("backoffDelay with zero BaseDelay = %v, want 0", d)
 	}
 }
 
-func TestDefaultClientTimeout(t *testing.T) {
-	// Literal, not DefaultEmbedTimeout: mutating the constant to 0 must
-	// fail here.
-	if DefaultEmbedTimeout != 60*time.Second {
-		t.Errorf("DefaultEmbedTimeout = %v, want 60s", DefaultEmbedTimeout)
-	}
-	if got := (Config{}).httpClient().Timeout; got != 60*time.Second {
-		t.Errorf("default client timeout = %v, want 60s", got)
-	}
-	if got := (Config{Timeout: -1}).httpClient().Timeout; got != 60*time.Second {
-		t.Errorf("negative Timeout client = %v, want 60s", got)
+func TestHTTPClientConstruction(t *testing.T) {
+	// No default http.Client timeout: round trips are bounded by the
+	// per-attempt Retry.RequestTimeout context deadline (see retryDo), so
+	// the constructed client must not add a second, independent bound.
+	if got := (Config{}).httpClient().Timeout; got != 0 {
+		t.Errorf("default client timeout = %v, want 0 (bounded via per-attempt ctx)", got)
 	}
 	injected := &http.Client{}
-	if got := (Config{HTTPClient: injected, Timeout: 7 * time.Second}).httpClient(); got != injected {
+	if got := (Config{HTTPClient: injected}).httpClient(); got != injected {
 		t.Error("httpClient must return the injected client as-is")
 	}
 }
@@ -1020,8 +1023,7 @@ func TestOllamaEmbedder_TimeoutRetriedAsTransient(t *testing.T) {
 		Embedder: "ollama",
 		Model:    "m",
 		URL:      srv.URL,
-		Timeout:  30 * time.Millisecond,
-		Retry:    RetryConfig{MaxAttempts: 2, BaseDelay: time.Millisecond},
+		Retry:    llmkit.RetryConfig{MaxAttempts: 2, BaseDelay: time.Millisecond, RequestTimeout: 30 * time.Millisecond},
 	})
 	if err != nil {
 		t.Fatalf("NewOllamaEmbedder: %v", err)
@@ -1037,5 +1039,151 @@ func TestOllamaEmbedder_TimeoutRetriedAsTransient(t *testing.T) {
 	}
 	if got := calls.Load(); got != 2 {
 		t.Errorf("requests = %d, want 2 (timeouts are transient)", got)
+	}
+}
+
+// =============================================================================
+// Slice S5: cache copy-on-read, empty-vector auto-detect, Jitter tri-state
+// =============================================================================
+
+// TestCachedEmbedder_ReturnedVectorIsACopy pins copy-on-read: a caller that
+// mutates a returned vector must never corrupt subsequent reads, on both the
+// Embed and EmbedBatch paths.
+func TestCachedEmbedder_ReturnedVectorIsACopy(t *testing.T) {
+	inner := &fakeEmbedder{
+		dims:  3,
+		model: "m",
+		embedFn: func(text string) []float32 {
+			return []float32{1, 2, 3}
+		},
+		embedBatchFn: func(texts []string) [][]float32 {
+			out := make([][]float32, len(texts))
+			for i := range texts {
+				out[i] = []float32{float32(i), float32(i + 1), float32(i + 2)}
+			}
+			return out
+		},
+	}
+	c := NewCachedEmbedder(inner, 0)
+
+	v1, err := c.Embed(context.Background(), "hello")
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	v1[0] = 99 // caller-owned mutation
+	v2, err := c.Embed(context.Background(), "hello")
+	if err != nil {
+		t.Fatalf("Embed (cached): %v", err)
+	}
+	if v2[0] != 1 {
+		t.Fatalf("cache aliased the returned vector: re-read = %v, want [1 2 3]", v2)
+	}
+
+	b1, err := c.EmbedBatch(context.Background(), []string{"a", "b"})
+	if err != nil {
+		t.Fatalf("EmbedBatch: %v", err)
+	}
+	b1[0][0] = 99 // freshly computed on the first call, cached since
+	b1[1][0] = 99
+	b2, err := c.EmbedBatch(context.Background(), []string{"a", "b"})
+	if err != nil {
+		t.Fatalf("EmbedBatch (cached): %v", err)
+	}
+	if b2[0][0] != 0 || b2[1][0] != 1 {
+		t.Fatalf("cache aliased batch vectors: re-read [0][0]=%v [1][0]=%v, want 0 and 1", b2[0][0], b2[1][0])
+	}
+}
+
+// TestOllamaEmbedder_EmptyVector_AutoDetectRejected pins the guard: with
+// Dimensions unset, an empty first vector is ErrEmptyVector — it must not
+// latch the embedder's dimensionality to zero.
+func TestOllamaEmbedder_EmptyVector_AutoDetectRejected(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		jsonEncode(w, ollamaResponse{Model: "m", Embeddings: [][]float64{{}}})
+	}))
+	defer srv.Close()
+
+	emb, err := NewOllamaEmbedder(Config{
+		Embedder: "ollama",
+		Model:    "m",
+		URL:      srv.URL,
+		Retry:    llmkit.RetryConfig{MaxAttempts: 1},
+	})
+	if err != nil {
+		t.Fatalf("NewOllamaEmbedder: %v", err)
+	}
+
+	_, err = emb.Embed(context.Background(), "x")
+	if !errors.Is(err, ErrEmptyVector) {
+		t.Fatalf("Embed with empty first vector = %v, want ErrEmptyVector", err)
+	}
+	if emb.Dimensions() != 0 {
+		t.Errorf("Dimensions() = %d, want 0 (an empty vector must not be latched)", emb.Dimensions())
+	}
+}
+
+// TestCheckDimensions_EmptyVectorConfigured pins the error split: with
+// configured dimensions an empty vector is a dimension mismatch, not
+// ErrEmptyVector — that error is specific to the auto-detect path.
+func TestCheckDimensions_EmptyVectorConfigured(t *testing.T) {
+	var mu sync.RWMutex
+	dims := 3
+	err := checkDimensions("ollama", [][]float32{{}}, &dims, &mu)
+	if err == nil || errors.Is(err, ErrEmptyVector) {
+		t.Fatalf("configured dims with empty vector = %v, want a dimension-mismatch error", err)
+	}
+	if dims != 3 {
+		t.Errorf("dims = %d, want 3 (unchanged)", dims)
+	}
+}
+
+// TestConfig_JitterTriState pins the three representable states: explicit 0
+// is valid and means no jitter, negative and >1 are Validate errors, and the
+// unset state on the env path resolves to the kit default via LoadConfig.
+func TestConfig_JitterTriState(t *testing.T) {
+	base := Config{Embedder: "ollama", Model: "m", URL: "http://localhost"}
+
+	// Explicit 0: valid, no jitter — deterministic backoff.
+	zero := base
+	zero.Retry = llmkit.RetryConfig{MaxAttempts: 2}
+	if err := zero.Validate(); err != nil {
+		t.Fatalf("Validate with Jitter 0: %v", err)
+	}
+	if got := zero.retryPolicy().Jitter; got != 0 {
+		t.Errorf("retryPolicy Jitter = %v, want 0 (explicit zero = no jitter)", got)
+	}
+	if d := backoffDelay(llmkit.RetryConfig{BaseDelay: 100 * time.Millisecond, Jitter: 0}, 2, 0, false); d != 200*time.Millisecond {
+		t.Errorf("backoffDelay with Jitter 0 = %v, want exact 200ms (deterministic)", d)
+	}
+
+	// Negative: config error.
+	neg := base
+	neg.Retry = llmkit.RetryConfig{Jitter: -0.5}
+	if err := neg.Validate(); err == nil {
+		t.Error("negative Jitter must be rejected by Validate")
+	}
+
+	// Above 1: config error, not a silent clamp.
+	big := base
+	big.Retry = llmkit.RetryConfig{Jitter: 1.5}
+	if err := big.Validate(); err == nil {
+		t.Error("Jitter above 1 must be rejected by Validate")
+	}
+
+	// Unset via LoadConfig: kit-default 20% jitter, and the resolved policy
+	// uses the embed bounds (3 attempts, 60s per attempt) with kit delays.
+	cfg, err := LoadConfig("S5JITTERUNSET")
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Retry.Jitter != llmkit.DefaultRetryConfig().Jitter {
+		t.Errorf("LoadConfig Jitter = %v, want kit default %v", cfg.Retry.Jitter, llmkit.DefaultRetryConfig().Jitter)
+	}
+	p := cfg.retryPolicy()
+	if p.MaxAttempts != 3 || p.RequestTimeout != 60*time.Second {
+		t.Errorf("LoadConfig resolved attempts/timeout = %d/%v, want 3/60s (embed bounds)", p.MaxAttempts, p.RequestTimeout)
+	}
+	if p.BaseDelay != llmkit.DefaultRetryConfig().BaseDelay || p.MaxDelay != llmkit.DefaultRetryConfig().MaxDelay {
+		t.Errorf("LoadConfig resolved delays = %v/%v, want kit defaults", p.BaseDelay, p.MaxDelay)
 	}
 }
