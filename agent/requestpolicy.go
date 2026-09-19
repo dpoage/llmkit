@@ -16,16 +16,17 @@ import (
 // recorded under step — the same 1-based transcript step every hook family
 // reports — with the runner-owned fields already set: System, Messages,
 // Tools, MaxTokens, and ResponseSchema when the client's StructuredOutput
-// capability is on. On the finalization and repair turns Tools is nil
-// (those turns forbid further investigation); a policy that needs to
-// distinguish them checks Tools rather than a separate flag.
+// capability is on. On the forced finalization and repair turns (RunJSON
+// runs only) Tools is nil — as on every turn of a tool-less runner — so a
+// policy that needs to distinguish the forced turns checks Tools rather
+// than a separate flag.
 //
 // Message aliasing: req.Messages is a shallow clone of the loop's history,
 // so a policy may filter, append, and reorder messages freely — the edits
 // shape THIS turn's wire view only, and the loop's own history is never
-// changed. The Block slices inside the messages are shared with the
-// history: replace a message wholesale instead of mutating its blocks in
-// place. Every other field of *req is likewise the policy's to set —
+// changed. The Block and ToolCalls slices inside the messages are shared
+// with the history: replace a message wholesale instead of mutating its
+// blocks or tool calls in place. Every other field of *req is likewise the policy's to set —
 // Thinking, Temperature, ToolChoice, StopSequences, TopP, TopK, Seed — each
 // capability-gated by the adapters at the wire boundary (see
 // [llmkit.Request]).

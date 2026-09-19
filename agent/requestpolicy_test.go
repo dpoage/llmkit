@@ -262,3 +262,216 @@ func TestNilRequestPolicySendsRequestAsBuilt(t *testing.T) {
 		t.Errorf("wire messages = %+v, want the single seeded user turn", got)
 	}
 }
+
+// TestRequestPolicyInPlaceWritesLeaveHistoryUntouched pins the shallow-clone
+// contract with IN-PLACE slice writes — the cases a re-slice would hide.
+// Removing the slices.Clone in complete() makes every subtest fail: the
+// policy's writes land in the loop's own array, corrupting Outcome.Messages
+// and retroactively rewriting the wire requests the fake client retained.
+func TestRequestPolicyInPlaceWritesLeaveHistoryUntouched(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("index swap on the main turn", func(t *testing.T) {
+		fake := newFakeClient(textResp("a", 5, 2), textResp("b", 5, 2))
+		rp := RequestPolicyFunc(func(_ context.Context, _ int, req *llmkit.Request) error {
+			if len(req.Messages) >= 2 {
+				req.Messages[0], req.Messages[1] = req.Messages[1], req.Messages[0]
+			}
+			return nil
+		})
+		r := NewRunner(fake, nil, "sys", WithRequestPolicy(rp))
+		out1, err := r.Run(ctx, "a")
+		if err != nil {
+			t.Fatalf("run 1: %v", err)
+		}
+		out2, err := r.Run(ctx, "b", Continue(out1))
+		if err != nil {
+			t.Fatalf("run 2: %v", err)
+		}
+		// Wire: the continued run's 3-message history, first two swapped.
+		want := []llmkit.Message{
+			llmkit.TextMessage(llmkit.RoleAssistant, "a"),
+			llmkit.TextMessage(llmkit.RoleUser, "a"),
+			llmkit.TextMessage(llmkit.RoleUser, "b"),
+		}
+		if !reflect.DeepEqual(fake.requests[1].Messages, want) {
+			t.Errorf("wire = %+v, want the swapped order %+v", fake.requests[1].Messages, want)
+		}
+		// The loop's history (and the seed) stay canonical.
+		wantOut := []llmkit.Message{
+			llmkit.TextMessage(llmkit.RoleUser, "a"),
+			llmkit.TextMessage(llmkit.RoleAssistant, "a"),
+			llmkit.TextMessage(llmkit.RoleUser, "b"),
+			llmkit.TextMessage(llmkit.RoleAssistant, "b"),
+		}
+		if !reflect.DeepEqual(out2.Messages, wantOut) {
+			t.Errorf("outcome history = %+v, want the unswapped canonical order", out2.Messages)
+		}
+		if !reflect.DeepEqual(out1.Messages, wantOut[:2]) {
+			t.Errorf("run-1 history = %+v, want untouched seed %+v", out1.Messages, wantOut[:2])
+		}
+		// The transcript records the swapped (post-policy) wire view.
+		for _, ev := range out2.Transcript.Events {
+			if ev.Kind == EventRequest && ev.Step == 1 && !reflect.DeepEqual(ev.Messages, want) {
+				t.Errorf("transcript step-1 request = %+v, want the wire messages", ev.Messages)
+			}
+		}
+	})
+
+	t.Run("overlapping filter append", func(t *testing.T) {
+		fake := newFakeClient(textResp("a", 5, 2), textResp("b", 5, 2))
+		rp := RequestPolicyFunc(func(_ context.Context, _ int, req *llmkit.Request) error {
+			if len(req.Messages) >= 3 {
+				// In-place element copy: writes m[1] = m[2] into the array.
+				req.Messages = append(req.Messages[:1], req.Messages[2:]...)
+			}
+			return nil
+		})
+		r := NewRunner(fake, nil, "sys", WithRequestPolicy(rp))
+		out1, err := r.Run(ctx, "a")
+		if err != nil {
+			t.Fatalf("run 1: %v", err)
+		}
+		out2, err := r.Run(ctx, "b", Continue(out1))
+		if err != nil {
+			t.Fatalf("run 2: %v", err)
+		}
+		want := []llmkit.Message{
+			llmkit.TextMessage(llmkit.RoleUser, "a"),
+			llmkit.TextMessage(llmkit.RoleUser, "b"),
+		}
+		if !reflect.DeepEqual(fake.requests[1].Messages, want) {
+			t.Errorf("wire = %+v, want the filtered pair %+v", fake.requests[1].Messages, want)
+		}
+		// Without the clone the overlapping copy overwrites the assistant
+		// turn inside the loop's own array: history would read
+		// [user a, user b, user b, assistant b].
+		wantOut := []llmkit.Message{
+			llmkit.TextMessage(llmkit.RoleUser, "a"),
+			llmkit.TextMessage(llmkit.RoleAssistant, "a"),
+			llmkit.TextMessage(llmkit.RoleUser, "b"),
+			llmkit.TextMessage(llmkit.RoleAssistant, "b"),
+		}
+		if !reflect.DeepEqual(out2.Messages, wantOut) {
+			t.Errorf("outcome history = %+v, want the unfiltered canonical order", out2.Messages)
+		}
+	})
+
+	t.Run("append into spare capacity on main and continuation fires", func(t *testing.T) {
+		// The loop's own appends (assistant turn, tool result) leave the
+		// history slice with spare capacity, so an append onto the uncloned
+		// wire view would write into the loop's array and be overwritten by
+		// the next append — silently rewriting the retained wire requests.
+		fake := newFakeClient(textResp("a", 5, 2), toolResp("t1", "now", "{}", 5, 2), textResp("done", 5, 2))
+		rp := RequestPolicyFunc(func(_ context.Context, _ int, req *llmkit.Request) error {
+			req.Messages = append(req.Messages, llmkit.TextMessage(llmkit.RoleUser, "steer"))
+			return nil
+		})
+		r := NewRunner(fake, []Tool{rpTool{name: "now"}}, "sys", WithRequestPolicy(rp))
+		out1, err := r.Run(ctx, "a")
+		if err != nil {
+			t.Fatalf("run 1: %v", err)
+		}
+		out2, err := r.Run(ctx, "b", Continue(out1))
+		if err != nil {
+			t.Fatalf("run 2: %v", err)
+		}
+		// Fresh-run main turn: wire = seed + steer, retained verbatim.
+		if got := fake.requests[0].Messages; len(got) != 2 || got[1].Text() != "steer" {
+			t.Errorf("fire-1 wire = %+v, want seed plus steering turn", got)
+		}
+		// Continued run's main turn (len 3, cap 4) and its tool-follow-up
+		// turn (len 5, cap 8): the appended turn must still be the LAST
+		// element of the retained request after the run ends.
+		for i, wantLen := range map[int]int{1: 4, 2: 6} {
+			got := fake.requests[i].Messages
+			if len(got) != wantLen {
+				t.Errorf("fire-%d wire = %d messages, want %d", i+1, len(got), wantLen)
+				continue
+			}
+			if got[wantLen-1].Text() != "steer" {
+				t.Errorf("fire-%d wire last = %q, want the steering turn", i+1, got[wantLen-1].Text())
+			}
+		}
+		// The loop's history gained exactly the model's turns, never "steer".
+		if len(out2.Messages) != 6 {
+			t.Fatalf("outcome history = %d messages, want 6", len(out2.Messages))
+		}
+		if out2.Messages[0].Text() != "a" || out2.Messages[2].Text() != "b" {
+			t.Errorf("outcome history heads = %q, %q; want a, b", out2.Messages[0].Text(), out2.Messages[2].Text())
+		}
+		for _, m := range out2.Messages {
+			if m.Text() == "steer" {
+				t.Error("appended steering turn leaked into the loop history")
+			}
+		}
+		// Transcript snapshots (copied at fire time) equal the retained wire
+		// requests — with the clone they are stable independently.
+		for _, step := range []int{1, 2} {
+			for _, ev := range out2.Transcript.Events {
+				if ev.Kind == EventRequest && ev.Step == step &&
+					!reflect.DeepEqual(ev.Messages, fake.requests[step].Messages) {
+					t.Errorf("transcript step-%d request != retained wire request", step)
+				}
+			}
+		}
+	})
+
+	t.Run("in-place writes across continuation, finalization, and repair fires", func(t *testing.T) {
+		fake := newFakeClient(
+			maxTokensResp("half an", 10, 5),
+			toolResp("t1", "now", "{}", 10, 5),
+			textResp("not json", 10, 5),
+			textResp(`{"k":"v"}`, 10, 5),
+		)
+		preps := 0
+		rp := RequestPolicyFunc(func(_ context.Context, _ int, req *llmkit.Request) error {
+			preps++
+			if len(req.Messages) >= 2 {
+				last := len(req.Messages) - 1
+				req.Messages[0], req.Messages[last] = req.Messages[last], req.Messages[0]
+			}
+			return nil
+		})
+		r := NewRunner(fake, []Tool{rpTool{name: "now"}}, "sys",
+			WithRequestPolicy(rp),
+			WithLimits(Limits{MaxIterations: 1}))
+		var out map[string]any
+		outcome, err := r.RunJSON(ctx, "policy-repair-probe task", json.RawMessage(`{"type":"object"}`), &out)
+		if err != nil {
+			t.Fatalf("RunJSON: %v", err)
+		}
+		if out["k"] != "v" {
+			t.Errorf("RunJSON out = %v, want k=v", out)
+		}
+		if preps != 4 || fake.callCount() != 4 {
+			t.Errorf("PrepareRequest calls = %d, completions = %d, want 4 and 4", preps, fake.callCount())
+		}
+		// The continuation fire's wire view (history swapped in the clone)
+		// is retained verbatim: [task, assistant half, continuation nudge]
+		// swaps to [nudge, assistant half, task]. (Without the clone the
+		// finalization fire's in-place swap rewrites this shared array and
+		// wire[0] would read the finalization prompt instead.)
+		if got := fake.requests[1].Messages; len(got) != 3 ||
+			!strings.HasPrefix(got[0].Text(), "Your previous message was cut off") ||
+			got[1].Text() != "half an" ||
+			!strings.Contains(got[2].Text(), "policy-repair-probe task") {
+			t.Errorf("continuation wire = %q, %q, %q; want [continuation nudge, assistant half, task]",
+				got[0].Text(), got[1].Text(), got[2].Text())
+		}
+		// The loop's canonical history is untouched by the swaps: it still
+		// STARTS with the seeded task (without the clone the finalization
+		// fire's in-place swap reorders the live array and the task lands
+		// mid-history) and ends with an assistant turn.
+		msgs := outcome.Messages
+		if len(msgs) == 0 {
+			t.Fatal("canonical history empty")
+		}
+		if !strings.Contains(msgs[0].Text(), "policy-repair-probe task") {
+			t.Errorf("canonical history[0] = %q, want the seeded task turn", msgs[0].Text())
+		}
+		if msgs[len(msgs)-1].Role != llmkit.RoleAssistant {
+			t.Errorf("canonical history ends with role %q, want assistant", msgs[len(msgs)-1].Role)
+		}
+	})
+}
