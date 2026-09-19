@@ -486,3 +486,151 @@ func TestSerializeStream_PassesThroughParallelCapableClient(t *testing.T) {
 		t.Fatalf("Response = %+v, want untruncated %+v", out, resp)
 	}
 }
+
+// TestStream_NilFnThroughDecorators routes a nil fn through every
+// decorator over both inner kinds: the wrappers wrap fn in non-nil
+// closures, so a missing guard would panic on the first fragment instead
+// of returning Complete's response.
+func TestStream_NilFnThroughDecorators(t *testing.T) {
+	completeResp := Response{
+		Blocks:     []Block{Text("once"), {Kind: BlockThinking, Text: "hmm"}},
+		Text:       "oncehmm",
+		ToolCalls:  []ToolCall{{ID: "call_1", Name: "f", Arguments: json.RawMessage(`{}`)}},
+		StopReason: StopToolUse,
+	}
+	nativeResp := Response{Text: "native", StopReason: StopEndTurn}
+
+	t.Run("retry", func(t *testing.T) {
+		t.Run("complete only", func(t *testing.T) {
+			inner := &fakeClient{responses: []Response{completeResp}}
+			sleeps := 0
+			c := WithRetry(inner, countedRetryConfig(3, time.Second, &sleeps))
+			out, err := Stream(context.Background(), c, simpleRequest(), nil)
+			if err != nil {
+				t.Fatalf("Stream: %v", err)
+			}
+			if !reflect.DeepEqual(out, completeResp) {
+				t.Fatalf("Response = %+v, want Complete's %+v", out, completeResp)
+			}
+		})
+		t.Run("native", func(t *testing.T) {
+			inner := &scriptedStreamClient{
+				deltas: []Delta{{Kind: DeltaText, Text: "native"}},
+				resp:   nativeResp,
+			}
+			sleeps := 0
+			c := WithRetry(inner, countedRetryConfig(3, time.Second, &sleeps))
+			out, err := Stream(context.Background(), c, simpleRequest(), nil)
+			if err != nil {
+				t.Fatalf("Stream: %v", err)
+			}
+			if inner.completes != 0 {
+				t.Fatalf("Complete calls = %d, want 0", inner.completes)
+			}
+			if !reflect.DeepEqual(out, nativeResp) {
+				t.Fatalf("Response = %+v, want %+v", out, nativeResp)
+			}
+		})
+	})
+
+	t.Run("recorder", func(t *testing.T) {
+		t.Run("complete only", func(t *testing.T) {
+			inner := &fakeClient{responses: []Response{completeResp}}
+			records := 0
+			c := WithRecorder(inner, RecorderFunc(func(UsageEvent) { records++ }), "fake", "m-1")
+			out, err := Stream(context.Background(), c, simpleRequest(), nil)
+			if err != nil {
+				t.Fatalf("Stream: %v", err)
+			}
+			if records != 1 {
+				t.Fatalf("records = %d, want 1", records)
+			}
+			if !reflect.DeepEqual(out, completeResp) {
+				t.Fatalf("Response = %+v, want Complete's %+v", out, completeResp)
+			}
+		})
+		t.Run("native", func(t *testing.T) {
+			inner := &scriptedStreamClient{resp: nativeResp}
+			records := 0
+			c := WithRecorder(inner, RecorderFunc(func(UsageEvent) { records++ }), "fake", "m-1")
+			out, err := Stream(context.Background(), c, simpleRequest(), nil)
+			if err != nil {
+				t.Fatalf("Stream: %v", err)
+			}
+			if records != 1 {
+				t.Fatalf("records = %d, want 1", records)
+			}
+			if !reflect.DeepEqual(out, nativeResp) {
+				t.Fatalf("Response = %+v, want %+v", out, nativeResp)
+			}
+		})
+	})
+
+	t.Run("serialize", func(t *testing.T) {
+		t.Run("complete only", func(t *testing.T) {
+			inner := &fakeClient{responses: []Response{completeResp}}
+			c := WithSerializedToolCalls(inner)
+			out, err := Stream(context.Background(), c, simpleRequest(), nil)
+			if err != nil {
+				t.Fatalf("Stream: %v", err)
+			}
+			// One tool call, the way this decorator's Complete truncates.
+			want := completeResp
+			want.ToolCalls = completeResp.ToolCalls[:1]
+			if !reflect.DeepEqual(out, want) {
+				t.Fatalf("Response = %+v, want truncated %+v", out, want)
+			}
+		})
+		t.Run("native", func(t *testing.T) {
+			inner := &scriptedStreamClient{
+				deltas: []Delta{
+					{Kind: DeltaToolCall, Index: 0, ID: "call_1", Name: "f", Arguments: `{}`},
+					{Kind: DeltaToolCall, Index: 1, ID: "call_2", Name: "g", Arguments: `{}`},
+				},
+				resp: nativeResp,
+			}
+			c := WithSerializedToolCalls(inner)
+			out, err := Stream(context.Background(), c, simpleRequest(), nil)
+			if err != nil {
+				t.Fatalf("Stream: %v", err)
+			}
+			if !reflect.DeepEqual(out, nativeResp) {
+				t.Fatalf("Response = %+v, want %+v", out, nativeResp)
+			}
+		})
+	})
+}
+
+// TestRetryStream_FnErrorOnFirstDeltaReturnsUnretried pins the delivered
+// flag against fn errors specifically: an fn error reaches the retry loop
+// unclassified, so without the flag it would look retryable and replay the
+// stream the caller already began consuming.
+func TestRetryStream_FnErrorOnFirstDeltaReturnsUnretried(t *testing.T) {
+	sentinel := errors.New("stop after first fragment")
+	inner := &scriptedStreamClient{
+		deltas: []Delta{{Kind: DeltaText, Text: "first"}},
+		err:    &APIError{Kind: ErrServer, StatusCode: 500, Provider: "fake", Message: "drop"},
+	}
+	sleeps := 0
+	c := WithRetry(inner, countedRetryConfig(4, time.Second, &sleeps))
+	var got []Delta
+	out, err := Stream(context.Background(), c, simpleRequest(), func(d Delta) error {
+		got = append(got, d)
+		return sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("err = %v, want it to wrap the fn error", err)
+	}
+	if inner.calls != 1 {
+		t.Fatalf("attempts = %d, want 1: the fn error on the first delta is terminal", inner.calls)
+	}
+	if sleeps != 0 {
+		t.Fatalf("backoff sleeps = %d, want 0", sleeps)
+	}
+	if len(got) != 1 {
+		t.Fatalf("delivered %d deltas, want 1", len(got))
+	}
+	if !reflect.DeepEqual(out, Response{}) {
+		t.Fatalf("Response = %+v, want zero", out)
+	}
+}

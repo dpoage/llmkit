@@ -56,8 +56,12 @@ func (s *serializingClient) Complete(ctx context.Context, req Request) (Response
 // Stream streams from the wrapped client, forwarding text and thinking
 // deltas, dropping tool-call deltas for any Index beyond the first, and
 // truncating the final Response the same way Complete does — the delta
-// stream never announces a call the caller will not see.
+// stream never announces a call the caller will not see. A nil fn is
+// replaced with a no-op so the inner Stream never sees a nil callback.
 func (s *serializingClient) Stream(ctx context.Context, req Request, fn func(Delta) error) (Response, error) {
+	if fn == nil {
+		fn = func(Delta) error { return nil }
+	}
 	resp, err := Stream(ctx, s.inner, req, func(d Delta) error {
 		if d.Kind == DeltaToolCall && d.Index != 0 {
 			return nil

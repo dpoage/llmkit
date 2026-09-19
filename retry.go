@@ -115,7 +115,7 @@ func (r *retryClient) Stream(ctx context.Context, req Request, fn func(Delta) er
 // retryLoop runs run until it succeeds, retrying transient failures with
 // backoff and honoring Retry-After. run's delivered result marks a terminal
 // error: output already reached the caller, so no further attempt may run.
-func (r *retryClient) retryLoop(ctx context.Context, run func() (Response, error, bool)) (Response, error) {
+func (r *retryClient) retryLoop(ctx context.Context, run func() (resp Response, err error, delivered bool)) (Response, error) {
 	var lastErr error
 	for attempt := range r.cfg.MaxAttempts {
 		if attempt > 0 {
@@ -174,8 +174,12 @@ func (r *retryClient) attempt(ctx context.Context, req Request) (Response, error
 // streamAttempt runs one inner stream attempt under a per-attempt wall-clock
 // deadline derived from ctx (see attempt). delivered reports whether at
 // least one delta reached fn before the attempt ended; Stream treats such
-// an attempt's error as terminal.
+// an attempt's error as terminal. A nil fn is replaced with a no-op so the
+// inner Stream never sees a nil callback; the wrapper still marks progress.
 func (r *retryClient) streamAttempt(ctx context.Context, req Request, fn func(Delta) error) (resp Response, err error, delivered bool) {
+	if fn == nil {
+		fn = func(Delta) error { return nil }
+	}
 	attemptCtx, cancel := context.WithTimeout(ctx, r.cfg.RequestTimeout)
 	defer cancel()
 	resp, err = Stream(attemptCtx, r.inner, req, func(d Delta) error {
