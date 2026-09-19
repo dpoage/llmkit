@@ -198,95 +198,107 @@ func (o *options) applyDefaults(d *defaults) {
 	}
 }
 
-// WithRuntime sets the container runtime binary (podman or docker); empty
-// auto-detects. CLI-only: NewBwrap refuses it.
+// WithRuntime sets the container runtime binary (podman or docker).
+// Accepted by NewCLI; NewBwrap refuses it. Default: auto-detect, podman
+// first, then docker.
 func WithRuntime(name string) Option {
 	return func(o *options) { o.runtime = name; o.track("WithRuntime") }
 }
 
-// WithImage sets the default container image used when a Spec leaves Image
-// unset; required (NewCLI errors without it). CLI-only: NewBwrap refuses it.
+// WithImage sets the default container image used when a Spec leaves
+// Image unset. Accepted by NewCLI, which requires it (NewCLI errors
+// without an image); NewBwrap refuses it. There is no package default.
 func WithImage(image string) Option {
 	return func(o *options) { o.image = image; o.track("WithImage") }
 }
 
-// WithCPUs sets the default CPU limit applied to every run.
+// WithCPUs sets the default CPU limit applied to every run. Accepted by
+// NewCLI and NewBwrap. Default: 2.
 func WithCPUs(c float64) Option {
 	return func(o *options) { o.cpus = c; o.track("WithCPUs") }
 }
 
 // WithMemoryMB sets the default memory limit (MB) applied to every run.
+// Accepted by NewCLI and NewBwrap. Default: 2048 MB.
 func WithMemoryMB(m int) Option {
 	return func(o *options) { o.memoryMB = m; o.track("WithMemoryMB") }
 }
 
-// WithTimeout sets the default execution timeout applied when a Spec leaves
-// Timeout unset.
+// WithTimeout sets the default execution timeout applied when a Spec
+// leaves Timeout unset. Accepted by NewCLI and NewBwrap. Default: 10m.
 func WithTimeout(d time.Duration) Option {
 	return func(o *options) { o.timeout = d; o.track("WithTimeout") }
 }
 
-// WithIdleTimeout sets the default idle (no-progress) window applied to every
-// run. A run is cancelled only after this long with no observable progress;
-// the absolute WithTimeout remains a hard ceiling. Zero disables the
-// watchdog (the HostExec backend has no watchdog and takes no options).
+// WithIdleTimeout sets the default idle (no-progress) window applied to
+// every run. A run is cancelled only after this long with no observable
+// progress; the absolute WithTimeout remains a hard ceiling. Accepted by
+// NewCLI and NewBwrap. Default: 0 — the idle watchdog is disabled, and
+// only the absolute timeout and the growth ceiling apply. (HostExec has
+// no watchdog and takes no options.)
 func WithIdleTimeout(d time.Duration) Option {
 	return func(o *options) { o.idleTimeout = d; o.track("WithIdleTimeout") }
 }
 
 // WithNetwork sets the default network mode applied when a Spec leaves
-// Network unset. The package default is NetworkNone; a mode the backend
-// cannot honor is rejected by the constructor.
+// Network unset. Accepted by NewCLI and NewBwrap. Default:
+// NetworkNone. A mode the backend cannot honor (bridge on NewBwrap) is
+// rejected by the constructor.
 func WithNetwork(n NetworkMode) Option {
 	return func(o *options) { o.network = n; o.track("WithNetwork") }
 }
 
-// WithPidsLimit sets the process-count cap. A value <= 0 disables the cap.
+// WithPidsLimit sets the process-count cap. Accepted by NewCLI and
+// NewBwrap. Default: 256. A value <= 0 disables the cap.
 func WithPidsLimit(n int) Option {
 	return func(o *options) { o.pidsLimit = n; o.track("WithPidsLimit") }
 }
 
-// WithMaxOutputBytes overrides the per-stream output cap.
+// WithMaxOutputBytes overrides the per-stream output cap. Accepted by
+// NewCLI and NewBwrap. Default: DefaultMaxOutputBytes (1 MiB).
 func WithMaxOutputBytes(n int) Option {
 	return func(o *options) { o.maxOutputBytes = n; o.track("WithMaxOutputBytes") }
 }
 
-// WithScratchSizeMB sets the size (MB) of the writable tmpfs scratch space
-// (/tmp, plus the tmpfs root under bwrap). Values <= 0 fall back to
-// fallbackScratchSizeMB.
+// WithScratchSizeMB sets the size (MB) of the writable tmpfs scratch
+// space (/tmp, plus the tmpfs root under bwrap). Accepted by NewCLI and
+// NewBwrap. Default: 512 MB. Values <= 0 fall back to 512.
 func WithScratchSizeMB(mb int) Option {
 	return func(o *options) { o.scratchSizeMB = mb; o.track("WithScratchSizeMB") }
 }
 
-// WithWorkspaceGrowthCeilingMB sets the workspace-growth ceiling (MB of NET
-// workspace-size growth, not cumulative bytes written) the shared idle
-// watchdog enforces independent of idle-stall detection: a run whose
-// workspace grows past this is killed with Result.WorkspaceQuotaExceeded.
-// <= 0 disables the ceiling entirely.
+// WithWorkspaceGrowthCeilingMB sets the workspace-growth ceiling (MB of
+// NET workspace-size growth, not cumulative bytes written) the shared
+// idle watchdog enforces independent of idle-stall detection: a run
+// whose workspace grows past this is killed with
+// Result.WorkspaceQuotaExceeded. Accepted by NewCLI and NewBwrap.
+// Default: 2048 MB (2 GiB). A value <= 0 disables the ceiling entirely.
 func WithWorkspaceGrowthCeilingMB(mb int) Option {
 	return func(o *options) { o.growthCeilingMB = mb; o.track("WithWorkspaceGrowthCeilingMB") }
 }
 
 // WithCapPolicy sets what a Bwrap run does when the host offers no
-// resource-limit enforcement mechanism: CapRequired (the default) fails with
-// ErrBwrapNoCapMethod; CapBestEffort runs uncapped. Bwrap-only: NewCLI
-// refuses it.
+// resource-limit enforcement mechanism: CapRequired (the default) fails
+// with ErrBwrapNoCapMethod; CapBestEffort runs uncapped. Accepted by
+// NewBwrap; NewCLI refuses it. Default: CapRequired.
 func WithCapPolicy(p CapPolicy) Option {
 	return func(o *options) { o.capPolicy = p; o.track("WithCapPolicy") }
 }
 
-// WithToolchainBinds adds extra read-only binds (beyond fixedROAllowlist) to
-// every Bwrap run, resolved by the host-toolchain resolver. Bwrap-only:
-// NewCLI refuses it.
+// WithToolchainBinds adds extra read-only binds (beyond the fixed
+// allowlist) to every Bwrap run, resolved by the host-toolchain
+// resolver. Accepted by NewBwrap; NewCLI refuses it. Default: none
+// beyond the fixed allowlist.
 func WithToolchainBinds(mounts []ROMount) Option {
 	return func(o *options) { o.toolchainBinds = mounts; o.track("WithToolchainBinds") }
 }
 
-// WithToolchainPath sets the PATH prefix (ResolveHostToolchains' PathPrepend)
-// paired with WithToolchainBinds, so resolved toolchain binaries are actually
-// reachable via PATH inside the sandbox rather than merely bind-mounted.
-// Callers pass both options from the same ToolchainResolution. Bwrap-only:
-// NewCLI refuses it.
+// WithToolchainPath sets the PATH prefix (ResolveHostToolchains'
+// PathPrepend) paired with WithToolchainBinds, so resolved toolchain
+// binaries are actually reachable via PATH inside the sandbox rather
+// than merely bind-mounted. Callers pass both options from the same
+// ToolchainResolution. Accepted by NewBwrap; NewCLI refuses it.
+// Default: empty (no PATH prepend).
 func WithToolchainPath(prepend string) Option {
 	return func(o *options) { o.toolchainPathPrepend = prepend; o.track("WithToolchainPath") }
 }

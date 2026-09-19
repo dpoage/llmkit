@@ -72,22 +72,28 @@ func resolveNetworkMode(backend string, def, requested NetworkMode, supported ..
 }
 
 // Spec describes a single sandboxed execution.
+//
+// The Mock backend records every field verbatim and runs nothing; the
+// honor notes below cover the three real backends (CLI, Bwrap,
+// HostExec).
 type Spec struct {
 	// RepoDir is the host path to the repository snapshot to run against. It is
 	// copied into a fresh temporary workspace before execution; the original is
 	// never mounted writable (and is not mutated). Required.
 	RepoDir string
 
-	// Workspace, when non-empty, overrides the fresh-copy-per-Exec default: Exec
-	// uses this HOST DIRECTORY as the workspace directly instead of copying
-	// RepoDir into a new temp dir, and does NOT remove it afterward — the
-	// caller owns its entire lifecycle (creation via MaterializeWorkspace and
-	// removal). WriteFiles are still applied onto it via applyWriteFiles, so
-	// repeated Execs against the same Workspace accumulate/overwrite files
-	// exactly like repeated writes to a real working tree.
+	// Workspace, when non-empty, overrides the fresh-copy-per-Exec default:
+	// Exec uses this host directory as the workspace directly instead of
+	// copying RepoDir into a new temp dir. Exec does not remove it afterward;
+	// the caller owns its entire lifecycle (creation via MaterializeWorkspace
+	// and removal). WriteFiles still apply onto it, so repeated Execs
+	// against the same Workspace accumulate and overwrite files exactly like
+	// repeated writes to a real working tree. The container backends require
+	// an absolute path; HostExec uses the path verbatim as the working
+	// directory.
 	//
 	// TRUST: only pass a directory the harness itself created (e.g. via
-	// MaterializeWorkspace) — Exec does no provenance check, so an arbitrary
+	// MaterializeWorkspace). Exec does no provenance check, so an arbitrary
 	// caller-supplied path is trusted verbatim as writable model-code
 	// execution surface. RepoDir is ignored when Workspace is set.
 	Workspace string
@@ -106,9 +112,10 @@ type Spec struct {
 	// Image at Exec instead of silently ignoring it.
 	Image string
 
-	// Timeout bounds the execution wall-clock time as a HARD ceiling. When <= 0
-	// the backend's default timeout is used. On expiry the container is forcibly
-	// removed and Result.TimedOut is set.
+	// Timeout bounds the execution wall-clock time as a HARD ceiling. When
+	// <= 0 the backend's default timeout is used (CLI and Bwrap default to
+	// 10m; HostExec has no default, so only the caller's context can cancel).
+	// On expiry the backend kills the command and sets Result.TimedOut.
 	Timeout time.Duration
 
 	// Network selects the run's network posture (see NetworkMode). The zero
@@ -125,81 +132,88 @@ type Spec struct {
 	// rejected as an error.
 	WriteFiles map[string][]byte
 
-	// ROMounts are additional host directories bind-mounted read-only into the
-	// container, in addition to the writable workspace. They exist so a
-	// dependency cache (e.g. a Go module cache) can be made available to an
-	// otherwise network-none run without copying it into the workspace.
+	// ROMounts are additional host directories bind-mounted read-only into
+	// the sandbox, in addition to the writable workspace. They exist so a
+	// dependency cache (e.g. a Go module cache) can be available to an
+	// otherwise network-none run without copying it into the workspace. The
+	// CLI and Bwrap backends honor them; HostExec refuses a non-empty
+	// ROMounts with an UnsupportedSpecError.
 	//
-	// Each mount is rendered as `-v host:ctr:ro,Z` and is NEVER writable. Both
-	// paths must be absolute; empty paths and duplicate ContainerPaths are
-	// rejected as an error by Exec.
+	// A mount is NEVER writable. Both paths must be absolute; empty paths
+	// and ContainerPaths duplicate across ROMounts and RWMounts are rejected
+	// as an error by Exec. On the CLI backend each mount renders as
+	// `-v host:ctr:ro,Z` unless ROMount.Shared is true.
 	//
-	// SECURITY: a read-only mount exposes host content to untrusted, model-
-	// driven code. Callers must only mount public/cache content and never
-	// secrets or private trees. See the package doc.
+	// SECURITY: a read-only mount exposes host content to untrusted,
+	// model-driven code. Callers must only mount public/cache content and
+	// never secrets or private trees. See the package doc.
 	ROMounts []ROMount
 
-	// RWMounts are host directories bind-mounted WRITABLE into the container.
-	// They exist for two callers: a caller-run dependency-prefetch step
-	// (e.g. `go mod download`) populating a caller-managed
-	// module cache on the host, later exposed to the untrusted network-none
-	// run read-only via ROMounts; and an operator's
-	// explicitly opted-in writable mount entry,
-	// for tools that unconditionally mutate a
-	// mounted directory at analysis/build time — the motivating case is
-	// `bazel vendor`, which refreshes its bazel-external symlink and repo
-	// .marker files inside the vendor dir (and, symmetrically, a bazel disk
-	// cache) at analysis time; a read-only mount there aborts the run.
+	// RWMounts are host directories bind-mounted WRITABLE into the sandbox.
+	// They exist for two callers:
+	//
+	//   - A trusted dependency-prefetch step (e.g. `go mod download`) that
+	//     populates a caller-managed module cache on the host, later exposed
+	//     to the untrusted network-none run read-only via ROMounts.
+	//   - An operator's explicitly opted-in writable entry, for tools that
+	//     unconditionally mutate a mounted directory at analysis or build
+	//     time. The motivating case is `bazel vendor`, which refreshes its
+	//     bazel-external symlinks, .marker files, and disk cache inside the
+	//     vendor dir; a read-only mount there aborts the run.
+	//
+	// The CLI and Bwrap backends honor RWMounts; HostExec refuses a
+	// non-empty RWMounts with an UnsupportedSpecError.
 	//
 	// SECURITY: a writable mount is strictly more dangerous than ROMounts —
 	// untrusted, model-driven code can corrupt whatever is mounted. Do NOT
 	// use RWMounts for a normal model-driven run's own scratch space: the
-	// writable workspace copy is that surface. The operator-opted-in
-	// case is scoped by operator discipline: point writable entries
-	// only at caller-owned or caller-controlled directories (e.g. a
-	// dedicated vendor/disk-cache dir the operator manages for the tool) —
-	// poisoning tradeoff accepted is that a compromised run can corrupt that
-	// directory, but the blast radius stops there: it is never a directory
-	// shared with anything the operator (or another tool) trusts, so the
-	// worst case is the tool's own next sandbox run reading corrupted
-	// vendored state, not a wider compromise. Rendered writable on both
-	// backends; on the container backend Shared=true suppresses the SELinux
-	// :Z relabel exactly like ROMounts (host-owned trees the host also
-	// manages must keep their context). Same absolute-path/uniqueness
-	// validation as ROMounts; ContainerPaths must be unique across ROMounts
-	// and RWMounts combined.
+	// writable workspace copy is that surface. Scope an operator-opted-in
+	// entry to a caller-owned directory (e.g. a dedicated vendor or
+	// disk-cache dir the operator manages for the tool). The accepted
+	// tradeoff: a compromised run can corrupt that directory, and the blast
+	// radius stops there — the worst case is the tool's own next sandbox run
+	// reading corrupted vendored state, not a wider compromise. On the CLI
+	// backend Shared=true suppresses the SELinux :Z relabel, exactly like
+	// ROMounts: host-owned trees the host also manages must keep their
+	// context. Absolute-path and uniqueness validation match ROMounts, and
+	// ContainerPaths must be unique across ROMounts and RWMounts combined.
 	RWMounts []ROMount
 
-	// SetupCmds are optional ordered commands executed inside the container, in
-	// the same network-none run, in the workspace directory, BEFORE Cmd. They
-	// exist so non-Go ecosystems (npm, pip, cargo, etc.) can perform offline
-	// package installation from a pre-mounted cache without altering the main
-	// command.
+	// SetupCmds are optional ordered commands executed inside the sandbox,
+	// in the same network-none run, in the workspace directory, BEFORE Cmd.
+	// They exist so non-Go ecosystems (npm, pip, cargo, etc.) can perform
+	// offline package installation from a pre-mounted cache without
+	// altering the main command. The CLI and Bwrap backends honor them;
+	// HostExec refuses a non-empty SetupCmds with an UnsupportedSpecError
+	// (a bare host process has no exit-125 environment-error contract to
+	// keep).
 	//
 	// Examples: ["npm","ci","--offline"] or ["pip","install","--no-index","--find-links=/pipcache","."]
 	//
-	// When SetupCmds is non-empty the CLI backend wraps the execution in
-	// /bin/sh: each command is shell-quoted and chained with "|| exit 125" so
-	// any setup failure exits with code 125. Exit 125 is intentional:
-	// a caller's verdict classification treats container exit
-	// 125/126/127 as an environment error, NOT a demonstrated result — a failed
+	// When SetupCmds is non-empty, both container backends wrap the
+	// execution in /bin/sh: each command is shell-quoted and chained with
+	// "|| exit 125", so any setup failure exits with code 125. Exit 125 is
+	// intentional: verdict classification treats container exit 125/126/127
+	// as an environment error, NOT a demonstrated result — a failed
 	// "npm ci --offline" must never be misread as a successful repro. The
-	// original Cmd is exec'd (via sh's exec builtin) so it retains its own
+	// original Cmd is exec'd (via sh's exec builtin), so it retains its own
 	// exit code and signal mask.
 	//
-	// Requires /bin/sh in the container image. Images used only for Go (the
-	// default) set no SetupCmds, so existing images and behavior are untouched.
+	// Requires /bin/sh in the container image (or in the bwrap allowlist).
+	// Go-only images set no SetupCmds, so existing images and behavior are
+	// untouched.
 	SetupCmds [][]string
 
 	// CaptureFiles are workspace-relative paths to read back from the
 	// workspace after the command finishes, in addition to stdout/stderr.
-	// This is the seam structured-output ecosystems use: e.g. a pytest run
-	// asked to emit `--junitxml=report.xml` writes machine-
-	// readable results to a file rather than (only) stdout, and the caller
-	// needs that file's bytes, not just the exit code. Each path is validated
-	// with the same sanitizeRelPath rule as WriteFiles (no escaping the
-	// workspace); a path the command never wrote is silently absent from
-	// Result.Captured rather than failing the run.
+	// All three real backends honor them. This is the seam structured-output
+	// ecosystems use: e.g. a pytest run asked to emit
+	// `--junitxml=report.xml` writes machine-readable results to a file
+	// rather than (only) stdout, and the caller needs that file's bytes,
+	// not just the exit code. Each path is validated with the same rule as
+	// WriteFiles keys (no escaping the workspace); a path the command never
+	// wrote is silently absent from Result.Captured rather than failing the
+	// run.
 	CaptureFiles []string
 }
 
@@ -209,7 +223,8 @@ type ROMount struct {
 	// HostPath is the absolute host path to expose. Required.
 	HostPath string
 	// ContainerPath is the absolute path the mount appears at inside the
-	// container. Required and unique across a Spec's ROMounts.
+	// sandbox. Required, and unique across the Spec's ROMounts and RWMounts
+	// combined.
 	ContainerPath string
 	// Shared, when true, suppresses the SELinux :Z relabel suffix on this
 	// mount. Use Shared=true for host directories that are NOT owned exclusively
@@ -244,8 +259,10 @@ type ROMount struct {
 // infrastructure failures — a missing runtime, a failed workspace copy, an
 // inability to launch the container — are returned as errors from Exec.
 type Result struct {
-	// ExitCode is the process exit code from the command inside the container.
-	// On timeout it is -1.
+	// ExitCode is the process exit code of the sandboxed command. A
+	// watchdog kill (timeout or growth ceiling) reports -1; every other
+	// value is the command's own exit code. Set by Exec on every backend;
+	// a Mock script supplies whatever value its caller scripted.
 	ExitCode int
 
 	// Stdout and Stderr are the captured output streams, each capped at the
@@ -274,34 +291,39 @@ type Result struct {
 	// exclusive, distinct kill reasons.
 	TimedOut bool
 
-	// WorkspaceQuotaExceeded is true when the execution was killed by the
-	// idle watchdog's workspace-growth ceiling: the workspace's
-	// NET regular-file size (workspaceProgress' fsSize — a write-then-delete
-	// churn nets out and never trips this) grew by more than the backend's
-	// configured growth-ceiling bytes since the run started. This is
-	// deliberately NOT reported as TimedOut — a run that is actively filling
-	// disk is making "progress" by the idle-stall definition (see cli.go's
-	// progressSnapshot doc) and would otherwise run undetected until the
-	// absolute Timeout, so callers that only check TimedOut must not mistake
-	// a disk-filler for a genuine stall or a legitimate long-running build.
-	// ExitCode is -1, exactly like a TimedOut kill, since the process was
-	// killed by us either way (or, if it happened to exit on its own after
-	// breaching the ceiling, the breach still overrides its own exit code —
-	// see checkGrowthCeiling's doc).
+	// WorkspaceQuotaExceeded is true when Exec killed the run because the
+	// workspace's NET regular-file size grew by more than the backend's
+	// configured growth-ceiling bytes since the run started (a
+	// write-then-delete churn nets out and never trips this). The CLI and
+	// Bwrap watchdogs set it; HostExec never does (no watchdog), and a Mock
+	// script supplies it verbatim.
+	//
+	// This is deliberately NOT reported as TimedOut. A run that is actively
+	// filling disk reads as "making progress" to the idle check and would
+	// otherwise run undetected until the absolute Timeout. Callers that
+	// only check TimedOut must not mistake a disk-filler for a genuine
+	// stall or a legitimate long-running build.
+	//
+	// ExitCode is -1, exactly like a TimedOut kill. If the process exited
+	// on its own after breaching the ceiling, the breach still overrides
+	// its own exit code: the ceiling is a measured invariant, not a racing
+	// heuristic.
 	WorkspaceQuotaExceeded bool
 
 	// PrepDuration is the wall-clock time spent preparing the workspace
-	// BEFORE the container ran: resolving the pristine-cache key, ensuring
-	// the pristine (materializing on a cache miss, reusing it on a hit),
-	// cloning it into a fresh per-run workspace, and applying WriteFiles. It
-	// is disjoint from Duration.
+	// BEFORE the command ran: ensuring the pristine workspace copy
+	// (materializing on a cache miss, reusing it on a hit), cloning it into
+	// a fresh per-run workspace, and applying WriteFiles. It is disjoint
+	// from Duration. The three real backends set it; a Mock script supplies
+	// whatever its caller scripted.
 	PrepDuration time.Duration
 
-	// WorkspaceCacheHit reports whether the pristine-workspace cache
-	// (the backend's wsCache) already held a pristine
-	// matching this repo's current HEAD + working-tree state, so this Exec
-	// skipped materialization and only cloned it. Always false when RepoDir
-	// is not a git work tree, since the cache is bypassed entirely there.
+	// WorkspaceCacheHit reports whether the backend's pristine-workspace
+	// cache already held a pristine copy matching this repo's current HEAD
+	// + working-tree state, so this Exec skipped materialization and only
+	// cloned it. CLI and Bwrap set it; always false on HostExec (no cache)
+	// and whenever RepoDir is not a git work tree, since the cache is
+	// bypassed entirely there. A Mock script supplies it verbatim.
 	WorkspaceCacheHit bool
 
 	// Captured holds the workspace-relative files named in Spec.CaptureFiles,

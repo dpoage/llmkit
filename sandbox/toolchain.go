@@ -67,7 +67,7 @@ import (
 // the conventional dependency-cache mount paths (/modcache, /pipcache, ...).
 const hostToolchainMountRoot = "/opt/llmkit-toolchains"
 
-// defaultContainerPath is appended after any resolved toolchain bin
+// DefaultContainerPath is appended after any resolved toolchain bin
 // directories when building the container's PATH override. It mirrors a
 // standard Linux distribution's default PATH so images that already ship
 // their own toolchains (and set no ENV PATH override) keep working exactly
