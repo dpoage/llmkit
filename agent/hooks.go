@@ -25,9 +25,18 @@ import (
 //   - ToolStart / ToolEnd around each Tool.Run. ToolEnd carries the final
 //     Result, IsError, and measured Duration; ToolStart leaves those zero.
 //     A model naming an unregistered tool never reaches Tool.Run, so neither
-//     hook fires for it; under WithParallelTools a panicking call never
-//     returns, so ToolEnd does not fire for it either (its error result is
-//     still fed back). Step matches the transcript's tool-result event.
+//     hook fires for it. A panicking Tool.Run is recovered by the harness in
+//     BOTH dispatch modes and ToolEnd fires with the rendered panic result
+//     ("ERROR: tool <name> panicked: …", IsError=true). Step matches the
+//     transcript's tool-result event.
+//
+// Hook functions are part of the harness, not the model conversation: a
+// panic raised INSIDE any Hooks callback is a harness bug. It is never
+// rendered to the model as a tool result. Sequential dispatch propagates it
+// inline; under WithParallelTools the per-call goroutine recovers it and the
+// loop re-panics with the original value after all sibling calls finish —
+// the run aborts with that panic in both modes.
+//
 //   - ToolHealth when a tool returns a *ToolHealthError (a genuine
 //     harness/infra failure) — but not for ordinary model-recoverable tool
 //     errors, and never for a failure caused by an already-cancelled context.
@@ -132,16 +141,23 @@ func WithToolTimeout(d time.Duration) Option {
 	return func(r *Runner) { r.toolTimeout = d }
 }
 
-// WithParallelTools opts in to concurrent dispatch of the tool calls a single
-// completion requests: one goroutine per call, bounded by the number of
-// calls. Results are appended to the conversation history and the transcript
-// in the model's original call order, so the wire-visible history is
-// identical to sequential dispatch. Per-call failures are isolated: one
-// tool's error never affects its siblings — and a tool that PANICS under
-// this option does not abort the run either: the panic is recovered in the
-// call's goroutine and rendered as that call's error result
-// ("ERROR: tool <name> panicked: …"), so siblings complete normally.
-// (Sequential dispatch propagates a panic to the Runner's caller, unchanged.)
+// WithParallelTools opts in to concurrent dispatch of the tool calls a
+// single completion requests: one goroutine per call, bounded by the number
+// of calls. Results are appended to the conversation history and the
+// transcript in the model's original call order, so the wire-visible history
+// is identical to sequential dispatch. Per-call failures are isolated: one
+// tool's error never affects its siblings.
+//
+// Failure semantics are IDENTICAL to sequential dispatch — toggling this
+// option never changes who sees a panic. A panicking Tool.Run is recovered
+// in the call's goroutine and rendered as that call's error result
+// ("ERROR: tool <name> panicked: …"), so siblings complete normally and the
+// run continues — the same rendering the sequential path produces. A
+// panicking [Hooks] callback is a harness bug, not tool data: it is
+// recovered in the per-call goroutine and re-panicked with the original
+// value after all sibling calls finish, aborting the run exactly as a hook
+// panic does sequentially — no goroutine leaks, no tool_result recorded for
+// the interrupted turn. See [Tool.Run] and [Hooks].
 //
 // Tools that run under this option must be safe for concurrent calls (see
 // [Tool.Run]), and so must the [Hooks] callbacks. Without this option, calls

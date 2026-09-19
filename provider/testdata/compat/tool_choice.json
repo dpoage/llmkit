@@ -4,8 +4,8 @@
   "model": "MiniMax-M3",
   "capabilities": {
     "ContextWindow": 0,
-    "ParallelToolCalls": false,
-    "PromptCaching": false,
+    "ParallelToolCalls": true,
+    "PromptCaching": true,
     "StructuredOutput": false,
     "Thinking": false,
     "ToolChoice": true,
@@ -25,14 +25,8 @@
           "Role": "user",
           "Content": [
             {
-              "Kind": "text",
-              "Text": "Call the add tool with a=2 and b=3.",
-              "MediaType": "",
-              "Data": null,
-              "URL": "",
-              "Title": "",
-              "Provider": "",
-              "Raw": null
+              "kind": "text",
+              "text": "Call the add tool with a=2 and b=3."
             }
           ],
           "ToolCalls": null,
@@ -82,14 +76,8 @@
           "Role": "user",
           "Content": [
             {
-              "Kind": "text",
-              "Text": "Call the add tool with a=2 and b=3.",
-              "MediaType": "",
-              "Data": null,
-              "URL": "",
-              "Title": "",
-              "Provider": "",
-              "Raw": null
+              "kind": "text",
+              "text": "Call the add tool with a=2 and b=3."
             }
           ],
           "ToolCalls": null,
@@ -139,14 +127,8 @@
           "Role": "user",
           "Content": [
             {
-              "Kind": "text",
-              "Text": "Call the add tool with a=2 and b=3.",
-              "MediaType": "",
-              "Data": null,
-              "URL": "",
-              "Title": "",
-              "Provider": "",
-              "Raw": null
+              "kind": "text",
+              "text": "Call the add tool with a=2 and b=3."
             }
           ],
           "ToolCalls": null,
@@ -212,21 +194,21 @@
       "response": {
         "headers": {
           "access-control-allow-origin": "*",
-          "alb_receive_time": "1789780923.545",
-          "alb_request_id": "67906f54ddbc76c26d517d15c524cfb68f375e33",
+          "alb_receive_time": "1789786179.135",
+          "alb_request_id": "d2fc3de21f64709ced8efd8bba7dbc58597209cb",
           "cache-control": "max-age=0, no-cache, no-store",
-          "content-length": "811",
+          "content-length": "762",
           "content-type": "application/json; charset=utf-8",
-          "date": "Sat, 19 Sep 2026 01:22:04 GMT",
-          "expires": "Sat, 19 Sep 2026 01:22:04 GMT",
-          "minimax-request-id": "41a7a1489d6576b6f4724c693b487d7f",
+          "date": "Sat, 19 Sep 2026 02:49:39 GMT",
+          "expires": "Sat, 19 Sep 2026 02:49:39 GMT",
+          "minimax-request-id": "c19acd9c6a5d110a4edb5b97f4674321",
           "pragma": "no-cache",
-          "trace-id": "06fd16bb15a6329463a5d318057ed35a",
+          "trace-id": "06fd2b43725237258dde73d3bae30234",
           "x-from": "ak",
-          "x-mm-request-id": "2022431855143301769_1789780924yz0qa8",
+          "x-mm-request-id": "2022431855143301769_1789786179da5rnl",
           "x-session-id": "d41f06064b20b0e153a4e53424eaf14b"
         },
-        "body": "{\"id\":\"06fd16bb15a6329463a5d318057ed35a\",\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"\u003cthink\u003e\\nThe user wants me to call the add tool with a=2 and b=3. I'll use the function call format.\\n\u003c/think\u003e\\n\\n```json\\n{\\\"name\\\": \\\"add\\\", \\\"arguments\\\": {\\\"a\\\": 2, \\\"b\\\": 3}}\\n```\",\"role\":\"assistant\",\"name\":\"MiniMax AI\",\"audio_content\":\"\"}}],\"created\":1789780923,\"model\":\"MiniMax-M3\",\"object\":\"chat.completion\",\"usage\":{\"total_tokens\":242,\"total_characters\":0,\"prompt_tokens\":189,\"completion_tokens\":53,\"completion_tokens_details\":{\"reasoning_tokens\":23},\"prompt_tokens_details\":{\"cached_tokens\":0}},\"input_sensitive\":false,\"output_sensitive\":false,\"input_sensitive_type\":0,\"output_sensitive_type\":0,\"output_sensitive_int\":0,\"service_tier\":\"standard\",\"base_resp\":{\"status_code\":0,\"status_msg\":\"\"}}\n",
+        "body": "{\"id\":\"06fd2b43725237258dde73d3bae30234\",\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"\u003cthink\u003e\\nThe user wants me to call the add tool with a=2 and b=3.\\n\u003c/think\u003e\\n\\n{\\\"name\\\": \\\"add\\\", \\\"arguments\\\": {\\\"a\\\": 2, \\\"b\\\": 3}}\",\"role\":\"assistant\",\"name\":\"MiniMax AI\",\"audio_content\":\"\"}}],\"created\":1789786179,\"model\":\"MiniMax-M3\",\"object\":\"chat.completion\",\"usage\":{\"total_tokens\":231,\"total_characters\":0,\"prompt_tokens\":189,\"completion_tokens\":42,\"completion_tokens_details\":{\"reasoning_tokens\":14},\"prompt_tokens_details\":{\"cached_tokens\":0}},\"input_sensitive\":false,\"output_sensitive\":false,\"input_sensitive_type\":0,\"output_sensitive_type\":0,\"output_sensitive_int\":0,\"service_tier\":\"standard\",\"base_resp\":{\"status_code\":0,\"status_msg\":\"\"}}\n",
         "status": 200
       }
     },
@@ -251,21 +233,21 @@
       "response": {
         "headers": {
           "access-control-allow-origin": "*",
-          "alb_receive_time": "1789780924.529",
-          "alb_request_id": "4473d613afcae9ce2a49b06a5a7960ab4e2ca89f",
+          "alb_receive_time": "1789786179.96",
+          "alb_request_id": "fa52e091d7ba0b3fc6290e3774a44a1e02b238e4",
           "cache-control": "max-age=0, no-cache, no-store",
           "content-length": "854",
           "content-type": "application/json; charset=utf-8",
-          "date": "Sat, 19 Sep 2026 01:22:05 GMT",
-          "expires": "Sat, 19 Sep 2026 01:22:05 GMT",
-          "minimax-request-id": "b51c294321379490c35651871398da9b",
+          "date": "Sat, 19 Sep 2026 02:49:40 GMT",
+          "expires": "Sat, 19 Sep 2026 02:49:40 GMT",
+          "minimax-request-id": "378651a0d5ceb45b4bb52f6911006ebe",
           "pragma": "no-cache",
-          "trace-id": "06fd16bcbe80c645c91a39b2f6389092",
+          "trace-id": "06fd2b4301c8a483cc4b8514550cc8b6",
           "x-from": "ak",
-          "x-mm-request-id": "2022431855143301769_1789780925xd0ijz",
+          "x-mm-request-id": "2022431855143301769_1789786180gfrevv",
           "x-session-id": "d41f06064b20b0e153a4e53424eaf14b"
         },
-        "body": "{\"id\":\"06fd16bcbe80c645c91a39b2f6389092\",\"choices\":[{\"finish_reason\":\"tool_calls\",\"index\":0,\"message\":{\"content\":\"\u003cthink\u003e\\nThe user wants me to call the add tool with a=2 and b=3\\n\u003c/think\u003e\\n\\n.\",\"role\":\"assistant\",\"name\":\"MiniMax AI\",\"tool_calls\":[{\"id\":\"call_f5d8754843e24a33ba85060c\",\"type\":\"function\",\"function\":{\"name\":\"add\",\"arguments\":\"{\\\"a\\\":2,\\\"b\\\":3}\"},\"index\":0}],\"audio_content\":\"\"}}],\"created\":1789780924,\"model\":\"MiniMax-M3\",\"object\":\"chat.completion\",\"usage\":{\"total_tokens\":460,\"total_characters\":0,\"prompt_tokens\":407,\"completion_tokens\":53,\"completion_tokens_details\":{\"reasoning_tokens\":14},\"prompt_tokens_details\":{\"cached_tokens\":256}},\"input_sensitive\":false,\"output_sensitive\":false,\"input_sensitive_type\":0,\"output_sensitive_type\":0,\"output_sensitive_int\":0,\"service_tier\":\"standard\",\"base_resp\":{\"status_code\":0,\"status_msg\":\"\"}}\n",
+        "body": "{\"id\":\"06fd2b4301c8a483cc4b8514550cc8b6\",\"choices\":[{\"finish_reason\":\"tool_calls\",\"index\":0,\"message\":{\"content\":\"\u003cthink\u003e\\nThe user wants me to call the add tool with a=2 and b=3\\n\u003c/think\u003e\\n\\n.\",\"role\":\"assistant\",\"name\":\"MiniMax AI\",\"tool_calls\":[{\"id\":\"call_32121460c5194fe39e7764ea\",\"type\":\"function\",\"function\":{\"name\":\"add\",\"arguments\":\"{\\\"a\\\":2,\\\"b\\\":3}\"},\"index\":0}],\"audio_content\":\"\"}}],\"created\":1789786179,\"model\":\"MiniMax-M3\",\"object\":\"chat.completion\",\"usage\":{\"total_tokens\":460,\"total_characters\":0,\"prompt_tokens\":407,\"completion_tokens\":53,\"completion_tokens_details\":{\"reasoning_tokens\":14},\"prompt_tokens_details\":{\"cached_tokens\":256}},\"input_sensitive\":false,\"output_sensitive\":false,\"input_sensitive_type\":0,\"output_sensitive_type\":0,\"output_sensitive_int\":0,\"service_tier\":\"standard\",\"base_resp\":{\"status_code\":0,\"status_msg\":\"\"}}\n",
         "status": 200
       }
     },
@@ -290,21 +272,21 @@
       "response": {
         "headers": {
           "access-control-allow-origin": "*",
-          "alb_receive_time": "1789780925.557",
-          "alb_request_id": "7b706d599f79f05cdbc798f883a2aaecd3cd239b",
+          "alb_receive_time": "1789786180.979",
+          "alb_request_id": "6a060df30e2507f9994db5c627e143472144af89",
           "cache-control": "max-age=0, no-cache, no-store",
           "content-length": "854",
           "content-type": "application/json; charset=utf-8",
-          "date": "Sat, 19 Sep 2026 01:22:06 GMT",
-          "expires": "Sat, 19 Sep 2026 01:22:06 GMT",
-          "minimax-request-id": "bc4a8429f7280fc9d2823b0e1d2a999d",
+          "date": "Sat, 19 Sep 2026 02:49:41 GMT",
+          "expires": "Sat, 19 Sep 2026 02:49:41 GMT",
+          "minimax-request-id": "0585e1b008a4718cef10aecb1e7b3a1b",
           "pragma": "no-cache",
-          "trace-id": "06fd16bdf9b20532ab5a5120473f8c6f",
+          "trace-id": "06fd2b4410c7187f5956bb3e03612621",
           "x-from": "ak",
-          "x-mm-request-id": "2022431855143301769_1789780926vepobx",
+          "x-mm-request-id": "2022431855143301769_1789786181n83g9o",
           "x-session-id": "d41f06064b20b0e153a4e53424eaf14b"
         },
-        "body": "{\"id\":\"06fd16bdf9b20532ab5a5120473f8c6f\",\"choices\":[{\"finish_reason\":\"tool_calls\",\"index\":0,\"message\":{\"content\":\"\u003cthink\u003e\\nThe user wants me to call the add tool with a=2 and b=3\\n\u003c/think\u003e\\n\\n.\",\"role\":\"assistant\",\"name\":\"MiniMax AI\",\"tool_calls\":[{\"id\":\"call_9356fb1196de4e7492f72113\",\"type\":\"function\",\"function\":{\"name\":\"add\",\"arguments\":\"{\\\"a\\\":2,\\\"b\\\":3}\"},\"index\":0}],\"audio_content\":\"\"}}],\"created\":1789780925,\"model\":\"MiniMax-M3\",\"object\":\"chat.completion\",\"usage\":{\"total_tokens\":460,\"total_characters\":0,\"prompt_tokens\":407,\"completion_tokens\":53,\"completion_tokens_details\":{\"reasoning_tokens\":14},\"prompt_tokens_details\":{\"cached_tokens\":256}},\"input_sensitive\":false,\"output_sensitive\":false,\"input_sensitive_type\":0,\"output_sensitive_type\":0,\"output_sensitive_int\":0,\"service_tier\":\"standard\",\"base_resp\":{\"status_code\":0,\"status_msg\":\"\"}}\n",
+        "body": "{\"id\":\"06fd2b4410c7187f5956bb3e03612621\",\"choices\":[{\"finish_reason\":\"tool_calls\",\"index\":0,\"message\":{\"content\":\"\u003cthink\u003e\\nThe user wants me to call the add tool with a=2 and b=3\\n\u003c/think\u003e\\n\\n.\",\"role\":\"assistant\",\"name\":\"MiniMax AI\",\"tool_calls\":[{\"id\":\"call_2757a8d214bb4fccbd1d9613\",\"type\":\"function\",\"function\":{\"name\":\"add\",\"arguments\":\"{\\\"a\\\":2,\\\"b\\\":3}\"},\"index\":0}],\"audio_content\":\"\"}}],\"created\":1789786180,\"model\":\"MiniMax-M3\",\"object\":\"chat.completion\",\"usage\":{\"total_tokens\":460,\"total_characters\":0,\"prompt_tokens\":407,\"completion_tokens\":53,\"completion_tokens_details\":{\"reasoning_tokens\":14},\"prompt_tokens_details\":{\"cached_tokens\":256}},\"input_sensitive\":false,\"output_sensitive\":false,\"input_sensitive_type\":0,\"output_sensitive_type\":0,\"output_sensitive_int\":0,\"service_tier\":\"standard\",\"base_resp\":{\"status_code\":0,\"status_msg\":\"\"}}\n",
         "status": 200
       }
     }
@@ -313,7 +295,7 @@
     "text": "\u003cthink\u003e\nThe user wants me to call the add tool with a=2 and b=3\n\u003c/think\u003e\n\n.",
     "tool_calls": [
       {
-        "ID": "call_9356fb1196de4e7492f72113",
+        "ID": "call_2757a8d214bb4fccbd1d9613",
         "Name": "add",
         "Arguments": {
           "a": 2,

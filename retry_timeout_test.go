@@ -140,7 +140,12 @@ func (w *wrappingBlockClient) Complete(ctx context.Context, req Request) (Respon
 	w.calls++
 	if i < w.blockAttempts {
 		<-ctx.Done()
-		return Response{}, NewAPIError("fake", 0, 0, ErrServer, ctx.Err().Error(), ctx.Err())
+		return Response{}, &APIError{
+			Kind:     ErrServer,
+			Provider: "fake",
+			Message:  ctx.Err().Error(),
+			Err:      ctx.Err(),
+		}
 	}
 	return Response{Text: "ok", StopReason: StopEndTurn}, nil
 }

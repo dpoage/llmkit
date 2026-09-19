@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -9,6 +10,66 @@ import (
 // stderr. Output beyond this size is discarded and Result records that it was
 // truncated.
 const DefaultMaxOutputBytes = 1 << 20 // 1 MiB
+
+// NetworkMode selects a run's network posture. The zero value ("") means
+// "the backend default" and is resolved explicitly at Exec; every non-empty
+// mode must be in the backend's supported set, which each Exec enforces.
+type NetworkMode string
+
+const (
+	// NetworkNone disables all network egress. It is the CLI and Bwrap
+	// backends' default.
+	NetworkNone NetworkMode = "none"
+	// NetworkHost shares the host's own network namespace: full access,
+	// no namespace isolation. The HostExec backend's default is the
+	// equivalent posture (a bare host process has only host networking).
+	NetworkHost NetworkMode = "host"
+	// NetworkBridge attaches the run to the container runtime's default
+	// bridge network. Only the CLI backend honors it — bwrap either
+	// unshares the single host namespace or shares it wholesale, and a
+	// bare host process has no namespace to bridge to — so the other
+	// backends refuse it at Exec.
+	NetworkBridge NetworkMode = "bridge"
+)
+
+// UnsupportedSpecError is returned by Exec when a backend cannot honor a
+// non-empty per-call Spec field, and by NewCLI/NewBwrap when a WithNetwork
+// default names a mode that backend could never honor. A backend never
+// silently runs with a different posture than the Spec requested: refusing
+// the run IS the contract. Match with errors.As; Backend is "cli", "bwrap",
+// or "host".
+type UnsupportedSpecError struct {
+	Backend string // "cli", "bwrap", or "host"
+	Field   string // Spec field name, e.g. "Network", "Image"
+	Value   string // the unsupported value as written
+}
+
+func (e *UnsupportedSpecError) Error() string {
+	return fmt.Sprintf("sandbox: %s backend cannot honor Spec.%s = %q", e.Backend, e.Field, e.Value)
+}
+
+// resolveNetworkMode merges the backend default with the Spec's per-call
+// mode and validates the result against the backend's supported set. An
+// empty requested mode resolves to def; when both are empty the package
+// default NetworkNone applies (the constructors set it explicitly, so this
+// fallback only covers a zero-value backend struct). Anything outside
+// supported is refused with an UnsupportedSpecError — never silently
+// substituted.
+func resolveNetworkMode(backend string, def, requested NetworkMode, supported ...NetworkMode) (NetworkMode, error) {
+	mode := requested
+	if mode == "" {
+		mode = def
+	}
+	if mode == "" {
+		mode = NetworkNone
+	}
+	for _, s := range supported {
+		if mode == s {
+			return mode, nil
+		}
+	}
+	return "", &UnsupportedSpecError{Backend: backend, Field: "Network", Value: string(mode)}
+}
 
 // Spec describes a single sandboxed execution.
 type Spec struct {
@@ -40,32 +101,22 @@ type Spec struct {
 	Env []string
 
 	// Image overrides the backend's default image for this execution. When
-	// empty, the backend's configured default image is used.
+	// empty, the backend's configured default image is used. The Bwrap and
+	// HostExec backends have no image concept, so they refuse a non-empty
+	// Image at Exec instead of silently ignoring it.
 	Image string
-
-	// CPUs is the CPU limit (e.g. 1.5 for one and a half cores). When <= 0 the
-	// backend's default is used.
-	CPUs float64
-
-	// MemoryMB is the memory limit in megabytes. When <= 0 the backend's
-	// default is used.
-	MemoryMB int
 
 	// Timeout bounds the execution wall-clock time as a HARD ceiling. When <= 0
 	// the backend's default timeout is used. On expiry the container is forcibly
 	// removed and Result.TimedOut is set.
 	Timeout time.Duration
 
-	// IdleTimeout bounds wall-clock time with NO observable progress (output
-	// bytes or workspace filesystem activity). A run that keeps making progress
-	// is allowed to continue up to Timeout; one that stalls for IdleTimeout is
-	// cancelled and Result.TimedOut is set. When <= 0 the backend default is
-	// used, and a zero backend default disables the watchdog (Timeout only).
-	IdleTimeout time.Duration
-
-	// Network selects the container network mode. The default (empty) resolves
-	// to "none", disabling all network egress.
-	Network string
+	// Network selects the run's network posture (see NetworkMode). The zero
+	// value resolves to the backend default — NetworkNone on the CLI and
+	// Bwrap backends; the host network on HostExec. A mode the backend
+	// cannot honor is refused at Exec with an UnsupportedSpecError, never
+	// silently substituted.
+	Network NetworkMode
 
 	// WriteFiles are files to write into the workspace before execution, keyed
 	// by path relative to the workspace root. This is how reproduction tests
@@ -218,8 +269,9 @@ type Result struct {
 
 	// TimedOut is true when the execution was killed because it exceeded the
 	// effective timeout OR because the idle watchdog observed no progress for
-	// IdleTimeout. It is left false when WorkspaceQuotaExceeded is true (see
-	// below) — the two are mutually exclusive, distinct kill reasons.
+	// the backend's WithIdleTimeout window. It is left false when
+	// WorkspaceQuotaExceeded is true (see below) — the two are mutually
+	// exclusive, distinct kill reasons.
 	TimedOut bool
 
 	// WorkspaceQuotaExceeded is true when the execution was killed by the
@@ -285,7 +337,7 @@ func (r Result) InfraKilled() bool {
 func (r Result) KillReason() string {
 	switch {
 	case r.WorkspaceQuotaExceeded:
-		return "workspace growth exceeded the configured ceiling (see WithWorkspaceGrowthCeilingMB / WithBwrapWorkspaceGrowthCeilingMB)"
+		return "workspace growth exceeded the configured ceiling (see WithWorkspaceGrowthCeilingMB)"
 	case r.TimedOut:
 		return "timed out"
 	default:
@@ -301,4 +353,16 @@ type Sandbox interface {
 	// infrastructure failures; a non-zero exit code is reported via
 	// Result.ExitCode, not as an error.
 	Exec(ctx context.Context, spec Spec) (Result, error)
+
+	// MaterializeWorkspace clones repoDir into a fresh, caller-owned
+	// workspace directory and returns its path, writing nothing into the
+	// clone itself. It is the public seam behind Spec.Workspace: a caller
+	// that wants to write into and run repeated Execs against ONE persistent
+	// workspace materializes it once here, then passes the returned path as
+	// Spec.Workspace on each Exec instead of letting Exec copy a fresh one
+	// every time. The caller owns the returned directory's entire lifecycle:
+	// Exec(Workspace: ...) never removes it, so the caller MUST os.RemoveAll
+	// it when done (typically via defer at the scope that bounds all the
+	// iteration's Execs).
+	MaterializeWorkspace(repoDir string) (string, error)
 }

@@ -54,6 +54,10 @@ type Runner struct {
 	// parallelTools, when true, dispatches one turn's tool calls concurrently
 	// (see WithParallelTools).
 	parallelTools bool
+	// budgetPool, when non-nil, is checked before every completion and
+	// charged after every successful one (see WithBudgetPool). A nil pool is
+	// unlimited.
+	budgetPool *BudgetPool
 }
 
 // Option configures a [Runner] at construction.
@@ -73,16 +77,13 @@ func WithTranscriptDir(dir string) Option {
 	return func(r *Runner) { r.transcriptDir = dir }
 }
 
-// WithTranscriptKey embeds key in the autosave filename between the timestamp
-// and the task slug, giving a caller that mints a stable identifier for this
-// run BEFORE constructing the Runner (typically a store row's primary key,
-// generated up front so it can be threaded through both the runner and the
-// eventual row insert) an EXACT way to recover the transcript file later, by
-// filename match, instead of a timestamp-window guess. A no-op unless
-// WithTranscriptDir is also set. Empty key is a no-op (preserves the plain
-// "<timestamp>-<slug>.jsonl" naming used by callers with no stable key —
-// e.g. callers that only learn a run's stable ID from their own store after
-// the run completes, and so have nothing to key by up front).
+// WithTranscriptKey embeds key in the autosave filename between the
+// timestamp and the task slug, so a caller that knows a stable identifier
+// for this run BEFORE constructing the Runner can recover the exact
+// transcript file later by filename match instead of guessing from a
+// timestamp window. A no-op unless WithTranscriptDir is also set. Empty key
+// is a no-op: the plain "<timestamp>-<slug>.jsonl" naming is preserved for
+// callers with no stable key.
 func WithTranscriptKey(key string) Option {
 	return func(r *Runner) { r.transcriptKey = key }
 }
@@ -91,6 +92,18 @@ func WithTranscriptKey(key string) Option {
 // default.
 func WithMaxTokens(n int) Option {
 	return func(r *Runner) { r.maxTokens = n }
+}
+
+// WithBudgetPool makes the Runner share pool across its runs: the Runner
+// checks the pool BEFORE every completion (ErrBudgetExhausted stops the run
+// cleanly with TruncBudgetPool) and charges it AFTER every successful
+// completion with that completion's llmkit.Usage.ChargeableTokens
+// (CacheReadWeight-discounted). A nil pool — the zero default — is
+// unlimited: no check, no charge. The pool may be shared by any number of
+// concurrently running Runners; spend external to the loop (other
+// processes, other clients) can still be recorded with BudgetPool.Add.
+func WithBudgetPool(pool *BudgetPool) Option {
+	return func(r *Runner) { r.budgetPool = pool }
 }
 
 // NewRunner builds a Runner bound to client, the given tools, and a system
@@ -108,29 +121,28 @@ func NewRunner(client llmkit.Client, tools []Tool, systemPrompt string, opts ...
 	return r
 }
 
-// Run executes the tool loop for a single task. It seeds the conversation with
-// the system prompt and the task as a user message, then repeatedly calls the
-// model and executes any requested tools until the model finishes its turn, a
-// limit is hit, or an infrastructure error occurs.
-
+// Run executes the tool loop for a single task: it seeds the conversation
+// with the task as a user message, then repeatedly calls the model and
+// executes any requested tools until the model finishes its turn, a limit
+// is hit, or an infrastructure error occurs.
+//
 // Pass [Continue] to run the task inside a prior conversation instead of a
 // fresh one.
 //
-// Limit exhaustion is not an error: it returns an [Outcome] with a non-empty
-// [Outcome.TruncationReason] and the last assistant text preserved. Only
-// context cancellation, client/IO failures, or [StopReasonError] return a
-// non-nil error. The
-// returned Outcome's Transcript
-// is always non-nil, even on error, capturing whatever happened before the
-// failure.
+// Limit exhaustion is not an error: it returns an [Outcome] with a
+// non-empty [Outcome.TruncationReason] and the last completion's text in
+// [Outcome.FinalText]. Only context cancellation, client/IO failures, or
+// [StopReasonError] return a non-nil error. The returned Outcome's
+// Transcript is always non-nil, even on error, capturing whatever happened
+// before the failure.
 //
 // Max-tokens continuation: when a turn stops at the output token cap
 // (StopMaxTokens) with no tool calls, Run makes ONE extra continuation
-// completion that turn — nudging the model to emit the rest — and stitches the
-// two halves into a single assistant message (see [Runner.completeOnce]). This
-// applies to plain Run, not only RunJSON: a truncated final answer is completed
-// rather than returned half-written. It costs at most one additional completion
-// per truncated turn and is reflected in the Outcome's Iterations and Usage.
+// completion that turn — nudging the model to emit the rest — and stitches
+// the two halves into a single assistant message. This applies to plain
+// Run, not only RunJSON: a truncated final answer is completed rather than
+// returned half-written. It costs at most one additional completion per
+// truncated turn and is reflected in the Outcome's Iterations and Usage.
 func (r *Runner) Run(ctx context.Context, task string, opts ...RunOption) (*Outcome, error) {
 	var cfg runConfig
 	for _, opt := range opts {
@@ -161,16 +173,18 @@ type runConfig struct {
 //
 // The same-Runner contract: prev must come from a run of THIS Runner — the
 // system prompt and the tool set must match the seed — and Limits apply per
-// call: iteration and token budgets are re-armed fresh for each continued run
-// (a [BudgetPool] via [Limits.BudgetCheck] already spans runs).
+// call: iteration and token budgets are re-armed fresh for each continued
+// run (a [BudgetPool] installed with [WithBudgetPool] already spans runs).
 //
 // If the seed's final assistant turn carries tool calls that were never
-// answered (the history a context-cancelled run returns), that trailing turn
-// is dropped before the run starts — see [trimDanglingToolTurn] — so the wire
-// request is always well-formed. Trimming can leave two consecutive user
-// turns on the wire (the cancelled tool turn is dropped whole, so nothing
-// answers between them); the in-tree adapters send consecutive user messages
-// as-is and the providers accept or coalesce them.
+// answered (the history a context-cancelled run returns), that trailing
+// turn is dropped before the run starts — only the seed's last assistant
+// turn is checked, and everything from it to the end of the seed is
+// dropped — so the wire request is always well-formed. Trimming can leave
+// two consecutive user turns on the wire (the cancelled tool turn is
+// dropped whole, so nothing answers between them); the in-tree adapters
+// send consecutive user messages as-is and the providers accept or coalesce
+// them.
 //
 // Like Run, there is no context-window management: a caller driving a long
 // conversation must bound the history itself, using the client's
@@ -301,23 +315,15 @@ func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task, finalizeP
 		// run-spanning ceiling is hit rather than running to completion. This is a
 		// read-only check: it does not touch System/Tools/Messages, so request
 		// prefix stability is preserved.
-		if r.limits.BudgetCheck != nil {
-			if err := r.limits.BudgetCheck(); err != nil {
-				if !errors.Is(err, ErrBudgetExhausted) {
-					// A hook failure that isn't a budget stop is an infrastructure
-					// error; surface it rather than misreporting a clean stop.
-					tr.closeStream()
-					return outcome, fmt.Errorf("agent: budget check: %w", err)
-				}
-				// Shared pool exhausted: give the model one reserved finalization
-				// turn (RunJSON only) so a near-budget agent can still emit its
-				// answer before we classify the stop as TruncBudgetPool.
-				if err := r.finalizeAndTruncate(ctx, tr, &messages, outcome, finalizePrompt, responseSchema, compactThreshold, toolNameByID, TruncBudgetPool); err != nil {
-					return outcome, err
-				}
-				r.finishTruncated(outcome, TruncBudgetPool)
-				break
+		if r.budgetPool != nil && r.budgetPool.Check() != nil {
+			// Shared pool exhausted: give the model one reserved finalization
+			// turn (RunJSON only) so a near-budget agent can still emit its
+			// answer before we classify the stop as TruncBudgetPool.
+			if err := r.finalizeAndTruncate(ctx, tr, &messages, outcome, finalizePrompt, responseSchema, compactThreshold, toolNameByID, TruncBudgetPool); err != nil {
+				return outcome, err
 			}
+			r.finishTruncated(outcome, TruncBudgetPool)
+			break
 		}
 
 		if err := ctx.Err(); err != nil {
@@ -384,10 +390,13 @@ func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task, finalizeP
 			}
 			tr.recordToolResult(outcome.Iterations, call, executed[i].result, executed[i].isErr)
 			toolNameByID[call.ID] = call.Name
-			trMsg := llmkit.TextMessage(llmkit.RoleToolResult, executed[i].result)
-			trMsg.ToolCallID = call.ID
-			trMsg.IsError = executed[i].isErr
-			messages = append(messages, trMsg)
+			// ToolResult names the call; ToolError adds the IsError mark for
+			// a failed execution.
+			if executed[i].isErr {
+				messages = append(messages, llmkit.ToolError(call.ID, executed[i].result))
+			} else {
+				messages = append(messages, llmkit.ToolResult(call.ID, executed[i].result))
+			}
 		}
 		if err := ctx.Err(); err != nil {
 			tr.closeStream()
@@ -558,17 +567,22 @@ func (r *Runner) maybeCompact(ctx context.Context, messages []llmkit.Message, th
 // silently (per llmkit.Request docs) and the prompt-embedded schema instruction
 // is the only enforcement — same contract as the main run path.
 //
-// The repair uses a fresh outcome but shares the caller's transcript so the
-// assistant turn is recorded there for parity with the main run path. No tool
-// loop runs; [Hooks.Repair] fires at entry. The single repair completion is
-// issued via completeOnce, so when it itself stops at the output token cap the
-// ONE max-tokens continuation completion is paid on top — the pass is bounded
-// to at most two schema-bearing, tool-less completions.
-func (r *Runner) repair(ctx context.Context, tr *Transcript, prompt string, responseSchema json.RawMessage) (*Outcome, error) {
+// The repair uses a fresh outcome seeded with baseIter — the parent run's
+// completed iteration count — but shares the caller's transcript so the
+// assistant turn is recorded there for parity with the main run path.
+// Seeding keeps the transcript's step numbering monotonic across the
+// boundary (a parent that recorded steps 1..N records its repair at N+1,
+// not at 1), so consumers joining hooks and transcript events on Step see
+// one continuous sequence. No tool loop runs; [Hooks.Repair] fires at
+// entry. The single repair completion is issued via completeOnce, so when
+// it itself stops at the output token cap the ONE max-tokens continuation
+// completion is paid on top — the pass is bounded to at most two
+// schema-bearing, tool-less completions.
+func (r *Runner) repair(ctx context.Context, tr *Transcript, prompt string, responseSchema json.RawMessage, baseIter int) (*Outcome, error) {
 	if r.hooks.Repair != nil {
 		r.hooks.Repair(ctx)
 	}
-	outcome := &Outcome{Transcript: tr}
+	outcome := &Outcome{Transcript: tr, Iterations: baseIter}
 	messages := []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, prompt)}
 	if _, err := r.completeOnce(ctx, tr, &messages, outcome, responseSchema, true); err != nil {
 		return outcome, err
@@ -764,30 +778,39 @@ func (r *Runner) complete(ctx context.Context, tr *Transcript, messages []llmkit
 	outcome.Usage.CacheCreationInputTokens += resp.Usage.CacheCreationInputTokens
 	outcome.LastStopReason = resp.StopReason
 	tr.recordAssistant(outcome.Iterations, resp)
-
-	if resp.Text != "" {
-		outcome.FinalText = resp.Text
-		outcome.FinalTextSet = true
-	} else {
-		outcome.FinalTextSet = false
-	}
+	// FinalText is always the LAST completion's text: assigned
+	// unconditionally, so an empty completion empties it (no stale earlier
+	// turn ever leaks through). completeOnce overwrites it with the stitched
+	// text after a max-tokens continuation.
+	outcome.FinalText = resp.Text
+	// Charge the shared budget pool (WithBudgetPool) for this completion:
+	// every successful completion of the run — main turn, continuation,
+	// forced finalization, repair — pays here, right where its usage is
+	// folded, so the pre-turn pool check above always sees complete spend.
+	r.budgetPool.Add(resp.Usage.ChargeableTokens(r.limits.CacheReadWeight))
 	return resp, nil
 }
 
-// runTool dispatches one tool call. A missing tool or a Run error is returned to
-// the model as an "ERROR:"-prefixed result (isErr=true) rather than aborting the
-// loop. Context cancellation surfaced by the tool is still rendered as a tool
-// error here; the loop's own ctx checks handle real cancellation.
+// runTool dispatches one tool call. A missing tool, a Run error, or a
+// Tool.Run PANIC is returned to the model as an "ERROR:"-prefixed result
+// (isErr=true) rather than aborting the loop — in BOTH dispatch modes, so
+// toggling WithParallelTools never changes failure semantics. A panic is
+// the tool-boundary conversion of a bug into data for the model; a hook
+// panic (ToolStart/ToolEnd) is a harness bug and is NOT recovered here — it
+// propagates to the caller (see [Runner.executeTools] for the parallel-mode
+// path). Context cancellation surfaced by the tool is still rendered as a
+// tool error here; the loop's own ctx checks handle real cancellation.
 //
-// With WithToolTimeout set, the call runs under a derived deadline: on expiry
-// the model receives "ERROR: tool <name> timed out after <d>" and the loop
-// continues — the run's own context is unaffected. A timeout is not a
-// *ToolHealthError and does not fire [Hooks.ToolHealth].
+// With WithToolTimeout set, the call runs under a derived deadline: on
+// expiry the model receives "ERROR: tool <name> timed out after <d>" and
+// the loop continues — the run's own context is unaffected. A timeout is
+// not a *ToolHealthError and does not fire [Hooks.ToolHealth].
 //
 // [Hooks.ToolStart] fires immediately before Tool.Run and [Hooks.ToolEnd]
-// immediately after (Result, IsError, Duration set); a missing tool never
-// runs, so neither fires for it. Hooks fire from the goroutine executing the
-// call — concurrently under WithParallelTools.
+// immediately after (Result, IsError, Duration set — including for a
+// panic-rendered or timed-out call); a missing tool never runs, so neither
+// fires for it. Hooks fire from the goroutine executing the call —
+// concurrently under WithParallelTools.
 func (r *Runner) runTool(ctx context.Context, call llmkit.ToolCall, step int) (result string, isErr bool) {
 	tool, ok := r.tools.lookup(call.Name)
 	if !ok {
@@ -803,8 +826,17 @@ func (r *Runner) runTool(ctx context.Context, call llmkit.ToolCall, step int) (r
 		r.hooks.ToolStart(ctx, ToolEvent{Step: step, Call: call})
 	}
 	start := time.Now()
-	out, err := tool.Run(runCtx, call.Arguments)
+	out, panicVal, err := invokeTool(runCtx, tool, call.Arguments)
 	duration := time.Since(start)
+	if panicVal != nil {
+		// A panicking Tool.Run is model-recoverable data: render it as this
+		// call's error result and keep the loop going.
+		result = fmt.Sprintf("ERROR: tool %s panicked: %v", call.Name, panicVal)
+		if r.hooks.ToolEnd != nil {
+			r.hooks.ToolEnd(ctx, ToolEvent{Step: step, Call: call, Result: result, IsError: true, Duration: duration})
+		}
+		return result, true
+	}
 	if err != nil {
 		// Deadline expiry: report the timeout as the tool result, leaving the
 		// run's own context untouched. The parent-ctx guard keeps a genuine
@@ -835,6 +867,22 @@ func (r *Runner) runTool(ctx context.Context, call llmkit.ToolCall, step int) (r
 	return out, false
 }
 
+// invokeTool invokes Tool.Run once, converting a panic into a non-nil
+// second return so the harness decides how to render it. A panic recovered
+// here never reaches the dispatching goroutine's own recover, which (in
+// parallel mode) is reserved for harness bugs — hook panics — only. A tool
+// that panics with nil still yields a non-nil marker: runtime turns
+// panic(nil) into a *runtime.PanicNilError.
+func invokeTool(ctx context.Context, tool Tool, args json.RawMessage) (out string, panicVal any, err error) {
+	defer func() {
+		if v := recover(); v != nil {
+			out, panicVal, err = "", v, nil
+		}
+	}()
+	out, err = tool.Run(ctx, args)
+	return out, nil, err
+}
+
 // toolResult is one executed tool call's outcome, as returned by [Runner.executeTools].
 type toolResult struct {
 	result string
@@ -847,11 +895,19 @@ type toolResult struct {
 // the returned slice then holds only the already-executed results. Parallel
 // mode (WithParallelTools) runs each call on its own goroutine (bounded by
 // len(calls)) and waits for all of them: per-call failures are isolated (a
-// tool error or panic never fails its siblings — a panic is recovered in the
-// call's goroutine and rendered as that call's error result), and the
-// full-length result slice is always returned. Neither mode mutates the
-// conversation or the transcript; the caller appends the results in call
-// order after executeTools returns.
+// tool error or panic never fails its siblings — runTool renders a panic as
+// that call's error result), and the full-length result slice is always
+// returned. Neither mode mutates the conversation or the transcript; the
+// caller appends the results in call order after executeTools returns.
+//
+// Hook panics are harness bugs and are never rendered to the model. In
+// sequential mode a panicking hook propagates to [Runner.Run]'s caller
+// unchanged. In parallel mode the per-call goroutine recovers it (the only
+// panic that can escape runTool — tool panics are fully contained there),
+// stashes the FIRST hook panic, and this function re-panics with the
+// original value AFTER all sibling goroutines have finished: no goroutine
+// leaks, no result is recorded for the interrupted turn, and the caller sees
+// the same panic value in both modes.
 func (r *Runner) executeTools(ctx context.Context, outcome *Outcome, calls []llmkit.ToolCall) []toolResult {
 	results := make([]toolResult, len(calls))
 	if !r.parallelTools || len(calls) < 2 {
@@ -864,28 +920,33 @@ func (r *Runner) executeTools(ctx context.Context, outcome *Outcome, calls []llm
 		return results
 	}
 	var wg sync.WaitGroup
+	var hookPanic any // the first hook panic, re-panicked below
+	var panicMu sync.Mutex
 	for i, call := range calls {
 		wg.Add(1)
 		go func(i int, call llmkit.ToolCall) {
-			// A panicking Tool.Run must not abort the process from this
-			// goroutine (a panic here escapes any caller recover and kills
-			// every concurrent Run): render it as THIS call's error result so
-			// isolation stays literal. Sequential dispatch propagates the
-			// panic to the Runner's caller, unchanged.
-			// Recover FIRST (this defer runs before wg.Done below) so
-			// wg.Wait cannot observe the result slot before the panic
-			// rendering is published.
 			defer wg.Done()
+			// runTool fully contains tool panics; anything that escapes it
+			// into this goroutine is a harness bug (a hook). Stash the first
+			// one and let every sibling finish — the loop goroutine re-panics
+			// with the original value after wg.Wait, so the panic never dies
+			// in this goroutine and never renders as tool output.
 			defer func() {
 				if v := recover(); v != nil {
-					results[i].result = fmt.Sprintf("ERROR: tool %s panicked: %v", call.Name, v)
-					results[i].isErr = true
+					panicMu.Lock()
+					if hookPanic == nil {
+						hookPanic = v
+					}
+					panicMu.Unlock()
 				}
 			}()
 			results[i].result, results[i].isErr = r.runTool(ctx, call, outcome.Iterations)
 		}(i, call)
 	}
 	wg.Wait()
+	if hookPanic != nil {
+		panic(hookPanic)
+	}
 	return results
 }
 

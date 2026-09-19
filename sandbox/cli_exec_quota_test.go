@@ -63,7 +63,7 @@ exit 0
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	s, err := NewCLI("podman", "unused-image", opts...)
+	s, err := NewCLI(append([]Option{WithRuntime("podman"), WithImage("unused-image")}, opts...)...)
 	if err != nil {
 		t.Fatalf("NewCLI: %v", err)
 	}
@@ -90,7 +90,7 @@ func newFakePodmanNoopCLI(t *testing.T, opts ...Option) *CLI {
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	s, err := NewCLI("podman", "unused-image", opts...)
+	s, err := NewCLI(append([]Option{WithRuntime("podman"), WithImage("unused-image")}, opts...)...)
 	if err != nil {
 		t.Fatalf("NewCLI: %v", err)
 	}
@@ -162,7 +162,8 @@ func TestCLIExec_QuotaKillFidelity(t *testing.T) {
 // TestCLIExec_QuotaKillFidelity_SpawnGateWithIdleTimeoutUnset pins the
 // watchdog spawn gate: the goroutine
 // must start from the growth ceiling ALONE, with IdleTimeout completely
-// unset (both Spec.IdleTimeout and the backend default are zero) — gutting
+// unset (the backend's idle-window default is zero — there is no per-call
+// idle knob) — gutting
 // the "idleTimeout>0 || growthCeilingBytes>0" gate back to "idleTimeout>0"
 // would silently disable growth-ceiling enforcement whenever an operator
 // sets idle_timeout_seconds: 0, reintroducing the original unbounded-disk
@@ -248,7 +249,7 @@ exit 0
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	s, err := NewCLI("podman", "unused-image", opts...)
+	s, err := NewCLI(append([]Option{WithRuntime("podman"), WithImage("unused-image")}, opts...)...)
 	if err != nil {
 		t.Fatalf("NewCLI: %v", err)
 	}

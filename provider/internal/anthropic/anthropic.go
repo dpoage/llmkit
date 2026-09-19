@@ -144,8 +144,11 @@ func (a *anthropicAdapter) buildParams(req llmkit.Request) (anthropic.MessageNew
 	// feature is a silent drop rather than a server 400.
 	if req.Thinking != nil && a.caps.Thinking {
 		if req.Thinking.BudgetTokens <= 0 {
-			return anthropic.MessageNewParams{}, llmkit.NewAPIError("anthropic", 0, 0,
-				llmkit.ErrInvalidRequest, "Thinking.BudgetTokens must be positive", nil)
+			return anthropic.MessageNewParams{}, &llmkit.APIError{
+				Kind:     llmkit.ErrInvalidRequest,
+				Provider: "anthropic",
+				Message:  "Thinking.BudgetTokens must be positive",
+			}
 		}
 		params.Thinking = anthropic.ThinkingConfigParamUnion{
 			OfEnabled: &anthropic.ThinkingConfigEnabledParam{
@@ -209,8 +212,12 @@ func (a *anthropicAdapter) buildParams(req llmkit.Request) (anthropic.MessageNew
 		// the SDK would receive for a user tool.
 		properties, required, err := adapter.ParseToolParameters(req.ResponseSchema)
 		if err != nil {
-			return anthropic.MessageNewParams{}, llmkit.NewAPIError("anthropic", 0, 0,
-				llmkit.ErrInvalidRequest, "ResponseSchema: invalid JSON", err)
+			return anthropic.MessageNewParams{}, &llmkit.APIError{
+				Kind:     llmkit.ErrInvalidRequest,
+				Provider: "anthropic",
+				Message:  "ResponseSchema: invalid JSON",
+				Err:      err,
+			}
 		}
 		schema := anthropic.ToolInputSchemaParam{
 			Properties: properties,
@@ -241,15 +248,21 @@ func applyAnthropicToolChoice(params *anthropic.MessageNewParams, tc llmkit.Tool
 		params.ToolChoice = anthropic.ToolChoiceUnionParam{OfAny: &anthropic.ToolChoiceAnyParam{}}
 	case llmkit.ToolChoiceTool:
 		if tc.Name == "" {
-			return llmkit.NewAPIError("anthropic", 0, 0, llmkit.ErrInvalidRequest,
-				"ToolChoice.Mode=tool requires ToolChoice.Name", nil)
+			return &llmkit.APIError{
+				Kind:     llmkit.ErrInvalidRequest,
+				Provider: "anthropic",
+				Message:  "ToolChoice.Mode=tool requires ToolChoice.Name",
+			}
 		}
 		params.ToolChoice = anthropic.ToolChoiceUnionParam{
 			OfTool: &anthropic.ToolChoiceToolParam{Name: tc.Name},
 		}
 	default:
-		return llmkit.NewAPIError("anthropic", 0, 0, llmkit.ErrInvalidRequest,
-			"unknown ToolChoice.Mode "+string(tc.Mode), nil)
+		return &llmkit.APIError{
+			Kind:     llmkit.ErrInvalidRequest,
+			Provider: "anthropic",
+			Message:  "unknown ToolChoice.Mode " + string(tc.Mode),
+		}
 	}
 	return nil
 }
@@ -306,8 +319,12 @@ func markLastBlock(m *anthropic.MessageParam) bool {
 func toAnthropicTool(t llmkit.ToolDef) (*anthropic.ToolParam, error) {
 	properties, required, err := adapter.ParseToolParameters(t.Parameters)
 	if err != nil {
-		return nil, llmkit.NewAPIError("anthropic", 0, 0, llmkit.ErrInvalidRequest,
-			"tool "+t.Name+": invalid parameters JSON schema", err)
+		return nil, &llmkit.APIError{
+			Kind:     llmkit.ErrInvalidRequest,
+			Provider: "anthropic",
+			Message:  "tool " + t.Name + ": invalid parameters JSON schema",
+			Err:      err,
+		}
 	}
 	schema := anthropic.ToolInputSchemaParam{
 		Properties: properties,
@@ -394,8 +411,11 @@ func toAnthropicMessages(msgs []llmkit.Message) ([]anthropic.MessageParam, error
 			pendingResults = append(pendingResults,
 				anthropic.NewToolResultBlock(m.ToolCallID, m.Text(), m.IsError))
 		default:
-			return nil, llmkit.NewAPIError("anthropic", 0, 0, llmkit.ErrInvalidRequest,
-				"unknown message role "+string(m.Role), nil)
+			return nil, &llmkit.APIError{
+				Kind:     llmkit.ErrInvalidRequest,
+				Provider: "anthropic",
+				Message:  "unknown message role " + string(m.Role),
+			}
 		}
 	}
 	flush()
@@ -432,8 +452,11 @@ func anthropicUserBlocks(m llmkit.Message) ([]anthropic.ContentBlockParamUnion, 
 				return nil, err
 			}
 			if len(b.Data) > 0 && b.MediaType != "application/pdf" {
-				return nil, llmkit.NewAPIError("anthropic", 0, 0, llmkit.ErrInvalidRequest,
-					"document block: Anthropic base64 documents support application/pdf only", nil)
+				return nil, &llmkit.APIError{
+					Kind:     llmkit.ErrInvalidRequest,
+					Provider: "anthropic",
+					Message:  "document block: Anthropic base64 documents support application/pdf only",
+				}
 			}
 			src := anthropic.DocumentBlockParamSourceUnion{}
 			if b.URL != "" {
@@ -485,8 +508,12 @@ func anthropicAssistantBlocks(m llmkit.Message) ([]anthropic.ContentBlockParamUn
 		var input any
 		if len(tc.Arguments) > 0 {
 			if err := json.Unmarshal(tc.Arguments, &input); err != nil {
-				return nil, llmkit.NewAPIError("anthropic", 0, 0, llmkit.ErrInvalidRequest,
-					"assistant tool call "+tc.Name+": invalid arguments JSON", err)
+				return nil, &llmkit.APIError{
+					Kind:     llmkit.ErrInvalidRequest,
+					Provider: "anthropic",
+					Message:  "assistant tool call " + tc.Name + ": invalid arguments JSON",
+					Err:      err,
+				}
 			}
 		}
 		blocks = append(blocks, anthropic.ContentBlockParamUnion{
@@ -518,12 +545,19 @@ func anthropicThinkingBlock(b llmkit.Block) (anthropic.ContentBlockParamUnion, e
 	// the literal bytes "null" — treat both as missing, not as an empty
 	// payload to forward.
 	if len(b.Raw) == 0 || string(b.Raw) == "null" {
-		return anthropic.ContentBlockParamUnion{}, llmkit.NewAPIError("anthropic", 0, 0,
-			llmkit.ErrInvalidRequest, "thinking block: Raw is empty; the verbatim provider payload is required", nil)
+		return anthropic.ContentBlockParamUnion{}, &llmkit.APIError{
+			Kind:     llmkit.ErrInvalidRequest,
+			Provider: "anthropic",
+			Message:  "thinking block: Raw is empty; the verbatim provider payload is required",
+		}
 	}
 	if err := json.Unmarshal(b.Raw, &probe); err != nil {
-		return anthropic.ContentBlockParamUnion{}, llmkit.NewAPIError("anthropic", 0, 0,
-			llmkit.ErrInvalidRequest, "thinking block: malformed Raw JSON", err)
+		return anthropic.ContentBlockParamUnion{}, &llmkit.APIError{
+			Kind:     llmkit.ErrInvalidRequest,
+			Provider: "anthropic",
+			Message:  "thinking block: malformed Raw JSON",
+			Err:      err,
+		}
 	}
 	if probe.Type == "redacted_thinking" {
 		return anthropic.ContentBlockParamUnion{
@@ -613,7 +647,12 @@ func (a *anthropicAdapter) normalizeErr(err error) error {
 	}
 	// Transport/timeout error: leave status 0, mark as server-class so it is
 	// retried.
-	return llmkit.NewAPIError("anthropic", 0, 0, llmkit.ErrServer, err.Error(), err)
+	return &llmkit.APIError{
+		Kind:     llmkit.ErrServer,
+		Provider: "anthropic",
+		Message:  err.Error(),
+		Err:      err,
+	}
 }
 
 // Sources (vendor docs consulted for this table):
@@ -632,11 +671,14 @@ func (a *anthropicAdapter) normalizeErr(err error) error {
 // Keys name exactly the generations the cited docs verify, and matching
 // (adapter.MatchesModelFamily) requires a "-" segment boundary, so an
 // unverified future ID such as "claude-opus-4-9" reports ContextWindow 0
-// instead of inheriting a stale window. The retired 4.0 generation
-// (claude-opus-4 / claude-sonnet-4, deprecated 2026-06) is deliberately
-// unlisted: the API rejects those IDs outright, and unknown reports 0 rather
-// than resurrecting a stale window. Pin exact values for unknown models via
-// Options.Capabilities.
+// instead of inheriting a stale window. The two date-stamped 4.0 first
+// snapshots (May 2025) are listed explicitly — the vendor overview page
+// (https://platform.claude.com/docs/en/about-claude/models/overview) gives
+// both a 200K window with extended thinking — while the retired bare
+// aliases (claude-opus-4 / claude-sonnet-4, deprecated 2026-06) stay
+// unlisted: the API rejects those IDs outright, and unknown reports 0
+// rather than resurrecting a stale window. Pin exact values for unknown
+// models via Options.Capabilities.
 //
 // Only the fields that genuinely vary by model are stored per entry;
 // everything else is shared (parallel tool calls, prompt caching,
@@ -654,6 +696,10 @@ var anthropicModelTable = []anthropicModelCaps{
 	{"claude-opus-4-7", 1_000_000, true},
 	{"claude-opus-4-6", 1_000_000, true},
 	{"claude-sonnet-4-6", 1_000_000, true},
+	// First 4.0-generation snapshots (2025-05-22): 200k window, extended
+	// thinking. Source: https://platform.claude.com/docs/en/about-claude/models/overview
+	{"claude-opus-4-20250514", 200_000, true},
+	{"claude-sonnet-4-20250514", 200_000, true},
 	{"claude-opus-4-5", 200_000, true},
 	{"claude-opus-4-1", 200_000, true},
 	{"claude-sonnet-4-5", 200_000, true},

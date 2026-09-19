@@ -11,6 +11,29 @@ import (
 	"github.com/dpoage/llmkit/provider"
 )
 
+// usagePreamble is the shared first half of every example's usage text:
+// the LLMKIT_* variables the examples read. It lives here, once, so the
+// four examples cannot drift apart.
+const usagePreamble = `missing environment:
+  LLMKIT_PROVIDER  anthropic | openai | openai-compatible | google
+  LLMKIT_MODEL     model name, e.g. claude-sonnet-4-5 or gpt-4o-mini
+  LLMKIT_API_KEY   provider API key (any placeholder for a local endpoint)
+  LLMKIT_BASE_URL  required for openai-compatible, optional otherwise; e.g. a local endpoint
+`
+
+// Usage returns the full usage text an example prints when the LLMKIT_*
+// environment is unset: the shared variable preamble followed by the
+// example's own re-run line. program is the command line, e.g. "go run
+// ./examples/basic"; flags, when non-empty, is appended after a space,
+// e.g. "[--image path/to/photo.jpg]".
+func Usage(program, flags string) string {
+	reRun := program
+	if flags != "" {
+		reRun += " " + flags
+	}
+	return usagePreamble + "\nset the variables above, then re-run:\n  " + reRun
+}
+
 // Load builds a provider.Spec from the environment:
 //
 //	LLMKIT_PROVIDER  required; anthropic | openai | openai-compatible | google

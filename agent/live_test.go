@@ -130,7 +130,7 @@ func TestLiveAgentFuncToolLoop(t *testing.T) {
 		t.Fatalf("transcript missing a mandatory tool call: %v", toolCalls)
 	}
 	// ...and the final answer must carry both tool-reported facts.
-	if !out.FinalTextSet {
+	if out.FinalText == "" {
 		t.Fatalf("no final text; outcome=%+v", out)
 	}
 	final := strings.ToLower(llmkit.StripThinkBlocks(out.FinalText))
@@ -214,7 +214,7 @@ func TestLiveAgentContinueKeepsPriorTurns(t *testing.T) {
 		if err != nil {
 			t.Fatalf("continued run (attempt %d): %v", attempt, err)
 		}
-		if s.FinalTextSet && strings.TrimSpace(llmkit.StripThinkBlocks(s.FinalText)) != "" {
+		if strings.TrimSpace(llmkit.StripThinkBlocks(s.FinalText)) != "" {
 			second = s
 			break
 		}

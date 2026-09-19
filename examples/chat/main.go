@@ -11,10 +11,7 @@
 //
 // Usage:
 //
-//	export LLMKIT_PROVIDER=openai   # anthropic | openai | openai-compatible | google
-//	export LLMKIT_MODEL=gpt-4o-mini
-//	export LLMKIT_API_KEY=sk-...
-//	export LLMKIT_BASE_URL=...      # required for openai-compatible, optional otherwise; e.g. a local endpoint
+//	# export the shared LLMKIT_* variables (examples/internal/envcfg), then:
 //	go run ./examples/chat
 //
 // Without the environment variables set, the program prints usage and exits
@@ -43,14 +40,7 @@ func main() {
 }
 
 func run() error {
-	spec, err := envcfg.Load(`missing environment:
-  LLMKIT_PROVIDER  anthropic | openai | openai-compatible | google
-  LLMKIT_MODEL     model name, e.g. claude-sonnet-4-5 or gpt-4o-mini
-  LLMKIT_API_KEY   provider API key (any placeholder for a local endpoint)
-  LLMKIT_BASE_URL  required for openai-compatible, optional otherwise; e.g. a local endpoint
-
-set the variables above, then re-run:
-  go run ./examples/chat`)
+	spec, err := envcfg.Load(envcfg.Usage("go run ./examples/chat", ""))
 	if err != nil {
 		return err
 	}
@@ -92,7 +82,7 @@ set the variables above, then re-run:
 		if err != nil {
 			return fmt.Errorf("run: %w", err)
 		}
-		if outcome.FinalTextSet {
+		if outcome.FinalText != "" {
 			fmt.Println("assistant>", outcome.FinalText)
 		} else {
 			fmt.Println("assistant> (no assistant text produced)")

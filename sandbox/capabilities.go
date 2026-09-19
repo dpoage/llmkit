@@ -81,7 +81,9 @@ var capCache sync.Map
 // makes N concurrent ProbeCapabilities calls for the same inputs execute the
 // probe argv once, not N times. On a panic inside the probe, done is still
 // closed and waiters receive a nil CapabilitySet (all-unavailable); the
-// panic itself propagates in the caller that ran the probe.
+// panic itself propagates in the caller that ran the probe, and the
+// flight's cache entry is EVICTED so the poisoned nil set is never served
+// to a later caller (see ProbeCapabilities).
 type capFlight struct {
 	done chan struct{}
 	cs   CapabilitySet
@@ -119,14 +121,17 @@ func (f *capFlight) wait() CapabilitySet {
 // block until that shared run completes — under the FIRST claimant's ctx,
 // bounded by the probeTimeout ceiling — and its result is what gets cached.
 // If the probe panics inside a caller-supplied Interpret, the panic
-// propagates in the claimant while waiters receive the flight's nil
-// (all-unavailable) set, which then stays cached until
-// InvalidateCapabilityCache clears it.
+// propagates in the claimant, the flight's cache entry is EVICTED (a
+// panicking Interpret is a caller bug; its poisoned nil set must never be
+// served to a later caller — the next ProbeCapabilities for this key
+// re-probes from scratch), while waiters already blocked on the flight
+// still wake and receive the nil (all-unavailable) set.
 //
 // image is the container image Spec.Image on the CLI backend, so it must be
 // a real, pullable image there; on the Bwrap and HostExec backends there is
-// no image concept and it is only a cache-key label (Spec.Image is
-// ignored). A made-up label on the CLI backend makes every probe Exec fail
+// no image concept and it is only a cache-key label (probeSpecImage leaves
+// Spec.Image empty there — those backends refuse a non-empty Image). A
+// made-up label on the CLI backend makes every probe Exec fail
 // at the runtime, yielding all-false.
 //
 // repoDir gives the probe's Spec a valid RepoDir; it is only read (copied
@@ -170,10 +175,35 @@ func ProbeCapabilities(ctx context.Context, sb Sandbox, image, repoDir string, m
 		// capFlight). The winner returns its own result directly — waiting
 		// on its own done channel would deadlock it.
 		defer close(mine.done)
+		defer func() {
+			if r := recover(); r != nil {
+				// A panicking Interpret is a caller bug; EVICT the flight
+				// so its poisoned nil entry is never served to a later
+				// caller — the next ProbeCapabilities for this key
+				// re-probes from scratch. Waiters already blocked still
+				// wake (done is closed by the defer above) and receive
+				// the nil set. The panic then continues propagating in
+				// the claimant, exactly as before.
+				capCache.Delete(key)
+				panic(r)
+			}
+		}()
 		mine.cs = runProbes(ctx, sb, image, repoDir, mounts, rwMounts, env, probes)
 		return mine.cs
 	}
 	return loaded.(*capFlight).wait()
+}
+
+// probeSpecImage returns the Spec.Image a probe run should carry on sb.
+// Only the container-runtime backend honors a per-call image — the image is
+// what is being probed there; the imageless backends refuse a non-empty
+// Spec.Image at Exec, so the probe leaves it empty for them. image remains
+// part of the cache key either way as the caller's population label.
+func probeSpecImage(sb Sandbox, image string) string {
+	if _, ok := sb.(*CLI); ok {
+		return image
+	}
+	return ""
 }
 
 // probeSetKey identifies a probe list by its entry Names IN ORDER — the
@@ -219,7 +249,7 @@ func runProbes(ctx context.Context, sb Sandbox, image, repoDir string, mounts, r
 		spec := Spec{
 			RepoDir:  repoDir,
 			Cmd:      e.Probe,
-			Image:    image,
+			Image:    probeSpecImage(sb, image),
 			Timeout:  probeTimeout,
 			ROMounts: mounts,
 			RWMounts: rwMounts,

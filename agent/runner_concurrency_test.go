@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -678,3 +679,193 @@ func TestStitchBlocks_KeepsThinkingFromBothHalves(t *testing.T) {
 		t.Errorf("block 2 = %+v, want the joined text block", got[2])
 	}
 }
+
+// doneSignalTool reports on done when its Run returns, so a test can observe
+// the exact moment a sibling goroutine finished.
+type doneSignalTool struct {
+	name   string
+	delay  time.Duration
+	result string
+	done   chan struct{} // closed once, when Run returns
+}
+
+func (d doneSignalTool) Def() llmkit.ToolDef {
+	return llmkit.ToolDef{Name: d.name, Description: "signals completion", Parameters: json.RawMessage(`{"type":"object"}`)}
+}
+
+func (d doneSignalTool) Run(ctx context.Context, _ json.RawMessage) (string, error) {
+	select {
+	case <-ctx.Done():
+		close(d.done)
+		return "", ctx.Err()
+	case <-time.After(d.delay):
+	}
+	close(d.done)
+	return d.result, nil
+}
+
+// TestRun_ToolPanic_SequentialRenderedAsError pins half of the uniform
+// tool-panic contract: under SEQUENTIAL dispatch (the default), a panicking
+// Tool.Run is recovered by the harness and rendered as that call's
+// "ERROR:"-prefixed result with IsError=true — exactly as in parallel mode —
+// ToolEnd fires with that result, and the run continues to completion.
+func TestRun_ToolPanic_SequentialRenderedAsError(t *testing.T) {
+	fc := newFakeClient(
+		toolResp("c1", "panicky", `{}`, 10, 4),
+		textResp("recovered", 5, 2),
+	)
+	var endEv ToolEvent
+	r := NewRunner(fc, []Tool{panicTool{name: "panicky"}}, "sys",
+		WithHooks(Hooks{ToolEnd: func(_ context.Context, ev ToolEvent) { endEv = ev }}))
+
+	out, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run must survive a panicking tool in sequential mode: %v", err)
+	}
+	if out.FinalText != "recovered" {
+		t.Fatalf("FinalText = %q, want the run to continue past the panic", out.FinalText)
+	}
+	var tr *llmkit.Message
+	for i := range fc.requests[1].Messages {
+		if fc.requests[1].Messages[i].Role == llmkit.RoleToolResult && fc.requests[1].Messages[i].ToolCallID == "c1" {
+			tr = &fc.requests[1].Messages[i]
+		}
+	}
+	if tr == nil {
+		t.Fatal("no tool result carried back after the panic")
+	}
+	want := "ERROR: tool panicky panicked: tool exploded"
+	if tr.Text() != want {
+		t.Errorf("panicking call result = %q, want %q", tr.Text(), want)
+	}
+	if !tr.IsError {
+		t.Error("panic tool result IsError = false, want true")
+	}
+	// ToolEnd fired with the rendered result.
+	if endEv.Result != want || !endEv.IsError {
+		t.Errorf("ToolEnd event = %+v, want the rendered panic result with IsError", endEv)
+	}
+}
+
+// TestRun_HookPanic_SequentialPropagates pins the other half of the
+// contract: a panicking HOOK is a harness bug — it propagates out of Run
+// with the ORIGINAL panic value and is never rendered to the model.
+func TestRun_HookPanic_SequentialPropagates(t *testing.T) {
+	fc := newFakeClient(
+		toolResp("c1", "echo", `{}`, 10, 4),
+		textResp("never reached", 5, 2),
+	)
+	hooks := Hooks{
+		ToolStart: func(_ context.Context, ev ToolEvent) {
+			panic("hook exploded")
+		},
+	}
+	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys", WithHooks(hooks))
+
+	done := make(chan any, 1)
+	go func() {
+		defer func() { done <- recover() }()
+		_, _ = r.Run(context.Background(), "task")
+		done <- nil
+	}()
+	select {
+	case v := <-done:
+		if v != "hook exploded" {
+			t.Fatalf("Run panic value = %v, want the original hook panic value", v)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not panic on a sequential hook panic")
+	}
+	// The panic aborted the turn: no second completion was ever issued.
+	if len(fc.requests) != 1 {
+		t.Errorf("requests = %d, want 1 (the hook panic must abort the run, not render as tool output)", len(fc.requests))
+	}
+}
+
+// TestRun_HookPanic_ParallelPropagatesAfterSiblings pins the parallel-mode
+// hook contract: the per-call goroutine recovers the hook panic and the loop
+// goroutine re-panics with the ORIGINAL value only AFTER every sibling
+// goroutine has finished — no goroutine leak, no tool_result recorded for
+// the interrupted turn, nothing rendered to the model.
+func TestRun_HookPanic_ParallelPropagatesAfterSiblings(t *testing.T) {
+	fc := newFakeClient(
+		toolCallsResp(
+			llmkit.ToolCall{ID: "c1", Name: "fast", Arguments: json.RawMessage(`{}`)},
+			llmkit.ToolCall{ID: "c2", Name: "slow", Arguments: json.RawMessage(`{}`)},
+		),
+		textResp("never reached", 5, 2),
+	)
+	slow := doneSignalTool{name: "slow", delay: 150 * time.Millisecond, result: "R_slow", done: make(chan struct{})}
+	// ToolEnd panics for the FAST call only; the slow sibling's ToolEnd must
+	// still fire (hooks are not suppressed by a sibling's panic).
+	var slowEndFired atomicBool
+	hooks := Hooks{
+		ToolEnd: func(_ context.Context, ev ToolEvent) {
+			if ev.Call.Name == "slow" {
+				slowEndFired.store(true)
+				return
+			}
+			panic("hook exploded")
+		},
+	}
+	trDir := t.TempDir()
+	r := NewRunner(fc, []Tool{staggerTool{name: "fast", delay: time.Millisecond, result: "R_fast"}, slow}, "sys",
+		WithHooks(hooks), WithParallelTools(), WithTranscriptDir(trDir))
+	type result struct {
+		panicked any
+	}
+	done := make(chan result, 1)
+	go func() {
+		defer func() { done <- result{panicked: recover()} }()
+		_, _ = r.Run(context.Background(), "task")
+		done <- result{panicked: nil}
+	}()
+
+	// The sibling must FINISH before the panic surfaces: receive its signal
+	// first, then the panic. If the harness re-panicked without waiting, the
+	// order below would invert (the panic would arrive while this receive is
+	// still blocked on the sibling).
+	select {
+	case <-slow.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("slow sibling never finished — leaked goroutine or deadlock")
+	}
+	select {
+	case res := <-done:
+		if res.panicked != "hook exploded" {
+			t.Fatalf("Run panic value = %v, want the original hook panic value re-panicked after siblings finished", res.panicked)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not panic after the sibling finished")
+	}
+	if !slowEndFired.load() {
+		t.Error("slow sibling's ToolEnd never fired — a sibling's hook panic must not suppress it")
+	}
+	// The transcript records NO tool_result for the interrupted turn: the
+	// autosaved JSONL holds the request and assistant events but no
+	// tool_result event — the re-panic happened before the caller recorded
+	// anything for this turn.
+	entries, rerr := os.ReadDir(trDir)
+	if rerr != nil || len(entries) == 0 {
+		t.Fatalf("autosave transcript missing (entries=%d err=%v)", len(entries), rerr)
+	}
+	data, rerr := os.ReadFile(filepath.Join(trDir, entries[0].Name()))
+	if rerr != nil {
+		t.Fatalf("ReadFile: %v", rerr)
+	}
+	if bytes.Contains(data, []byte(`"tool_result"`)) {
+		t.Errorf("transcript recorded a tool_result for the hook-panicked turn:\n%s", data)
+	}
+	if !bytes.Contains(data, []byte(`"request"`)) {
+		t.Errorf("transcript lost the request event:\n%s", data)
+	}
+}
+
+// atomicBool is a tiny concurrency-safe flag for hook callbacks.
+type atomicBool struct {
+	mu sync.Mutex
+	v  bool
+}
+
+func (b *atomicBool) store(v bool) { b.mu.Lock(); b.v = v; b.mu.Unlock() }
+func (b *atomicBool) load() bool   { b.mu.Lock(); defer b.mu.Unlock(); return b.v }
