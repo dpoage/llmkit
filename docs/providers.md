@@ -135,7 +135,11 @@ Adapters map vendor failures onto the sentinel errors in `llmkit`; match them wi
 | Any other 4xx (404, 409, 422, ...) | `ErrInvalidRequest` | No |
 | Transport failure (timeout, connection reset) | `ErrServer` | Yes |
 
-Statuses below 400 are not classified. The OpenAI and Anthropic SDKs only error on 4xx and 5xx: a 200 response with an error body parses as an empty success and returns no error, and a 3xx fails body parsing and surfaces as an `ErrServer`-class error with status code 0. The Google SDK treats any non-2xx status as an error, so a 3xx classifies as `ErrInvalidRequest`. One 200 path does produce an error: an Anthropic SSE stream that carries an error event inside a 200 classifies as `ErrInvalidRequest`.
+Outcomes below 400 are body-parse-driven, not status-driven:
+
+- Anthropic, OpenAI, and openai-compatible: a body that decodes as the vendor's completion object returns no error (a JSON error body decodes the same way; its error field is ignored). A body that fails to parse — empty, or an HTML page — returns an `ErrServer`-class error with status code 0, at any status including 200.
+- Google: any non-2xx status returns `ErrInvalidRequest` carrying that status (302 included). A 200 with an unparseable body (HTML) returns an `ErrServer`-class error with status code 0; an empty 200 body returns no error.
+- Anthropic SSE: a 200 stream that carries an error event returns `ErrInvalidRequest`.
 
 A refused pre-wire request (a `Capabilities` violation, a malformed block, an unknown role) also returns `ErrInvalidRequest` before any network call. See [capabilities](capabilities.md) for which profile fields refuse rather than drop, and the `llmkit` package documentation for the `APIError` fields.
 
