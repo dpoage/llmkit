@@ -4,7 +4,7 @@ llmkit ships three test suites: a hermetic default suite, a `live`-tagged accept
 
 ## The gate
 
-CI (`.github/workflows/ci.yml`) runs exactly these commands on every push and pull request:
+CI (`.github/workflows/ci.yml`) runs these commands on every push and pull request. A dedicated `sandbox-integration` job additionally runs the integration-tagged sandbox suite:
 
 ```bash
 go build ./...
@@ -23,7 +23,7 @@ The tag-gated `go vet` steps compile the gated suites without running them. CI p
 
 | Suite | Command | Needs | Skip behavior |
 | --- | --- | --- | --- |
-| Hermetic (default) | `go test -race -count=1 ./...` | Nothing. No network, no credentials, no backends. | Never skips. Runs everywhere, including CI. |
+| Hermetic (default) | `go test -race -count=1 ./...` | No network, no credentials, no backends. | Needs no network or credentials. A few host-capability tests skip when the host lacks the tool: sandbox bwrap and container-CLI presence checks, platform guards, and the example builds under `-short`. |
 | Live (`live` tag) | `go test -tags live -count=1 ./provider/ ./agent/ ./examples/...` | Vendor credentials in `LLMKIT_LIVE_*` variables. Calls real vendor APIs and costs money. | Each lane skips at the lane level and names the lane and its missing variables. |
 | Integration (`integration` tag) | `go test -tags integration -count=1 ./embed/` and `go test -tags integration -count=1 ./sandbox/` | `./embed/`: a local Ollama server (typical address `localhost:11434`). `./sandbox/`: bwrap (`bubblewrap` on Linux) and/or a container runtime (podman or docker). | Each test auto-skips when its backend is missing. CI runs the sandbox suite in a dedicated `sandbox-integration` job. |
 
@@ -64,11 +64,11 @@ A keyless lane skips with a message naming the lane and its missing variables. E
 | `openai` | `LLMKIT_LIVE_OPENAI_API_KEY` | `LLMKIT_LIVE_OPENAI_MODEL` | `gpt-4o-mini` |
 | `google` | `LLMKIT_LIVE_GOOGLE_API_KEY` | `LLMKIT_LIVE_GOOGLE_MODEL` | `gemini-2.5-flash-lite` |
 
-CI runs the live suite in its own workflow (`.github/workflows/live.yml`): nightly schedule, manual dispatch, and pushes to `master` or `round/**` that touch provider, agent, examples, or internal code. The workflow deliberately does not run on pull requests, so a PR that edits the workflow cannot read the key. The job reads the repo secret `LLMKIT_LIVE_COMPAT_API_KEY` and the repo variables `LLMKIT_LIVE_COMPAT_BASE_URL` and `LLMKIT_LIVE_COMPAT_MODEL`, and sets `LLMKIT_LIVE_COMPAT_CAPS=parallel_tool_calls,prompt_caching`. Without the key the job prints `no live credentials — skipped` and exits 0.
+CI runs the live suite in its own workflow (`.github/workflows/live.yml`): nightly schedule, manual dispatch, and pushes to `master` or `round/**` that touch `provider/`, `agent/`, `examples/`, `internal/`, any root `*.go` file, `go.mod`, `go.sum`, or the workflow file itself. The workflow deliberately does not run on pull requests, so a PR that edits the workflow cannot read the key. The job reads the repo secret `LLMKIT_LIVE_COMPAT_API_KEY` and the repo variables `LLMKIT_LIVE_COMPAT_BASE_URL` and `LLMKIT_LIVE_COMPAT_MODEL`, and sets `LLMKIT_LIVE_COMPAT_CAPS=parallel_tool_calls,prompt_caching`. Without the key the job prints `no live credentials — skipped` and exits 0.
 
 ## LLMKIT_LIVE_COMPAT_CAPS
 
-`LLMKIT_LIVE_COMPAT_CAPS` is a comma-separated list of `llmkit.Capabilities` field names in snake_case (see [capabilities](capabilities.md)). The suite forces each listed capability to true through `Spec.Capabilities`, so the gated cases run and MUST pass instead of skipping. A cap you assert must pass on your endpoint, so leave out any that fail.
+`LLMKIT_LIVE_COMPAT_CAPS` is a comma-separated list of `llmkit.Capabilities` field names in snake_case (see [capabilities](capabilities.md)). The suite forces each listed capability to true through `provider.Spec.Capabilities`, so the gated cases run and must pass instead of skipping. A cap you assert must pass on your endpoint, so leave out any that fail.
 
 The set exported above is **MiniMax-M3-verified, not universal**. Probed 2026-09-18 against MiniMax-M3:
 

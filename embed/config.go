@@ -50,21 +50,22 @@ type Config struct {
 	CacheEnabled bool
 
 	// HTTPClient optionally injects a custom HTTP client (custom transport,
-	// proxy, test double). When non-nil, the embedder uses it as-is, with
-	// its own transport and timeout policy. Round trips are bounded by
-	// Retry.RequestTimeout, never by http.Client.Timeout.
+	// proxy, test double). When non-nil, the embedder uses the injected
+	// client as-is, including its Timeout: an attempt then ends at the
+	// earlier of Retry.RequestTimeout and the client's Timeout. When nil,
+	// the embedder uses a client with no Timeout, so Retry.RequestTimeout
+	// is the only per-attempt bound.
 	HTTPClient *http.Client
 
-	// MaxBatch caps how many texts one HTTP request carries. Zero disables
-	// chunking: the whole batch goes in one request. A negative value is
-	// rejected by Validate. EmbedBatch splits larger inputs and preserves
+	// chunking: the whole batch goes in one request. Validate rejects a
+	// negative value. EmbedBatch splits larger inputs and preserves
 	// order; a failed chunk fails the whole call.
 	MaxBatch int
 
 	// CacheSize caps the number of cache entries when CacheEnabled is true.
-	// Zero means unbounded; a negative value is rejected by Validate. When
-	// positive, inserting past the bound evicts the least recently used
-	// entry.
+	// Zero means unbounded; Validate rejects a negative value. When
+	// positive, the cache evicts the least recently used entry past the
+	// bound.
 	CacheSize int
 
 	// Retry tunes transient-failure retries via the shared
@@ -102,7 +103,7 @@ func defaults() Config {
 //	<PREFIX>_EMBED_URL         - base URL (required; no default)
 //	<PREFIX>_EMBED_API_KEY     - bearer token for the openai-compatible backend (optional)
 //	<PREFIX>_EMBED_DIMENSIONS  - vector dimensions (integer; 0 = auto-detect)
-//	<PREFIX>_EMBED_CACHE       - "true" to enable caching
+//	<PREFIX>_EMBED_CACHE       - "true" (case-insensitive) to enable caching
 //	<PREFIX>_EMBED_TIMEOUT     - per-attempt timeout (Go duration, e.g. "30s"; zero, negative, or unset: 60s embed default)
 //	<PREFIX>_EMBED_MAX_BATCH   - max texts per HTTP request (integer; 0 = no chunking)
 //	<PREFIX>_EMBED_CACHE_SIZE  - max cache entries (integer; 0 = unbounded)
@@ -190,10 +191,11 @@ func (c Config) Validate() error {
 	return nil
 }
 
-// httpClient returns the injected client as-is, or a plain client. Round
-// trips are bounded by the per-attempt Retry.RequestTimeout deadline (see
-// retryDo), not by an http.Client timeout. Callers must treat the returned
-// client as read-only.
+// httpClient returns the injected client as-is, or a plain client with no
+// Timeout. With the plain client, retryDo bounds each round trip with the
+// per-attempt Retry.RequestTimeout deadline. An injected client keeps its
+// own Timeout, which can end an attempt earlier. Callers must treat the
+// returned client as read-only.
 func (c Config) httpClient() *http.Client {
 	if c.HTTPClient != nil {
 		return c.HTTPClient
