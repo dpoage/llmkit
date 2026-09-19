@@ -1,9 +1,69 @@
-// Package embed provides a pluggable embedding layer.
+// Package embed generates vector embeddings from text.
 //
-// It defines the Embedder interface and provides implementations for
-// Ollama (local-first) and any OpenAI-compatible API. Configuration is
-// driven by environment variables, and an optional content-hash cache
-// avoids redundant embedding calls.
+// # Embedders
+//
+// The [Embedder] interface produces vectors: [Embedder.Embed] embeds one
+// text, [Embedder.EmbedBatch] embeds many. EmbedBatch results are
+// index-aligned with the input: len(result) == len(texts) and result[i]
+// embeds texts[i]. Duplicate texts are embedded once per occurrence.
+// Implementations may split a batch into multiple requests; a failed
+// request fails the whole call, with no partial results.
+//
+// Batching is capped by [Config.MaxBatch]. The zero value sends the whole
+// batch in one HTTP request. A positive value splits the input into
+// requests of at most MaxBatch texts. A negative value is rejected by
+// [Config.Validate].
+//
+// # Backends
+//
+// [NewEmbedder] builds the backend named by [Config.Embedder]:
+//
+//   - "ollama" (the [LoadConfig] default) posts to <URL>/api/embed on an
+//     Ollama server. There is no default URL: [Config.Validate] requires a
+//     non-empty [Config.URL]. A local server typically listens on
+//     http://localhost:11434.
+//   - "openai-compatible" posts to <URL>/v1/embeddings on any
+//     OpenAI-compatible API. [Config.APIKey] is optional. When set, the
+//     embedder sends it as an "Authorization: Bearer" header.
+//
+// Both backends detect the vector dimensionality from the first response
+// when [Config.Dimensions] is zero, and reject any later vector of a
+// different length. A zero-length vector during auto-detection fails with
+// [ErrEmptyVector].
+//
+// The module does not bundle an in-process embedding runtime. To embed
+// without a server, implement [Embedder] in your application.
+//
+// # Configuration
+//
+// [Config] holds all settings. [LoadConfig] reads them from
+// <PREFIX>_EMBED* environment variables. The backend defaults to "ollama"
+// and the model to "nomic-embed-text"; the URL has no default.
+// [Config.Validate] rejects negative Dimensions, MaxBatch, and CacheSize
+// values, and jitter outside [0, 1].
+//
+// # Retries
+//
+// Both backends retry transient failures through the shared
+// [llmkit.RetryConfig]: HTTP 429 and 5xx (honoring Retry-After when the
+// server supplies it) and timeout-classified network errors. Other errors,
+// including context cancellation, are terminal.
+// [Config.Retry.RequestTimeout] is the single per-attempt bound; round
+// trips never depend on an http.Client timeout. Unset knobs resolve at
+// construction to the embed defaults of 3 attempts and a 60s per-attempt
+// timeout. BaseDelay and MaxDelay fall back to
+// [llmkit.DefaultRetryConfig]. Jitter is taken literally: 0 means no
+// jitter, and [LoadConfig] seeds the kit default of 20%.
+//
+// # Caching
+//
+// [NewCachedEmbedder] wraps any [Embedder] with an in-memory content-hash
+// cache. Cache keys are SHA-256(model + "\x00" + text), so different models
+// never share entries for the same text. The cache evicts the least
+// recently used entry past a positive capacity; a capacity of zero or less
+// means unbounded. All methods are safe for concurrent use, and every
+// returned vector is a private copy. [NewEmbedder] applies the cache
+// itself when [Config.CacheEnabled] is true, bounded by [Config.CacheSize].
 package embed
 
 import (
@@ -15,27 +75,30 @@ import (
 
 // Embedder generates vector embeddings from text.
 type Embedder interface {
-	// Embed returns the embedding vector for a single text string.
+	// Embed returns the embedding vector for one text.
 	Embed(ctx context.Context, text string) ([]float32, error)
 
 	// EmbedBatch returns embedding vectors for multiple texts.
 	//
 	// Results are index-aligned with the input: len(result) == len(texts)
-	// and result[i] embeds texts[i]. Duplicate texts are not deduplicated —
+	// and result[i] embeds texts[i]. Duplicate texts are not deduplicated:
 	// each occurrence is embedded independently. Implementations may split
 	// the batch into multiple requests; a failed request fails the whole
-	// call (no partial results).
+	// call with no partial results.
 	EmbedBatch(ctx context.Context, texts []string) ([][]float32, error)
 
-	// Dimensions returns the dimensionality of the embedding vectors
-	// produced by the underlying model.
+	// Dimensions returns the dimensionality of the vectors produced by the
+	// underlying model.
 	Dimensions() int
 
 	// ModelName returns the identifier of the model used for embedding.
 	ModelName() string
 }
 
-// NewEmbedder creates an Embedder from the provided Config.
+// NewEmbedder creates an Embedder from cfg.Embedder: "ollama" or
+// "openai-compatible". When cfg.CacheEnabled is true, the embedder is
+// wrapped in a [CachedEmbedder] bounded by cfg.CacheSize. Unknown backend
+// names return an error.
 func NewEmbedder(cfg Config) (Embedder, error) {
 	var emb Embedder
 	var err error
@@ -70,11 +133,10 @@ func batchChunkSize(remaining, maxBatch int) int {
 	return maxBatch
 }
 
-// ErrEmptyVector is returned, wrapped with backend context, when dimension
-// auto-detection (Config.Dimensions == 0) encounters a zero-length embedding
-// vector. Such a vector carries no dimensional information: accepting it
-// would silently hand callers an empty result while leaving the embedder's
-// dimensionality undetected. Test with errors.Is.
+// ErrEmptyVector reports a zero-length vector returned while dimension
+// auto-detection is active (Config.Dimensions == 0). A zero-length vector
+// carries no dimensional information, so the backend rejects it, wrapped
+// with backend context. Test with errors.Is.
 var ErrEmptyVector = errors.New("empty embedding vector")
 
 // checkDimensions enforces vector-dimension consistency for a converted

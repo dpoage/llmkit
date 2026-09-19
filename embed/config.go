@@ -22,7 +22,9 @@ const (
 	defaultEmbedRequestTimeout = 60 * time.Second
 )
 
-// Config holds all embedder-related settings.
+// Config configures an embedding backend, its retry policy, and its
+// optional cache. NewEmbedder, NewOllamaEmbedder, and
+// NewOpenAICompatibleEmbedder call Validate before use.
 type Config struct {
 	// Embedder selects the backend: "ollama" or "openai-compatible".
 	Embedder string
@@ -30,44 +32,50 @@ type Config struct {
 	// Model is the embedding model name (e.g. "nomic-embed-text").
 	Model string
 
-	// URL is the base URL for the embedding service.
+	// URL is the base URL of the embedding service. Validate requires a
+	// non-empty URL; there is no default.
 	URL string
 
-	// APIKey is the bearer token for authenticated APIs (optional for Ollama).
+	// APIKey is the bearer token for the openai-compatible backend. Ollama
+	// ignores it, and Validate does not require it.
 	APIKey string
 
-	// Dimensions overrides the expected vector dimensionality.
-	// When zero the embedder auto-detects from the first response; a later
-	// response with a different dimensionality is an error either way.
+	// Dimensions overrides the expected vector dimensionality. When zero,
+	// the embedder detects the dimensionality from the first response. A
+	// later vector of a different length is an error either way.
 	Dimensions int
 
-	// CacheEnabled turns on the content-hash embedding cache.
+	// CacheEnabled turns on the content-hash embedding cache, bounded by
+	// CacheSize.
 	CacheEnabled bool
 
 	// HTTPClient optionally injects a custom HTTP client (custom transport,
-	// proxy, test double). When non-nil it is used as-is, with its own
-	// transport and timeout policy.
+	// proxy, test double). When non-nil, the embedder uses it as-is, with
+	// its own transport and timeout policy. Round trips are bounded by
+	// Retry.RequestTimeout, never by http.Client.Timeout.
 	HTTPClient *http.Client
 
-	// MaxBatch caps how many texts are sent per HTTP request. Zero disables
-	// chunking (the whole batch goes in one request); negative is rejected
-	// by Validate. EmbedBatch splits larger batches and preserves input
+	// MaxBatch caps how many texts one HTTP request carries. Zero disables
+	// chunking: the whole batch goes in one request. A negative value is
+	// rejected by Validate. EmbedBatch splits larger inputs and preserves
 	// order; a failed chunk fails the whole call.
 	MaxBatch int
 
-	// CacheSize caps the number of cache entries. Zero means unbounded;
-	// negative is rejected by Validate. When positive, inserting past the
-	// bound evicts the least recently used entry.
+	// CacheSize caps the number of cache entries when CacheEnabled is true.
+	// Zero means unbounded; a negative value is rejected by Validate. When
+	// positive, inserting past the bound evicts the least recently used
+	// entry.
 	CacheSize int
 
 	// Retry tunes transient-failure retries via the shared
-	// llmkit.RetryConfig. Unset knobs (<= 0) resolve at backend construction:
-	// MaxAttempts to 3 and RequestTimeout to 60s — the embed bounds, since
-	// embeddings retry less and are lighter than LLM completions. BaseDelay
-	// and MaxDelay fall back to llmkit.DefaultRetryConfig. Jitter is taken
-	// literally: 0 means no jitter, values outside [0, 1] are rejected by
-	// Validate. LoadConfig seeds the kit default 20% jitter so env-driven
-	// configs jitter unless overridden.
+	// llmkit.RetryConfig. Unset knobs (<= 0) resolve at backend
+	// construction: MaxAttempts to 3 and RequestTimeout to 60s, the embed
+	// bounds, because embeddings are lighter and retried less than LLM
+	// completions. BaseDelay and MaxDelay fall back to
+	// llmkit.DefaultRetryConfig. Jitter is taken literally: 0 means no
+	// jitter, and values outside [0, 1] are rejected by Validate.
+	// LoadConfig seeds the kit default 20% jitter so env-driven configs
+	// jitter unless overridden.
 	Retry llmkit.RetryConfig
 }
 
@@ -91,8 +99,8 @@ func defaults() Config {
 //
 //	<PREFIX>_EMBEDDER          - "ollama" (default) or "openai-compatible"
 //	<PREFIX>_EMBED_MODEL       - model name (default: nomic-embed-text)
-//	<PREFIX>_EMBED_URL         - base URL
-//	<PREFIX>_EMBED_API_KEY     - API key / bearer token
+//	<PREFIX>_EMBED_URL         - base URL (required; no default)
+//	<PREFIX>_EMBED_API_KEY     - bearer token for the openai-compatible backend (optional)
 //	<PREFIX>_EMBED_DIMENSIONS  - vector dimensions (integer; 0 = auto-detect)
 //	<PREFIX>_EMBED_CACHE       - "true" to enable caching
 //	<PREFIX>_EMBED_TIMEOUT     - per-attempt timeout (Go duration, e.g. "30s"; zero, negative, or unset: 60s embed default)
@@ -152,7 +160,9 @@ func LoadConfig(prefix string) (Config, error) {
 	return cfg, nil
 }
 
-// Validate checks that the configuration is internally consistent.
+// Validate reports whether c is internally consistent: Embedder names a
+// known backend, Model and URL are non-empty, Dimensions, MaxBatch, and
+// CacheSize are non-negative, and Retry.Jitter is in [0, 1].
 func (c Config) Validate() error {
 	switch c.Embedder {
 	case "ollama", "openai-compatible":
