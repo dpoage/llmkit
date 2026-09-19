@@ -62,10 +62,9 @@ type StreamingClient interface {
 // calls c.Complete and synthesizes deltas from the Response in block order
 // (text blocks → DeltaText, thinking blocks → DeltaThinking, each ToolCall →
 // one DeltaToolCall with ID/Name/Index and the full Arguments) before
-// returning it. Every caller that wants deltas uses this function, so a
-// non-streaming client is never a special case. fn runs on the calling
-// goroutine, and its execution time counts toward the per-attempt
-// RequestTimeout when Stream is wrapped in WithRetry.
+// returning it. fn runs on the calling goroutine, and its execution time
+// counts toward the per-attempt RequestTimeout when Stream is wrapped in
+// WithRetry.
 func Stream(ctx context.Context, c Client, req Request, fn func(Delta) error) (Response, error) {
 	if sc, ok := c.(StreamingClient); ok {
 		return sc.Stream(ctx, req, fn)

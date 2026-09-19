@@ -58,8 +58,7 @@ var ErrUnparseableOutput = errors.New("agent: model output did not parse as JSON
 // of the run — not the unparseable pre-repair answer.
 
 // Pass [WithSteering] to inject queued user turns mid-run ([Steering]):
-// both drain points apply unchanged, and the JSON parse applies to the last
-// completion.
+// both drain points apply; the JSON parse applies to the last completion.
 func (r *Runner) RunJSON(ctx context.Context, task string, schema json.RawMessage, out any, opts ...RunOption) (*Outcome, error) {
 	var cfg runConfig
 	for _, opt := range opts {
@@ -80,9 +79,9 @@ func RunJSONAs[T any](ctx context.Context, r *Runner, task string, opts ...RunOp
 }
 
 // runJSON is the shared implementation behind RunJSON. seed is nil (reseed
-// every call) or a prior Outcome's Messages ([Continue]).
-// attach rides on the seeded task turn (see [Attach]). steering drains at
-// the loop's turn boundaries ([Steering]).
+// every call) or a prior Outcome's Messages ([Continue]); attach rides on
+// the seeded task turn (see [Attach]); steering drains at the loop's turn
+// boundaries ([Steering]).
 func (r *Runner) runJSON(ctx context.Context, seed []llmkit.Message, task string, attach []llmkit.Block, schema json.RawMessage, out any, steering *Steering) (*Outcome, error) {
 	prompt := task + "\n\n" + jsonInstruction(schema)
 

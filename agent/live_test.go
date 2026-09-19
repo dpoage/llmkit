@@ -512,10 +512,10 @@ func TestLiveAgentToolPolicyDeny(t *testing.T) {
 }
 
 // TestLiveAgentDeltaHook pins the Hooks.Delta seam end to end against the
-// live lane: the hook fires at least once, and the concatenated text deltas
-// equal the run's FinalText. With today's adapters the llmkit.Stream fallback
-// synthesizes one delta per content block; as adapter streaming lands the
-// count rises — only >= 1 is pinned here.
+// live lane: the hook fires at least once and the concatenated text
+// deltas equal the run's FinalText. With today's adapters the
+// [llmkit.Stream] fallback synthesizes one delta per content block; as
+// adapter streaming lands the count rises — only >= 1 is pinned here.
 func TestLiveAgentDeltaHook(t *testing.T) {
 	ctx, cl, _ := newLiveAgentClient(t)
 
@@ -554,9 +554,9 @@ func TestLiveAgentDeltaHook(t *testing.T) {
 }
 
 // TestLiveAgentSteering pins that a FollowUp queued before Run turns the
-// would-be final turn into a second assistant turn against the live lane:
-// the follow-up user turn rides Outcome.Messages between the two assistant
-// turns and the handle ends with nothing pending.
+// would-be final turn into a second assistant turn against the live
+// lane: the follow-up user turn rides Outcome.Messages between the two
+// assistant turns and the handle ends with nothing pending.
 func TestLiveAgentSteering(t *testing.T) {
 	ctx, cl, _ := newLiveAgentClient(t)
 	runner := agent.NewRunner(cl, nil, "You are a terse assistant.", agent.WithMaxTokens(1024))

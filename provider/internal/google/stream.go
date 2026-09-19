@@ -20,12 +20,12 @@ var errStreamNoFinishReason = errors.New("google: stream ended before finishReas
 // goes through the same builder as Complete, per-chunk errors through the
 // same normalizeErr, and the reassembled response through the same
 // toResponse — the returned Response is what Complete would have returned
-// for the same wire exchange. fn (when non-nil) runs on the calling
-// goroutine, in wire order: one DeltaText per text part, one DeltaThinking
-// per thought part, one DeltaToolCall per functionCall part with the full
-// arguments (function calls arrive whole; Index is the call's arrival
-// position among the response's calls). A fn error cancels the stream and
-// is returned wrapped, with no Response.
+// for the same wire exchange. fn (when non-nil) runs in wire order: one
+// DeltaText per text part, one DeltaThinking per thought part, one
+// DeltaToolCall per functionCall part with the full arguments (function
+// calls arrive whole; Index is the call's arrival position among the
+// response's calls). A fn error cancels the stream and is returned wrapped,
+// with no Response.
 func (g *googleAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(llmkit.Delta) error) (llmkit.Response, error) {
 	// Per-request transport-status recorder for normalizeErr's fallback,
 	// mirroring Complete.
@@ -60,8 +60,8 @@ func (g *googleAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(
 	}
 	// A stream that carried candidate content but never a finishReason was
 	// truncated. A promptFeedback-only stream (no candidates — the
-	// blocked-prompt shape) is the legitimate Complete response and stays a
-	// success.
+	// blocked-prompt shape) is the legitimate Complete response and stays
+	// a success.
 	if len(agg.Candidates) > 0 && !sawFinish {
 		return llmkit.Response{}, g.normalizeErr(ctx, errStreamNoFinishReason)
 	}
@@ -74,10 +74,10 @@ func (g *googleAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(
 // would have produced: consecutive plain-text parts merge into one part
 // (contiguous text arrives as one part when the whole completion comes
 // back at once), thought and functionCall parts are kept verbatim — their
-// ThoughtSignature bytes must survive for the next turn — and finishReason,
-// usageMetadata, and promptFeedback are each taken from the last chunk that
-// carries them. The adapter never sets CandidateCount, so every chunk
-// carries the single (index-0) candidate.
+// ThoughtSignature bytes must survive for the next turn — and
+// finishReason, usageMetadata, and promptFeedback are each taken from the
+// last chunk that carries them. The adapter never sets CandidateCount, so
+// every chunk carries the single (index-0) candidate.
 func absorbChunk(agg *genai.GenerateContentResponse, chunk *genai.GenerateContentResponse, fn func(llmkit.Delta) error, calls *int, sawFinish *bool) error {
 	if len(chunk.Candidates) > 0 && chunk.Candidates[0] != nil {
 		if len(agg.Candidates) == 0 {

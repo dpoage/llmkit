@@ -10,8 +10,6 @@ import (
 	"github.com/openai/openai-go/v3"
 )
 
-// openaiAdapter satisfies llmkit.StreamingClient for both the openai and
-// openai-compatible provider types.
 var _ llmkit.StreamingClient = (*openaiAdapter)(nil)
 
 // Stream implements [llmkit.StreamingClient] on top of Chat Completions
@@ -74,8 +72,8 @@ func (o *openaiAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(
 		return llmkit.Response{}, o.normalizeErr(err)
 	}
 	// A clean stream end without a finish_reason is a truncated generation:
-	// Complete over the same wire would fail, and returning the partial text
-	// or tool arguments would mask that as success.
+	// Complete over the same wire would fail, and returning the partial
+	// text or tool arguments would mask that as success.
 	if len(acc.Choices) == 0 || acc.Choices[0].FinishReason == "" {
 		return llmkit.Response{}, o.normalizeErr(errors.New("stream ended before finish_reason"))
 	}
@@ -83,10 +81,10 @@ func (o *openaiAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(
 	return o.toResponse(&acc.ChatCompletion), nil
 }
 
-// compactGhostToolCalls drops never-populated entries the accumulator leaves
-// when the wire's tool-call indices are non-contiguous: it places each
-// fragment by the raw vendor index, so a gap becomes a zero entry. Such an
-// entry is not a call — no fragment ever carried it an ID, name, or
+// compactGhostToolCalls drops never-populated entries the accumulator
+// leaves when the wire's tool-call indices are non-contiguous: the
+// accumulator places each fragment by the raw vendor index, so a gap
+// becomes a zero entry — no fragment ever carried it an ID, name, or
 // arguments — and dropping it keeps Response.ToolCalls aligned with the
 // renumbered Delta.Index positions.
 func compactGhostToolCalls(cc *openai.ChatCompletion) {
@@ -109,9 +107,9 @@ func compactGhostToolCalls(cc *openai.ChatCompletion) {
 func deltas(d openai.ChatCompletionChunkChoiceDelta, calls *toolCallTracker) []llmkit.Delta {
 	var out []llmkit.Delta
 	// reasoning_content is not a typed SDK field: compatible endpoints send
-	// it as an extra delta property, which the SDK keeps (raw JSON value) in
-	// JSON.ExtraFields — present but flagged invalid, so Valid() is false
-	// even for a value. Null and absent stay silent.
+	// it as an extra delta property, which the SDK keeps (raw JSON value)
+	// in JSON.ExtraFields — present but flagged invalid, so Valid() is
+	// false even for a value. Null and absent stay silent.
 	if f, ok := d.JSON.ExtraFields["reasoning_content"]; ok {
 		raw := f.Raw()
 		if raw != "" && raw != "null" {
@@ -156,9 +154,9 @@ func (t *toolCallTracker) delta(tc openai.ChatCompletionChunkChoiceDeltaToolCall
 		t.pos[tc.Index] = p
 	}
 	// IDs travel whole on the wire (never fragmented), so the latest wins;
-	// names may fragment across chunks, so they concatenate exactly like the
-	// accumulator does — every fragment then repeats the same accumulated
-	// name the final Response carries.
+	// names may fragment across chunks, so they concatenate exactly like
+	// the accumulator does — every fragment then repeats the same
+	// accumulated name the final Response carries.
 	if tc.ID != "" {
 		t.ids[p] = tc.ID
 	}

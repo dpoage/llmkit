@@ -180,7 +180,7 @@ type runConfig struct {
 	// and [taskTurn] for the shape rules.
 	attach []llmkit.Block
 	// steering, when non-nil, drains queued user turns at the loop's turn
-	// boundaries; see [WithSteering] and [Steering].
+	// boundaries; see [Steering].
 	steering *Steering
 }
 
@@ -247,12 +247,12 @@ func Continue(prev *Outcome) RunOption {
 // decoding. The public Run passes nil; RunJSON passes its schema.
 //
 // steering, when non-nil, delivers queued user turns at two drain points
-// ([Steering]): steers before every completion — at the top of the loop
-// body, below the limit and context checks, so a run stopped by a limit
-// leaves them queued; steers and follow-ups together, in enqueue order,
-// whenever a completion returns no tool calls, continuing the loop instead
-// of breaking (or nudging an empty turn). The bind at entry refuses a
-// second concurrent run on the same handle with [ErrSteeringInUse].
+// ([Steering]): steers before every completion — below the limit and
+// context checks, so a run stopped by a limit leaves them queued;
+// steers and follow-ups together, in enqueue order, whenever a completion
+// returns no tool calls, continuing the loop instead of breaking. The
+// bind at entry refuses a second concurrent run on the same handle
+// with [ErrSteeringInUse].
 //
 // maxEmptyTurnNudges bounds how many times run() will nudge a model that
 // produced neither a tool call nor visible text (after stripping reasoning
@@ -276,8 +276,8 @@ func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task string, at
 	}
 
 	outcome := &Outcome{Transcript: tr}
-	// Binding before any work keeps a second concurrent run on the same
-	// Steering handle from interleaving its turns into this run's queue.
+	// Bind before any work so a second concurrent run on the same handle
+	// cannot interleave its turns into this run's queue.
 	if steering != nil {
 		if err := steering.bind(); err != nil {
 			tr.closeStream()
@@ -369,11 +369,9 @@ func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task string, at
 			return outcome, err
 		}
 
-		// Mid-run steering, pre-completion drain: deliver queued steer
-		// turns before this completion, after the previous turn's tool
-		// results. Living below the limit and context checks keeps a run
-		// stopped by a limit from consuming its queue (see [Steering]);
-		// follow-ups are never delivered here.
+		// Pre-completion drain: deliver queued steers below the limit and
+		// context checks, so a run stopped by a limit leaves its queue
+		// intact (see [Steering]); follow-ups are never drained here.
 		if steering != nil {
 			if steered := steering.drainSteers(); len(steered) > 0 {
 				messages = append(messages, steered...)
@@ -407,13 +405,12 @@ func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task string, at
 				return outcome, &StopReasonError{StopReason: resp.StopReason, Text: resp.Text, Outcome: outcome}
 			}
 
-			// Mid-run steering, would-be-finish drain: any queued turn —
-			// steer or follow-up, in enqueue order — continues the run
-			// instead of ending it. This covers the empty-turn case below
-			// too: fresh user content replaces the synthetic nudge and does
-			// not consume a nudge attempt. The refusal check above returns
-			// before this drain, so a queued turn never papers over a
-			// refusal stop (see [Steering]).
+			// Would-be-finish drain: any queued turn — steer or follow-up,
+			// in enqueue order — continues the loop instead of ending
+			// it, and at an empty turn the queued content replaces the
+			// synthetic nudge without consuming a nudge attempt. The
+			// refusal check above returns before this drain, so a queued
+			// turn never papers over a refusal stop (see [Steering]).
 			if steering != nil {
 				if drained := steering.drainAll(); len(drained) > 0 {
 					messages = append(messages, drained...)
