@@ -181,3 +181,27 @@ func TestWriteFixtureRefusesSecrets(t *testing.T) {
 		t.Fatalf("writeFixture(clean): %v", err)
 	}
 }
+
+func TestRequestCheckMode(t *testing.T) {
+	exchanges := func(n int) []Exchange {
+		out := make([]Exchange, n)
+		return out
+	}
+	cases := []struct {
+		declared string
+		n        int
+		want     string
+	}{
+		{RequestCheckStrict, 1, RequestCheckStrict},
+		{RequestCheckResponseOnly, 3, RequestCheckResponseOnly},
+		{"", 1, RequestCheckStrict},       // legacy single exchange
+		{"", 2, RequestCheckResponseOnly}, // legacy multi exchange
+		{"bogus_mode", 1, "bogus_mode"},   // unknown passes through
+	}
+	for _, tc := range cases {
+		f := &Fixture{RequestCheck: tc.declared, Exchanges: exchanges(tc.n)}
+		if got := f.RequestCheckMode(); got != tc.want {
+			t.Errorf("RequestCheck=%q n=%d: mode = %q, want %q", tc.declared, tc.n, got, tc.want)
+		}
+	}
+}

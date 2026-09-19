@@ -18,7 +18,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"path"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -41,7 +40,7 @@ func TestFixtureReplay(t *testing.T) {
 	for _, p := range matches {
 		p := p
 		name := strings.TrimSuffix(filepath.Base(p), ".json")
-		t.Run(path.Base(filepath.Dir(p))+"/"+name, func(t *testing.T) {
+		t.Run(filepath.Base(filepath.Dir(p))+"/"+name, func(t *testing.T) {
 			f, err := livetest.ReadFixture(p)
 			if err != nil {
 				t.Fatal(err)
@@ -199,17 +198,6 @@ func sameToolCalls(got, want []llmkit.ToolCall) bool {
 	return true
 }
 
-// sameEndpoint compares request paths. The replay host has no vendor base
-// path (the SDK's /v1 style prefix is part of the record-time base URL), so
-// matching is on the final path segment plus the call sequence.
-func sameEndpoint(got, recorded string) bool {
-	if got == recorded {
-		return true
-	}
-	recorded = strings.SplitN(recorded, "?", 2)[0]
-	return path.Base(got) == path.Base(recorded)
-}
-
 // sameJSON reports semantic JSON equality: whitespace and key order do not
 // matter, content does.
 func sameJSON(a, b []byte) bool {
@@ -221,4 +209,32 @@ func sameJSON(a, b []byte) bool {
 		return false
 	}
 	return reflect.DeepEqual(va, vb)
+}
+
+// stripVersionPrefix removes a leading "/v<number>[letters]" segment — the
+// vendor base path the record-time SDK folded into the URL — together with
+// its trailing slash. Paths without such a prefix are returned unchanged.
+func stripVersionPrefix(p string) string {
+	seg, tail, ok := strings.Cut(strings.TrimPrefix(p, "/"), "/")
+	if !ok || seg == "" || seg[0] != 'v' {
+		return p // no version prefix
+	}
+	i := 1
+	for i < len(seg) && seg[i] >= '0' && seg[i] <= '9' {
+		i++
+	}
+	if i == 1 {
+		return p // no digits after 'v'
+	}
+	for j := i; j < len(seg); j++ {
+		if seg[j] < 'a' || seg[j] > 'z' {
+			return p // not a version suffix (e.g. "vendor")
+		}
+	}
+	return "/" + tail
+}
+
+func sameEndpoint(got, recorded string) bool {
+	recorded = strings.SplitN(recorded, "?", 2)[0]
+	return stripVersionPrefix(got) == stripVersionPrefix(recorded)
 }
