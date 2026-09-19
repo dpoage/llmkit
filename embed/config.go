@@ -80,7 +80,7 @@ func defaults() Config {
 //	<PREFIX>_EMBED_API_KEY     - API key / bearer token
 //	<PREFIX>_EMBED_DIMENSIONS  - vector dimensions (integer; 0 = auto-detect)
 //	<PREFIX>_EMBED_CACHE       - "true" to enable caching
-//	<PREFIX>_EMBED_TIMEOUT     - per-attempt timeout (Go duration, e.g. "30s"; default: llmkit's 5m request timeout)
+//	<PREFIX>_EMBED_TIMEOUT     - per-attempt timeout (Go duration, e.g. "30s"; zero, negative, or unset: llmkit's 5m request timeout)
 //	<PREFIX>_EMBED_MAX_BATCH   - max texts per HTTP request (integer; 0 = no chunking)
 //	<PREFIX>_EMBED_CACHE_SIZE  - max cache entries (integer; 0 = unbounded)
 //

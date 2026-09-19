@@ -110,9 +110,13 @@ func TestFSRoot_SymlinkEscape(t *testing.T) {
 
 	if _, err := fr.Resolve("escape"); err == nil {
 		t.Error("resolve via file symlink escaping root should fail")
+	} else if !errors.Is(err, ErrPathEscape) {
+		t.Errorf("file symlink escape error = %v, want ErrPathEscape", err)
 	}
 	if _, err := fr.Resolve("outdir/secret.txt"); err == nil {
 		t.Error("resolve through dir symlink escaping root should fail")
+	} else if !errors.Is(err, ErrPathEscape) {
+		t.Errorf("dir symlink escape error = %v, want ErrPathEscape", err)
 	}
 }
 

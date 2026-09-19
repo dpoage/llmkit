@@ -74,9 +74,9 @@ func batchChunkSize(remaining, maxBatch int) int {
 
 // ErrEmptyVector is returned, wrapped with backend context, when dimension
 // auto-detection (Config.Dimensions == 0) encounters a zero-length embedding
-// vector. A zero-length vector carries no dimensional information; accepting
-// it would lock the embedder to zero dimensions and reject every real vector
-// after it. Test with errors.Is.
+// vector. Such a vector carries no dimensional information: accepting it
+// would silently hand callers an empty result while leaving the embedder's
+// dimensionality undetected. Test with errors.Is.
 var ErrEmptyVector = errors.New("empty embedding vector")
 
 // checkDimensions enforces vector-dimension consistency for a converted
