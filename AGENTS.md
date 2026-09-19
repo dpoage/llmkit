@@ -261,7 +261,13 @@ in its message.
   feeding `RunJSON`/`RunJSONAs`), multi-turn continuation via the
   `Continue` run option, and the synchronous `Hooks` observer surface.
   `Outcome.FinalText` holds the final completion's text (empty when that
-  completion produced none). `WithBudgetPool` makes the Runner check a
+  completion produced none). The `Attach` run option seeds the task turn
+  with image/document blocks: `Text(task)` followed by the given blocks —
+  blocks only when the task is empty — and with `Continue` the attached
+  turn lands after the seed. Attachments ride on the task turn alone,
+  never on the empty-turn or max-tokens nudges, forced finalization, or
+  repair prompts; the adapters own block-kind validation.
+  `WithBudgetPool` makes the Runner check a
   shared `BudgetPool` before every model call and charge it after every
   successful completion. Tool panics are recovered and rendered as that
   call's error result in both dispatch modes (sequential and
