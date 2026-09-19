@@ -134,21 +134,28 @@ full gate — CI (`.github/workflows/ci.yml`) runs exactly this on push/PR:
 ```bash
 go build ./...
 go vet ./...
-go vet -tags live ./provider/      # the `live` real-API probe must keep compiling
+go vet -tags live ./provider/ ./agent/ ./examples/... # the `live` acceptance suite must keep compiling
 go vet -tags integration ./embed/  # the `integration` Ollama test must keep compiling
 go vet -tags integration ./sandbox/ # the sandbox integration test must keep compiling
 go test -race -count=1 ./...
 golangci-lint run ./...            # config: .golangci.yml (v2 schema, conservative set)
 gofmt -l .                         # must print nothing
 ```
-The tag-gated suites RUN (not just compile) outside CI, when their
-backends exist: `go test -tags live ./provider/` exercises the real-API
-probe and skips itself unless the `LLM_LIVE_*` environment variables are
-set; `go test -tags integration ./embed/` needs a local Ollama (default
+
+The tag-gated suites RUN (not just compile) outside CI, when their backends
+exist: `go test -tags live ./provider/ ./agent/ ./examples/...` is the live
+acceptance suite (next section) and skips itself without credentials;
+`go test -tags integration ./embed/` needs a local Ollama (default
 localhost:11434); `go test -tags integration ./sandbox/` needs bwrap
 (`bubblewrap` on Linux) and/or a container runtime (podman/docker) — each
-test auto-skips when its backend is missing, and CI runs the suite in the
-dedicated `sandbox-integration` job.
+test auto-skips when its backend is missing, and CI runs the sandbox suite
+in the dedicated `sandbox-integration` job. The live suite also has its own
+workflow, `.github/workflows/live.yml` (workflow_dispatch, nightly schedule,
+and pushes to `master` or `round/**` touching provider/agent/examples/internal
+— not pull_request, so a PR editing the workflow cannot read the key), driven
+by the repo secret `LLMKIT_LIVE_COMPAT_API_KEY` and the repo variables
+`LLMKIT_LIVE_COMPAT_BASE_URL`, `LLMKIT_LIVE_COMPAT_MODEL`. Without the key
+the job prints `no live credentials — skipped` and exits 0.
 
 `examples/` are runnable contract checks (also compiled by
 `go build ./...`): `go run ./examples/basic`, `go run ./examples/agent`,
@@ -157,6 +164,73 @@ a usage message and
 exit 1 unless `LLMKIT_PROVIDER`, `LLMKIT_MODEL`, and `LLMKIT_API_KEY` are
 set (`LLMKIT_BASE_URL` required for openai-compatible, optional otherwise), so they never touch the network by
 accident.
+
+### Live acceptance suite
+
+Rule: any change to an adapter, the agent loop, or a `llmkit.Capabilities`
+field must name (a) its hermetic test and (b) its live case in bead
+llmkit-3kl.1's registry — `provider/live_registry_test.go` reflects over
+`Capabilities` and fails the plain `go test ./...` suite when any field has
+no case. Oracles in development rounds run the live suite before APPROVE.
+
+Lanes — each auto-skips, naming its lane and exact missing variables, when
+its key is absent:
+
+```bash
+LLMKIT_LIVE_COMPAT_API_KEY / _BASE_URL / _MODEL   # all three required (openai-compatible)
+LLMKIT_LIVE_ANTHROPIC_API_KEY [+_MODEL]           # default claude-haiku-4-5
+LLMKIT_LIVE_OPENAI_API_KEY     [+_MODEL]          # default gpt-4o-mini
+LLMKIT_LIVE_GOOGLE_API_KEY     [+_MODEL]          # default gemini-2.5-flash-lite
+```
+
+The only credential that exists today is MiniMax M3 (openai-compatible).
+Exact local run — costs real money; prompts stay tiny and a full run is well
+under $0.10:
+
+```bash
+set -a; . ~/.config/bugbot/env; set +a
+export LLMKIT_LIVE_COMPAT_API_KEY="$MINIMAX_API_KEY"
+export LLMKIT_LIVE_COMPAT_BASE_URL=https://api.minimax.io/v1
+export LLMKIT_LIVE_COMPAT_MODEL=MiniMax-M3
+export LLMKIT_LIVE_COMPAT_CAPS=parallel_tool_calls,prompt_caching
+go test -tags live -count=1 ./provider/ ./agent/ ./examples/... -v
+```
+
+Add `-update` to the same command to re-record the compat fixtures
+(`provider/testdata/compat/*.json`) — a deliberate local operation, since
+every recording differs (model ids, sample text, token counts). The
+committed fixtures are proven secret-free (the writer refuses to store any
+header carrying the key or any `sk-` substring) and are two-sided under
+replay: single-exchange fixtures declare `request_check: "strict"` and
+assert the adapter's outgoing request (method, path, body as parsed JSON)
+AND the normalized response; multi-turn fixtures declare
+`"response_only"` (later requests echo model-generated ids) and compare
+response normalization only. `provider/fixture_replay_test.go` replays them
+hermetically in every plain `go test ./...`. The nightly `Live` workflow
+(`.github/workflows/live.yml`) runs the suite WITHOUT `-update`: the live
+matrix's assertions against real responses are the vendor-drift gate.
+
+The `LIVE_TOKENS` summary line covers each test binary's own calls; the
+examples package's line prints `note=child-process spend not tallied`
+because the example binaries it launches spend separately.
+
+`LLMKIT_LIVE_COMPAT_CAPS` is a comma list of `Capabilities` field names
+(snake_case) the operator asserts the compat endpoint supports; listed caps
+are forced true via `Spec.Capabilities`, so the gated cases run and MUST
+pass instead of skipping. The set exported above — and by the nightly `Live`
+workflow's job env — is **MiniMax-M3-verified, not universal**; a cap you
+assert must pass, so leave out any that fail on your endpoint.
+
+Probed 2026-09-18 against MiniMax-M3: `parallel_tool_calls` (two tool calls
+in one response) and `prompt_caching` (`CacheReadInputTokens > 0` on a
+repeated prefix) pass; `top_k` passes trivially (the Chat Completions
+adapter never serializes top_k, so the request is accepted);
+`structured_output` FAILS (`response_format` json_schema is accepted but
+ignored — the model answers in prose) and `thinking` FAILS (M3 emits inline
+`<think>` text; the adapter never produces `BlockThinking`).
+`stop_sequences` is claimed by the compat profile, but MiniMax-M3 ignores
+the `stop` parameter at the raw wire, so that case skips with the evidence
+in its message.
 
 ## Architecture Overview
 
