@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/dpoage/llmkit"
 	"math/rand/v2"
 	"net"
 	"net/http"
@@ -11,44 +12,6 @@ import (
 	"strings"
 	"time"
 )
-
-// RetryConfig tunes how embed backends retry transient failures. The four
-// tuning knobs are named and typed as in llmkit.RetryConfig, but the types
-// are deliberately distinct: embed bounds each attempt with the HTTP client
-// timeout (Config.Timeout), not llmkit's per-attempt RequestTimeout, and
-// embed's defaults differ (3 attempts vs root's 4) — the types are not
-// convertible and no shared implementation is implied. Callers do not
-// normalize this struct themselves: Config.retryPolicy fills unset knobs
-// (<= 0, including Jitter) from DefaultRetryConfig and clamps Jitter above 1.
-type RetryConfig struct {
-	// MaxAttempts is the total number of attempts (initial try + retries).
-	// Must be >= 1.
-	MaxAttempts int
-
-	// BaseDelay is the first backoff interval; subsequent delays grow
-	// exponentially.
-	BaseDelay time.Duration
-
-	// MaxDelay caps any single backoff interval, including a server-supplied
-	// Retry-After.
-	MaxDelay time.Duration
-
-	// Jitter, in [0,1], is the fraction of each delay randomized to avoid
-	// thundering herds. 0.2 means the delay is multiplied by a random factor
-	// in [0.8, 1.2].
-	Jitter float64
-}
-
-// DefaultRetryConfig returns the embed defaults: 3 attempts total, 500ms
-// base delay, 30s cap, 20% jitter.
-func DefaultRetryConfig() RetryConfig {
-	return RetryConfig{
-		MaxAttempts: 3,
-		BaseDelay:   500 * time.Millisecond,
-		MaxDelay:    30 * time.Second,
-		Jitter:      0.2,
-	}
-}
 
 // statusError reports a non-200 HTTP response from a backend call. It carries
 // the parsed Retry-After header so the retry loop can honor it; the backend
@@ -131,13 +94,19 @@ func retryable(err error) (delay time.Duration, hasDelay bool, ok bool) {
 }
 
 // retryDo runs fn up to cfg.MaxAttempts times, retrying transient failures
-// with Retry-After-aware exponential backoff. It returns nil on success or
-// the last attempt's error otherwise. Once ctx is done it returns the last
-// error immediately — cancellation is never retried.
-func retryDo(ctx context.Context, cfg RetryConfig, fn func() error) error {
+// with Retry-After-aware exponential backoff. Each attempt runs under a child
+// context carrying the cfg.RequestTimeout deadline — the same per-attempt
+// bound llmkit.WithRetry applies to provider calls — so a stalled round-trip
+// aborts as a timeout-classified error and is retried instead of blocking
+// forever. The parent ctx is never modified: once it is done, retryDo returns
+// the last error immediately — cancellation is never retried. cfg must come
+// from Config.retryPolicy, which normalizes MaxAttempts and RequestTimeout.
+func retryDo(ctx context.Context, cfg llmkit.RetryConfig, fn func(context.Context) error) error {
 	var err error
 	for attempt := 1; ; attempt++ {
-		err = fn()
+		actx, cancel := context.WithTimeout(ctx, cfg.RequestTimeout)
+		err = fn(actx)
+		cancel()
 		if err == nil {
 			return nil
 		}
@@ -157,7 +126,7 @@ func retryDo(ctx context.Context, cfg RetryConfig, fn func() error) error {
 // backoffDelay picks the wait before retrying after the given attempt
 // (1-indexed): a server Retry-After when supplied (capped at MaxDelay),
 // otherwise exponential backoff with jitter.
-func backoffDelay(cfg RetryConfig, attempt int, after time.Duration, hasAfter bool) time.Duration {
+func backoffDelay(cfg llmkit.RetryConfig, attempt int, after time.Duration, hasAfter bool) time.Duration {
 	if hasAfter {
 		if after < 0 {
 			after = 0

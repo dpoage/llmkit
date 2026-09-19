@@ -10,12 +10,11 @@ import (
 )
 
 // Stats reports cumulative cache counters. Hits+Misses counts every text
-// requested through the cache; Size is the current entry count. Counters
-// are lifetime values and are not reset by Clear.
+// requested through the cache. Counters are lifetime values and are not reset
+// by Clear; the current entry count is Len().
 type Stats struct {
 	Hits   int64
 	Misses int64
-	Size   int64
 }
 
 // CachedEmbedder wraps any Embedder with an in-memory content-hash cache.
@@ -56,7 +55,8 @@ func NewCachedEmbedder(inner Embedder, maxSize int) *CachedEmbedder {
 	}
 }
 
-// Embed returns a cached embedding or delegates to the inner Embedder.
+// Embed returns a cached embedding or delegates to the inner Embedder. The
+// returned vector is a private copy: mutating it never affects later reads.
 func (c *CachedEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
 	key := c.cacheKey(text)
 
@@ -64,7 +64,7 @@ func (c *CachedEmbedder) Embed(ctx context.Context, text string) ([]float32, err
 	if el, ok := c.cache[key]; ok {
 		c.lru.MoveToFront(el)
 		c.hits++
-		emb := el.Value.(*lruEntry).emb
+		emb := copyVector(el.Value.(*lruEntry).emb)
 		c.mu.Unlock()
 		return emb, nil
 	}
@@ -80,12 +80,12 @@ func (c *CachedEmbedder) Embed(ctx context.Context, text string) ([]float32, err
 	c.insert(key, emb)
 	c.mu.Unlock()
 
-	return emb, nil
+	return copyVector(emb), nil
 }
 
 // EmbedBatch returns cached embeddings where available and batches the
-// remaining texts through the inner Embedder. Results are index-aligned
-// with the input.
+// remaining texts through the inner Embedder. Results are index-aligned with
+// the input; every returned vector is a private copy (see Embed).
 func (c *CachedEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
@@ -101,7 +101,7 @@ func (c *CachedEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]fl
 		if el, ok := c.cache[key]; ok {
 			c.lru.MoveToFront(el)
 			c.hits++
-			results[i] = el.Value.(*lruEntry).emb
+			results[i] = copyVector(el.Value.(*lruEntry).emb)
 		} else {
 			c.misses++
 			missingTexts = append(missingTexts, text)
@@ -124,7 +124,7 @@ func (c *CachedEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]fl
 
 	c.mu.Lock()
 	for j, idx := range missingIndices {
-		results[idx] = computed[j]
+		results[idx] = copyVector(computed[j])
 		c.insert(c.cacheKey(missingTexts[j]), computed[j])
 	}
 	c.mu.Unlock()
@@ -142,11 +142,11 @@ func (c *CachedEmbedder) ModelName() string {
 	return c.inner.ModelName()
 }
 
-// Stats returns cumulative hit/miss counters and the current entry count.
+// Stats returns cumulative hit/miss counters.
 func (c *CachedEmbedder) Stats() Stats {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return Stats{Hits: c.hits, Misses: c.misses, Size: int64(len(c.cache))}
+	return Stats{Hits: c.hits, Misses: c.misses}
 }
 
 // Len returns the number of entries currently in the cache.
@@ -181,6 +181,14 @@ func (c *CachedEmbedder) insert(key string, emb []float32) {
 		delete(c.cache, oldest.Value.(*lruEntry).key)
 		c.lru.Remove(oldest)
 	}
+}
+
+// copyVector returns a fresh copy of v so cached slices never alias returned
+// data.
+func copyVector(v []float32) []float32 {
+	out := make([]float32, len(v))
+	copy(out, v)
+	return out
 }
 
 // cacheKey produces a deterministic key from model name and text content.
