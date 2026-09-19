@@ -99,27 +99,12 @@ func probeBwrapUserns(bwrapPath string) error {
 // instead (see ProbeCapabilities' mounts/env cache key), the same mechanism
 // used to key a mounted toolchain for the container backend.
 type Bwrap struct {
-	bwrapPath          string
-	defaultCPUs        float64
-	defaultMemory      int
-	defaultTimeout     time.Duration
-	defaultIdleTimeout time.Duration
-	defaultNetwork     NetworkMode
-	pidsLimit          int
-	maxOutputBytes     int
-	// defaultScratchSizeMB is the size (MB) of the writable tmpfs scratch
-	// space applied to BOTH /tmp and the tmpfs root ("/").
-	// <= 0 is treated as unset and falls back to fallbackScratchSizeMB (the
-	// package constant, shared with the container backend) in
-	// buildBwrapArgs.
-	defaultScratchSizeMB int
-	// defaultGrowthCeilingBytes bounds NET workspace growth (the fsSize
-	// delta, not cumulative bytes written — see workspaceProgress) since a
-	// run starts, tolerated by the shared idle watchdog before
-	// killing the run with the distinct Result.WorkspaceQuotaExceeded
-	// reason, independent of idle-stall detection. <= 0 disables the
-	// ceiling.
-	defaultGrowthCeilingBytes int64
+	bwrapPath string
+	// defaults is the shared per-run default state (see the defaults type):
+	// CPU/memory/pids caps, absolute+idle timeouts, network mode, output cap,
+	// scratch size, and workspace-growth ceiling. Backed by
+	// options.baseDefaults and configured via the one shared Option type.
+	defaults
 	// capPolicy selects what Exec does when no resource-limit enforcement
 	// mechanism (neither systemd-run --user --scope nor a delegated cgroup
 	// v2 subtree) is available: CapRequired (the default) fails loudly with
@@ -166,44 +151,9 @@ func NewBwrap(opts ...Option) (*Bwrap, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sandbox: bwrap not found on PATH: %w", err)
 	}
-	s := &Bwrap{
-		bwrapPath:                 path,
-		defaultCPUs:               2,
-		defaultMemory:             2048,
-		defaultTimeout:            10 * time.Minute,
-		defaultNetwork:            NetworkNone,
-		pidsLimit:                 256,
-		maxOutputBytes:            DefaultMaxOutputBytes,
-		defaultScratchSizeMB:      fallbackScratchSizeMB,
-		defaultGrowthCeilingBytes: defaultWorkspaceGrowthCeilingBytes,
-	}
-	if o.has("WithCPUs") {
-		s.defaultCPUs = o.cpus
-	}
-	if o.has("WithMemoryMB") {
-		s.defaultMemory = o.memoryMB
-	}
-	if o.has("WithTimeout") {
-		s.defaultTimeout = o.timeout
-	}
-	if o.has("WithIdleTimeout") {
-		s.defaultIdleTimeout = o.idleTimeout
-	}
-	if o.has("WithNetwork") {
-		s.defaultNetwork = o.network
-	}
-	if o.has("WithPidsLimit") {
-		s.pidsLimit = o.pidsLimit
-	}
-	if o.has("WithMaxOutputBytes") {
-		s.maxOutputBytes = o.maxOutputBytes
-	}
-	if o.has("WithScratchSizeMB") {
-		s.defaultScratchSizeMB = o.scratchSizeMB
-	}
-	if o.has("WithWorkspaceGrowthCeilingMB") {
-		s.defaultGrowthCeilingBytes = int64(o.growthCeilingMB) * 1024 * 1024
-	}
+	s := &Bwrap{bwrapPath: path}
+	s.defaults = baseDefaults()
+	o.applyDefaults(&s.defaults)
 	if o.has("WithCapPolicy") {
 		s.capPolicy = o.capPolicy
 	}

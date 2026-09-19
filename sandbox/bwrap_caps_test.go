@@ -115,7 +115,7 @@ func TestBwrapExec_NoCapMethod_IsSentinel(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repo, "f.txt"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	s := &Bwrap{bwrapPath: "/nonexistent/bwrap", defaultTimeout: time.Second}
+	s := &Bwrap{bwrapPath: "/nonexistent/bwrap", defaults: defaults{defaultTimeout: time.Second}}
 	_, err := s.Exec(context.Background(), Spec{RepoDir: repo, Cmd: []string{"true"}})
 	if !errors.Is(err, ErrBwrapNoCapMethod) {
 		t.Fatalf("Exec error = %v, want errors.Is ErrBwrapNoCapMethod", err)

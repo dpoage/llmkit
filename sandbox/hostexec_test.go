@@ -269,7 +269,7 @@ func TestHostExec_MaterializeWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MaterializeWorkspace: %v", err)
 	}
-	defer os.RemoveAll(ws)
+	defer func() { _ = os.RemoveAll(ws) }()
 	if ws == repoDir {
 		t.Fatal("MaterializeWorkspace returned the live checkout itself")
 	}

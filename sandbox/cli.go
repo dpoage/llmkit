@@ -33,28 +33,13 @@ func Detect() (runtime string, ok bool) {
 // safe for concurrent use: each Exec prepares its own workspace and launches
 // its own uniquely-named container.
 type CLI struct {
-	runtime        string
-	defaultImage   string
-	defaultCPUs    float64
-	defaultMemory  int
-	defaultTimeout time.Duration
-	// defaultIdleTimeout is the inactivity window applied to every run.
-	// Zero disables the idle watchdog (absolute timeout only).
-	defaultIdleTimeout time.Duration
-	defaultNetwork     NetworkMode
-	pidsLimit          int
-	maxOutputBytes     int
-	// defaultScratchSizeMB is the size (MB) of the writable /tmp tmpfs
-	// scratch space. <= 0 is treated as unset and falls back
-	// to fallbackScratchSizeMB (the package constant) in buildRunArgs.
-	defaultScratchSizeMB int
-	// defaultGrowthCeilingBytes bounds NET workspace growth (the fsSize
-	// delta, not cumulative bytes written — see workspaceProgress) since a
-	// run starts, tolerated by the shared idle watchdog before
-	// killing the run with the distinct Result.WorkspaceQuotaExceeded
-	// reason, independent of idle-stall detection. <= 0 disables the
-	// ceiling.
-	defaultGrowthCeilingBytes int64
+	runtime      string
+	defaultImage string
+	// defaults is the shared per-run default state (see the defaults type):
+	// CPU/memory/pids caps, absolute+idle timeouts, network mode, output cap,
+	// scratch size, and workspace-growth ceiling. Backed by options.baseDefaults
+	// and configured via the one shared Option type.
+	defaults
 	// wsCache is the pristine-materialization cache backing prepareWorkspace.
 	// Zero value is ready to use; see wsCache's doc comment.
 	wsCache wsCache
@@ -90,44 +75,11 @@ func NewCLI(opts ...Option) (*CLI, error) {
 	}
 
 	s := &CLI{
-		runtime:                   runtime,
-		defaultImage:              o.image,
-		defaultCPUs:               2,
-		defaultMemory:             2048,
-		defaultTimeout:            10 * time.Minute,
-		defaultNetwork:            NetworkNone,
-		pidsLimit:                 256,
-		maxOutputBytes:            DefaultMaxOutputBytes,
-		defaultScratchSizeMB:      fallbackScratchSizeMB,
-		defaultGrowthCeilingBytes: defaultWorkspaceGrowthCeilingBytes,
+		runtime:      runtime,
+		defaultImage: o.image,
 	}
-	if o.has("WithCPUs") {
-		s.defaultCPUs = o.cpus
-	}
-	if o.has("WithMemoryMB") {
-		s.defaultMemory = o.memoryMB
-	}
-	if o.has("WithTimeout") {
-		s.defaultTimeout = o.timeout
-	}
-	if o.has("WithIdleTimeout") {
-		s.defaultIdleTimeout = o.idleTimeout
-	}
-	if o.has("WithNetwork") {
-		s.defaultNetwork = o.network
-	}
-	if o.has("WithPidsLimit") {
-		s.pidsLimit = o.pidsLimit
-	}
-	if o.has("WithMaxOutputBytes") {
-		s.maxOutputBytes = o.maxOutputBytes
-	}
-	if o.has("WithScratchSizeMB") {
-		s.defaultScratchSizeMB = o.scratchSizeMB
-	}
-	if o.has("WithWorkspaceGrowthCeilingMB") {
-		s.defaultGrowthCeilingBytes = int64(o.growthCeilingMB) * 1024 * 1024
-	}
+	s.defaults = baseDefaults()
+	o.applyDefaults(&s.defaults)
 	// Best-effort hygiene: purge any workspace-cache parent dirs a previous,
 	// non-Closed CLI instance (or a crashed process) left behind. See
 	// purgeStaleWorkspaceCaches.

@@ -119,6 +119,85 @@ func validateNetworkDefault(backend string, m NetworkMode, supported []NetworkMo
 	return &UnsupportedSpecError{Backend: backend, Field: "Network", Value: string(m)}
 }
 
+// defaults is the shared per-run default state both option-taking backends
+// apply: every Spec field that resolves to a backend default when the Spec
+// leaves it unset, plus the knobs with no per-call counterpart. CLI and
+// Bwrap embed it, so their field names — and the option mapping below —
+// exist exactly once.
+type defaults struct {
+	// defaultTimeout is the absolute wall-clock ceiling applied when a
+	// Spec leaves Timeout unset.
+	defaultTimeout time.Duration
+	// defaultIdleTimeout is the inactivity window applied to every run.
+	// Zero disables the idle watchdog (absolute timeout only).
+	defaultIdleTimeout time.Duration
+	defaultNetwork     NetworkMode
+	defaultCPUs        float64
+	defaultMemory      int
+	pidsLimit          int
+	maxOutputBytes     int
+	// defaultScratchSizeMB is the size (MB) of the writable tmpfs scratch
+	// space (/tmp, plus the tmpfs root under bwrap). <= 0 is treated as
+	// unset and falls back to fallbackScratchSizeMB in the argv builders.
+	defaultScratchSizeMB int
+	// defaultGrowthCeilingBytes bounds NET workspace growth (the fsSize
+	// delta, not cumulative bytes written — see workspaceProgress) since a
+	// run starts, tolerated by the shared idle watchdog before killing the
+	// run with the distinct Result.WorkspaceQuotaExceeded reason.
+	// <= 0 disables the ceiling.
+	defaultGrowthCeilingBytes int64
+}
+
+// baseDefaults returns the out-of-the-box posture every backend starts
+// from, before any With* override is applied.
+func baseDefaults() defaults {
+	return defaults{
+		defaultCPUs:               2,
+		defaultMemory:             2048,
+		defaultTimeout:            10 * time.Minute,
+		defaultNetwork:            NetworkNone,
+		pidsLimit:                 256,
+		maxOutputBytes:            DefaultMaxOutputBytes,
+		defaultScratchSizeMB:      fallbackScratchSizeMB,
+		defaultGrowthCeilingBytes: defaultWorkspaceGrowthCeilingBytes,
+	}
+}
+
+// applyDefaults copies each applied option's value over the base defaults.
+// This is the SINGLE site where an option reaches a backend's defaults: a
+// knob added to options without a line here is a compile-visible no-op the
+// option-application tests catch, and no constructor carries its own
+// hand-copied application block that can silently drift.
+func (o *options) applyDefaults(d *defaults) {
+	if o.has("WithCPUs") {
+		d.defaultCPUs = o.cpus
+	}
+	if o.has("WithMemoryMB") {
+		d.defaultMemory = o.memoryMB
+	}
+	if o.has("WithTimeout") {
+		d.defaultTimeout = o.timeout
+	}
+	if o.has("WithIdleTimeout") {
+		d.defaultIdleTimeout = o.idleTimeout
+	}
+	if o.has("WithNetwork") {
+		d.defaultNetwork = o.network
+	}
+	if o.has("WithPidsLimit") {
+		d.pidsLimit = o.pidsLimit
+	}
+	if o.has("WithMaxOutputBytes") {
+		d.maxOutputBytes = o.maxOutputBytes
+	}
+	if o.has("WithScratchSizeMB") {
+		d.defaultScratchSizeMB = o.scratchSizeMB
+	}
+	if o.has("WithWorkspaceGrowthCeilingMB") {
+		d.defaultGrowthCeilingBytes = int64(o.growthCeilingMB) * 1024 * 1024
+	}
+}
+
 // WithRuntime sets the container runtime binary (podman or docker); empty
 // auto-detects. CLI-only: NewBwrap refuses it.
 func WithRuntime(name string) Option {

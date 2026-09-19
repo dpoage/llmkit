@@ -269,8 +269,9 @@ type Result struct {
 
 	// TimedOut is true when the execution was killed because it exceeded the
 	// effective timeout OR because the idle watchdog observed no progress for
-	// IdleTimeout. It is left false when WorkspaceQuotaExceeded is true (see
-	// below) — the two are mutually exclusive, distinct kill reasons.
+	// the backend's WithIdleTimeout window. It is left false when
+	// WorkspaceQuotaExceeded is true (see below) — the two are mutually
+	// exclusive, distinct kill reasons.
 	TimedOut bool
 
 	// WorkspaceQuotaExceeded is true when the execution was killed by the

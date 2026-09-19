@@ -546,3 +546,25 @@ func TestProbeCapabilitiesPanickingInterpretEvictsCache(t *testing.T) {
 		t.Fatal("waiter blocked forever on a panicked flight")
 	}
 }
+
+// TestProbeSpecImageOnlyOnCLI pins probeSpecImage's backend discrimination:
+// only a *CLI carries the image into Spec.Image (there the image IS what is
+// probed), while every imageless backend — Bwrap, HostExec, Mock — must see
+// an empty Spec.Image, since a non-empty one is an UnsupportedSpecError
+// refusal at their Exec. Hermetic: zero-value backends, no construction,
+// no probing.
+func TestProbeSpecImageOnlyOnCLI(t *testing.T) {
+	const image = "some-image-label"
+	if got := probeSpecImage(&CLI{}, image); got != image {
+		t.Errorf("probeSpecImage(&CLI{}) = %q, want the caller's image %q (the container backend honors a per-call image)", got, image)
+	}
+	for name, sb := range map[string]Sandbox{
+		"bwrap":    &Bwrap{},
+		"hostexec": &HostExec{},
+		"mock":     NewMock(MockResponse{}),
+	} {
+		if got := probeSpecImage(sb, image); got != "" {
+			t.Errorf("probeSpecImage(%s) = %q, want \"\" (imageless backends refuse a non-empty Spec.Image)", name, got)
+		}
+	}
+}
