@@ -3,6 +3,7 @@ package embed
 import (
 	"context"
 	"encoding/json"
+	"github.com/dpoage/llmkit"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -781,6 +782,12 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	}
 	if cfg.CacheEnabled {
 		t.Error("default CacheEnabled should be false")
+	}
+	def := llmkit.DefaultRetryConfig()
+	if cfg.Retry.MaxAttempts != def.MaxAttempts || cfg.Retry.BaseDelay != def.BaseDelay ||
+		cfg.Retry.MaxDelay != def.MaxDelay || cfg.Retry.Jitter != def.Jitter ||
+		cfg.Retry.RequestTimeout != def.RequestTimeout {
+		t.Errorf("default Retry = %+v, want %+v", cfg.Retry, def)
 	}
 }
 

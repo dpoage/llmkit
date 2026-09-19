@@ -83,7 +83,7 @@ func (r *FSRoot) Resolve(rel string) (string, error) {
 	// and ensure it still lands inside the root. This defeats symlinks that point
 	// outside the tree. Non-existent tail components are fine (the access will
 	// fail naturally); we only validate what exists.
-	if resolved, err := r.evalExistingPrefix(cleaned); err == nil {
+	if resolved, err := evalExistingPrefixPath(cleaned); err == nil {
 		if !r.contains(resolved) {
 			return "", fmt.Errorf("%w: %q resolves outside the root via symlink", ErrPathEscape, rel)
 		}
@@ -98,11 +98,4 @@ func (r *FSRoot) contains(p string) bool {
 		return true
 	}
 	return strings.HasPrefix(p, r.root+string(filepath.Separator))
-}
-
-// evalExistingPrefix delegates to the package-level EvalExistingPrefixPath so
-// both the in-repository and dep-source traversal guards share one
-// implementation (see pathutil.go).
-func (r *FSRoot) evalExistingPrefix(p string) (string, error) {
-	return EvalExistingPrefixPath(p)
 }
