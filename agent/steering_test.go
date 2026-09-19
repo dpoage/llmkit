@@ -647,8 +647,12 @@ func TestSteeringRejectsSecondRunWhileBound(t *testing.T) {
 	}()
 	cl.waitServed(t, 0)
 
+	// A short-cancel context keeps a mutated build (bind check removed)
+	// failing fast on the ctx error instead of hanging on the gate.
+	ctx2, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
 	// A second concurrent run on the same handle fails at Run entry.
-	_, err2 := runner.Run(context.Background(), "two", WithSteering(s))
+	_, err2 := runner.Run(ctx2, "two", WithSteering(s))
 	if !errors.Is(err2, ErrSteeringInUse) {
 		t.Fatalf("second run err = %v, want ErrSteeringInUse", err2)
 	}
@@ -696,5 +700,150 @@ func TestSteeringQueuedTurnReplacesEmptyTurnNudge(t *testing.T) {
 	}
 	if outcome.FinalText != "answered" {
 		t.Fatalf("FinalText = %q, want answered", outcome.FinalText)
+	}
+}
+
+func TestSteeringSteerRescueDoesNotConsumeNudgeBudget(t *testing.T) {
+	empty := scriptStep{resp: llmkit.Response{StopReason: llmkit.StopEndTurn}}
+	cl := newSteerGate(empty, empty, empty, empty, empty)
+	s := NewSteering()
+	runner := NewRunner(cl, nil, "sys")
+
+	done := make(chan struct{})
+	var outcome *Outcome
+	var err error
+	go func() {
+		defer close(done)
+		outcome, err = runner.Run(context.Background(), "task", WithSteering(s))
+	}()
+
+	// Two steer-rescued empty turns, then genuinely empty turns that ride
+	// the nudge path.
+	cl.waitServed(t, 0)
+	s.Steer(llmkit.Text("STEER-A"))
+	cl.releaseNow(0)
+	cl.waitServed(t, 1)
+	s.Steer(llmkit.Text("STEER-B"))
+	cl.releaseNow(1)
+	for i := 2; i <= 4; i++ {
+		cl.waitServed(t, i)
+		cl.releaseNow(i)
+	}
+	waitDone(t, done)
+
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	reqs := cl.requests()
+	// The request in which a steer turn FIRST appears must be free of the
+	// synthetic nudge: a steer rescue replaces the nudge for that turn.
+	// (Later requests carry both, as persisted history.)
+	for _, steer := range []string{"STEER-A", "STEER-B"} {
+		first := -1
+		for i, req := range reqs {
+			if hasUserText(req.Messages, steer) {
+				first = i
+				break
+			}
+		}
+		if first < 0 {
+			t.Fatalf("%s never reached the wire", steer)
+		}
+		if hasUserText(reqs[first].Messages, emptyTurnNudge) {
+			t.Fatalf("request %d delivered %s together with the synthetic nudge", first, steer)
+		}
+	}
+	// The nudge turns persist in the final history: exactly the two
+	// budgeted nudges may be there, none consumed by the steer rescues.
+	nudges := 0
+	for _, m := range outcome.Messages {
+		if m.Role == llmkit.RoleUser && m.Text() == emptyTurnNudge {
+			nudges++
+		}
+	}
+	if nudges != 2 {
+		t.Fatalf("nudge turns in the final history = %d, want 2 (steer rescues must not consume nudge attempts)", nudges)
+	}
+	if !hasUserText(outcome.Messages, "STEER-A") || !hasUserText(outcome.Messages, "STEER-B") {
+		t.Fatal("Outcome.Messages lost a steer-rescued turn")
+	}
+}
+
+func TestSteeringDrainKeepsEnqueueOrder(t *testing.T) {
+	cl := newSteerGate(
+		toolResp("call1", "echo", `"x"`, 10, 5),
+		textResp("mid", 10, 5),
+		textResp("final", 10, 5),
+	)
+	s := NewSteering()
+	runner := NewRunner(cl, []Tool{echoTool{name: "echo"}}, "sys")
+
+	done := make(chan struct{})
+	var outcome *Outcome
+	var err error
+	go func() {
+		defer close(done)
+		outcome, err = runner.Run(context.Background(), "task", WithSteering(s))
+	}()
+
+	// Interleave the kinds while the loop is blocked: the FIFO across both
+	// is what each drain must preserve.
+	cl.waitServed(t, 0)
+	s.FollowUp(llmkit.Text("F1"))
+	s.Steer(llmkit.Text("S1"))
+	s.Steer(llmkit.Text("S2"))
+	s.FollowUp(llmkit.Text("F2"))
+	cl.releaseNow(0)
+	cl.waitServed(t, 1)
+
+	// Turn-boundary drain: the steers deliver in enqueue order, contiguous
+	// after the tool results; the follow-ups wait.
+	reqs := cl.requests()
+	toolIdx := -1
+	for i, m := range reqs[1].Messages {
+		if m.Role == llmkit.RoleToolResult {
+			toolIdx = i
+		}
+	}
+	if toolIdx < 0 {
+		t.Fatal("request 2 lost the tool result")
+	}
+	tail := reqs[1].Messages[toolIdx+1:]
+	if len(tail) != 2 || tail[0].Text() != "S1" || tail[1].Text() != "S2" {
+		t.Fatalf("steer drain delivered [%s, %s], want [S1, S2] contiguous after the tool result",
+			tail[0].Text(), tail[1].Text())
+	}
+	if hasUserText(reqs[1].Messages, "F1") || hasUserText(reqs[1].Messages, "F2") {
+		t.Fatal("follow-ups delivered at the turn boundary")
+	}
+	cl.releaseNow(1)
+	cl.waitServed(t, 2)
+
+	// Finish drain: the follow-ups deliver in enqueue order, directly after
+	// the assistant turn that would have ended the run.
+	msgs := cl.requests()[2].Messages
+	if n := len(msgs); n < 3 || msgs[n-2].Text() != "F1" || msgs[n-1].Text() != "F2" {
+		t.Fatalf("finish drain tail = [%s, %s], want [F1, F2]",
+			msgs[n-2].Text(), msgs[n-1].Text())
+	}
+	cl.releaseNow(2)
+	waitDone(t, done)
+
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if outcome.FinalText != "final" {
+		t.Fatalf("FinalText = %q, want final", outcome.FinalText)
+	}
+	order := map[string]int{"S1": -1, "S2": -1, "F1": -1, "F2": -1}
+	for i, m := range outcome.Messages {
+		if m.Role == llmkit.RoleUser {
+			if _, ok := order[m.Text()]; ok {
+				order[m.Text()] = i
+			}
+		}
+	}
+	if order["S1"] < 0 || order["S1"] > order["S2"] || order["S2"] > order["F1"] || order["F1"] > order["F2"] {
+		t.Fatalf("delivery order broken: %v", order)
 	}
 }

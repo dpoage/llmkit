@@ -90,44 +90,70 @@ func run() error {
 
 	fmt.Println("llmkit chat — type a message (/think toggles extended thinking, ctrl-d to exit).")
 
-	var prev *agent.Outcome
+	var (
+		prev        *agent.Outcome
+		steering    *agent.Steering
+		result      chan runResult
+		pendingLine string
+	)
+
+	// reportAndRetire prints a finished run and retires its steering
+	// handle. Turns queued in the race between the run's finish and the
+	// input loop never reached the model; they are called out instead of
+	// being dropped silently.
+	reportAndRetire := func(res runResult) error {
+		p, rerr := reportRun(res)
+		prev = p
+		if rerr != nil {
+			return rerr
+		}
+		if n := steering.Pending(); n > 0 {
+			fmt.Printf("(steering: %d line(s) typed as the run finished were not delivered — resend them)\n", n)
+		}
+		steering = nil
+		return nil
+	}
+
 	for {
-		fmt.Print("you> ")
-		line, ok := <-lines
-		if !ok {
-			break
-		}
-		line = strings.TrimSpace(line)
+		line := pendingLine
+		pendingLine = ""
 		if line == "" {
-			continue
-		}
-		if line == "/think" {
-			toggleThink(think, thinkingSupported)
-			continue
+			fmt.Print("you> ")
+			l, ok := <-lines
+			if !ok {
+				break
+			}
+			line = strings.TrimSpace(l)
+			if line == "" {
+				continue
+			}
+			if line == "/think" {
+				toggleThink(think, thinkingSupported)
+				continue
+			}
 		}
 
-		// Idle: start a run with a fresh steering handle. Lines typed after
-		// the run finished are new tasks, not stale steering.
-		steering := agent.NewSteering()
-		result := make(chan runResult, 1)
-		go func(task string, p *agent.Outcome) {
+		// Idle: start a run with a fresh steering handle.
+		steering = agent.NewSteering()
+		s := steering
+		p := prev
+		result = make(chan runResult, 1)
+		go func(task string) {
 			o, e := runner.Run(context.Background(), task,
-				agent.Continue(p), agent.WithSteering(steering))
+				agent.Continue(p), agent.WithSteering(s))
 			result <- runResult{outcome: o, err: e}
-		}(line, prev)
+		}(line)
 
 		// Serve stdin while the run is in flight; the prompt marks it.
-		for {
+		for steering != nil {
 			fmt.Print("steered> ")
 			select {
 			case l, ok := <-lines:
 				if !ok {
 					// stdin closed mid-run: nothing more to steer; let the
 					// run finish, print its answer, and exit.
-					p, rerr := reportRun(<-result)
-					prev = p
-					if rerr != nil {
-						return rerr
+					if err := reportAndRetire(<-result); err != nil {
+						return err
 					}
 					return nil
 				}
@@ -137,18 +163,24 @@ func run() error {
 				case l == "/think":
 					toggleThink(think, thinkingSupported)
 				default:
-					steering.Steer(llmkit.Text(l))
+					// The run may have finished while the line was being
+					// typed: take the finished result back first so the
+					// line becomes the next task instead of steering a
+					// run that already ended.
+					select {
+					case res := <-result:
+						if err := reportAndRetire(res); err != nil {
+							return err
+						}
+						pendingLine = l
+					default:
+						steering.Steer(llmkit.Text(l))
+					}
 				}
 			case res := <-result:
-				p, rerr := reportRun(res)
-				prev = p
-				if rerr != nil {
-					return rerr
+				if err := reportAndRetire(res); err != nil {
+					return err
 				}
-				steering = nil
-			}
-			if steering == nil {
-				break
 			}
 		}
 	}
