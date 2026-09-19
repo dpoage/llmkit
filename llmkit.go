@@ -1,7 +1,8 @@
 // Package llmkit is a thin, provider-agnostic abstraction over LLM backends
 // (Anthropic, OpenAI, Google, and any OpenAI-compatible endpoint). Provider
 // construction lives in llmkit/provider and its adapter subpackages; this
-// package holds the normalized types, errors, and client wrappers.
+// package holds the normalized types, errors, and client wrappers that every
+// provider shares.
 //
 // It normalizes three things that otherwise differ wildly between providers:
 //
@@ -12,15 +13,107 @@
 //     adapter honors) so callers can adapt without provider sniffing;
 //   - errors (rate limiting, auth, context-too-long, ...) into a small typed set.
 //
-// Delivery is incremental where the backend allows it: a client whose type
-// also implements [StreamingClient] exposes Stream, which delivers
-// fragments to a callback and returns the same normalized Response as
-// Complete. [Stream] accepts any Client — streaming or not — so callers
-// never special-case a non-streaming backend.
-//
 // The layer is deliberately thin: each adapter maps these normalized types
 // to/from its vendor SDK and nothing more. Higher-level concerns (agent tool
 // loops, budgets, transcripts) live in the caller's code.
+//
+// # Messages and blocks
+//
+// A conversation is a list of [Message] values. Each Message carries an
+// ordered list of [Block] values plus role-specific fields. Build blocks with
+// [Text], [Image], [ImageURL], [Document], and [DocumentURL]; assemble
+// messages with [TextMessage], [UserMessage], [SystemMessage], [ToolResult],
+// and [ToolError].
+//
+// Each role accepts specific block kinds, and every adapter enforces the rule
+// BEFORE any wire call. A violation returns an error wrapping
+// [ErrInvalidRequest]:
+//
+//   - [RoleUser]: text, image, document
+//   - [RoleAssistant]: text and thinking; [Message.ToolCalls] carries tool-use
+//     requests
+//   - [RoleSystem] and [RoleToolResult]: text only
+//
+// The constructors panic on inputs no adapter can accept (an image without
+// bytes, a tool result without a call ID). Hand-built [Block] and [Message]
+// literals stay legal; they reach the same adapter validation and produce the
+// same [ErrInvalidRequest] when invalid.
+//
+// # Requests and responses
+//
+// [Request] is the normalized completion request; [Response] is the normalized
+// completion. A [Request.MaxTokens] of zero or negative means
+// [DefaultMaxTokens] on every adapter. [Response.Text] concatenates the text
+// blocks; [Response.Blocks] keeps every block in provider order;
+// [Response.ToolCalls] carries raw JSON arguments.
+//
+// # Usage
+//
+// [Usage] reports token consumption. [Usage.InputTokens] is the TOTAL prompt
+// size: it includes cache-read and cache-creation tokens.
+// [Usage.CacheReadInputTokens] and [Usage.CacheCreationInputTokens] are
+// informational subsets of InputTokens, never additions to it. A caller that
+// ignores the cache fields sees exactly the pre-caching numbers.
+// [Usage.ChargeableTokens] discounts cache reads by a weight for budget math;
+// cache-creation tokens stay at full weight.
+//
+// # Errors
+//
+// Complete and Stream return [*APIError] for provider-side failures. Each
+// APIError wraps exactly one sentinel ([ErrRateLimited], [ErrAuth],
+// [ErrContextTooLong], [ErrInvalidRequest], [ErrServer], [ErrOverloaded]);
+// match it with errors.Is. Rate-limit and overload errors carry any
+// Retry-After the server sent. Unclassifiable transport failures (timeouts,
+// connection resets) surface as [ErrServer]. See docs/providers.md for the
+// HTTP-status-to-sentinel table.
+//
+// # Capabilities
+//
+// [Client.Capabilities] reports what the provider+model supports as a
+// [Capabilities] value, so callers adapt without provider sniffing. Every
+// field belongs to one of four enforcement classes:
+//
+//   - DROPPED SILENTLY when false: the adapter omits the feature from the wire
+//     (StructuredOutput, Thinking, StopSequences, TopP, TopK, Seed).
+//   - REFUSED PRE-WIRE: the adapter rejects the request with an error wrapping
+//     [ErrInvalidRequest] before the wire call (ToolChoice).
+//   - DECORATOR: provider.New installs a wrapping Client that follows the
+//     field (ParallelToolCalls).
+//   - ADVISORY: information for callers; no adapter reads the field
+//     (ContextWindow, PromptCaching, Images, Documents).
+//
+// See docs/capabilities.md for the per-field table.
+//
+// # Decorators
+//
+// Three wrappers compose around any [Client]:
+//
+//   - [WithRetry] retries transient failures (429, 5xx, transport timeouts)
+//     with exponential backoff and honors Retry-After.
+//   - [WithRecorder] reports each successful completion's usage to a
+//     [Recorder].
+//   - [WithSerializedToolCalls] truncates multi-tool-call responses to the
+//     first call; a no-op on parallel-capable clients.
+//
+// The wrappers compose over streaming too: retry stops once a delta is
+// delivered, the recorder reports the final streamed response, and
+// serialization drops tool-call deltas for any index beyond the first.
+//
+// # Streaming
+//
+// A client that delivers a completion incrementally implements
+// [StreamingClient]. [Stream] accepts ANY [Client]: it delegates to
+// StreamingClient.Stream when the client implements it, and otherwise calls
+// Complete and synthesizes deltas from the response (text and thinking blocks
+// in block order, then one DeltaToolCall per tool call). Callers never
+// special-case a non-streaming backend.
+//
+// # Reasoning text
+//
+// Reasoning models served through plain-text channels inline
+// "<think>...</think>" spans in the visible answer. [StripThinkBlocks] removes
+// leading think spans, including one unclosed by a truncated thought, and
+// leaves spans embedded inside the body intact.
 //
 // API keys are never logged. They are resolved by the caller and handed
 // straight to the vendor SDK.

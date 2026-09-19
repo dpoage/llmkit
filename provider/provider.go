@@ -1,13 +1,61 @@
 // Package provider builds fully-wrapped llmkit.Clients for a named provider
-// type. It is the single construction entry point: callers describe the
-// endpoint with a Spec and tune the wrapper stack with Options; this package
-// dispatches to the right first-party adapter and decorates it with
-// serialize -> recorder -> retry (outer to inner).
+// type. Callers describe the endpoint with a [Spec], tune the wrapper stack
+// with [Options], and call [New]; this package dispatches to the right
+// first-party adapter and decorates it. It is the single construction entry
+// point, so Spec validation cannot be bypassed.
 //
 // The vendor-SDK adapters live under provider/internal/{anthropic,openai,
-// google} and are internal on purpose: provider.New is the only construction
-// path, so Spec validation (auth mode, Secret shape, OpenAI-compatible
-// BaseURL, model presence) cannot be bypassed.
+// google} and are internal on purpose: [New] is the only way in.
+//
+// # Provider types
+//
+// [Type] selects the adapter:
+//
+//   - [TypeAnthropic]: Anthropic Claude models through the official SDK.
+//   - [TypeOpenAI]: first-party OpenAI models through Chat Completions.
+//   - [TypeOpenAICompatible]: any OpenAI-compatible endpoint (Ollama, vLLM,
+//     Groq, ...) through the OpenAI adapter under a conservative profile.
+//   - [TypeGoogle]: Gemini models through the official GenAI SDK.
+//
+// [Spec.BaseURL] overrides the vendor endpoint per type. Anthropic, OpenAI,
+// and Google have vendor defaults; TypeOpenAICompatible has none, so New
+// refuses an empty BaseURL there.
+//
+// # Credentials
+//
+// [Spec.Auth] selects the credential mode: [AuthAPIKey] (the zero value)
+// sends Secret as a standard API key; [AuthOAuthToken] sends it as an OAuth
+// bearer token and is Anthropic-only. [Spec.Secret] must be a non-empty value
+// without surrounding whitespace. New never reads the environment for
+// credentials and never logs the Secret. A credential-less endpoint (a local
+// Ollama or vLLM server) takes any non-empty placeholder.
+//
+// # Capability profiles
+//
+// [Spec.Capabilities] tunes the adapter's model-table profile once at
+// construction: flip a single field in a closure, or return a fixed profile
+// to pin exact values for models the table does not know. The override is
+// plumbed into the adapter, so wire behavior follows the effective profile.
+// See [llmkit.Capabilities] for the enforcement classes and
+// docs/capabilities.md for the per-field table.
+//
+// # Construction
+//
+// [New] validates the spec and returns an error wrapping
+// llmkit.ErrInvalidRequest on: an unknown Auth value, AuthOAuthToken on a
+// non-Anthropic Type, an empty Model, a Secret that is empty, whitespace
+// only, or whitespace-padded, an empty BaseURL on TypeOpenAICompatible, and
+// an unknown Type. New performs no network I/O and no environment lookups of
+// its own (see [Spec.BaseURL] for the SDK-level env fallbacks), so
+// construction is hermetic.
+//
+// The returned client is decorated, outer to inner:
+//
+//	serialize -> recorder -> retry -> adapter
+//
+// so usage is recorded only for the final successful attempt, retries see the
+// raw adapter errors, and models without parallel tool calls have their
+// multi-call responses truncated to one before the caller sees them.
 package provider
 
 import (
@@ -62,30 +110,13 @@ func ParseType(s string) (Type, error) {
 }
 
 // Spec is the caller-owned description of a provider endpoint. Callers
-// construct it from their own config types and pass it to New. The provider
-// package never reads external config directly.
-//
-// Auth selects the credential mode. The zero value AuthAPIKey sends Secret
-// as a standard API key (x-api-key header); AuthOAuthToken sends it as an
-// OAuth bearer token (Authorization header) and is Anthropic-only — New
-// refuses AuthOAuthToken on any other Type with an error wrapping
-// ErrInvalidRequest. Any other Auth value is likewise refused; there is no
-// silent fallback to API-key mode.
-//
-// Capabilities, when non-nil, tunes the adapter's model-table profile: the
-// function receives the table-derived profile and returns the effective
-// one, applied once at construction. Flip a single field in a closure, or
-// return a fixed profile to pin exact values for models the table doesn't
-// know (adapters report ContextWindow 0 for unknown models; llmkit never
-// fabricates a window). The override is plumbed into the adapter itself, so
-// wire behavior follows the effective profile, not just the reported one —
-// concretely: on a profile with Thinking=false the thinking config is
-// dropped silently; on a profile with ToolChoice=false every explicit
-// Request.ToolChoice mode is rejected with ErrInvalidRequest before the
-// wire call (auto stays allowed); StructuredOutput=false gates
-// response_format (OpenAI) and the synthetic forced-output tool (Anthropic)
-// off, and ParallelToolCalls=false installs the tool-call serializer.
+// construct it from their own config types and pass it to [New]; this
+// package never reads external config directly. The field docs below state
+// the rules New enforces.
 type Spec struct {
+	// Type selects the adapter: [TypeAnthropic], [TypeOpenAI],
+	// [TypeOpenAICompatible], or [TypeGoogle]. New refuses any other value
+	// with an error wrapping llmkit.ErrInvalidRequest.
 	Type Type
 
 	// Model is the model identifier (e.g. "claude-sonnet-4-5"). Empty is
@@ -103,7 +134,12 @@ type Spec struct {
 	// its own — empty would silently target first-party api.openai.com/v1
 	// — so New refuses it with an error wrapping ErrInvalidRequest.
 	BaseURL string
-	// Auth selects the credential mode; the zero value is API-key mode.
+	// Auth selects the credential mode. The zero value [AuthAPIKey] sends
+	// Secret as a standard API key (x-api-key header); [AuthOAuthToken]
+	// sends it as an OAuth bearer token (Authorization header) and is
+	// Anthropic-only. New refuses AuthOAuthToken on any other Type with an
+	// error wrapping llmkit.ErrInvalidRequest, and refuses any other Auth
+	// value likewise: there is no silent fallback to API-key mode.
 	Auth Auth
 	// Secret is the resolved credential: an API key in AuthAPIKey mode, an
 	// OAuth bearer token in AuthOAuthToken mode. New refuses a Secret that
@@ -116,7 +152,20 @@ type Spec struct {
 	Secret string
 
 	// Capabilities tunes the adapter's model-table profile; nil keeps the
-	// table.
+	// table. When non-nil, the function receives the table-derived profile
+	// and returns the effective one, applied once at construction: flip a
+	// single field in a closure, or return a fixed profile to pin exact
+	// values for models the table does not know (adapters report
+	// ContextWindow 0 for unknown models; llmkit never fabricates a
+	// window). The override is plumbed into the adapter itself, so wire
+	// behavior follows the effective profile, not just the reported one —
+	// concretely: on a profile with Thinking=false the thinking config is
+	// dropped silently; on a profile with ToolChoice=false every explicit
+	// Request.ToolChoice mode is rejected with llmkit.ErrInvalidRequest
+	// before the wire call (auto stays allowed); StructuredOutput=false
+	// gates response_format (OpenAI) and the synthetic forced-output tool
+	// (Anthropic) off; ParallelToolCalls=false installs the tool-call
+	// serializer.
 	Capabilities func(llmkit.Capabilities) llmkit.Capabilities
 }
 
@@ -153,8 +202,9 @@ type Options struct {
 // safe and capability-driven.
 //
 // spec.Secret is the resolved credential (callers obtain it via their own
-// config); New performs no environment lookups, so it stays testable
-// without real keys. spec.Auth routes the secret
+// config); New performs no network I/O and no environment lookups of its
+// own, so construction is hermetic and testable without real keys.
+// spec.Auth routes the secret
 // to the right credential field; unknown Auth values, AuthOAuthToken on
 // a non-Anthropic Type, an empty spec.Model, a spec.Secret that is
 // empty, whitespace-only, or differs from its own strings.TrimSpace, an
