@@ -15,7 +15,7 @@ import (
 
 // weatherArgs is the schema for the ExampleNewRunner weather tool.
 type weatherArgs struct {
-	City string `json:"city" jsonschema:"the city to look up"`
+	City string `json:"city" jsonschema:"description=the city to look up"`
 }
 
 // ExampleNewRunner builds a Runner with one Func tool and drives it through a
@@ -62,8 +62,8 @@ func ExampleNewRunner() {
 
 // exampleAddArgs is the schema for the ExampleFunc add tool.
 type exampleAddArgs struct {
-	A int `json:"a" jsonschema:"first addend"`
-	B int `json:"b" jsonschema:"second addend"`
+	A int `json:"a" jsonschema:"description=first addend"`
+	B int `json:"b" jsonschema:"description=second addend"`
 }
 
 // ExampleFunc builds a Tool from a plain function. The struct argument is the
@@ -87,8 +87,8 @@ func ExampleFunc() {
 
 // tripAnswer is the structured output schema for ExampleRunJSONAs.
 type tripAnswer struct {
-	City string `json:"city" jsonschema:"destination city"`
-	Days int    `json:"days" jsonschema:"trip length in days"`
+	City string `json:"city" jsonschema:"description=destination city"`
+	Days int    `json:"days" jsonschema:"description=trip length in days"`
 }
 
 // ExampleRunJSONAs derives the answer schema from a Go type and returns the
@@ -192,7 +192,7 @@ func ExampleWithRequestPolicy() {
 
 // echoArgs is the schema for the ExampleWithHooks echo tool.
 type echoArgs struct {
-	Text string `json:"text" jsonschema:"the text to echo"`
+	Text string `json:"text" jsonschema:"description=the text to echo"`
 }
 
 // ExampleWithHooks observes tool calls with Hooks.ToolEnd. The Step field is
