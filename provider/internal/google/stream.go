@@ -2,11 +2,18 @@ package google
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/dpoage/llmkit"
 	"google.golang.org/genai"
 )
+
+// errStreamNoFinishReason marks an SSE stream that delivered candidate
+// content but ended without any finishReason — the signature of a stream the
+// server or the network cut short, which genai's iterator does not report as
+// an error.
+var errStreamNoFinishReason = errors.New("google: stream ended before finishReason")
 
 // Stream implements llmkit.StreamingClient: Complete with incremental
 // delivery over the SDK's GenerateContentStream SSE iterator. The request
@@ -29,17 +36,34 @@ func (g *googleAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(
 	}
 	agg := &genai.GenerateContentResponse{}
 	calls := 0
+	sawFinish := false
 	var fnErr error
 	for chunk, err := range g.client.Models.GenerateContentStream(ctx, g.model, contents, cfg) {
 		if err != nil {
 			return llmkit.Response{}, g.normalizeErr(ctx, err)
 		}
-		if fnErr = absorbChunk(agg, chunk, fn, &calls); fnErr != nil {
+		if fnErr = absorbChunk(agg, chunk, fn, &calls, &sawFinish); fnErr != nil {
 			break // cancels the iterator; the SDK closes the response body
 		}
 	}
 	if fnErr != nil {
 		return llmkit.Response{}, fmt.Errorf("llmkit: stream fn: %w", fnErr)
+	}
+	// genai's iterator never yields transport errors that surface after
+	// scanning starts — context cancellation, deadline, connection reset:
+	// iterateResponseStream only logs them — and a clean EOF is
+	// indistinguishable from a stream cut short. Fail loudly instead of
+	// dressing a partial up as StopEndTurn; WithRetry's per-attempt
+	// RequestTimeout relies on this to see a stalled attempt as failed.
+	if err := ctx.Err(); err != nil {
+		return llmkit.Response{}, g.normalizeErr(ctx, err)
+	}
+	// A stream that carried candidate content but never a finishReason was
+	// truncated. A promptFeedback-only stream (no candidates — the
+	// blocked-prompt shape) is the legitimate Complete response and stays a
+	// success.
+	if len(agg.Candidates) > 0 && !sawFinish {
+		return llmkit.Response{}, g.normalizeErr(ctx, errStreamNoFinishReason)
 	}
 	return g.toResponse(agg), nil
 }
@@ -54,13 +78,20 @@ func (g *googleAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(
 // usageMetadata, and promptFeedback are each taken from the last chunk that
 // carries them. The adapter never sets CandidateCount, so every chunk
 // carries the single (index-0) candidate.
-func absorbChunk(agg *genai.GenerateContentResponse, chunk *genai.GenerateContentResponse, fn func(llmkit.Delta) error, calls *int) error {
+func absorbChunk(agg *genai.GenerateContentResponse, chunk *genai.GenerateContentResponse, fn func(llmkit.Delta) error, calls *int, sawFinish *bool) error {
 	if len(chunk.Candidates) > 0 && chunk.Candidates[0] != nil {
 		if len(agg.Candidates) == 0 {
 			agg.Candidates = []*genai.Candidate{{}}
 		}
 		cand := agg.Candidates[0]
 		src := chunk.Candidates[0]
+		// Any finishReason carrier marks the exchange complete, including
+		// FINISH_REASON_UNSPECIFIED — the aggregate keeps dropping that
+		// placeholder, so the truncation check in Stream must consult this
+		// flag instead of the folded reason.
+		if src.FinishReason != "" {
+			*sawFinish = true
+		}
 		if fr := src.FinishReason; fr != "" && fr != genai.FinishReasonUnspecified {
 			cand.FinishReason = fr
 		}
@@ -101,6 +132,10 @@ func absorbChunk(agg *genai.GenerateContentResponse, chunk *genai.GenerateConten
 					}
 					parts := cand.Content.Parts
 					if n := len(parts); n > 0 && plainText(parts[n-1]) && plainText(p) {
+						// String concatenation rather than a Builder: a
+						// merge run's lifetime is the open text span and
+						// fragments arrive in kilobyte chunks, so the copies
+						// stay trivial and the aggregate holds plain Parts.
 						parts[n-1].Text += p.Text
 					} else {
 						cand.Content.Parts = append(parts, p)
