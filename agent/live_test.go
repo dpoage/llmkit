@@ -430,3 +430,108 @@ func TestLiveAgentAttachImageOnTaskTurn(t *testing.T) {
 		t.Errorf("first request's user message carries no image block with the generated PNG; content kinds: %v", kinds)
 	}
 }
+
+// TestLiveAgentToolPolicyDeny exercises the [agent.ToolPolicy] seam against
+// the live lane: the policy denies the ONLY registered tool, so Tool.Run
+// must never execute, the model must receive the
+// "ERROR: tool <name> denied: …" tool result (the Outcome's tool-result
+// message is exactly what the next wire request carries, and the
+// transcript records the same tool_result), and the run must still reach a
+// final answer without error.
+func TestLiveAgentToolPolicyDeny(t *testing.T) {
+	ctx, cl, sess := newLiveAgentClient(t)
+	add := agent.Func("add", "adds two numbers",
+		func(_ context.Context, p addArgs) (string, error) {
+			return fmt.Sprintf("%g", p.A+p.B), nil
+		})
+
+	// runs counts actual Tool.Run executions (must stay 0); authorizations
+	// counts policy consultations — the premise probe: a run where the
+	// model never REQUESTED `add` is noncompliant and retried.
+	var mu sync.Mutex
+	runs, authorizations := 0, 0
+	const denyReason = "add is denied by the live policy"
+	policy := agent.ToolPolicyFunc(func(_ context.Context, call *llmkit.ToolCall) error {
+		mu.Lock()
+		defer mu.Unlock()
+		authorizations++
+		if call.Name == "add" {
+			return errors.New(denyReason)
+		}
+		return nil
+	})
+	hooks := agent.Hooks{
+		ToolStart: func(_ context.Context, ev agent.ToolEvent) {
+			mu.Lock()
+			defer mu.Unlock()
+			runs++
+		},
+	}
+
+	system := "You are a helpful assistant. Call the `add` tool to compute sums when asked."
+	// Three DISTINCT phrasings: re-issuing a byte-identical prompt within
+	// seconds re-elicits the same correlated noncompliance.
+	tasks := []string{
+		"You MUST call the `add` tool with a=41 and b=58. After the tool has been called, report the sum in one sentence.",
+		"Use the `add` tool to compute 41 plus 58, then answer with the sum in one sentence. You must invoke `add` before answering.",
+		"Call `add` (a=41, b=58). It is mandatory. Then state the sum in one sentence.",
+	}
+
+	var out *agent.Outcome
+	var err error
+	for attempt := 1; attempt <= 3; attempt++ {
+		mu.Lock()
+		runs, authorizations = 0, 0
+		mu.Unlock()
+		runner := agent.NewRunner(cl, []agent.Tool{add}, system,
+			agent.WithHooks(hooks), agent.WithToolPolicy(policy), agent.WithMaxTokens(2048))
+		out, err = runner.Run(ctx, tasks[attempt-1])
+		if err != nil {
+			t.Fatalf("run (attempt %d): %v", attempt, err)
+		}
+		mu.Lock()
+		auths, executed := authorizations, runs
+		mu.Unlock()
+		if auths > 0 {
+			// Compliant premise: the model requested the (sole) tool and the
+			// policy denied it. Strict assertions follow below.
+			if executed != 0 {
+				t.Fatalf("Tool.Run executed %d time(s) despite a deny-all policy", executed)
+			}
+			break
+		}
+		if attempt == 3 {
+			sess.Logf(t, "premise failure: the model never requested `add` in any attempt")
+			t.Fatal("after 3 differently-phrased attempts the model still never requested the `add` tool")
+		}
+		t.Logf("attempt %d: the model never requested `add`; retrying with different phrasing", attempt)
+	}
+
+	// The deny result reached the model: the Outcome's tool-result message
+	// (exactly what the follow-up wire request carries)...
+	want := "ERROR: tool add denied: " + denyReason
+	sawMsg := false
+	for _, m := range out.Messages {
+		if m.Role == llmkit.RoleToolResult && m.IsError && m.Text() == want {
+			sawMsg = true
+		}
+	}
+	if !sawMsg {
+		t.Fatalf("Outcome.Messages lost the deny tool result %q", want)
+	}
+	// ...and the transcript's tool_result event says the same.
+	sawEvent := false
+	for _, ev := range out.Transcript.Events {
+		if ev.Kind == agent.EventToolResult && ev.IsError && ev.Result == want {
+			sawEvent = true
+		}
+	}
+	if !sawEvent {
+		t.Fatal("transcript lost the deny tool_result event")
+	}
+
+	// The run continued past the denial and reached a final answer.
+	if out.FinalText == "" {
+		t.Fatalf("no final text after the denial; outcome=%+v", out)
+	}
+}
