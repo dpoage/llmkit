@@ -46,11 +46,15 @@ type StreamingClient interface {
 	// calling goroutine, in wire order, once per fragment; a non-nil error
 	// from fn cancels the stream and is returned (wrapped) — no Response.
 	// fn execution time counts toward the per-attempt RequestTimeout a
-	// wrapping WithRetry applies. The returned Response is byte-for-byte
-	// what Complete would have returned for the same wire exchange (same
-	// normalization: Usage convention, StopReason, verbatim thinking blocks,
-	// ToolCalls with concatenated Arguments). A nil fn is allowed and makes
-	// Stream equivalent to Complete.
+	// wrapping WithRetry applies. The returned Response equals what Complete
+	// returns for the same wire exchange: same normalization, Usage
+	// convention, StopReason, thinking text and signatures, and ToolCalls
+	// with concatenated Arguments. Block.Raw may differ in encoding (a
+	// vendor accumulator re-serializes streamed blocks) but decodes to the
+	// same content and re-emits the same wire block. A stream that ends
+	// before the vendor's terminal event is an error wrapping ErrServer,
+	// never a partial Response. A nil fn is allowed and makes Stream
+	// equivalent to Complete.
 	Stream(ctx context.Context, req Request, fn func(Delta) error) (Response, error)
 }
 
