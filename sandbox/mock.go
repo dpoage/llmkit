@@ -5,8 +5,8 @@ import (
 	"sync"
 )
 
-// Call is a single recorded invocation of Mock.Exec, capturing the Spec it was
-// called with so tests can assert on what the funnel/repro stages requested.
+// Call is a single recorded invocation of Mock.Exec, capturing the Spec
+// it was called with so tests can assert on what the caller requested.
 type Call struct {
 	Spec Spec
 }
@@ -20,9 +20,9 @@ type MockResponse struct {
 	Err error
 }
 
-// Mock is a scriptable, in-memory Sandbox implementation for testing callers
-// (e.g. the funnel and reproduce stages) without a real container runtime. It
-// is part of the package's public contract.
+// Mock is a scriptable, in-memory Sandbox implementation for testing
+// callers of a Sandbox without a real container runtime or bwrap. It is
+// part of the package's public contract.
 //
 // Responses are consumed in order via EnqueueResponse; once exhausted, the
 // configured DefaultResponse is returned. A ResponseFunc, when set, takes

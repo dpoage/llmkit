@@ -1,104 +1,126 @@
 # llmkit
 
-Go building blocks for LLM harnesses: a provider-agnostic client, a
-tool-calling agent loop with policy seams, sandboxed command execution, and
-embeddings. Extracted from `bugbot`, `known`, and `go-research`.
+llmkit is a Go toolkit for LLM applications. It ships a provider-agnostic
+completion client, a tool-calling agent loop, sandboxed command execution, and
+embeddings. One normalized vocabulary covers Anthropic, OpenAI, Google Gemini,
+and any OpenAI-compatible endpoint.
+
+## Install
+
+Requires Go 1.25 or newer.
+
+```bash
+go get github.com/dpoage/llmkit@latest
+```
+
+## Quick start
+
+The snippets assume an OpenAI-compatible endpoint, such as a local Ollama
+server. For Anthropic, OpenAI, or Google construction, see
+[providers](docs/providers.md). Export the variables before running:
+
+```bash
+export LLMKIT_PROVIDER=openai-compatible
+export LLMKIT_MODEL=llama3.1
+export LLMKIT_BASE_URL=http://localhost:11434/v1   # required for openai-compatible
+export LLMKIT_API_KEY=ollama                       # any non-empty placeholder
+```
+
+The programs under `examples/` are the runnable counterparts of the first
+two snippets; run them once the variables are set.
+
+### Complete a request
+
+Build a client with `provider.New`. Construction validates the spec and wires
+the decorators; it performs no network I/O.
+
+```go
+spec := provider.Spec{
+	Type:    provider.TypeOpenAICompatible,
+	Model:   os.Getenv("LLMKIT_MODEL"),
+	BaseURL: os.Getenv("LLMKIT_BASE_URL"),
+	Secret:  os.Getenv("LLMKIT_API_KEY"),
+}
+client, err := provider.New(context.Background(), spec, provider.Options{})
+if err != nil {
+	log.Fatal(err)
+}
+resp, err := client.Complete(context.Background(), llmkit.Request{
+	Messages: []llmkit.Message{llmkit.UserMessage(llmkit.Text("Hello!"))},
+})
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Println(resp.Text) // the text blocks, concatenated
+fmt.Println(resp.Usage.InputTokens, resp.Usage.OutputTokens)
+```
+
+`Complete` returns the normalized `Response`. `resp.Text` concatenates the
+text blocks; `resp.Usage` reports token consumption.
+
+### Run an agent with one tool
+
+`agent.Func` derives the tool's JSON Schema from a Go struct, so the schema
+and the decoding cannot drift. The runner runs the loop: it sends the task,
+executes requested tool calls, feeds results back, and stops at the final
+answer. This snippet reuses `client` from the previous section.
+
+```go
+type weatherArgs struct {
+	City string `json:"city" jsonschema:"description=the city to look up"`
+}
+
+weather := agent.Func("weather", "look up the current weather for a city",
+	func(_ context.Context, a weatherArgs) (string, error) {
+		return "18°C, clear", nil
+	})
+
+runner := agent.NewRunner(client, []agent.Tool{weather}, "Answer weather questions.")
+
+outcome, err := runner.Run(context.Background(), "What is the weather in Tokyo?")
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Println(outcome.FinalText)
+```
+
+### Stream
+
+Stream the request instead of waiting for the full answer. This snippet
+reuses `client`, `resp`, and `err` from the previous snippets. `llmkit.Stream`
+works on any client: a client that cannot stream gets deltas synthesized from
+one `Complete`, and `resp` is the same normalized `Response` either way.
+
+```go
+req := llmkit.Request{Messages: []llmkit.Message{llmkit.UserMessage(llmkit.Text("Count to five."))}}
+resp, err = llmkit.Stream(context.Background(), client, req,
+	func(d llmkit.Delta) error { fmt.Print(d.Text); return nil })
+```
 
 ## Packages
 
-- **`llmkit`** (root) — provider-agnostic client abstraction: one synchronous
-  `Complete(ctx, Request) (Response, error)` plus a `Capabilities()` probe;
-  a content-block `Message` model (text, image, document, thinking) with
-  block constructors (`Text`, `Image`, `ImageURL`, `Document`,
-  `DocumentURL`) and message constructors (`UserMessage`, `SystemMessage`,
-  `ToolResult`, `ToolError`; `TextMessage` stays), normalized errors
-  (`APIError` + sentinel kinds), usage accounting with prompt-cache
-  conventions, stop-reason normalization, `<think>`-block stripping, and
-  decorator wrappers: retry (exponential backoff + jitter, Retry-After,
-  per-attempt timeout), usage recorder, tool-call serializer.
-  Origin: `bugbot/internal/llm`.
-
-- **`llmkit/provider`** — client construction: `New` dispatches on
-  `Spec.Type` and decorates the chosen adapter serialize → recorder →
-  retry. Vendor-SDK adapters live under `provider/internal/` (internal;
-  `provider.New` is the sole construction path), and `Spec.Type`
-  `openai-compatible` serves any OpenAI-compatible endpoint (Ollama, vLLM,
-  Groq, ...).
-
-- **`llmkit/internal/adapter`** — helpers shared by the three adapters
-  (status classification, error normalization, schema parsing); internal,
-  not public API.
-
-- **`llmkit/agent`** — tool-calling harness over `llmkit.Client`: `Runner`
-  with iteration/token budgets, history compaction, forced finalization,
-  max-tokens continuation stitching, JSONL transcripts with an offline
-  `ReplayClient`, schema derivation from Go types (`SchemaOf`/`Func`,
-  feeding `RunJSON`/`RunJSONAs`), multi-turn continuation via the
-  `Continue` run option, synchronous lifecycle `Hooks`, per-tool timeouts,
-  and optional parallel tool dispatch. Two policy seams shape a run:
-  `RequestPolicy` edits each wire request (thinking, sampling, tool choice,
-  message preprocessing) and `ToolPolicy` allows, denies, or rewrites each
-  model-requested tool call before it runs. The `Attach` run option adds
-  image or document blocks to the task turn. `Outcome.FinalText` holds the
-  final completion's text; `WithBudgetPool` charges a shared `BudgetPool`;
-  tool panics become that call's error result (hook panics propagate).
-  `Steering` (`NewSteering`, `WithSteering`) queues user turns mid-run from
-  any goroutine: `Steer` lands before the next model call, `FollowUp` when
-  the run would otherwise end; a limit stop leaves them queued
-  (`Pending`) and `Continue` with the same handle delivers them next run.
-  Tools implement `Tool{Def, Run}` or come from `Func`; tool errors feed
-  back to the model, infra failures surface via `ToolHealthError`. Origin:
-  `bugbot/internal/agent` (harness only).
-
-- **`llmkit/sandbox`** — isolated execution of untrusted, model-generated
-  commands against repo snapshots: one `Sandbox` interface —
-  `Exec(ctx, Spec) (Result, error)` plus `MaterializeWorkspace(repoDir)` —
-  over the Bubblewrap backend (Linux, unprivileged user namespaces), a
-  container CLI backend (podman/docker), and a scriptable `Mock` (plus
-  `HostExec`, the documented no-isolation attended escape hatch that no
-  kit default or example constructs). Spec fields are honest per backend:
-  `Spec.Network` is a typed `NetworkMode`, and a field a backend cannot
-  honor is refused at `Exec` with an `UnsupportedSpecError` naming the
-  backend, field, and value — never a silent drop or substitution.
-  Backend-only knobs (runtime, default image, CPUs, memory, idle window) are
-  backend options configured through ONE `Option` type shared by `NewCLI`
-  and `NewBwrap` (`WithRuntime`/`WithImage` are CLI-only, `WithCapPolicy`
-  is Bwrap-only); no option takes a bare bool — modes are named types
-  (`NetworkMode`, `CapPolicy`) — and `Spec` carries no
-  CPUs/MemoryMB/IdleTimeout fields (those are backend options). Workspace
-  materialization with symlink-hardened writes, output capped at
-  `DefaultMaxOutputBytes` (1 MiB) per stream, and a shared
-  idle/growth-ceiling watchdog; standard library plus golang.org/x/sys
-  (the reflink fast path). Path containment for agent tools lives in the
-  sibling `fsroot` package. Origin: `bugbot/internal/sandbox`.
-
-- **`llmkit/fsroot`** — tool-anchored path containment for agent tools:
-  `NewFSRoot(dir)` + `Resolve(rel)` reject absolute paths, `..` escapes, and
-  symlink escapes (checked via the longest existing prefix), returning
-  `ErrPathEscape`; path resolution is package-internal. Deliberately
-  separate from `sandbox`'s post-exec workspace write hardening
-  (different threat model). Standard library only. Origin:
-  `bugbot/internal/agenttools/{fsroot,pathutil}.go`.
-
-- **`llmkit/embed`** — `Embedder` interface with Ollama and
-  OpenAI-compatible HTTP backends (shared `llmkit.RetryConfig` retry whose
-  `Retry.RequestTimeout` is the single per-attempt bound — embed defaults
-  3 attempts / 60s per attempt — plus batching) and a content-hash LRU
-  caching decorator (`CachedEmbedder`). Local ONNX inference (hugot)
-  intentionally NOT included — it drags the ONNX/GoMLX dependency tree;
-  implement `Embedder` in your app if you need it. Origin: `known/embed`.
+| Package | Provides | Reference |
+|---|---|---|
+| [`llmkit`](https://pkg.go.dev/github.com/dpoage/llmkit) | The normalized vocabulary: messages, blocks, requests, responses, usage, capabilities, errors, decorators, streaming. | [capabilities](docs/capabilities.md) |
+| [`provider`](https://pkg.go.dev/github.com/dpoage/llmkit/provider) | Client construction: one `New` per endpoint; validation, adapters, and the decorator stack. | [providers](docs/providers.md) |
+| [`agent`](https://pkg.go.dev/github.com/dpoage/llmkit/agent) | The tool-calling loop: budgets, policies, hooks, steering, structured output, transcripts. | [agent loop](docs/agent-loop.md) |
+| [`sandbox`](https://pkg.go.dev/github.com/dpoage/llmkit/sandbox) | Isolated execution of untrusted commands: Bubblewrap, container CLIs, `HostExec`, `Mock`. | [sandbox](docs/sandbox.md) |
+| [`fsroot`](https://pkg.go.dev/github.com/dpoage/llmkit/fsroot) | Path containment for agent file tools. | [sandbox](docs/sandbox.md) |
+| [`embed`](https://pkg.go.dev/github.com/dpoage/llmkit/embed) | Embeddings: Ollama and OpenAI-compatible backends, batching, retry, least-recently-used (LRU) cache. | [reference](https://pkg.go.dev/github.com/dpoage/llmkit/embed) |
 
 ## Examples
 
-`examples/` contains four runnable programs, one per major surface: a
-plain completion with content blocks and capability gating (`basic`), a
-tool-calling agent with hooks (`agent`), schema-constrained output via
-`RunJSONAs` (`structured`), and a multi-turn chat REPL with mid-run
-steering on `Run(..., Continue(prev), WithSteering(...))` (`chat`). All
-four read
-`LLMKIT_PROVIDER`/`LLMKIT_MODEL`/`LLMKIT_API_KEY` (`LLMKIT_BASE_URL` required for
-openai-compatible, optional otherwise) and print a usage message instead of touching the
-network when the environment is unset:
+Four runnable programs live under `examples/`:
+
+- `examples/basic` — one completion with content blocks and capability gating.
+- `examples/agent` — the agent loop with hooks, a tool policy, and optional parallel dispatch.
+- `examples/structured` — schema-constrained output with `RunJSONAs`.
+- `examples/chat` — a multi-turn read–eval–print loop (REPL) with mid-run steering.
+
+All four read `LLMKIT_PROVIDER`, `LLMKIT_MODEL`, and `LLMKIT_API_KEY`
+(`LLMKIT_BASE_URL` is required for `openai-compatible`, optional otherwise).
+With the variables unset, an example prints its usage and exits 1 without
+touching the network.
 
 ```bash
 go run ./examples/basic --image path/to/photo.jpg
@@ -107,41 +129,30 @@ go run ./examples/structured
 go run ./examples/chat
 ```
 
-The examples are executed for real by the live acceptance suite:
-`go test -tags live ./examples/...` builds and runs each binary against a
-live backend, and a hermetic test asserts each exits 1 with its usage
-message when the environment is unset. Adapter, agent-loop, and capability
-changes are additionally gated by a live vendor matrix with recorded,
-secret-free wire fixtures (`provider/testdata/`, replayed hermetically in
-every plain `go test ./...`); the acceptance rule and exact commands live in
-[AGENTS.md](AGENTS.md) (Build & Test → Live acceptance suite), and the
-nightly `.github/workflows/live.yml` runs the whole suite against the
-compat lane.
+## Documentation
 
-## Design decisions
+- [docs/README.md](docs/README.md) — the index, with a reading order for new users.
+- [docs/design.md](docs/design.md) — the architecture and the decisions behind it.
+- [docs/providers.md](docs/providers.md) — building a client for each provider type.
+- [docs/capabilities.md](docs/capabilities.md) — what `Capabilities` reports and enforces.
+- [docs/agent-loop.md](docs/agent-loop.md) — the `agent.Runner` loop, policies, hooks, steering.
+- [docs/sandbox.md](docs/sandbox.md) — sandbox backends, threat model, and `fsroot`.
+- [docs/testing.md](docs/testing.md) — the test suites and how to run them.
 
-- Message model: content-block `Message{Role, Content []Block, ...}` — text,
-  image, document, and opaque provider thinking blocks (Anthropic thinking
-  signatures round-trip verbatim; foreign-provider thinking is dropped).
-  Block/message constructors (`Text`, `Image`, `ImageURL`, `Document`,
-  `DocumentURL`, `UserMessage`, `SystemMessage`, `ToolResult`, `ToolError`,
-  `TextMessage`) keep the common cases one line; constructors with
-  required arguments (media type, data, URL, tool-call ID, at least one
-  block) panic when they are missing. `Message.Text()` concatenates a
-  message's text blocks.
-  `Block.Data` is base64 in JSONL transcripts, and `Block` fields marshal
-  snake_case with `omitempty`. See the root package docs.
-- Streaming without special cases: `Client` stays synchronous; clients that
-  can also stream implement `StreamingClient`, and `llmkit.Stream` gives any
-  client a delta stream — native when available, otherwise synthesized from
-  one `Complete` (same normalized `Response` either way). The decorators
-  compose: retry stops at the first delivered delta, the recorder books the
-  final usage, and the tool-call serializer forwards only the first call's
-  fragments.
-- Official vendor SDKs (anthropic-sdk-go, openai-go, google genai) rather than
-  hand-rolled wire types.
+## Testing
+
+CI runs the full gate on every push and pull request: build, vet, race-enabled
+tests, lint, and gofmt. The live acceptance suite runs against real vendors
+and skips itself without credentials. See [docs/testing.md](docs/testing.md).
+
+## Stability
+
+llmkit is pre-1.0. Semver minor versions may contain breaking changes; the
+[changelog](CHANGELOG.md) marks them. Every release so far has carried them:
+v0.2.0 changed the message model to content blocks, and v0.3.0 changed
+`provider.New` and the recorder.
 
 ## License
 
-AGPL-3.0 (matching bugbot, the primary donor). The `embed` package derives
-from MIT-licensed `known`; relicensed here by the copyright holder.
+AGPL-3.0. The `embed` package derives from MIT-licensed `known`; the copyright
+holder relicensed it here.

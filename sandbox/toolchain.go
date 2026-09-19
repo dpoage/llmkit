@@ -67,7 +67,7 @@ import (
 // the conventional dependency-cache mount paths (/modcache, /pipcache, ...).
 const hostToolchainMountRoot = "/opt/llmkit-toolchains"
 
-// defaultContainerPath is appended after any resolved toolchain bin
+// DefaultContainerPath is appended after any resolved toolchain bin
 // directories when building the container's PATH override. It mirrors a
 // standard Linux distribution's default PATH so images that already ship
 // their own toolchains (and set no ENV PATH override) keep working exactly
@@ -81,9 +81,8 @@ const toolchainVersionProbeTimeout = 3 * time.Second
 
 // ToolchainFingerprint records provenance for one resolved host toolchain
 // mount: the host path actually mounted and the toolchain's reported version
-// string. Recorded in run metadata (see repro artifact READMEs) so a
-// demonstrated bug — or its absence — can be attributed to the exact host
-// toolchain build that produced it.
+// string. Recorded in run metadata so a demonstrated bug — or its absence —
+// can be attributed to the exact host toolchain build that produced it.
 type ToolchainFingerprint struct {
 	// Name is the requested toolchain entry (e.g. "node") or, for an
 	// explicit directory entry, the directory's base name.

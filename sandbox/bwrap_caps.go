@@ -134,7 +134,7 @@ func delegatedCgroupV2Dir() (string, bool) {
 	return dir, true
 }
 
-// ErrBwrapNoCapMethod is returned (possibly wrapped) by NewBwrap and Bwrap.Exec
+// ErrBwrapNoCapMethod is returned (possibly wrapped) by Bwrap.Exec
 // when resource limits were requested (the normal case) but neither enforcement
 // mechanism is available and the operator has not opted into running uncapped
 // via WithCapPolicy(CapBestEffort). Callers match it with errors.Is to attach

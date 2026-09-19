@@ -32,7 +32,10 @@ var (
 // APIError is the normalized error type adapters return. It wraps one of the
 // sentinel errors (accessible via errors.Is / the Kind field), preserves the
 // HTTP status code and any Retry-After hint, and chains the underlying SDK
-// error for debugging. It deliberately carries no API key or request body.
+// error for debugging. llmkit never inserts the credential or the request
+// body into these fields; vendor error text passes through as the provider
+// sent it, so a provider that echoes credentials into its error output is
+// outside llmkit's control.
 type APIError struct {
 	// Kind is the sentinel error this maps to (ErrRateLimited, ErrAuth, ...).
 	Kind error
@@ -45,10 +48,13 @@ type APIError struct {
 	RetryAfter time.Duration
 	// Provider names the backend that produced the error (e.g. "anthropic").
 	Provider string
-	// Message is a short, key-free description.
+	// Message is a short description: either fixed llmkit text or text
+	// extracted from the provider's error. llmkit never inserts the
+	// credential into it.
 	Message string
 	// Err is the underlying vendor-SDK error, for Unwrap chaining. It may
-	// carry provider response detail; it never contains the API key.
+	// carry provider response detail. llmkit never inserts the credential
+	// into it; vendor error bodies pass through verbatim.
 	Err error
 }
 

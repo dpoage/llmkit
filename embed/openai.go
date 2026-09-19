@@ -12,13 +12,17 @@ import (
 	"sync"
 )
 
-// OpenAICompatibleEmbedder produces embeddings via any OpenAI-compatible
-// /v1/embeddings endpoint (OpenAI, Azure OpenAI, vLLM, LiteLLM, etc.).
+// OpenAICompatibleEmbedder produces embeddings by posting to any
+// OpenAI-compatible /v1/embeddings endpoint (OpenAI, Azure OpenAI, vLLM,
+// LiteLLM, and others).
 //
 // Endpoint: POST <baseURL>/v1/embeddings
 //
 //	Request:  {"model": "...", "input": ["...", ...]}
 //	Response: {"data": [{"embedding": [...], "index": 0}], "model": "..."}
+//
+// When Config.APIKey is set, requests carry an "Authorization: Bearer"
+// header.
 type OpenAICompatibleEmbedder struct {
 	baseURL    string
 	model      string
@@ -30,8 +34,8 @@ type OpenAICompatibleEmbedder struct {
 	mu         sync.RWMutex // guards dimensions
 }
 
-// NewOpenAICompatibleEmbedder creates an Embedder backed by an
-// OpenAI-compatible embedding API.
+// NewOpenAICompatibleEmbedder creates an OpenAICompatibleEmbedder that
+// posts to cfg.URL. It returns an error when cfg fails Config.Validate.
 func NewOpenAICompatibleEmbedder(cfg Config) (*OpenAICompatibleEmbedder, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("openai-compatible config: %w", err)
