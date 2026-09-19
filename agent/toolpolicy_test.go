@@ -228,6 +228,17 @@ func TestRun_ToolPolicy_DenySkipsToolAndFeedsModelError(t *testing.T) {
 	if got := reqResults["c1"]; got.text != wantText || !got.isError {
 		t.Errorf("model saw tool result %q isError=%t, want %q isError=true", got.text, got.isError, wantText)
 	}
+	// The transcript records the deny as a tool_result event (IsError, same
+	// text) under c1.
+	sawEvent := false
+	for _, ev := range out.Transcript.Events {
+		if ev.Kind == EventToolResult && ev.ToolCallID == "c1" && ev.IsError && ev.Result == wantText {
+			sawEvent = true
+		}
+	}
+	if !sawEvent {
+		t.Fatal("transcript lost the deny tool_result event")
+	}
 }
 
 // TestRun_ToolPolicy_RewriteReachesToolAndHooksHistoryKeepsOriginal pins the
@@ -587,5 +598,178 @@ func TestRun_ToolPolicy_AuthorizePanicParallelPropagates(t *testing.T) {
 	}
 	if starts.Load() != 0 {
 		t.Errorf("ToolStart fired %d time(s), want 0 (the pre-pass panics before any dispatch)", starts.Load())
+	}
+}
+
+// TestRun_ToolPolicy_CancelInsideAuthorizeDeniesRemainderInBothModes pins
+// the cancellation rule that closes the parallel bypass: once the pre-pass
+// observes a cancelled ctx, NO later call is authorized or dispatched in
+// EITHER mode — the remainder is denied with the context error instead.
+// Removing the ctx check makes the policy consulted twice (authorize count
+// 2); removing the marking makes the parallel fan-out run the
+// never-authorized calls (ToolStart > 0). Both mutations must fail here.
+func TestRun_ToolPolicy_CancelInsideAuthorizeDeniesRemainderInBothModes(t *testing.T) {
+	for _, mode := range []struct {
+		name     string
+		parallel bool
+	}{{"sequential", false}, {"parallel", true}} {
+		t.Run(mode.name, func(t *testing.T) {
+			fc := &tpScriptClient{steps: []tpScriptStep{
+				tpToolCallsResp(
+					tpToolCall("c1", "t1", `{}`),
+					tpToolCall("c2", "t2", `{}`),
+					tpToolCall("c3", "t3", `{}`),
+				),
+				tpTextResp("never reached"),
+			}}
+			tools := []*tpCountingTool{
+				{name: "t1", result: "R1"},
+				{name: "t2", result: "R2"},
+				{name: "t3", result: "R3"},
+			}
+			var starts, authorizations atomic.Int64
+			hooks := Hooks{ToolStart: func(_ context.Context, _ ToolEvent) { starts.Add(1) }}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			opts := []Option{
+				WithHooks(hooks),
+				WithToolPolicy(ToolPolicyFunc(func(_ context.Context, _ *llmkit.ToolCall) error {
+					if authorizations.Add(1) == 1 {
+						cancel() // the test-owned cancel, inside Authorize #1
+						return errors.New("vetoed")
+					}
+					return nil
+				})),
+			}
+			if mode.parallel {
+				opts = append(opts, WithParallelTools())
+			}
+			r := NewRunner(fc, []Tool{tools[0], tools[1], tools[2]}, "sys", opts...)
+
+			out, err := r.Run(ctx, "task")
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("Run err = %v, want context.Canceled", err)
+			}
+			if authorizations.Load() != 1 {
+				t.Errorf("Authorize fired %d time(s), want exactly 1 (no consultation after cancellation)", authorizations.Load())
+			}
+			if starts.Load() != 0 {
+				t.Errorf("ToolStart fired %d time(s), want 0 (never-authorized calls must not dispatch)", starts.Load())
+			}
+			for _, tool := range tools {
+				if got := tool.runCount(); got != 0 {
+					t.Errorf("tool %s ran %d time(s), want 0", tool.name, got)
+				}
+			}
+			// The never-authorized remainder is denied with the context
+			// error; call 1 carries the policy's own denial.
+			order, byID := tpToolResults(out.Messages)
+			if len(order) != 3 || order[0] != "c1" || order[1] != "c2" || order[2] != "c3" {
+				t.Fatalf("tool-result order = %v, want [c1 c2 c3] (full-length slice, both modes)", order)
+			}
+			if want := "ERROR: tool t1 denied: vetoed"; byID["c1"].text != want || !byID["c1"].isError {
+				t.Errorf("c1 result = %+v, want %q isError=true", byID["c1"], want)
+			}
+			for id, name := range map[string]string{"c2": "t2", "c3": "t3"} {
+				if want := "ERROR: tool " + name + " denied: context canceled"; byID[id].text != want || !byID[id].isError {
+					t.Errorf("%s result = %+v, want %q isError=true", id, byID[id], want)
+				}
+			}
+			if len(fc.requests) != 1 {
+				t.Errorf("requests = %d, want 1 (the cancelled run never makes the second completion)", len(fc.requests))
+			}
+		})
+	}
+}
+
+// TestRun_ToolPolicy_ArgumentsMutationDoesNotAliasHistory pins the
+// isolation of the dispatch copy: a policy mutating the Arguments BYTES in
+// place must not corrupt the assistant turn already in the history or on
+// the wire — the dispatch copy owns its backing array.
+func TestRun_ToolPolicy_ArgumentsMutationDoesNotAliasHistory(t *testing.T) {
+	const origArgs = `{"a":1,"b":2}`
+	const mutatedArgs = `{"a":9,"b":2}`
+	fc := &tpScriptClient{steps: []tpScriptStep{
+		tpToolCallsResp(tpToolCall("c1", "add", origArgs)),
+		tpTextResp("done"),
+	}}
+	tool := &tpCountingTool{name: "add", result: "R_add"}
+	r := NewRunner(fc, []Tool{tool}, "sys",
+		WithToolPolicy(ToolPolicyFunc(func(_ context.Context, call *llmkit.ToolCall) error {
+			copy(call.Arguments, mutatedArgs) // in-place byte mutation
+			return nil
+		})))
+
+	out, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if string(tool.args()) != mutatedArgs {
+		t.Errorf("Tool.Run args = %s, want the mutated %s", tool.args(), mutatedArgs)
+	}
+	assertAssistantArgs := func(label string, msgs []llmkit.Message) {
+		t.Helper()
+		for _, m := range msgs {
+			if m.Role != llmkit.RoleAssistant || len(m.ToolCalls) == 0 || m.ToolCalls[0].ID != "c1" {
+				continue
+			}
+			if string(m.ToolCalls[0].Arguments) != origArgs {
+				t.Errorf("%s: assistant ToolCall args = %s, want the model's original %s (byte mutation leaked)",
+					label, m.ToolCalls[0].Arguments, origArgs)
+			}
+			return
+		}
+		t.Errorf("%s: no assistant turn carrying call c1", label)
+	}
+	assertAssistantArgs("Outcome.Messages", out.Messages)
+	assertAssistantArgs("wire request", fc.requests[1].Messages)
+}
+
+// TestRun_ToolPolicy_RewriteOnlyArguments pins the rewrite contract's
+// boundary: a policy reassigning Name or ID gets both reverted — the
+// requested tool executes under the model's name and ID with the rewritten
+// arguments, and the result pairs under the model's call ID.
+func TestRun_ToolPolicy_RewriteOnlyArguments(t *testing.T) {
+	fc := &tpScriptClient{steps: []tpScriptStep{
+		tpToolCallsResp(tpToolCall("c1", "t1", `{"n":1}`)),
+		tpTextResp("done"),
+	}}
+	t1 := &tpCountingTool{name: "t1", result: "R1"}
+	t3 := &tpCountingTool{name: "t3", result: "R3"}
+	var endEv ToolEvent
+	hooks := Hooks{ToolEnd: func(_ context.Context, ev ToolEvent) { endEv = ev }}
+	r := NewRunner(fc, []Tool{t1, t3}, "sys", WithHooks(hooks),
+		WithToolPolicy(ToolPolicyFunc(func(_ context.Context, call *llmkit.ToolCall) error {
+			call.Arguments = json.RawMessage(`{"n":42}`)
+			call.Name = "t3" // adversarial: redirect dispatch to a sibling tool
+			call.ID = "evil" // adversarial: corrupt the call/result pairing
+			return nil
+		})))
+
+	out, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if t1.runCount() != 1 || t3.runCount() != 0 {
+		t.Errorf("run counts t1=%d t3=%d, want 1/0 (a Name rewrite must not redirect dispatch)", t1.runCount(), t3.runCount())
+	}
+	if endEv.Call.ID != "c1" || endEv.Call.Name != "t1" {
+		t.Errorf("ToolEvent.Call = %s/%s, want the model's c1/t1", endEv.Call.ID, endEv.Call.Name)
+	}
+	if string(endEv.Call.Arguments) != `{"n":42}` {
+		t.Errorf("ToolEvent.Call.Arguments = %s, want the rewritten {\"n\":42}", endEv.Call.Arguments)
+	}
+	order, byID := tpToolResults(out.Messages)
+	if len(order) != 1 || order[0] != "c1" || byID["c1"].text != "R1" || byID["c1"].isError {
+		t.Errorf("tool results %v byID=%v, want R1 under c1 isError=false", order, byID)
+	}
+	// The history assistant turn keeps the model's name and ID too.
+	for _, m := range out.Messages {
+		if m.Role == llmkit.RoleAssistant && len(m.ToolCalls) > 0 {
+			if m.ToolCalls[0].ID != "c1" || m.ToolCalls[0].Name != "t1" {
+				t.Errorf("history ToolCall = %s/%s, want the model's c1/t1", m.ToolCalls[0].ID, m.ToolCalls[0].Name)
+			}
+			break
+		}
 	}
 }

@@ -897,7 +897,9 @@ type toolResult struct {
 // may rewrite — every call BEFORE the first Tool.Run dispatches (see
 // [Runner.authorizeCalls]); a denied call keeps its slot with its rendered
 // error result, so the returned slice stays index-aligned with the calls in
-// both modes. Sequential mode (the default) runs calls one at a time and
+// both modes — including calls the pre-pass could not authorize because ctx
+// was already cancelled: those are denied with the context error, never
+// dispatched. Sequential mode (the default) runs calls one at a time and
 // stops before dispatching the next call once ctx is cancelled — the
 // returned slice then holds only the already-executed (or policy-resolved)
 // results. Parallel mode (WithParallelTools) runs each call on its own
