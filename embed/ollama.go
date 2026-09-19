@@ -12,7 +12,8 @@ import (
 	"sync"
 )
 
-// OllamaEmbedder produces embeddings via the Ollama REST API.
+// OllamaEmbedder produces embeddings by posting to an Ollama server's REST
+// API.
 //
 // Ollama endpoint: POST <baseURL>/api/embed
 //
@@ -28,7 +29,8 @@ type OllamaEmbedder struct {
 	mu         sync.RWMutex // guards dimensions
 }
 
-// NewOllamaEmbedder creates an Embedder that talks to a local Ollama instance.
+// NewOllamaEmbedder creates an OllamaEmbedder that posts to cfg.URL. It
+// returns an error when cfg fails Config.Validate.
 func NewOllamaEmbedder(cfg Config) (*OllamaEmbedder, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("ollama config: %w", err)
