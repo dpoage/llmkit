@@ -176,9 +176,9 @@ func (o *OpenAICompatibleEmbedder) doEmbed(ctx context.Context, texts []string) 
 		return nil, fmt.Errorf("openai-compatible: expected %d embeddings, got %d", len(texts), len(result.Data))
 	}
 
-	// The response may not be sorted by index. Build by index, rejecting
-	// out-of-range and duplicate indices; together with the count check
-	// above this guarantees every slot is filled.
+	// Response entries may arrive out of order. Build by index, rejecting
+	// out-of-range and duplicate entries — together with the count check
+	// above this fills every slot exactly once.
 	out := make([][]float32, len(texts))
 	for _, d := range result.Data {
 		if d.Index < 0 || d.Index >= len(texts) {

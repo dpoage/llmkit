@@ -59,9 +59,8 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("llmkit: %s error: %s", e.Provider, e.Message)
 }
 
-// Unwrap returns both the Kind sentinel (so errors.Is(err, ErrRateLimited) etc.
-// work) and the underlying SDK error (so callers can still reach provider
-// detail). Uses the multi-error Unwrap form (Go 1.20+).
+// Unwrap returns the Kind sentinel (for errors.Is) and, when set, the
+// underlying SDK error so callers can reach provider detail. Go 1.20+.
 func (e *APIError) Unwrap() []error {
 	if e.Err != nil {
 		return []error{e.Kind, e.Err}

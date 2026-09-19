@@ -25,7 +25,7 @@ import (
 //     /proc/self/cgroup) and move the bwrap pid into it after launch.
 //
 // When NEITHER is available, resource limits would otherwise be silently
-// dropped — exactly the failure mode acceptance criterion 4 forbids. The run
+// dropped. The run
 // FAILS with an actionable error unless the operator explicitly opts into
 // the WithCapPolicy(CapBestEffort) option.
 

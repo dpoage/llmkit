@@ -1,6 +1,8 @@
 # llmkit
 
-Shared LLM tooling extracted from `bugbot`, `known`, and `go-research`.
+Go building blocks for LLM harnesses: a provider-agnostic client, a
+tool-calling agent loop with policy seams, sandboxed command execution, and
+embeddings. Extracted from `bugbot`, `known`, and `go-research`.
 
 ## Packages
 
@@ -29,21 +31,20 @@ Shared LLM tooling extracted from `bugbot`, `known`, and `go-research`.
 
 - **`llmkit/agent`** — tool-calling harness over `llmkit.Client`: `Runner`
   with iteration/token budgets, history compaction, forced finalization,
-  max-tokens continuation stitching, JSONL transcripts (blocks marshal
-  snake_case with omitempty; transcripts recorded before this encoding are
-  not supported) with offline
+  max-tokens continuation stitching, JSONL transcripts with an offline
   `ReplayClient`, schema derivation from Go types (`SchemaOf`/`Func`,
   feeding `RunJSON`/`RunJSONAs`), multi-turn continuation via the
   `Continue` run option, synchronous lifecycle `Hooks`, per-tool timeouts,
-  and optional parallel tool dispatch. `Outcome.FinalText` holds the final
-  completion's text (empty when it produced none); `WithBudgetPool` makes
-  the Runner check and charge a shared `BudgetPool`; tool panics are
-  recovered and rendered as that call's error result in both dispatch
-  modes (hook panics propagate); the `RunJSON` repair turn continues the
-  transcript's step numbering. Tools implement `Tool{Def, Run}` or
-  come from `Func`; tool errors feed back to the model, infra failures
-  surface via `ToolHealthError`. Origin: `bugbot/internal/agent`
-  (harness only; bugbot's concrete tools stay in bugbot).
+  and optional parallel tool dispatch. Two policy seams shape a run:
+  `RequestPolicy` edits each wire request (thinking, sampling, tool choice,
+  message preprocessing) and `ToolPolicy` allows, denies, or rewrites each
+  model-requested tool call before it runs. The `Attach` run option adds
+  image or document blocks to the task turn. `Outcome.FinalText` holds the
+  final completion's text; `WithBudgetPool` charges a shared `BudgetPool`;
+  tool panics become that call's error result (hook panics propagate).
+  Tools implement `Tool{Def, Run}` or come from `Func`; tool errors feed
+  back to the model, infra failures surface via `ToolHealthError`. Origin:
+  `bugbot/internal/agent` (harness only).
 
 - **`llmkit/sandbox`** — isolated execution of untrusted, model-generated
   commands against repo snapshots: one `Sandbox` interface —

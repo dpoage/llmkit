@@ -3,9 +3,7 @@
 // logging ToolStart/ToolEnd/AfterCompletion, a per-tool timeout, a
 // ToolPolicy denying any tool named in --deny (decisions logged alongside
 // the hooks), and — behind --parallel — concurrent dispatch of the tool
-// calls a single completion requests. Compile-time check for the agent
-// surface: agent.NewRunner, agent.Func, agent.Hooks, agent.ToolPolicyFunc,
-// WithToolTimeout, WithParallelTools.
+// calls a single completion requests.
 //
 // Usage:
 //
@@ -57,9 +55,8 @@ func run() error {
 	}
 
 	// Hooks are synchronous: each runs inline on the goroutine that reaches
-	// the fire point (under --parallel, ToolStart/ToolEnd fire concurrently
-	// from the per-call goroutines, so a real hook must synchronize its own
-	// state).
+	// the fire point. Under --parallel, ToolStart/ToolEnd fire concurrently
+	// from the per-call goroutines, so a real hook must synchronize its own state.
 	hooks := agent.Hooks{
 		BeforeCompletion: func(_ context.Context, step int, req *llmkit.Request) {
 			log.Printf("step %d: completion (%d message(s), %d tool(s))", step, len(req.Messages), len(req.Tools))
@@ -81,10 +78,10 @@ func run() error {
 	}
 
 	// ToolPolicy is the permission seam: consulted once per model-requested
-	// call, in model order, on the loop goroutine before any Tool.Run of the
-	// turn dispatches. A denial feeds the model
+	// call, in model order, on the loop goroutine before any Tool.Run of
+	// the turn dispatches. A denial feeds the model
 	// "ERROR: tool <name> denied: …" and the run continues; the decision is
-	// logged with the same output as the hooks.
+	// logged alongside the hooks.
 	denySet := map[string]bool{}
 	for _, name := range strings.Split(*deny, ",") {
 		if name = strings.TrimSpace(name); name != "" {
@@ -109,8 +106,6 @@ func run() error {
 		opts = append(opts, agent.WithParallelTools())
 	}
 
-	// now takes no arguments (struct{}); add's schema is derived from
-	// addArgs. agent.Func replaces the hand-written ToolDef + Run pairs.
 	now := agent.Func[struct{}]("now", "returns the current local date and time",
 		func(_ context.Context, _ struct{}) (string, error) {
 			return time.Now().Format(time.RFC3339), nil

@@ -100,7 +100,7 @@ func TestConformance_ExplicitMaxTokensPassesThrough(t *testing.T) {
 // Request.System is the reliable system channel, but the block model also
 // allows a RoleSystem message inline in Messages. Where it lands differs by
 // provider (documented on Request.Messages); these tests pin the exact wire
-// placement so a mapping change cannot silently lose or relocate the turn.
+// placement.
 
 // TestConformance_InlineSystemMessage asserts, per adapter, exactly where an
 // inline RoleSystem message between two user turns ends up: OpenAI keeps it

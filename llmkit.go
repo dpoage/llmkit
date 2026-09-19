@@ -40,7 +40,7 @@ const (
 	// model's request to invoke tools (Anthropic tool_use / OpenAI tool_calls /
 	// Gemini functionCall).
 	RoleAssistant Role = "assistant"
-	// RoleToolResult carries the result of a previously-requested tool call back
+	// RoleToolResult carries the result of a tool call back
 	// to the model. ToolCallID must reference the originating ToolCall.ID.
 	RoleToolResult Role = "tool-result"
 )
@@ -65,7 +65,7 @@ const (
 	// thinking). Provider names the adapter that produced/signed it (e.g.
 	// "anthropic"); Raw carries the provider's wire block verbatim and is
 	// never interpreted. An adapter re-emits a thinking block verbatim ONLY
-	// when its Provider matches the adapter itself — blocks from a foreign
+	// when its Provider matches the adapter — blocks from a foreign
 	// provider are silently dropped on the way out. For anthropic/google
 	// blocks Text additionally carries the thinking payload for readability;
 	// Raw remains authoritative for the round-trip.
@@ -129,10 +129,9 @@ type Block struct {
 // RoleToolResult carry text only.
 type Message struct {
 	Role Role
-	// Content is the message's content blocks. Build the common
-	// single-text form with TextMessage; read it back with Text.
+	// Content is the message's content blocks.
 	Content []Block
-	// ToolCalls is set on assistant turns that request tool invocations.
+	// ToolCalls holds tool-use requests on assistant turns.
 	ToolCalls []ToolCall
 	// ToolCallID is set only on RoleToolResult messages.
 	ToolCallID string
@@ -272,8 +271,7 @@ type ToolCall struct {
 // providers that honor thinking, BudgetTokens must be positive and their
 // adapters reject anything else with an error wrapping ErrInvalidRequest;
 // providers without reasoning support (Capabilities.Thinking = false, e.g.
-// the OpenAI adapters this round) drop the whole field and never see the
-// budget.
+// OpenAI adapters) drop the whole field and never see the budget.
 type ThinkingConfig struct {
 	BudgetTokens int
 }
@@ -420,9 +418,9 @@ type Usage struct {
 // discounting cache reads by cacheReadWeight (0..1). Raw InputTokens counts
 // cache reads at full weight, but they bill at a steep discount (~0.1x
 // Anthropic, 0.25–0.5x OpenAI), so a cache-heavy run exhausts a raw-token
-// budget far faster than its real cost warrants. cacheReadWeight of 1.0
-// reproduces the old behavior.
-//
+// budget far faster than its real cost warrants. cacheReadWeight = 1.0
+// reproduces the uncached-discount-free count.
+
 // Cache CREATION tokens are left at full weight (Anthropic bills them at
 // 1.25x; treating them as cheap would understate cost).
 func (u Usage) ChargeableTokens(cacheReadWeight float64) int64 {

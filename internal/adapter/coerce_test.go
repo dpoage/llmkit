@@ -8,7 +8,7 @@ import (
 // mapSchemaForTest mirrors the real reproducer/patch "files" contract: a
 // free-form string map expressed as an object-valued additionalProperties,
 // wrapped in a root object that itself closes with additionalProperties:false.
-// This is the exact shape MiniMax rejects with a 400 (see bugbot-d80).
+// This is the exact shape MiniMax rejects with a 400.
 var mapSchemaForTest = json.RawMessage(`{
   "type":"object",
   "properties":{

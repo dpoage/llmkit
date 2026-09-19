@@ -223,10 +223,9 @@ func Continue(prev *Outcome) RunOption {
 // nil (reseed every call); [Continue] seeds a prior Outcome's Messages so the
 // next round lands in the SAME conversation as the one that produced it.
 // task and attach together form that seeded task turn (see [taskTurn]):
-// [Attach]'s blocks ride on it and nowhere else.
-// Before the task
-// is appended, a seed whose trailing assistant turn carries unanswered tool
-// calls is trimmed — see [trimDanglingToolTurn].
+// [Attach]'s blocks ride on it and nowhere else. Before the task is appended,
+// a seed whose trailing assistant turn carries unanswered tool calls is
+// trimmed — see [trimDanglingToolTurn].
 //
 // finalizePrompt, when non-empty, enables forced finalization: when a stop
 // condition fires (iteration cap, per-run token budget, or shared budget
@@ -243,14 +242,12 @@ func Continue(prev *Outcome) RunOption {
 //
 // maxEmptyTurnNudges bounds how many times run() will nudge a model that
 // produced neither a tool call nor visible text (after stripping reasoning
-// <think> blocks) back into the loop before giving up and treating the turn
-// as finished. Real reasoning models (MiniMax-M3 observed in production)
-// sometimes emit an assistant turn that is ONLY an inline think
-// block — stop=end_turn, zero tool calls — which the old code treated as
-// "model finished its turn", handing RunJSON unparseable empty text and
-// burning its single repair for nothing. The cap keeps a persistently silent
-// model from looping forever: after maxEmptyTurnNudges nudges go unanswered,
-// run() falls through to today's break.
+// <think> blocks) back into the loop before giving up. Some reasoning models
+// emit an assistant turn that is ONLY an inline think block — stop=end_turn,
+// zero tool calls — which would otherwise hand RunJSON unparseable empty text
+// and burn its single repair. The cap stops a persistently silent model from
+// looping forever; after maxEmptyTurnNudges nudges go unanswered, run()
+// falls through to break.
 const maxEmptyTurnNudges = 2
 
 // emptyTurnNudge is appended as a user turn when a completion produced no
@@ -276,12 +273,11 @@ func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task string, at
 	}
 
 	outcome := &Outcome{Transcript: tr}
-	// Snapshot the conversation into the Outcome on every return path (clean
-	// finish, truncation, or error) so a caller that wants to continue this
-	// conversation ([Continue]) always has the latest history available,
-	// even from a truncated or erroring run. messages is reassigned (not just
-	// mutated) throughout the loop below; the deferred closure reads it by
-	// reference at return time, not at defer-registration time.
+	// Snapshot the conversation into the Outcome on every return path so a caller
+	// that wants to continue this conversation ([Continue]) always has the latest
+	// history available, even from a truncated or erroring run. messages is
+	// reassigned throughout the loop; the deferred closure reads it by reference
+	// at return time.
 	defer func() { outcome.Messages = messages }()
 
 	// History-compaction state. toolNameByID lets a tool-result stub name the
@@ -375,17 +371,13 @@ func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task string, at
 				tr.closeStream()
 				return outcome, &StopReasonError{StopReason: resp.StopReason, Text: resp.Text, Outcome: outcome}
 			}
-			// A turn with no tool call and no visible text once reasoning
-			// <think> blocks are stripped is not a real answer — it's an
-			// empty/think-only turn (MiniMax-M3 observed emitting
-			// exactly this in production, sometimes narrating a tool call it
-			// never actually made). Nudge the model to continue instead of
-			// treating the turn as finished, up to maxEmptyTurnNudges times;
-			// the nudge turn goes through the normal loop top (iteration cap,
-			// budget checks, compaction all still apply) so it bills and
-			// counts like any other turn. This also covers a truncated,
-			// unclosed think block: StripThinkBlocks strips it to empty too,
-			// and nudging gives the model a chance to re-emit cleanly.
+			// A turn with no tool call and no visible text (after stripping
+			// reasoning <think> blocks) is an empty/think-only turn, not a real
+			// answer. Nudge the model to continue instead of treating the turn
+			// as finished, up to maxEmptyTurnNudges times; the nudge turn goes
+			// through the normal loop top so it bills and counts like any
+			// other turn. A truncated, unclosed think block also strips to
+			// empty and gets the same nudge.
 			if strings.TrimSpace(llmkit.StripThinkBlocks(resp.Text)) == "" && emptyTurnNudges < maxEmptyTurnNudges {
 				emptyTurnNudges++
 				messages = append(messages, llmkit.TextMessage(llmkit.RoleUser, emptyTurnNudge))
@@ -573,29 +565,20 @@ func (r *Runner) maybeCompact(ctx context.Context, messages []llmkit.Message, th
 }
 
 // repair issues a SINGLE tools-less, schema-bearing completion against the
-// repair prompt. It replaces the previous "fresh tool loop" repair path with
-// the constrained shape: a single completion where adapters that support
-// structured output apply grammar-constrained decoding natively, so the
-// answer is shape-correct on the wire. Tools are dropped so Google and
-// Anthropic (which refuse to combine tool use with native structured output)
-// also get the schema honored.
+// repair prompt. Tools are dropped so Google and Anthropic (which refuse to
+// combine tool use with native structured output) also get the schema honored.
 //
-// responseSchema, when non-nil, is attached capability-gated; when the
-// adapter's StructuredOutput capability is off, the schema is dropped
-// silently (per llmkit.Request docs) and the prompt-embedded schema instruction
-// is the only enforcement — same contract as the main run path.
+// responseSchema, when non-nil, is attached capability-gated (same contract as
+// the main run path: dropped silently when the adapter lacks structured output).
 //
-// The repair uses a fresh outcome seeded with baseIter — the parent run's
-// completed iteration count — but shares the caller's transcript so the
-// assistant turn is recorded there for parity with the main run path.
-// Seeding keeps the transcript's step numbering monotonic across the
-// boundary (a parent that recorded steps 1..N records its repair at N+1,
-// not at 1), so consumers joining hooks and transcript events on Step see
-// one continuous sequence. No tool loop runs; [Hooks.Repair] fires at
-// entry. The single repair completion is issued via completeOnce, so when
-// it itself stops at the output token cap the ONE max-tokens continuation
-// completion is paid on top — the pass is bounded to at most two
-// schema-bearing, tool-less completions.
+// The repair uses a fresh outcome seeded with baseIter but shares the caller's
+// transcript so the assistant turn is recorded there for parity with the main
+// run path. baseIter is the parent run's completed iteration count, so a parent
+// that recorded steps 1..N records its repair at N+1 — step numbering stays
+// monotonic across the boundary. No tool loop runs; [Hooks.Repair] fires at
+// entry. The single completion is issued via completeOnce, so a stop at the
+// output token cap pays the ONE max-tokens continuation completion on top —
+// the pass is bounded to at most two schema-bearing, tool-less completions.
 func (r *Runner) repair(ctx context.Context, tr *Transcript, prompt string, responseSchema json.RawMessage, baseIter int) (*Outcome, error) {
 	if r.hooks.Repair != nil {
 		r.hooks.Repair(ctx)
@@ -740,8 +723,8 @@ func stitchBlocks(head, cont []llmkit.Block, joinedText string) []llmkit.Block {
 // (a conservative openai-compatible endpoint, etc.), the schema is silently
 // dropped on the wire (per [llmkit.Request.ResponseSchema] docs) and only the
 // prompt-embedded schema instruction is in effect. This is the agent-layer
-// gate: the no-cap passthrough path sends NO schema, matching today's
-// behavior, while the with-cap path gets a hard native shape guarantee.
+// gate between the no-cap passthrough path and the with-cap native shape
+// guarantee.
 func (r *Runner) complete(ctx context.Context, tr *Transcript, messages []llmkit.Message, outcome *Outcome, responseSchema json.RawMessage, final bool) (llmkit.Response, error) {
 	req := llmkit.Request{
 		System:    r.systemPrompt,

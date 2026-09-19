@@ -108,9 +108,8 @@ func (r *Runner) runJSON(ctx context.Context, seed []llmkit.Message, task string
 	// Schema-guided rescue: weak models frequently prefix the
 	// final JSON with prose ("Based on my investigation… {…}") or leave a
 	// mangled head, both of which fail the leading-value parse above. Before
-	// burning the repair round-trip — a tools-less, HISTORY-LESS single
-	// completion that must rebuild the whole answer blind and often
-	// fabricates — scan the cleaned output for the first embedded JSON value
+	// burning the repair round-trip — a tools-less, history-less single
+	// completion — scan the cleaned output for the first embedded JSON value
 	// that ALREADY satisfies the schema. The schema is the arbiter, so an
 	// incidental json-ish fragment in the prose cannot hijack the answer.
 	if body, ok := rescueBody(outcome.FinalText, schema); ok {
@@ -130,7 +129,7 @@ func (r *Runner) runJSON(ctx context.Context, seed []llmkit.Message, task string
 	}
 
 	// One repair round-trip: tell the model exactly what failed and demand JSON
-	// only. The repair is now a single tools-less, schema-bearing completion
+	// only. The repair is a single tools-less, schema-bearing completion
 	// (see [Runner.repair]) so adapters that support native structured output
 	// apply grammar-constrained decoding and the shape is guaranteed on the wire.
 	repair := fmt.Sprintf(
