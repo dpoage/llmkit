@@ -20,7 +20,7 @@ import (
 //     constraints (required fields, additionalProperties) would be silently
 //     unenforced.
 //   - AllowAdditionalProperties=false stamps "additionalProperties": false
-//     (the bool form) at every object level: provider/openai's
+//     (the bool form) at every object level: provider/internal/openai's
 //     OpenAI-compatible schema downgrade requires the bool form, and the
 //     closed-subset validator uses it to reject unknown keys.
 //   - RequiredFromJSONSchemaTags stays false (the default), so every field
