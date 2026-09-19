@@ -10,20 +10,20 @@ import (
 )
 
 // Stats reports cumulative cache counters. Hits+Misses counts every text
-// requested through the cache. Counters are lifetime values and are not reset
-// by Clear; the current entry count is Len().
+// requested through the cache. Counters are lifetime values; Clear does
+// not reset them. Len reports the current entry count.
 type Stats struct {
 	Hits   int64
 	Misses int64
 }
 
 // CachedEmbedder wraps any Embedder with an in-memory content-hash cache.
-// Cache keys are SHA-256(model + "\x00" + text) so that different models
+// Cache keys are SHA-256(model + "\x00" + text), so different models
 // produce distinct cache entries for the same text.
 //
-// When maxSize > 0 the cache is bounded: inserting past the bound evicts the
-// least recently used entry, and cache hits refresh recency. maxSize <= 0
-// means unbounded.
+// When maxSize > 0 the cache is bounded: inserting past the bound evicts
+// the least recently used entry, and cache hits refresh recency.
+// maxSize <= 0 means unbounded. All methods are safe for concurrent use.
 type CachedEmbedder struct {
 	inner   Embedder
 	maxSize int
@@ -40,8 +40,8 @@ type lruEntry struct {
 	emb []float32
 }
 
-// NewCachedEmbedder wraps an existing Embedder with caching, bounded to
-// maxSize entries (maxSize <= 0 means unbounded).
+// NewCachedEmbedder wraps inner with caching, bounded to maxSize entries.
+// A maxSize of zero or less means unbounded.
 func NewCachedEmbedder(inner Embedder, maxSize int) *CachedEmbedder {
 	if maxSize < 0 {
 		maxSize = 0
