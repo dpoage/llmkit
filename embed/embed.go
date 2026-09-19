@@ -40,7 +40,7 @@
 // <PREFIX>_EMBED* environment variables. The backend defaults to "ollama"
 // and the model to "nomic-embed-text"; the URL has no default.
 // [Config.Validate] rejects negative Dimensions, MaxBatch, and CacheSize
-// values, and jitter outside [0, 1].
+// values. It also rejects jitter outside [0, 1].
 //
 // # Retries
 //
@@ -48,12 +48,15 @@
 // [llmkit.RetryConfig]: HTTP 429 and 5xx (honoring Retry-After when the
 // server supplies it) and timeout-classified network errors. Other errors,
 // including context cancellation, are terminal.
-// [Config.Retry.RequestTimeout] is the single per-attempt bound; round
-// trips never depend on an http.Client timeout. Unset knobs resolve at
-// construction to the embed defaults of 3 attempts and a 60s per-attempt
-// timeout. BaseDelay and MaxDelay fall back to
+// The per-attempt bound depends on [Config.HTTPClient]. When nil, the
+// embedder uses a client with no [http.Client.Timeout], and
+// Config.Retry.RequestTimeout is the only per-attempt bound. An injected
+// client is used as-is, including its Timeout: an attempt then ends at the
+// earlier of RequestTimeout and the client's Timeout. Unset knobs resolve
+// at construction to the embed defaults of 3 attempts and a 60s
+// per-attempt timeout. BaseDelay and MaxDelay fall back to
 // [llmkit.DefaultRetryConfig]. Jitter is taken literally: 0 means no
-// jitter, and [LoadConfig] seeds the kit default of 20%.
+// jitter, and [LoadConfig] seeds llmkit's default of 20%.
 //
 // # Caching
 //
@@ -133,10 +136,10 @@ func batchChunkSize(remaining, maxBatch int) int {
 	return maxBatch
 }
 
-// ErrEmptyVector reports a zero-length vector returned while dimension
-// auto-detection is active (Config.Dimensions == 0). A zero-length vector
-// carries no dimensional information, so the backend rejects it, wrapped
-// with backend context. Test with errors.Is.
+// ErrEmptyVector reports a zero-length embedding vector. Backends return
+// this error, wrapped with backend context, when dimension auto-detection
+// (Config.Dimensions == 0) encounters such a vector: the vector carries no
+// dimensional information. Test with errors.Is.
 var ErrEmptyVector = errors.New("empty embedding vector")
 
 // checkDimensions enforces vector-dimension consistency for a converted
