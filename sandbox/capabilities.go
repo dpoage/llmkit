@@ -152,7 +152,7 @@ func (f *capFlight) wait() CapabilitySet {
 // under-provisioned the mount. Pass nil when there is nothing writable to
 // thread through.
 //
-// The probe runs under the backend's default network mode ("none") with a
+// The probe runs under the backend's default network mode with a
 // probeTimeout ceiling so it cannot stall the caller.
 func ProbeCapabilities(ctx context.Context, sb Sandbox, image, repoDir string, mounts, rwMounts []ROMount, env []string, probes []ProbeEntry) CapabilitySet {
 	if sb == nil || repoDir == "" {
