@@ -1,15 +1,16 @@
 // Command agent demonstrates the llmkit/agent tool-calling harness: a
 // Runner with two small tools (now, add), synchronous lifecycle hooks
-// logging ToolStart/ToolEnd/AfterCompletion, a per-tool timeout, and —
-// behind --parallel — concurrent dispatch of the tool calls a single
-// completion requests. It doubles as a compile-time contract check for the
-// agent surface: agent.NewRunner, agent.Func, agent.Hooks, WithToolTimeout,
-// and WithParallelTools.
+// logging ToolStart/ToolEnd/AfterCompletion, a per-tool timeout, a
+// ToolPolicy denying any tool named in --deny (decisions logged alongside
+// the hooks), and — behind --parallel — concurrent dispatch of the tool
+// calls a single completion requests. It doubles as a compile-time contract
+// check for the agent surface: agent.NewRunner, agent.Func, agent.Hooks,
+// agent.ToolPolicyFunc, WithToolTimeout, and WithParallelTools.
 //
 // Usage:
 //
 //	# export the shared LLMKIT_* variables (examples/internal/envcfg), then:
-//	go run ./examples/agent [--parallel] [--task "..."]
+//	go run ./examples/agent [--parallel] [--task "..."] [--deny now,add]
 //
 // Without the environment variables set, the program prints usage and exits
 // non-zero without touching the network.
@@ -21,6 +22,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/dpoage/llmkit"
@@ -38,6 +40,7 @@ func main() {
 
 func run() error {
 	parallel := flag.Bool("parallel", false, "dispatch the tool calls of one turn concurrently (WithParallelTools)")
+	deny := flag.String("deny", "", "comma-separated tool names the ToolPolicy refuses to run (WithToolPolicy demo)")
 	task := flag.String("task", "What time is it right now, and what is 41 plus 58? Use the tools to answer both parts.",
 		"the task to give the agent")
 	flag.Parse()
@@ -77,9 +80,31 @@ func run() error {
 		},
 	}
 
+	// The ToolPolicy is the permission seam: consulted once per
+	// model-requested call, in the model's order, on the loop goroutine
+	// before any Tool.Run of the turn dispatches — so prompting here (the
+	// real version of this demo) would be safe even under --parallel. A
+	// denial feeds the model "ERROR: tool <name> denied: …" and the run
+	// continues; the decision is logged with the same output as the hooks.
+	denySet := map[string]bool{}
+	for _, name := range strings.Split(*deny, ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			denySet[name] = true
+		}
+	}
+	policy := agent.ToolPolicyFunc(func(_ context.Context, call *llmkit.ToolCall) error {
+		if denySet[call.Name] {
+			log.Printf("policy: tool %s DENIED (named in --deny)", call.Name)
+			return fmt.Errorf("%s is disabled in this demo", call.Name)
+		}
+		log.Printf("policy: tool %s allowed", call.Name)
+		return nil
+	})
+
 	opts := []agent.Option{
 		agent.WithHooks(hooks),
 		agent.WithToolTimeout(10 * time.Second),
+		agent.WithToolPolicy(policy),
 	}
 	if *parallel {
 		opts = append(opts, agent.WithParallelTools())
