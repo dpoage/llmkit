@@ -8,6 +8,8 @@ entry below is marked.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-19
+
 ### Added
 
 - Streaming: `llmkit.Delta`, `StreamingClient`, and `llmkit.Stream` over any
@@ -134,7 +136,8 @@ entry below is marked.
 - Relicensed AGPL-3.0; the `embed` package derives from MIT-licensed `known`
   and is relicensed by the copyright holder.
 
-[Unreleased]: https://github.com/dpoage/llmkit/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/dpoage/llmkit/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/dpoage/llmkit/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/dpoage/llmkit/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/dpoage/llmkit/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/dpoage/llmkit/releases/tag/v0.1.0
