@@ -38,13 +38,15 @@ func TestNewCLIRefusesBwrapOnlyOptions(t *testing.T) {
 
 func TestResolveParamsAppliesDefaultsAndOverrides(t *testing.T) {
 	s := &CLI{
-		runtime:        "podman",
-		defaultImage:   "default-img",
-		defaultCPUs:    2,
-		defaultMemory:  2048,
-		defaultNetwork: NetworkNone,
-		pidsLimit:      256,
-		maxOutputBytes: DefaultMaxOutputBytes,
+		runtime:      "podman",
+		defaultImage: "default-img",
+		defaults: defaults{
+			defaultCPUs:    2,
+			defaultMemory:  2048,
+			defaultNetwork: NetworkNone,
+			pidsLimit:      256,
+			maxOutputBytes: DefaultMaxOutputBytes,
+		},
 	}
 
 	// Empty spec -> backend defaults.
@@ -75,7 +77,7 @@ func TestResolveParamsAppliesDefaultsAndOverrides(t *testing.T) {
 }
 
 func TestExecRejectsEmptyCmd(t *testing.T) {
-	s := &CLI{runtime: "podman", defaultImage: "img", maxOutputBytes: DefaultMaxOutputBytes}
+	s := &CLI{runtime: "podman", defaultImage: "img", defaults: defaults{maxOutputBytes: DefaultMaxOutputBytes}}
 	if _, err := s.Exec(context.Background(), Spec{RepoDir: t.TempDir()}); err == nil {
 		t.Fatal("expected error for empty Cmd")
 	}
@@ -106,6 +108,7 @@ func TestOptionsConfigureCLI(t *testing.T) {
 		WithCPUs(4), WithMemoryMB(1024), WithTimeout(5*time.Second),
 		WithNetwork(NetworkBridge), WithPidsLimit(64), WithMaxOutputBytes(2048),
 		WithScratchSizeMB(256), WithWorkspaceGrowthCeilingMB(1024),
+		WithIdleTimeout(90*time.Second),
 	)
 	if err != nil {
 		t.Fatalf("NewCLI: %v", err)
@@ -115,6 +118,9 @@ func TestOptionsConfigureCLI(t *testing.T) {
 	}
 	if s.defaultNetwork != NetworkBridge || s.pidsLimit != 64 || s.maxOutputBytes != 2048 {
 		t.Fatalf("options not applied: %+v", s)
+	}
+	if s.defaultIdleTimeout != 90*time.Second {
+		t.Errorf("defaultIdleTimeout = %v, want 90s (a dropped WithIdleTimeout application silently turns idle kills into absolute-timeout kills)", s.defaultIdleTimeout)
 	}
 	if s.defaultScratchSizeMB != 256 {
 		t.Errorf("defaultScratchSizeMB = %d, want 256", s.defaultScratchSizeMB)

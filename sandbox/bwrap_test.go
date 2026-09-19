@@ -71,38 +71,27 @@ func TestNewBwrapFailsFastWhenUnavailable(t *testing.T) {
 	}
 }
 
+// TestBwrapOptionsApplyDefaults pins the option→defaults mapping through
+// the REAL constructor: NewBwrap must land every shared knob on its
+// embedded defaults, so deleting any single application in
+// options.applyDefaults (or any base value in baseDefaults) fails here
+// instead of silently dropping the knob — a dropped WithIdleTimeout, for
+// instance, turns idle kills into unnoticed absolute-timeout kills.
 func TestBwrapOptionsApplyDefaults(t *testing.T) {
-	o := newOptions([]Option{
+	if ok, _ := DetectBwrap(); !ok {
+		t.Skip("bwrap unavailable; the application pin needs the real NewBwrap")
+	}
+	s, err := NewBwrap(
 		WithCPUs(3), WithMemoryMB(1024), WithPidsLimit(64),
 		WithNetwork(NetworkHost), WithCapPolicy(CapBestEffort),
 		WithScratchSizeMB(256), WithWorkspaceGrowthCeilingMB(1024),
-		WithIdleTimeout(30 * time.Second),
-	})
-	s := &Bwrap{}
-	if o.has("WithCPUs") {
-		s.defaultCPUs = o.cpus
+		WithIdleTimeout(30*time.Second), WithTimeout(7*time.Minute),
+		WithMaxOutputBytes(4096),
+	)
+	if err != nil {
+		t.Fatalf("NewBwrap: %v", err)
 	}
-	if o.has("WithMemoryMB") {
-		s.defaultMemory = o.memoryMB
-	}
-	if o.has("WithPidsLimit") {
-		s.pidsLimit = o.pidsLimit
-	}
-	if o.has("WithNetwork") {
-		s.defaultNetwork = o.network
-	}
-	if o.has("WithCapPolicy") {
-		s.capPolicy = o.capPolicy
-	}
-	if o.has("WithScratchSizeMB") {
-		s.defaultScratchSizeMB = o.scratchSizeMB
-	}
-	if o.has("WithWorkspaceGrowthCeilingMB") {
-		s.defaultGrowthCeilingBytes = int64(o.growthCeilingMB) * 1024 * 1024
-	}
-	if o.has("WithIdleTimeout") {
-		s.defaultIdleTimeout = o.idleTimeout
-	}
+	t.Cleanup(func() { _ = s.Close() })
 
 	cpus, mem, pids := s.Limits()
 	if cpus != 3 || mem != 1024 || pids != 64 {
@@ -119,6 +108,26 @@ func TestBwrapOptionsApplyDefaults(t *testing.T) {
 	}
 	if want := int64(1024) * 1024 * 1024; s.defaultGrowthCeilingBytes != want {
 		t.Errorf("defaultGrowthCeilingBytes = %d, want %d (1024 MB in bytes)", s.defaultGrowthCeilingBytes, want)
+	}
+	if s.defaultIdleTimeout != 30*time.Second {
+		t.Errorf("defaultIdleTimeout = %v, want 30s", s.defaultIdleTimeout)
+	}
+	if s.defaultTimeout != 7*time.Minute {
+		t.Errorf("defaultTimeout = %v, want 7m", s.defaultTimeout)
+	}
+	if s.maxOutputBytes != 4096 {
+		t.Errorf("maxOutputBytes = %d, want 4096", s.maxOutputBytes)
+	}
+
+	// The zero-option leg pins baseDefaults itself: every shared knob must
+	// start at the documented out-of-the-box posture.
+	base, err := NewBwrap()
+	if err != nil {
+		t.Fatalf("NewBwrap(): %v", err)
+	}
+	t.Cleanup(func() { _ = base.Close() })
+	if want := baseDefaults(); base.defaults != want {
+		t.Errorf("zero-option defaults = %+v, want baseDefaults %+v", base.defaults, want)
 	}
 }
 
@@ -142,7 +151,7 @@ func TestBwrapConstructorRefusesCLIOnlyOptions(t *testing.T) {
 }
 
 func TestBwrapResolveParamsRejectsBadNetwork(t *testing.T) {
-	s := &Bwrap{defaultNetwork: NetworkNone}
+	s := &Bwrap{defaults: defaults{defaultNetwork: NetworkNone}}
 	_, err := s.resolveBwrapParams(Spec{Cmd: []string{"true"}, Network: NetworkBridge})
 	var ue *UnsupportedSpecError
 	if !errors.As(err, &ue) {
