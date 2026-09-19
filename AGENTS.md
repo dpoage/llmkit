@@ -278,6 +278,15 @@ in its message.
   call's error result in both dispatch modes (sequential and
   `WithParallelTools`); hook panics propagate to the caller. The `RunJSON`
   repair turn continues the parent run's transcript step numbering.
+  `WithToolPolicy` installs a `ToolPolicy` permission gate consulted once
+  per model-requested call: every call of a turn is authorized in model
+  order on the loop goroutine before any `Tool.Run` dispatches, in both
+  dispatch modes, so an interactive policy never races the parallel
+  fan-out. A denial feeds the model `ERROR: tool <name> denied: …` with
+  IsError, keeps the hooks silent, and the run continues; a policy may
+  rewrite a call's Arguments (Tool.Run and ToolEvent.Call see the rewrite;
+  wire history keeps the model's original), while result rewriting
+  composes via a `Tool` decorator instead.
   Tool-failure typing: `ToolHealthError` for infra failures,
   `StopReasonError` for model refusal/safety stops.
 - **`llmkit/sandbox`** — isolated execution of untrusted, model-generated
