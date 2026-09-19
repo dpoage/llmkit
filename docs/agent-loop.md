@@ -208,7 +208,7 @@ Every run records an ordered `Transcript` of events. Each event has a kind, a 1-
 ```jsonl
 {"kind":"request","step":1,"time":"2026-09-19T15:16:26.585632674-06:00","messages":[{"Role":"user","Content":[{"kind":"text","text":"What is the weather in Tokyo?"}],"ToolCalls":null,"ToolCallID":"","IsError":false}]}
 {"kind":"assistant","step":1,"time":"2026-09-19T15:16:26.585634929-06:00","tool_calls":[{"ID":"call-1","Name":"weather","Arguments":{"city":"Tokyo"}}],"stop_reason":"tool_use","usage":{"InputTokens":312,"OutputTokens":24,"CacheReadInputTokens":0,"CacheCreationInputTokens":0}}
-{"kind":"tool_result","step":1,"time":"2026-09-19T15:16:26.585649386-06:00","tool_call_id":"call-1","tool_name":"weather","result":"18C, clear"}
+{"kind":"tool_result","step":1,"time":"2026-09-19T15:16:26.585649386-06:00","tool_call_id":"call-1","tool_name":"weather","result":"18°C, clear"}
 ```
 
 Step 2 repeats the pattern: a `request` event carrying the grown conversation, then the final `assistant` event with `stop_reason: end_turn`. `WithTranscriptDir` autosaves each run's transcript under a directory, and `WithTranscriptKey` adds a stable name to the file for later recovery.
