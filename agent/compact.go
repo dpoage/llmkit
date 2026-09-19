@@ -33,10 +33,10 @@ func EstimateHistoryTokens(msgs []llmkit.Message) int64 { return estimateTokens(
 // SimulateCompaction applies the Runner's threshold-triggered history-compaction
 // policy to a single history snapshot, given the threshold currently in force
 // and the running tool-name map. It returns the (possibly) compacted snapshot
-// and the next threshold (re-armed upward iff a real prune occurred), exactly
-// mirroring [Runner.maybeCompact]. It exists so an offline measurement can replay
-// a recorded run's request snapshots through the SAME policy the live Runner
-// applies, rather than a re-implementation that could drift.
+// and the next threshold (re-armed upward iff a real prune occurred) — the
+// same policy the live Runner applies. It exists so an offline measurement
+// can replay a recorded run's request snapshots through that policy rather
+// than a re-implementation that could drift.
 //
 // budget <= 0 disables compaction (returns the snapshot unchanged). recentK is
 // the trailing tool-result window to preserve; pass CompactRecentToolResults to

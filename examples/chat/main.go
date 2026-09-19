@@ -92,7 +92,7 @@ set the variables above, then re-run:
 		if err != nil {
 			return fmt.Errorf("run: %w", err)
 		}
-		if outcome.FinalTextSet {
+		if outcome.FinalText != "" {
 			fmt.Println("assistant>", outcome.FinalText)
 		} else {
 			fmt.Println("assistant> (no assistant text produced)")
