@@ -72,9 +72,9 @@ type retryClient struct {
 	cfg   RetryConfig
 }
 
-// WithRetry wraps c so that Complete retries transient failures per cfg.
-// Capabilities is delegated unchanged. Wrapping is composable with WithRecorder
-// and WithSerializedToolCalls.
+// WithRetry wraps c so that Complete and Stream retry transient failures per
+// cfg. Capabilities is delegated unchanged. Wrapping is composable with
+// WithRecorder and WithSerializedToolCalls.
 func WithRetry(c Client, cfg RetryConfig) Client {
 	if cfg.MaxAttempts < 1 {
 		cfg.MaxAttempts = 1
@@ -95,6 +95,27 @@ func WithRetry(c Client, cfg RetryConfig) Client {
 func (r *retryClient) Capabilities() Capabilities { return r.inner.Capabilities() }
 
 func (r *retryClient) Complete(ctx context.Context, req Request) (Response, error) {
+	return r.retryLoop(ctx, func() (Response, error, bool) {
+		resp, err := r.attempt(ctx, req)
+		return resp, err, false
+	})
+}
+
+// Stream streams from the wrapped client under the same retry policy as
+// Complete, the per-attempt RequestTimeout bounding the whole attempt. An
+// error that follows an already-delivered delta is terminal and is returned
+// as-is, the way Complete returns a non-retryable error: the caller holds
+// partial output, and a retry would replay or diverge from it.
+func (r *retryClient) Stream(ctx context.Context, req Request, fn func(Delta) error) (Response, error) {
+	return r.retryLoop(ctx, func() (Response, error, bool) {
+		return r.streamAttempt(ctx, req, fn)
+	})
+}
+
+// retryLoop runs run until it succeeds, retrying transient failures with
+// backoff and honoring Retry-After. run's delivered result marks a terminal
+// error: output already reached the caller, so no further attempt may run.
+func (r *retryClient) retryLoop(ctx context.Context, run func() (resp Response, err error, delivered bool)) (Response, error) {
 	var lastErr error
 	for attempt := range r.cfg.MaxAttempts {
 		if attempt > 0 {
@@ -109,9 +130,12 @@ func (r *retryClient) Complete(ctx context.Context, req Request) (Response, erro
 			}
 		}
 
-		resp, err := r.attempt(ctx, req)
+		resp, err, delivered := run()
 		if err == nil {
 			return resp, nil
+		}
+		if delivered {
+			return Response{}, err
 		}
 		lastErr = err
 
@@ -145,6 +169,24 @@ func (r *retryClient) attempt(ctx context.Context, req Request) (Response, error
 	attemptCtx, cancel := context.WithTimeout(ctx, r.cfg.RequestTimeout)
 	defer cancel()
 	return r.inner.Complete(attemptCtx, req)
+}
+
+// streamAttempt runs one inner stream attempt under a per-attempt wall-clock
+// deadline derived from ctx (see attempt). delivered reports whether at
+// least one delta reached fn before the attempt ended; Stream treats such
+// an attempt's error as terminal. A nil fn is replaced with a no-op so the
+// inner Stream never sees a nil callback; the wrapper still marks progress.
+func (r *retryClient) streamAttempt(ctx context.Context, req Request, fn func(Delta) error) (resp Response, err error, delivered bool) {
+	if fn == nil {
+		fn = func(Delta) error { return nil }
+	}
+	attemptCtx, cancel := context.WithTimeout(ctx, r.cfg.RequestTimeout)
+	defer cancel()
+	resp, err = Stream(attemptCtx, r.inner, req, func(d Delta) error {
+		delivered = true
+		return fn(d)
+	})
+	return resp, err, delivered
 }
 
 // backoff computes the delay before the given attempt (1-indexed for the first
