@@ -19,6 +19,16 @@ import (
 // for tool-level problems (bad arguments, file not found); never use them to
 // signal that the loop should abort.
 //
+// A PANIC from Run is treated the same way, in BOTH dispatch modes
+// (sequential and [WithParallelTools]): the harness recovers it and renders
+// it as that call's error result "ERROR: tool <name> panicked: <value>"
+// with IsError=true, [Hooks.ToolEnd] fires with that result, and the run
+// continues. A panic raised by adversarial model-supplied arguments is data
+// for the model, not an abort — the harness never lets a tool panic kill the
+// process or its caller. (A panicking HOOK is a harness bug with the
+// opposite contract: it propagates out of [Runner.Run] and is never rendered
+// to the model — see [Hooks].)
+//
 // Run must honor ctx cancellation. Run MAY BE INVOKED CONCURRENTLY: within a
 // single run when the Runner was constructed with [WithParallelTools] (one
 // goroutine per tool call in a turn), and across simultaneous Run calls on
@@ -31,7 +41,9 @@ type Tool interface {
 	// parameters) as advertised to the model.
 	Def() llmkit.ToolDef
 	// Run executes the tool with the model-supplied arguments and returns the
-	// textual result to feed back to the model.
+	// textual result to feed back to the model. An error, or a panic, is
+	// recovered by the harness and rendered to the model as this call's
+	// "ERROR:"-prefixed result (identically in both dispatch modes).
 	Run(ctx context.Context, args json.RawMessage) (string, error)
 }
 
