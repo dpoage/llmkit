@@ -70,17 +70,34 @@ func TestMockConcurrentSafe(t *testing.T) {
 	}
 }
 
+// TestMockReset pins the full-reset contract: EVERY piece of scripted or
+// recorded state is cleared — recorded calls, the response queue,
+// ResponseFunc, AND DefaultResponse (back to the zero value). The name
+// says what it does; nothing survives.
 func TestMockReset(t *testing.T) {
-	m := NewMock(MockResponse{})
+	m := NewMock(MockResponse{Result: Result{ExitCode: 7}})
 	m.EnqueueResponse(MockResponse{Result: Result{ExitCode: 5}})
 	_, _ = m.Exec(context.Background(), Spec{Cmd: []string{"x"}})
+	m.ResponseFunc = func(n int, spec Spec) (Result, error) {
+		return Result{ExitCode: 99}, nil
+	}
+
 	m.Reset()
+
 	if m.CallCount() != 0 {
 		t.Fatal("Reset should clear calls")
 	}
-	// Queue cleared -> default returned.
+	if len(m.Calls()) != 0 {
+		t.Fatal("Reset should clear recorded calls")
+	}
+	if m.ResponseFunc != nil {
+		t.Fatal("Reset should clear ResponseFunc")
+	}
+	// With queue, ResponseFunc, and DefaultResponse all cleared, Exec must
+	// return the zero value — a stale ExitCode=7 default or a surviving
+	// queued ExitCode=5 response would both fail this.
 	r, _ := m.Exec(context.Background(), Spec{Cmd: []string{"y"}})
 	if r.ExitCode != 0 {
-		t.Fatalf("after reset expected default exit 0, got %d", r.ExitCode)
+		t.Fatalf("after reset expected the zero-value response (exit 0), got %+v", r)
 	}
 }

@@ -101,13 +101,25 @@ func (m *Mock) CallCount() int {
 	return len(m.calls)
 }
 
-// Reset clears recorded calls and the queued responses (DefaultResponse and
-// ResponseFunc are retained).
+// Reset returns m to its zero value: recorded calls, the response queue,
+// ResponseFunc, and DefaultResponse are ALL cleared. The name says what it
+// does — nothing scripted survives; re-seed anything the next run should
+// see (via EnqueueResponse or by setting DefaultResponse/ResponseFunc).
 func (m *Mock) Reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.calls = nil
 	m.queue = nil
+	m.ResponseFunc = nil
+	m.DefaultResponse = MockResponse{}
 }
 
 var _ Sandbox = (*Mock)(nil)
+
+// MaterializeWorkspace implements Sandbox. Mock never touches the
+// filesystem, so it returns repoDir unchanged and records nothing; a caller
+// that feeds the result back as Spec.Workspace gets that path recorded on
+// the Call like any other Spec field.
+func (m *Mock) MaterializeWorkspace(repoDir string) (string, error) {
+	return repoDir, nil
+}

@@ -17,7 +17,7 @@ type runParams struct {
 	// /workspace inside the container.
 	workspace string
 	image     string
-	network   string
+	network   NetworkMode
 	cpus      float64
 	memoryMB  int
 	pidsLimit int
@@ -109,7 +109,7 @@ func buildRunArgs(p runParams) []string {
 		"run",
 		"--rm",
 		"--name", p.containerName,
-		"--network=" + p.network,
+		"--network=" + string(p.network),
 		"--read-only",
 		"--tmpfs", fmt.Sprintf("/tmp:rw,exec,nosuid,size=%dm", scratchMB),
 		"--env", "HOME=/tmp",

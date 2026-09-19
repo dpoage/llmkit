@@ -29,19 +29,22 @@ func newGoMountCLI(t *testing.T) *CLI {
 	if !ok {
 		t.Skip("no container runtime detected; skipping integration test")
 	}
-	s, err := NewCLI(rt, goTestImage,
+	base := []Option{
+		WithRuntime(rt),
+		WithImage(goTestImage),
 		WithCPUs(2),
 		WithMemoryMB(1024),
 		WithPidsLimit(512),
-		WithTimeout(120*time.Second),
-	)
+		WithTimeout(120 * time.Second),
+	}
+	s, err := NewCLI(base...)
 	if err != nil {
 		t.Skipf("NewCLI: %v", err)
 	}
 	// Force the image to be available up front; skip if it can't be pulled.
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	if _, err := s.Exec(ctx, Spec{RepoDir: t.TempDir(), Cmd: []string{"true"}, Network: "bridge"}); err != nil {
+	if _, err := s.Exec(ctx, Spec{RepoDir: t.TempDir(), Cmd: []string{"true"}, Network: NetworkBridge}); err != nil {
 		t.Skipf("cannot run Go test image %q (pull failed?): %v", goTestImage, err)
 	}
 	return s
@@ -118,7 +121,7 @@ func TestAnswer(t *testing.T) {
 		RepoDir:  repoDir,
 		Cmd:      []string{"go", "test", "./..."},
 		ROMounts: []ROMount{siblingMount},
-		Network:  "none",
+		Network:  NetworkNone,
 	})
 	if err != nil {
 		t.Fatalf("Exec: %v", err)

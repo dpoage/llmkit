@@ -1,12 +1,14 @@
 package sandbox
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDetectBwrapReasonsAreActionable(t *testing.T) {
@@ -70,24 +72,47 @@ func TestNewBwrapFailsFastWhenUnavailable(t *testing.T) {
 }
 
 func TestBwrapOptionsApplyDefaults(t *testing.T) {
+	o := newOptions([]Option{
+		WithCPUs(3), WithMemoryMB(1024), WithPidsLimit(64),
+		WithNetwork(NetworkHost), WithCapPolicy(CapBestEffort),
+		WithScratchSizeMB(256), WithWorkspaceGrowthCeilingMB(1024),
+		WithIdleTimeout(30 * time.Second),
+	})
 	s := &Bwrap{}
-	WithBwrapCPUs(3)(s)
-	WithBwrapMemoryMB(1024)(s)
-	WithBwrapPidsLimit(64)(s)
-	WithBwrapNetwork("host")(s)
-	WithBwrapAllowUncapped(true)(s)
-	WithBwrapScratchSizeMB(256)(s)
-	WithBwrapWorkspaceGrowthCeilingMB(1024)(s)
+	if o.has("WithCPUs") {
+		s.defaultCPUs = o.cpus
+	}
+	if o.has("WithMemoryMB") {
+		s.defaultMemory = o.memoryMB
+	}
+	if o.has("WithPidsLimit") {
+		s.pidsLimit = o.pidsLimit
+	}
+	if o.has("WithNetwork") {
+		s.defaultNetwork = o.network
+	}
+	if o.has("WithCapPolicy") {
+		s.capPolicy = o.capPolicy
+	}
+	if o.has("WithScratchSizeMB") {
+		s.defaultScratchSizeMB = o.scratchSizeMB
+	}
+	if o.has("WithWorkspaceGrowthCeilingMB") {
+		s.defaultGrowthCeilingBytes = int64(o.growthCeilingMB) * 1024 * 1024
+	}
+	if o.has("WithIdleTimeout") {
+		s.defaultIdleTimeout = o.idleTimeout
+	}
 
 	cpus, mem, pids := s.Limits()
 	if cpus != 3 || mem != 1024 || pids != 64 {
 		t.Errorf("Limits() = %v %v %v, want 3 1024 64", cpus, mem, pids)
 	}
-	if s.defaultNetwork != "host" {
-		t.Errorf("defaultNetwork = %q, want host", s.defaultNetwork)
+	if s.defaultNetwork != NetworkHost {
+		t.Errorf("defaultNetwork = %q, want %q", s.defaultNetwork, NetworkHost)
 	}
-	if !s.allowUncapped {
-		t.Error("allowUncapped should be true")
+	if s.capPolicy != CapBestEffort {
+		t.Errorf("capPolicy = %v, want CapBestEffort", s.capPolicy)
 	}
 	if s.defaultScratchSizeMB != 256 {
 		t.Errorf("defaultScratchSizeMB = %d, want 256", s.defaultScratchSizeMB)
@@ -97,17 +122,72 @@ func TestBwrapOptionsApplyDefaults(t *testing.T) {
 	}
 }
 
+// TestBwrapConstructorRefusesCLIOnlyOptions pins the one-Option-type
+// contract from the other side: NewBwrap must reject every CLI-only option
+// with an error NAMING it, instead of silently ignoring the knob.
+func TestBwrapConstructorRefusesCLIOnlyOptions(t *testing.T) {
+	if ok, _ := DetectBwrap(); !ok {
+		t.Skip("bwrap unavailable; constructor refusal is host-independent but DetectBwrap runs first")
+	}
+	for _, opt := range []Option{WithRuntime("podman"), WithImage("img")} {
+		_, err := NewBwrap(opt)
+		if err == nil {
+			t.Errorf("NewBwrap accepted a CLI-only option without error")
+			continue
+		}
+		if !strings.Contains(err.Error(), "option With") || !strings.Contains(err.Error(), "bwrap") {
+			t.Errorf("error %v must name the option and the bwrap backend", err)
+		}
+	}
+}
+
 func TestBwrapResolveParamsRejectsBadNetwork(t *testing.T) {
-	s := &Bwrap{defaultNetwork: "none"}
-	if _, err := s.resolveBwrapParams(Spec{Cmd: []string{"true"}, Network: "bridge"}); err == nil {
-		t.Error("expected an error for an unsupported bwrap network mode")
+	s := &Bwrap{defaultNetwork: NetworkNone}
+	_, err := s.resolveBwrapParams(Spec{Cmd: []string{"true"}, Network: NetworkBridge})
+	var ue *UnsupportedSpecError
+	if !errors.As(err, &ue) {
+		t.Fatalf("err = %v, want *UnsupportedSpecError", err)
+	}
+	if ue.Backend != "bwrap" || ue.Field != "Network" || ue.Value != string(NetworkBridge) {
+		t.Errorf("UnsupportedSpecError = %+v, want backend=bwrap field=Network value=bridge", ue)
 	}
 	p, err := s.resolveBwrapParams(Spec{Cmd: []string{"true"}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if p.network != "none" {
-		t.Errorf("expected default network 'none', got %q", p.network)
+	if p.network != NetworkNone {
+		t.Errorf("expected default network NetworkNone, got %q", p.network)
+	}
+}
+
+// TestBwrapConstructorRejectsBridgeNetworkDefault pins the construction-time
+// half of the Network row: WithNetwork(NetworkBridge) — a mode bwrap could
+// NEVER honor on any host — fails NewBwrap with an error naming the mode,
+// not a constructor that silently stores it and only fails per-Exec. This
+// runs before DetectBwrap, so it is host-independent.
+func TestBwrapConstructorRejectsBridgeNetworkDefault(t *testing.T) {
+	_, err := NewBwrap(WithNetwork(NetworkBridge))
+	var ue *UnsupportedSpecError
+	if !errors.As(err, &ue) {
+		t.Fatalf("err = %v, want *UnsupportedSpecError naming the network mode", err)
+	}
+	if ue.Backend != "bwrap" || ue.Field != "Network" {
+		t.Errorf("UnsupportedSpecError = %+v, want backend=bwrap field=Network", ue)
+	}
+}
+
+// TestBwrapExec_RefusesImage pins the Spec honesty table's Image row for the
+// bwrap backend: a non-empty Image is a typed Exec refusal, never a silent
+// ignore.
+func TestBwrapExec_RefusesImage(t *testing.T) {
+	s := &Bwrap{}
+	_, err := s.resolveBwrapParams(Spec{Cmd: []string{"true"}, Image: "quay.io/example/img:latest"})
+	var ue *UnsupportedSpecError
+	if !errors.As(err, &ue) {
+		t.Fatalf("err = %v, want *UnsupportedSpecError", err)
+	}
+	if ue.Backend != "bwrap" || ue.Field != "Image" {
+		t.Errorf("UnsupportedSpecError = %+v, want backend=bwrap field=Image", ue)
 	}
 }
 

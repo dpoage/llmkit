@@ -38,10 +38,10 @@ type CLI struct {
 	defaultCPUs    float64
 	defaultMemory  int
 	defaultTimeout time.Duration
-	// defaultIdleTimeout is the inactivity window applied when a Spec leaves
-	// IdleTimeout unset. Zero disables the idle watchdog (absolute timeout only).
+	// defaultIdleTimeout is the inactivity window applied to every run.
+	// Zero disables the idle watchdog (absolute timeout only).
 	defaultIdleTimeout time.Duration
-	defaultNetwork     string
+	defaultNetwork     NetworkMode
 	pidsLimit          int
 	maxOutputBytes     int
 	// defaultScratchSizeMB is the size (MB) of the writable /tmp tmpfs
@@ -60,55 +60,21 @@ type CLI struct {
 	wsCache wsCache
 }
 
-// Option configures a CLI sandbox.
-type Option func(*CLI)
+// NewCLI constructs a CLI sandbox backed by a container runtime (podman, then
+// docker; WithRuntime overrides the auto-detect order). WithImage is
+// required. The bwrap-only options (WithCapPolicy, WithToolchainBinds,
+// WithToolchainPath) are refused here with an error naming the option, and a
+// WithNetwork mode the runtime could never honor fails at construction.
+func NewCLI(opts ...Option) (*CLI, error) {
+	o := newOptions(opts)
+	if err := o.checkSupported("cli", bwrapOnlyOptions); err != nil {
+		return nil, err
+	}
+	if err := validateNetworkDefault("cli", o.network, cliNetworks); err != nil {
+		return nil, err
+	}
 
-// WithCPUs sets the default CPU limit applied when a Spec leaves CPUs unset.
-func WithCPUs(c float64) Option { return func(s *CLI) { s.defaultCPUs = c } }
-
-// WithMemoryMB sets the default memory limit (MB) applied when a Spec leaves
-// MemoryMB unset.
-func WithMemoryMB(m int) Option { return func(s *CLI) { s.defaultMemory = m } }
-
-// WithTimeout sets the default execution timeout applied when a Spec leaves
-// Timeout unset.
-func WithTimeout(d time.Duration) Option { return func(s *CLI) { s.defaultTimeout = d } }
-
-// WithIdleTimeout sets the default idle (no-progress) window applied when a Spec
-// leaves IdleTimeout unset. A run is cancelled only after this long with no
-// observable progress; the absolute WithTimeout remains a hard ceiling. Zero
-// disables the watchdog.
-func WithIdleTimeout(d time.Duration) Option { return func(s *CLI) { s.defaultIdleTimeout = d } }
-
-// WithNetwork sets the default network mode applied when a Spec leaves Network
-// unset. The package default is "none".
-func WithNetwork(n string) Option { return func(s *CLI) { s.defaultNetwork = n } }
-
-// WithPidsLimit sets the --pids-limit cap. A value <= 0 disables the flag.
-func WithPidsLimit(n int) Option { return func(s *CLI) { s.pidsLimit = n } }
-
-// WithMaxOutputBytes overrides the per-stream output cap.
-func WithMaxOutputBytes(n int) Option { return func(s *CLI) { s.maxOutputBytes = n } }
-
-// WithScratchSizeMB sets the size (MB) of the writable /tmp tmpfs scratch
-// space. Values <= 0 fall back to
-// fallbackScratchSizeMB.
-func WithScratchSizeMB(mb int) Option { return func(s *CLI) { s.defaultScratchSizeMB = mb } }
-
-// WithWorkspaceGrowthCeilingMB sets the workspace-growth ceiling (MB of NET
-// workspace-size growth, not cumulative bytes written) the shared idle watchdog
-// enforces independent of idle-stall detection: a run whose workspace grows
-// past this is killed with Result.WorkspaceQuotaExceeded, regardless of
-// whether it is otherwise "making progress" by the idle-stall definition.
-// <= 0 disables the ceiling entirely.
-func WithWorkspaceGrowthCeilingMB(mb int) Option {
-	return func(s *CLI) { s.defaultGrowthCeilingBytes = int64(mb) * 1024 * 1024 }
-}
-
-// NewCLI constructs a CLI sandbox. When runtime is empty it is auto-detected
-// (podman, then docker); if none is found an error is returned. image is the
-// default container image used when a Spec does not override it.
-func NewCLI(runtime, image string, opts ...Option) (*CLI, error) {
+	runtime := o.runtime
 	if runtime == "" {
 		detected, ok := Detect()
 		if !ok {
@@ -119,24 +85,48 @@ func NewCLI(runtime, image string, opts ...Option) (*CLI, error) {
 		return nil, fmt.Errorf("sandbox: container runtime %q not found on PATH: %w", runtime, err)
 	}
 
-	if image == "" {
-		return nil, errors.New("sandbox: a default image is required")
+	if o.image == "" {
+		return nil, errors.New("sandbox: a default image is required (WithImage)")
 	}
 
 	s := &CLI{
 		runtime:                   runtime,
-		defaultImage:              image,
+		defaultImage:              o.image,
 		defaultCPUs:               2,
 		defaultMemory:             2048,
 		defaultTimeout:            10 * time.Minute,
-		defaultNetwork:            "none",
+		defaultNetwork:            NetworkNone,
 		pidsLimit:                 256,
 		maxOutputBytes:            DefaultMaxOutputBytes,
 		defaultScratchSizeMB:      fallbackScratchSizeMB,
 		defaultGrowthCeilingBytes: defaultWorkspaceGrowthCeilingBytes,
 	}
-	for _, o := range opts {
-		o(s)
+	if o.has("WithCPUs") {
+		s.defaultCPUs = o.cpus
+	}
+	if o.has("WithMemoryMB") {
+		s.defaultMemory = o.memoryMB
+	}
+	if o.has("WithTimeout") {
+		s.defaultTimeout = o.timeout
+	}
+	if o.has("WithIdleTimeout") {
+		s.defaultIdleTimeout = o.idleTimeout
+	}
+	if o.has("WithNetwork") {
+		s.defaultNetwork = o.network
+	}
+	if o.has("WithPidsLimit") {
+		s.pidsLimit = o.pidsLimit
+	}
+	if o.has("WithMaxOutputBytes") {
+		s.maxOutputBytes = o.maxOutputBytes
+	}
+	if o.has("WithScratchSizeMB") {
+		s.defaultScratchSizeMB = o.scratchSizeMB
+	}
+	if o.has("WithWorkspaceGrowthCeilingMB") {
+		s.defaultGrowthCeilingBytes = int64(o.growthCeilingMB) * 1024 * 1024
 	}
 	// Best-effort hygiene: purge any workspace-cache parent dirs a previous,
 	// non-Closed CLI instance (or a crashed process) left behind. See
@@ -212,10 +202,17 @@ func (s *CLI) ScratchAndGrowthCeiling() (scratchSizeMB int, growthCeilingBytes i
 
 // resolveParams applies backend defaults to a Spec, producing the concrete
 // runParams for the run (workspace and containerName are filled in by Exec).
-func (s *CLI) resolveParams(spec Spec) runParams {
+// The network mode is resolved and validated here: a mode the backend cannot
+// honor refuses the run with an UnsupportedSpecError instead of passing
+// through to the runtime flag.
+func (s *CLI) resolveParams(spec Spec) (runParams, error) {
+	network, err := resolveNetworkMode("cli", s.defaultNetwork, spec.Network, cliNetworks...)
+	if err != nil {
+		return runParams{}, err
+	}
 	p := runParams{
 		image:         s.defaultImage,
-		network:       s.defaultNetwork,
+		network:       network,
 		cpus:          s.defaultCPUs,
 		memoryMB:      s.defaultMemory,
 		pidsLimit:     s.pidsLimit,
@@ -229,16 +226,7 @@ func (s *CLI) resolveParams(spec Spec) runParams {
 	if spec.Image != "" {
 		p.image = spec.Image
 	}
-	if spec.Network != "" {
-		p.network = spec.Network
-	}
-	if spec.CPUs > 0 {
-		p.cpus = spec.CPUs
-	}
-	if spec.MemoryMB > 0 {
-		p.memoryMB = spec.MemoryMB
-	}
-	return p
+	return p, nil
 }
 
 // Exec implements Sandbox. See the Sandbox interface for the error contract:
@@ -296,7 +284,10 @@ func (s *CLI) Exec(ctx context.Context, spec Spec) (Result, error) {
 	}
 	prepDuration := time.Since(prepStart)
 
-	p := s.resolveParams(spec)
+	p, err := s.resolveParams(spec)
+	if err != nil {
+		return Result{}, err
+	}
 	p.workspace = ws
 	p.containerName = "llmkit-" + randToken()
 
@@ -304,10 +295,7 @@ func (s *CLI) Exec(ctx context.Context, spec Spec) (Result, error) {
 	if timeout <= 0 {
 		timeout = s.defaultTimeout
 	}
-	idleTimeout := spec.IdleTimeout
-	if idleTimeout <= 0 {
-		idleTimeout = s.defaultIdleTimeout
-	}
+	idleTimeout := s.defaultIdleTimeout
 
 	// runCtx bounds the run by the absolute timeout (a hard ceiling) and is
 	// cancelled if the caller's ctx is cancelled first or the idle watchdog
