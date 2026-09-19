@@ -61,7 +61,7 @@ func (r *Runner) RunJSON(ctx context.Context, task string, schema json.RawMessag
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	return r.runJSON(ctx, cfg.seed, task, schema, out)
+	return r.runJSON(ctx, cfg.seed, task, cfg.attach, schema, out)
 }
 
 // RunJSONAs is [Runner.RunJSON] with the schema derived from T via [SchemaOf]
@@ -77,7 +77,8 @@ func RunJSONAs[T any](ctx context.Context, r *Runner, task string, opts ...RunOp
 
 // runJSON is the shared implementation behind RunJSON. seed is nil (reseed
 // every call) or a prior Outcome's Messages ([Continue]).
-func (r *Runner) runJSON(ctx context.Context, seed []llmkit.Message, task string, schema json.RawMessage, out any) (*Outcome, error) {
+// attach rides on the seeded task turn (see [Attach]).
+func (r *Runner) runJSON(ctx context.Context, seed []llmkit.Message, task string, attach []llmkit.Block, schema json.RawMessage, out any) (*Outcome, error) {
 	prompt := task + "\n\n" + jsonInstruction(schema)
 
 	// Reserve the last iteration for a forced finalization turn: if the model is
@@ -86,7 +87,7 @@ func (r *Runner) runJSON(ctx context.Context, seed []llmkit.Message, task string
 	// dangling exploration prose that can never parse. The schema is threaded
 	// natively so the finalization turn also benefits from grammar-constrained
 	// output on capable adapters.
-	outcome, err := r.run(ctx, seed, prompt, finalizationPrompt(schema), schema)
+	outcome, err := r.run(ctx, seed, prompt, attach, finalizationPrompt(schema), schema)
 	if err != nil {
 		return outcome, err
 	}
@@ -107,9 +108,8 @@ func (r *Runner) runJSON(ctx context.Context, seed []llmkit.Message, task string
 	// Schema-guided rescue: weak models frequently prefix the
 	// final JSON with prose ("Based on my investigation… {…}") or leave a
 	// mangled head, both of which fail the leading-value parse above. Before
-	// burning the repair round-trip — a tools-less, HISTORY-LESS single
-	// completion that must rebuild the whole answer blind and often
-	// fabricates — scan the cleaned output for the first embedded JSON value
+	// burning the repair round-trip — a tools-less, history-less single
+	// completion — scan the cleaned output for the first embedded JSON value
 	// that ALREADY satisfies the schema. The schema is the arbiter, so an
 	// incidental json-ish fragment in the prose cannot hijack the answer.
 	if body, ok := rescueBody(outcome.FinalText, schema); ok {
@@ -129,7 +129,7 @@ func (r *Runner) runJSON(ctx context.Context, seed []llmkit.Message, task string
 	}
 
 	// One repair round-trip: tell the model exactly what failed and demand JSON
-	// only. The repair is now a single tools-less, schema-bearing completion
+	// only. The repair is a single tools-less, schema-bearing completion
 	// (see [Runner.repair]) so adapters that support native structured output
 	// apply grammar-constrained decoding and the shape is guaranteed on the wire.
 	repair := fmt.Sprintf(

@@ -19,12 +19,11 @@ var roleBlockKinds = map[llmkit.Role]map[llmkit.BlockKind]bool{
 }
 
 // ValidateMessageBlocks enforces the per-role block-kind rule and the media
-// source rule for every message BEFORE the adapter touches its wire format:
-// a block kind outside the role's set, or an image/document failing
-// ValidateMediaBlock, is an error wrapping llmkit.ErrInvalidRequest. Without
-// this gate, invalid blocks would be silently dropped (m.Text()) or reach
-// the provider and fail there — so every adapter calls it in its
-// message-conversion entry point and returns the error verbatim.
+// source rule for every message BEFORE the adapter touches its wire format.
+// A block kind outside the role's set, or an image/document failing
+// ValidateMediaBlock, is an error wrapping llmkit.ErrInvalidRequest, returned
+// verbatim by the caller; every adapter calls it in its message-conversion
+// entry point.
 //
 // provider names the adapter for the error message only.
 func ValidateMessageBlocks(provider string, m llmkit.Message) error {

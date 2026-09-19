@@ -288,8 +288,6 @@ func toOpenAIMessages(provider string, msgs []llmkit.Message) ([]openai.ChatComp
 	out := make([]openai.ChatCompletionMessageParamUnion, 0, len(msgs))
 	for _, m := range msgs {
 		// Per-role block-kind rule + media source rule, before any mapping.
-		// Without this, an image in a system/tool-result/assistant message
-		// would be silently dropped by m.Text().
 		if err := adapter.ValidateMessageBlocks(provider, m); err != nil {
 			return nil, err
 		}
@@ -354,8 +352,8 @@ func dataURI(mediaType string, data []byte) string {
 // content parts: image → image_url part (data: URI for inline bytes, URL
 // verbatim), document → file part (file_data as a data: URI). Document URLs
 // are rejected: the Chat Completions file part has no URL source. A message
-// with no blocks yields one empty text part so the wire shape of a
-// previously-valid empty user turn is preserved.
+// with no blocks yields one empty text part so an empty user turn still
+// serializes the same wire shape.
 func openAIUserParts(m llmkit.Message) ([]openai.ChatCompletionContentPartUnionParam, error) {
 	parts := make([]openai.ChatCompletionContentPartUnionParam, 0, len(m.Content))
 	for _, b := range m.Content {
@@ -516,11 +514,10 @@ func (o *openaiAdapter) normalizeErr(err error) error {
 // Chat Completions API behavior (see firstPartyCaps).
 //
 // An unknown first-party model reports ContextWindow 0 — unknown is never
-// fabricated into a number (the old 128k fallback overstated gpt-4's 8k
-// window) — while the feature bools keep the API-level defaults: an
-// unrecognized name on the first-party endpoint is most likely a NEW model
-// with the modern feature set, and the server is the final validator. Pin
-// exact values for unknown models via Options.Capabilities.
+// fabricated into a number — while the feature bools keep the API-level
+// defaults: an unrecognized name on the first-party endpoint is most likely
+// a NEW model with the modern feature set, and the server is the final
+// validator. Pin exact values for unknown models via Options.Capabilities.
 type openAIModelCaps struct {
 	prefix string
 	caps   llmkit.Capabilities

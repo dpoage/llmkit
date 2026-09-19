@@ -22,15 +22,15 @@ type RetryConfig struct {
 	// [0.8, 1.2].
 	Jitter float64
 
-	// RequestTimeout is the per-attempt wall-clock deadline applied to each
-	// inner Complete call. It exists to bound a single provider request: a
-	// stalled HTTP round-trip that never returns would otherwise block a
+	// RequestTimeout is the per-attempt wall-clock deadline applied to
+	// each inner Complete call. It bounds a single provider request so a
+	// stalled HTTP round-trip that never returns does not block a
 	// goroutine forever. Zero or negative means DefaultRequestTimeout.
 	//
-	// The timeout is applied to a child context derived from the caller's ctx,
-	// so it expires as context.DeadlineExceeded on the ATTEMPT only — never as
-	// cancellation of the parent. A timed-out attempt is treated as a transient
-	// transport failure and is retried (see Complete).
+	// Applied to a child context derived from the caller's ctx, so it
+	// expires as context.DeadlineExceeded on the ATTEMPT only — never
+	// as parent cancellation. A timed-out attempt is treated as a
+	// transient transport failure and is retried (see Complete).
 	RequestTimeout time.Duration
 
 	// sleep is an injection point for tests; nil uses a real timer.
@@ -46,11 +46,11 @@ type RetryConfig struct {
 // context.DeadlineExceeded, and the retry loop tries again rather than blocking
 // indefinitely.
 //
-// 5 minutes is chosen to comfortably exceed a legitimate slow completion —
-// large reasoning-model responses with big output budgets can take a couple of
-// minutes — while still being far below the multi-minute, no-progress stalls
-// that motivated this fix. It is per-attempt, so the worst case before giving
-// up entirely is roughly MaxAttempts * (RequestTimeout + backoff).
+// 5 minutes is chosen to comfortably exceed a legitimate slow completion
+// (large reasoning-model responses with big output budgets can take a
+// couple of minutes) while staying well below multi-minute, no-progress
+// stalls. It is per-attempt, so the worst case before giving up is
+// roughly MaxAttempts * (RequestTimeout + backoff).
 const DefaultRequestTimeout = 5 * time.Minute
 
 // DefaultRetryConfig returns sensible defaults: 4 attempts, 500ms base,
@@ -132,15 +132,15 @@ func (r *retryClient) Complete(ctx context.Context, req Request) (Response, erro
 }
 
 // attempt runs one inner Complete under a per-attempt wall-clock deadline
-// derived from ctx. The child context bounds a single provider request so a
-// stalled round-trip aborts as context.DeadlineExceeded instead of blocking
-// forever. cancel is always called before returning so the timer is released
-// whether the call succeeds, fails, or times out — and it does not leak across
-// loop iterations (no defer-in-loop).
+// derived from ctx. The child bounds a single provider request so a
+// stalled round-trip aborts as context.DeadlineExceeded instead of
+// blocking forever. cancel is called explicitly before returning — never
+// via defer-in-loop — so the timer is released on every path without
+// leaking across iterations.
 //
-// Because the deadline lives on the child, parent cancellation semantics are
-// untouched: if the parent ctx is cancelled the child is too, but the caller's
-// loop distinguishes the two by inspecting the parent ctx.Err() directly.
+// Because the deadline lives on the child, parent cancellation
+// semantics are untouched: the caller's loop distinguishes them by
+// inspecting the parent ctx.Err() directly.
 func (r *retryClient) attempt(ctx context.Context, req Request) (Response, error) {
 	attemptCtx, cancel := context.WithTimeout(ctx, r.cfg.RequestTimeout)
 	defer cancel()

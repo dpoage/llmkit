@@ -336,8 +336,8 @@ func copyWorkspace(src, dst string) error {
 	if err != nil {
 		// src IS a git work tree but listing failed. Falling back to a full copy
 		// here would silently reintroduce the gitignored stale build tree this
-		// path exists to exclude (the RC2 poisoning), so surface the error
-		// rather than degrade to a poisoning copy.
+		// path exists to exclude, so surface the error rather than degrade to
+		// a poisoning copy.
 		return err
 	}
 	if isRepo {

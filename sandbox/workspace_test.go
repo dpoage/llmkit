@@ -421,10 +421,10 @@ func TestCopyTreeSkipsNestedGitInFallback(t *testing.T) {
 	}
 }
 
-// TestCopyWorkspaceSurfacesGitError covers the RC2 safety invariant: when src is
-// a git work tree but `git ls-files` fails, copyWorkspace returns the error
-// rather than silently full-copying gitignored artifacts (which would reintroduce
-// the stale build-tree poisoning).
+// TestCopyWorkspaceSurfacesGitError: when src is a git work tree but `git
+// ls-files` fails, copyWorkspace returns the error rather than silently
+// full-copying gitignored artifacts (which would reintroduce the stale
+// build-tree poisoning).
 func TestCopyWorkspaceSurfacesGitError(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not on PATH")

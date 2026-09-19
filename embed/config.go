@@ -61,16 +61,13 @@ type Config struct {
 	CacheSize int
 
 	// Retry tunes transient-failure retries via the shared
-	// llmkit.RetryConfig. Unset knobs (<= 0) resolve when a backend is
-	// constructed: MaxAttempts to 3 and RequestTimeout to 60s (the embed
-	// bounds — embeddings retry less and are lighter than LLM completions),
-	// BaseDelay and MaxDelay from llmkit.DefaultRetryConfig — so a partial
-	// policy like llmkit.RetryConfig{MaxAttempts: 5} is safe to use as
-	// written. Retry.Jitter is the exception and is taken literally: 0 (the
-	// zero value) disables jitter for deterministic backoff, and values
-	// outside [0, 1] are rejected by Validate. LoadConfig seeds the kit
-	// default 20% jitter, so environment-driven configs jitter unless
-	// overridden.
+	// llmkit.RetryConfig. Unset knobs (<= 0) resolve at backend construction:
+	// MaxAttempts to 3 and RequestTimeout to 60s — the embed bounds, since
+	// embeddings retry less and are lighter than LLM completions. BaseDelay
+	// and MaxDelay fall back to llmkit.DefaultRetryConfig. Jitter is taken
+	// literally: 0 means no jitter, values outside [0, 1] are rejected by
+	// Validate. LoadConfig seeds the kit default 20% jitter so env-driven
+	// configs jitter unless overridden.
 	Retry llmkit.RetryConfig
 }
 
@@ -159,14 +156,12 @@ func LoadConfig(prefix string) (Config, error) {
 func (c Config) Validate() error {
 	switch c.Embedder {
 	case "ollama", "openai-compatible":
-		// ok
 	default:
 		return fmt.Errorf("unknown embedder type %q", c.Embedder)
 	}
 	if c.Model == "" {
 		return fmt.Errorf("embedding model name is required")
 	}
-	// URL is required for all HTTP-based backends.
 	if c.URL == "" {
 		return fmt.Errorf("embedding service URL is required")
 	}
@@ -200,11 +195,9 @@ func (c Config) httpClient() *http.Client {
 // (<= 0) resolved to the embed bounds — MaxAttempts 3 and a 60s per-attempt
 // RequestTimeout (embeddings retry less often and each attempt is far lighter
 // than an LLM completion, so the kit's 4 / 5m defaults are tightened; worst
-// case before giving up is roughly 3 * (60s + backoff)) — with BaseDelay and
-// MaxDelay from llmkit.DefaultRetryConfig. Jitter is deliberately not
-// normalized here: Validate has already bounded it to [0, 1] and it is taken
-// literally, so 0 means no jitter; LoadConfig seeds it from the kit default,
-// keeping the default 20% jitter reachable for environment-driven configs.
+// case before giving up is roughly 3 * (60s + backoff)). BaseDelay and
+// MaxDelay fall back to llmkit.DefaultRetryConfig. Jitter is left literal so
+// explicit 0 means no jitter; LoadConfig seeds the kit default 20% jitter.
 func (c Config) retryPolicy() llmkit.RetryConfig {
 	p := c.Retry
 	def := llmkit.DefaultRetryConfig()

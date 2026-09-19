@@ -36,8 +36,6 @@ type Embedder interface {
 }
 
 // NewEmbedder creates an Embedder from the provided Config.
-// It reads cfg.Embedder to select the backend and delegates to the
-// appropriate constructor.
 func NewEmbedder(cfg Config) (Embedder, error) {
 	var emb Embedder
 	var err error

@@ -18,8 +18,8 @@ func simpleRequest() Request {
 }
 
 // blockingClient blocks each Complete call until its context is done, then
-// returns ctx.Err(). The blockUntil slice lets a per-attempt blocking call be
-// configured independently from later (succeeding) attempts.
+// returns ctx.Err(). The blockAttempts field configures a fixed run of
+// leading blocking attempts before later calls succeed.
 type blockingClient struct {
 	// blockAttempts is the number of leading attempts that block until their
 	// (per-attempt) context expires. Attempts beyond this succeed.
@@ -102,10 +102,10 @@ func TestRetry_PerAttemptTimeout_IsRetryable(t *testing.T) {
 	}
 }
 
-// TestRetry_PerAttemptTimeout_WrappedAsServerError covers the production path
-// where an adapter wraps an unclassified context-deadline error into an
-// *APIError{Kind: ErrServer} (as openaiAdapter.normalizeErr does). That is
-// retryable, so the loop must still recover on a later success.
+// TestRetry_PerAttemptTimeout_WrappedAsServerError covers the production
+// path where an adapter wraps an unclassified context-deadline error
+// into an *APIError{Kind: ErrServer} (as openaiAdapter.normalizeErr does)
+// — retryable, so the loop recovers on a later success.
 func TestRetry_PerAttemptTimeout_WrappedAsServerError(t *testing.T) {
 	inner := &wrappingBlockClient{blockAttempts: 1}
 	cfg := DefaultRetryConfig()
@@ -150,11 +150,10 @@ func (w *wrappingBlockClient) Complete(ctx context.Context, req Request) (Respon
 	return Response{Text: "ok", StopReason: StopEndTurn}, nil
 }
 
-// TestRetry_ParentCancelStillAbortsImmediately asserts the existing semantics
-// are preserved: when the CALLER'S context is cancelled mid-attempt, Complete
-// aborts and does NOT retry, even though the per-attempt timeout machinery now
-// derives a child context. This is the subtle correctness point — a cancelled
-// parent must not be confused with a per-attempt deadline.
+// TestRetry_ParentCancelStillAbortsImmediately asserts that when the
+// caller's context is cancelled mid-attempt, Complete aborts without
+// retrying — a cancelled parent must not be confused with a
+// per-attempt deadline.
 func TestRetry_ParentCancelStillAbortsImmediately(t *testing.T) {
 	inner := &blockingClient{blockAttempts: 100} // always blocks until ctx done
 	cfg := DefaultRetryConfig()
@@ -234,10 +233,9 @@ func TestWithRetry_JitterClamped(t *testing.T) {
 	}
 }
 
-// TestWithRetry_PreservesExplicitRequestTimeout pins the construction-path
-// wiring the former registry-level test asserted: a RetryConfig the caller
-// supplies (as provider.New does after applying its zero-MaxAttempts default)
-// must survive WithRetry unchanged.
+// TestWithRetry_PreservesExplicitRequestTimeout asserts that a RetryConfig
+// the caller supplies (as provider.New does after applying its
+// zero-MaxAttempts default) must survive WithRetry unchanged.
 func TestWithRetry_PreservesExplicitRequestTimeout(t *testing.T) {
 	want := 42 * time.Second
 	cfg := DefaultRetryConfig()

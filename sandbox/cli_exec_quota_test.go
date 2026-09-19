@@ -20,9 +20,8 @@ import (
 //     into that workspace directory every 50ms, up to 200 iterations
 //     (bounded so a broken watchdog fails the test instead of hanging it).
 //
-// This is the Exec-level fixture (oracle-review-requested): unlike
-// watchdog_test.go's direct watchIdle probes, it
-// drives the REAL CLI.Exec code path end to end — the Result field mapping
+// Unlike watchdog_test.go's direct watchIdle probes, this fixture drives
+// the REAL CLI.Exec code path end to end — the Result field mapping
 // (WorkspaceQuotaExceeded vs TimedOut) and the watchdog spawn gate
 // (idleTimeout>0 || growthCeilingBytes>0) are both exercised for real, so a
 // mutation collapsing either one is caught.

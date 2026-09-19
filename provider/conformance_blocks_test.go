@@ -494,8 +494,7 @@ func TestConformance_MediaSourceRejectedBeforeWire(t *testing.T) {
 	}
 	// The per-role rule is uniform: an invalid media block is rejected
 	// BEFORE any wire call in EVERY role that could carry it — not just
-	// user turns. system/tool-result/assistant previously slipped through
-	// as silent m.Text() drops.
+	// user turns.
 	roles := []llmkit.Role{llmkit.RoleUser, llmkit.RoleSystem, llmkit.RoleAssistant, llmkit.RoleToolResult}
 	for _, f := range allAdapters() {
 		for i, blk := range bad {
@@ -528,8 +527,8 @@ func TestConformance_MediaSourceRejectedBeforeWire(t *testing.T) {
 	}
 
 	// A block KIND outside its role's set is also ErrInvalidRequest with
-	// zero wire calls — including the image-in-assistant case that the
-	// openai adapter used to drop silently via m.Text().
+	// zero wire calls — including image-in-assistant, which a strict m.Text()
+	// drop would have hidden.
 	kindViolations := []struct {
 		role llmkit.Role
 		blk  llmkit.Block
