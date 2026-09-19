@@ -1,8 +1,6 @@
 // Command basic demonstrates a minimal llmkit completion: build a client
 // from the environment, send one user message (text, optionally with an
-// image block), and print the normalized response. It doubles as a
-// compile-time contract check for the root package surface —
-// provider.New, TextMessage, content blocks, Capabilities, and Response.
+// image block), and print the normalized response.
 //
 // Usage:
 //

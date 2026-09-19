@@ -73,6 +73,7 @@ func parseRetryAfter(v string, now time.Time) (time.Duration, bool) {
 // Transient: HTTP 429 and 5xx (honoring Retry-After when supplied), and
 // network errors that are timeouts or marked temporary. Everything else —
 // other 4xx, decode failures, context cancellation — is terminal.
+//
 // hasDelay reports whether the server supplied a Retry-After delay that
 // should replace the computed backoff.
 func retryable(err error) (delay time.Duration, hasDelay bool, ok bool) {
@@ -137,11 +138,11 @@ func backoffDelay(cfg llmkit.RetryConfig, attempt int, after time.Duration, hasA
 		return after
 	}
 
-	// Exponential: base * 2^(attempt-1).
 	delay := cfg.BaseDelay
 	for range attempt - 1 {
 		delay *= 2
-		if delay < 0 { // int64 overflow; zero BaseDelay means no wait
+		// Overflow clamp: zero BaseDelay means no wait, not a runaway sleep.
+		if delay < 0 {
 			delay = 1 << 62
 			break
 		}

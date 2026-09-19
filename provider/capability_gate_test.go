@@ -29,8 +29,7 @@ func okBody(name string) string {
 // Request.ToolChoice mode with an error wrapping ErrInvalidRequest BEFORE
 // any wire call. Dropping "none" would escalate permissions (the model stays
 // free to call the offered tools); dropping "required"/"tool" would silently
-// degrade. Each subtest fails if the adapter's gate is removed: the wire
-// handler fails the test the moment it sees a request.
+// degrade. The wire handler fails the test the moment it sees a request.
 func TestCapabilityGates_ToolChoiceRejected(t *testing.T) {
 	// anthropic has no table entry with ToolChoice=false (every Claude
 	// generation steers tools), so its case pins the gate through the
@@ -116,9 +115,9 @@ func TestCapabilityGates_ToolChoiceAutoAllowed(t *testing.T) {
 
 // TestCapabilityGates_ThinkingSilentlyDropped pins the Thinking gate on the
 // two adapters that gate a wire parameter on it (the documented contract for
-// a false feature is a silent drop, not a rejection). Each subtest fails if
-// the adapter's `&& caps.Thinking` gate is removed: the captured wire body
-// would then carry the unsupported thinking parameter.
+// a false feature is a silent drop, not a rejection). The captured wire body
+// would carry the unsupported thinking parameter if the `&& caps.Thinking`
+// gate were dropped.
 func TestCapabilityGates_ThinkingSilentlyDropped(t *testing.T) {
 	cases := []struct {
 		name      string

@@ -8,6 +8,7 @@ import (
 	"github.com/dpoage/llmkit"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -48,6 +49,11 @@ type Runner struct {
 	// hooks holds the optional observer callbacks; nil funcs are no-ops with
 	// zero overhead. See [Hooks] for the fire points.
 	hooks Hooks
+	// requestPolicy, when non-nil, shapes every completion request just
+	// before it goes on the wire (see [RequestPolicy] and
+	// [WithRequestPolicy]). A nil policy sends the request exactly as
+	// built, with no clone of the message slice.
+	requestPolicy RequestPolicy
 	// toolTimeout, when positive, is the per-call deadline applied to every
 	// Tool.Run (see WithToolTimeout).
 	toolTimeout time.Duration
@@ -58,6 +64,9 @@ type Runner struct {
 	// charged after every successful one (see WithBudgetPool). A nil pool is
 	// unlimited.
 	budgetPool *BudgetPool
+	// toolPolicy, when non-nil, gates every model-requested tool call before
+	// dispatch (see WithToolPolicy). A nil policy allows all calls.
+	toolPolicy ToolPolicy
 }
 
 // Option configures a [Runner] at construction.
@@ -129,6 +138,8 @@ func NewRunner(client llmkit.Client, tools []Tool, systemPrompt string, opts ...
 // Pass [Continue] to run the task inside a prior conversation instead of a
 // fresh one.
 //
+// Pass [Attach] to carry image or document blocks on the task turn.
+//
 // Limit exhaustion is not an error: it returns an [Outcome] with a
 // non-empty [Outcome.TruncationReason] and the last completion's text in
 // [Outcome.FinalText]. Only context cancellation, client/IO failures, or
@@ -148,11 +159,12 @@ func (r *Runner) Run(ctx context.Context, task string, opts ...RunOption) (*Outc
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	return r.run(ctx, cfg.seed, task, "", nil)
+	return r.run(ctx, cfg.seed, task, cfg.attach, "", nil)
 }
 
 // RunOption is a per-call option for [Runner.Run], [Runner.RunJSON], and
-// [Runner.RunJSONAs]. Options apply in order; a later option wins.
+// [Runner.RunJSONAs]. Options apply in order; a later option wins, except
+// [Attach], which accumulates.
 type RunOption func(*runConfig)
 
 // runConfig carries the resolved per-call options. It is unexported so new
@@ -161,6 +173,9 @@ type runConfig struct {
 	// seed, when non-empty, continues this conversation instead of reseeding
 	// one; see [Continue].
 	seed []llmkit.Message
+	// attach, when non-empty, rides on the seeded task turn; see [Attach]
+	// and [taskTurn] for the shape rules.
+	attach []llmkit.Block
 }
 
 // Continue makes the run CONTINUE a prior conversation instead of reseeding
@@ -207,9 +222,10 @@ func Continue(prev *Outcome) RunOption {
 // becoming the conversation's sole seed message. Run and RunJSON pass seed ==
 // nil (reseed every call); [Continue] seeds a prior Outcome's Messages so the
 // next round lands in the SAME conversation as the one that produced it.
-// Before the task
-// is appended, a seed whose trailing assistant turn carries unanswered tool
-// calls is trimmed — see [trimDanglingToolTurn].
+// task and attach together form that seeded task turn (see [taskTurn]):
+// [Attach]'s blocks ride on it and nowhere else. Before the task is appended,
+// a seed whose trailing assistant turn carries unanswered tool calls is
+// trimmed — see [trimDanglingToolTurn].
 //
 // finalizePrompt, when non-empty, enables forced finalization: when a stop
 // condition fires (iteration cap, per-run token budget, or shared budget
@@ -226,14 +242,12 @@ func Continue(prev *Outcome) RunOption {
 //
 // maxEmptyTurnNudges bounds how many times run() will nudge a model that
 // produced neither a tool call nor visible text (after stripping reasoning
-// <think> blocks) back into the loop before giving up and treating the turn
-// as finished. Real reasoning models (MiniMax-M3 observed in production)
-// sometimes emit an assistant turn that is ONLY an inline think
-// block — stop=end_turn, zero tool calls — which the old code treated as
-// "model finished its turn", handing RunJSON unparseable empty text and
-// burning its single repair for nothing. The cap keeps a persistently silent
-// model from looping forever: after maxEmptyTurnNudges nudges go unanswered,
-// run() falls through to today's break.
+// <think> blocks) back into the loop before giving up. Some reasoning models
+// emit an assistant turn that is ONLY an inline think block — stop=end_turn,
+// zero tool calls — which would otherwise hand RunJSON unparseable empty text
+// and burn its single repair. The cap stops a persistently silent model from
+// looping forever; after maxEmptyTurnNudges nudges go unanswered, run()
+// falls through to break.
 const maxEmptyTurnNudges = 2
 
 // emptyTurnNudge is appended as a user turn when a completion produced no
@@ -241,29 +255,29 @@ const maxEmptyTurnNudges = 2
 // call a tool or emit its final answer. See [maxEmptyTurnNudges].
 const emptyTurnNudge = "You made no tool call and produced no final answer. Continue: call a tool or emit your final answer now."
 
-func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task, finalizePrompt string, responseSchema json.RawMessage) (*Outcome, error) {
+func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task string, attach []llmkit.Block, finalizePrompt string, responseSchema json.RawMessage) (*Outcome, error) {
 	tr := NewTranscript()
 	if r.transcriptDir != "" {
 		tr.enableStreaming(r.transcriptPath(tr, task), r.hooks.TranscriptError)
 	}
 
 	var messages []llmkit.Message
+	taskMsg := taskTurn(task, attach)
 	if len(seed) > 0 {
 		seed = trimDanglingToolTurn(seed)
 		messages = make([]llmkit.Message, 0, len(seed)+1)
 		messages = append(messages, seed...)
-		messages = append(messages, llmkit.TextMessage(llmkit.RoleUser, task))
+		messages = append(messages, taskMsg)
 	} else {
-		messages = []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, task)}
+		messages = []llmkit.Message{taskMsg}
 	}
 
 	outcome := &Outcome{Transcript: tr}
-	// Snapshot the conversation into the Outcome on every return path (clean
-	// finish, truncation, or error) so a caller that wants to continue this
-	// conversation ([Continue]) always has the latest history available,
-	// even from a truncated or erroring run. messages is reassigned (not just
-	// mutated) throughout the loop below; the deferred closure reads it by
-	// reference at return time, not at defer-registration time.
+	// Snapshot the conversation into the Outcome on every return path so a caller
+	// that wants to continue this conversation ([Continue]) always has the latest
+	// history available, even from a truncated or erroring run. messages is
+	// reassigned throughout the loop; the deferred closure reads it by reference
+	// at return time.
 	defer func() { outcome.Messages = messages }()
 
 	// History-compaction state. toolNameByID lets a tool-result stub name the
@@ -357,17 +371,13 @@ func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task, finalizeP
 				tr.closeStream()
 				return outcome, &StopReasonError{StopReason: resp.StopReason, Text: resp.Text, Outcome: outcome}
 			}
-			// A turn with no tool call and no visible text once reasoning
-			// <think> blocks are stripped is not a real answer — it's an
-			// empty/think-only turn (MiniMax-M3 observed emitting
-			// exactly this in production, sometimes narrating a tool call it
-			// never actually made). Nudge the model to continue instead of
-			// treating the turn as finished, up to maxEmptyTurnNudges times;
-			// the nudge turn goes through the normal loop top (iteration cap,
-			// budget checks, compaction all still apply) so it bills and
-			// counts like any other turn. This also covers a truncated,
-			// unclosed think block: StripThinkBlocks strips it to empty too,
-			// and nudging gives the model a chance to re-emit cleanly.
+			// A turn with no tool call and no visible text (after stripping
+			// reasoning <think> blocks) is an empty/think-only turn, not a real
+			// answer. Nudge the model to continue instead of treating the turn
+			// as finished, up to maxEmptyTurnNudges times; the nudge turn goes
+			// through the normal loop top so it bills and counts like any
+			// other turn. A truncated, unclosed think block also strips to
+			// empty and gets the same nudge.
 			if strings.TrimSpace(llmkit.StripThinkBlocks(resp.Text)) == "" && emptyTurnNudges < maxEmptyTurnNudges {
 				emptyTurnNudges++
 				messages = append(messages, llmkit.TextMessage(llmkit.RoleUser, emptyTurnNudge))
@@ -555,29 +565,20 @@ func (r *Runner) maybeCompact(ctx context.Context, messages []llmkit.Message, th
 }
 
 // repair issues a SINGLE tools-less, schema-bearing completion against the
-// repair prompt. It replaces the previous "fresh tool loop" repair path with
-// the constrained shape: a single completion where adapters that support
-// structured output apply grammar-constrained decoding natively, so the
-// answer is shape-correct on the wire. Tools are dropped so Google and
-// Anthropic (which refuse to combine tool use with native structured output)
-// also get the schema honored.
+// repair prompt. Tools are dropped so Google and Anthropic (which refuse to
+// combine tool use with native structured output) also get the schema honored.
 //
-// responseSchema, when non-nil, is attached capability-gated; when the
-// adapter's StructuredOutput capability is off, the schema is dropped
-// silently (per llmkit.Request docs) and the prompt-embedded schema instruction
-// is the only enforcement — same contract as the main run path.
+// responseSchema, when non-nil, is attached capability-gated (same contract as
+// the main run path: dropped silently when the adapter lacks structured output).
 //
-// The repair uses a fresh outcome seeded with baseIter — the parent run's
-// completed iteration count — but shares the caller's transcript so the
-// assistant turn is recorded there for parity with the main run path.
-// Seeding keeps the transcript's step numbering monotonic across the
-// boundary (a parent that recorded steps 1..N records its repair at N+1,
-// not at 1), so consumers joining hooks and transcript events on Step see
-// one continuous sequence. No tool loop runs; [Hooks.Repair] fires at
-// entry. The single repair completion is issued via completeOnce, so when
-// it itself stops at the output token cap the ONE max-tokens continuation
-// completion is paid on top — the pass is bounded to at most two
-// schema-bearing, tool-less completions.
+// The repair uses a fresh outcome seeded with baseIter but shares the caller's
+// transcript so the assistant turn is recorded there for parity with the main
+// run path. baseIter is the parent run's completed iteration count, so a parent
+// that recorded steps 1..N records its repair at N+1 — step numbering stays
+// monotonic across the boundary. No tool loop runs; [Hooks.Repair] fires at
+// entry. The single completion is issued via completeOnce, so a stop at the
+// output token cap pays the ONE max-tokens continuation completion on top —
+// the pass is bounded to at most two schema-bearing, tool-less completions.
 func (r *Runner) repair(ctx context.Context, tr *Transcript, prompt string, responseSchema json.RawMessage, baseIter int) (*Outcome, error) {
 	if r.hooks.Repair != nil {
 		r.hooks.Repair(ctx)
@@ -722,8 +723,8 @@ func stitchBlocks(head, cont []llmkit.Block, joinedText string) []llmkit.Block {
 // (a conservative openai-compatible endpoint, etc.), the schema is silently
 // dropped on the wire (per [llmkit.Request.ResponseSchema] docs) and only the
 // prompt-embedded schema instruction is in effect. This is the agent-layer
-// gate: the no-cap passthrough path sends NO schema, matching today's
-// behavior, while the with-cap path gets a hard native shape guarantee.
+// gate between the no-cap passthrough path and the with-cap native shape
+// guarantee.
 func (r *Runner) complete(ctx context.Context, tr *Transcript, messages []llmkit.Message, outcome *Outcome, responseSchema json.RawMessage, final bool) (llmkit.Response, error) {
 	req := llmkit.Request{
 		System:    r.systemPrompt,
@@ -743,21 +744,31 @@ func (r *Runner) complete(ctx context.Context, tr *Transcript, messages []llmkit
 	if len(responseSchema) > 0 && r.client.Capabilities().StructuredOutput {
 		req.ResponseSchema = responseSchema
 	}
-	// This is the single fire point for [Hooks.BeforeCompletion] and
-	// [Hooks.AfterCompletion]: every client.Complete in the loop (main turn,
-	// max-tokens continuation, forced finalization, repair) goes through here.
-	// step is the 1-based transcript step this completion is recorded under
-	// (outcome.Iterations+1 at fire time): the SAME number every other hook
-	// reports for this turn — ToolEvent.Step, CompactionEvent.Step — and the
-	// Event.Step of the request/assistant transcript events below, so
-	// consumers can join all hook families on Step. Captured before Complete
-	// because outcome.Iterations is incremented only after the call returns,
-	// keeping the hook pair's step identical.
+	// This is the single fire point for [RequestPolicy.PrepareRequest],
+	// [Hooks.BeforeCompletion], and [Hooks.AfterCompletion]: every
+	// client.Complete in the loop (main turn, max-tokens continuation,
+	// forced finalization, repair) goes through here. step is the 1-based
+	// transcript step this completion is recorded under
+	// (outcome.Iterations+1 at fire time): the SAME number the policy and
+	// every other hook report for this turn — ToolEvent.Step,
+	// CompactionEvent.Step — and the Event.Step of the request/assistant
+	// transcript events below, so consumers can join all hook families on
+	// Step. Captured before Complete because outcome.Iterations is
+	// incremented only after the call returns, keeping the hook pair's step
+	// identical.
 	step := outcome.Iterations + 1
+	// The clone isolates the loop's history from slice-level edits by the
+	// policy; the post-policy slice is what the wire and the transcript see.
+	if r.requestPolicy != nil {
+		req.Messages = slices.Clone(messages)
+		if err := r.requestPolicy.PrepareRequest(ctx, step, &req); err != nil {
+			return llmkit.Response{}, fmt.Errorf("agent: request policy at iteration %d: %w", step, err)
+		}
+	}
 	if r.hooks.BeforeCompletion != nil {
 		r.hooks.BeforeCompletion(ctx, step, &req)
 	}
-	tr.recordRequest(step, messages)
+	tr.recordRequest(step, req.Messages)
 
 	resp, err := r.client.Complete(ctx, req)
 	if r.hooks.AfterCompletion != nil {
@@ -890,15 +901,22 @@ type toolResult struct {
 }
 
 // executeTools runs calls and returns one result per executed call, in the
-// model's original order. Sequential mode (the default) runs calls one at a
-// time and stops before dispatching the next call once ctx is cancelled —
-// the returned slice then holds only the already-executed results. Parallel
-// mode (WithParallelTools) runs each call on its own goroutine (bounded by
-// len(calls)) and waits for all of them: per-call failures are isolated (a
-// tool error or panic never fails its siblings — runTool renders a panic as
-// that call's error result), and the full-length result slice is always
-// returned. Neither mode mutates the conversation or the transcript; the
-// caller appends the results in call order after executeTools returns.
+// model's original order. A [ToolPolicy], when installed, authorizes — and
+// may rewrite — every call BEFORE the first Tool.Run dispatches (see
+// [Runner.authorizeCalls]); a denied call keeps its slot with its rendered
+// error result, so the returned slice stays index-aligned with the calls in
+// both modes — including calls the pre-pass could not authorize because ctx
+// was already cancelled: those are denied with the context error, never
+// dispatched. Sequential mode (the default) runs calls one at a time and
+// stops before dispatching the next call once ctx is cancelled — the
+// returned slice then holds only the already-executed (or policy-resolved)
+// results. Parallel mode (WithParallelTools) runs each call on its own
+// goroutine (bounded by len(calls)) and waits for all of them: per-call
+// failures are isolated (a tool error or panic never fails its siblings —
+// runTool renders a panic as that call's error result), and the full-length
+// result slice is always returned. Neither mode mutates the conversation or
+// the transcript; the caller appends the results in call order after
+// executeTools returns.
 //
 // Hook panics are harness bugs and are never rendered to the model. In
 // sequential mode a panicking hook propagates to [Runner.Run]'s caller
@@ -910,8 +928,14 @@ type toolResult struct {
 // the same panic value in both modes.
 func (r *Runner) executeTools(ctx context.Context, outcome *Outcome, calls []llmkit.ToolCall) []toolResult {
 	results := make([]toolResult, len(calls))
+	// Every call of the turn is authorized before the first Tool.Run, in
+	// both modes, so an interactive policy never overlaps the fan-out.
+	dispatch, denied := r.authorizeCalls(ctx, calls, results)
 	if !r.parallelTools || len(calls) < 2 {
-		for i, call := range calls {
+		for i, call := range dispatch {
+			if denied != nil && denied[i] {
+				continue // deny already rendered into results[i]
+			}
 			if err := ctx.Err(); err != nil {
 				return results[:i]
 			}
@@ -922,7 +946,7 @@ func (r *Runner) executeTools(ctx context.Context, outcome *Outcome, calls []llm
 	var wg sync.WaitGroup
 	var hookPanic any // the first hook panic, re-panicked below
 	var panicMu sync.Mutex
-	for i, call := range calls {
+	for i, call := range dispatch {
 		wg.Add(1)
 		go func(i int, call llmkit.ToolCall) {
 			defer wg.Done()
@@ -940,6 +964,9 @@ func (r *Runner) executeTools(ctx context.Context, outcome *Outcome, calls []llm
 					panicMu.Unlock()
 				}
 			}()
+			if denied != nil && denied[i] {
+				return // deny already rendered into results[i]
+			}
 			results[i].result, results[i].isErr = r.runTool(ctx, call, outcome.Iterations)
 		}(i, call)
 	}

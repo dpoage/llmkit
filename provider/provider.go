@@ -181,10 +181,8 @@ func New(ctx context.Context, spec Spec, opts Options) (llmkit.Client, error) {
 	// strings.TrimSpace. No vendor issues a credential with surrounding
 	// whitespace, and such a value is almost always a copy/paste or
 	// `cat`/`pass` artifact; refusing it here turns a confusing runtime
-	// failure into an immediate, actionable one. Space- and tab-padded
-	// secrets could previously reach a vendor and authenticate, so this
-	// is a deliberate breaking refusal. The error never echoes the
-	// secret.
+	// failure into an immediate, actionable one. The error never echoes
+	// the secret.
 	if trimmed := strings.TrimSpace(spec.Secret); trimmed == "" || trimmed != spec.Secret {
 		return nil, fmt.Errorf("llmkit: secret must be a non-empty value with no leading or trailing whitespace for provider %q: %w", spec.Type, llmkit.ErrInvalidRequest)
 	}

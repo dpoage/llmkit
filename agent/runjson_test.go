@@ -385,9 +385,9 @@ func TestRunJSON_ForcedFinalizationFiresOnce(t *testing.T) {
 }
 
 // TestRunJSON_RepairInfraErrorPreservesTruncationAndUsage covers the
-// `rerr != nil` early return in runJSON's post-repair fold (shp.10): the
-// original run's TruncationReason/Finalized/Iterations/Usage — including all
-// four Usage counters — must survive even when the repair completion itself
+// `rerr != nil` early return in runJSON's post-repair fold: the original
+// run's TruncationReason/Finalized/Iterations/Usage — including all four
+// Usage counters — must survive even when the repair completion itself
 // fails with an infrastructure error, not just on the success path
 // TestRunJSON_ForcedFinalizationFiresOnce already pins. repair()'s own
 // Outcome starts zero-valued (see [Runner.repair]) and never accrues
@@ -785,11 +785,11 @@ func TestRunJSON_PerRunTokenBudgetFinalizesAndParses(t *testing.T) {
 	}
 }
 
-// TestRunJSON_BudgetFinalizeEmptyStillClassified covers the OR-clause of the
-// bead: when the finalization turn itself yields no parseable JSON, the
-// outcome is still cleanly classified as a budget stop (TruncationReason + budget
-// reason), not a silently-empty result. The caller's budgetStopped(outcome)
-// must return true.
+// TestRunJSON_BudgetFinalizeEmptyStillClassified covers the case where the
+// finalization turn itself yields no parseable JSON: the outcome is still
+// cleanly classified as a budget stop (TruncationReason + budget reason),
+// not a silently-empty result. The caller's budgetStopped(outcome) must
+// return true.
 func TestRunJSON_BudgetFinalizeEmptyStillClassified(t *testing.T) {
 	pool := NewBudgetPool(100)
 	// finalization turn returns empty text — model fails to emit a useful answer.
@@ -824,7 +824,7 @@ func TestRunJSON_BudgetFinalizeEmptyStillClassified(t *testing.T) {
 			TokenBudget:   -1,
 		}),
 		WithBudgetPool(pool))
-	out, _ := r2.run(context.Background(), nil, "audit", finalizationPrompt(json.RawMessage(`{"type":"object"}`)), nil)
+	out, _ := r2.run(context.Background(), nil, "audit", nil, finalizationPrompt(json.RawMessage(`{"type":"object"}`)), nil)
 	if !out.Truncated() {
 		t.Error("Outcome.Truncated() = false, want true (budget stop should still mark truncated)")
 	}
@@ -1208,8 +1208,8 @@ func TestRunJSON_ParseFailureWrapsSentinel(t *testing.T) {
 // deepResultsSchema mirrors a production caller schema's nested shape: an
 // object with a "results" array of objects carrying an enum confidence, an
 // integer line with a minimum, a min-length summary string, and
-// additionalProperties:false. It exercises every branch validateSchema adds
-// over the old shallow root check.
+// additionalProperties:false. It exercises every nested-recursion branch
+// validateSchema enforces.
 const deepResultsSchema = `{
   "type":"object",
   "properties":{
@@ -1256,7 +1256,7 @@ const validResult = `{"path":"a.go","line":7,"confidence":"high","summary":"x"}`
 // TestValidateSchema pins down the deep validator's contract: the historical
 // root-level cases (preserved verbatim error phrasing) plus the nested
 // type/required/enum/minimum/minLength/additionalProperties/minItems/
-// minProperties branches that the old shallow check ignored.
+// minProperties branches.
 func TestValidateSchema(t *testing.T) {
 	deep := json.RawMessage(deepResultsSchema)
 	files := json.RawMessage(filesMapSchema)
@@ -1326,12 +1326,11 @@ func TestValidateSchema(t *testing.T) {
 	}
 }
 
-// TestRunJSON_DeepValidationTriggersRepair is the headline regression for the
-// deep validator: an answer that is valid JSON, the right ROOT shape, AND
-// unmarshals cleanly into the typed struct — but carries a CONTRACT violation
-// the old shallow root check could never see (an out-of-enum confidence). The
-// strengthened validateSchema rejects it and routes the call through the single
-// repair round-trip, which returns a schema-valid answer.
+// TestRunJSON_DeepValidationTriggersRepair pins the deep-validator behavior:
+// an answer that is valid JSON, the right ROOT shape, AND unmarshals cleanly
+// into the typed struct — but carries a CONTRACT violation (an out-of-enum
+// confidence). validateSchema rejects it and routes the call through the
+// single repair round-trip, which returns a schema-valid answer.
 func TestRunJSON_DeepValidationTriggersRepair(t *testing.T) {
 	const enumSchema = `{
   "type":"object",
@@ -1536,12 +1535,12 @@ func TestRunJSON_EmptyTurnNudgeCapExhausted(t *testing.T) {
 	}
 }
 
-// TestRunJSON_RepairStepContinuesParentSequence is the shp.15 regression:
-// the repair completion's transcript step continues the parent run's
-// iteration sequence instead of restarting at 1. A repaired run records
-// steps 1,2 then 3 (not 1,2 then 1) while Outcome.Iterations is 3, so a
-// consumer joining ToolEvent.Step / CompactionEvent.Step / Event.Step on
-// Step sees one monotonic sequence.
+// TestRunJSON_RepairStepContinuesParentSequence pins the repair step
+// continuity: the repair completion's transcript step continues the parent
+// run's iteration sequence instead of restarting at 1. A repaired run
+// records steps 1,2 then 3 (not 1,2 then 1) while Outcome.Iterations is 3,
+// so a consumer joining ToolEvent.Step / CompactionEvent.Step / Event.Step
+// on Step sees one monotonic sequence.
 func TestRunJSON_RepairStepContinuesParentSequence(t *testing.T) {
 	fc := newFakeClient(
 		toolResp("c1", "echo", `{"v":"hi"}`, 10, 4),

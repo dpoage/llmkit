@@ -1,11 +1,9 @@
 //go:build live
 
 // Live acceptance tests for the agent harness, run against the compat lane
-// (the only lane with credentials today) through provider.New — the
-// production construction path. Covers the Func tool loop, RunJSONAs's
-// prompt-embedded schema path, multi-turn continuation, the WithMaxTokens
-// continuation stitch, and raw-text preservation of a reasoning model's
-// inline <think> blocks.
+// through provider.New. Covers the Func tool loop, RunJSONAs's prompt-embedded
+// schema path, multi-turn continuation, WithMaxTokens continuation, the
+// RequestPolicy seam, Attach, ToolPolicy, and inline <think> preservation.
 //
 // Live-model flakes are handled, not hidden: where an assertion depends on
 // the model producing VISIBLE text or calling mandatory tools, the test
@@ -21,15 +19,20 @@
 package agent_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"maps"
 	"os"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	llmkit "github.com/dpoage/llmkit"
@@ -327,5 +330,182 @@ func TestLiveAgentPreservesInlineThink(t *testing.T) {
 	}
 	if ans.Sum != 42 {
 		t.Errorf("sum = %d, want 42", ans.Sum)
+	}
+}
+
+// TestLiveAgentRequestPolicyShapesWire pins that the RequestPolicy seam fires exactly once per completion against the live lane and the run completes untruncated.
+func TestLiveAgentRequestPolicyShapesWire(t *testing.T) {
+	ctx, cl, _ := newLiveAgentClient(t)
+	var preps, completions atomic.Int64
+	policy := agent.RequestPolicyFunc(func(_ context.Context, _ int, req *llmkit.Request) error {
+		preps.Add(1)
+		temp := 0.5
+		req.Temperature = &temp
+		if cl.Capabilities().Thinking {
+			req.Thinking = &llmkit.ThinkingConfig{BudgetTokens: 1024}
+		}
+		return nil
+	})
+	runner := agent.NewRunner(cl, nil, "You are a terse assistant.",
+		agent.WithMaxTokens(2048),
+		agent.WithHooks(agent.Hooks{
+			BeforeCompletion: func(context.Context, int, *llmkit.Request) { completions.Add(1) },
+		}),
+		agent.WithRequestPolicy(policy))
+	out, err := runner.Run(ctx, "Reply with the single word: ready.")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if out.TruncationReason != "" {
+		t.Fatalf("run truncated (%v): the policy case did not complete", out.TruncationReason)
+	}
+	if got := preps.Load(); got != completions.Load() {
+		t.Errorf("PrepareRequest calls = %d, completions = %d, want equal", got, completions.Load())
+	}
+	if preps.Load() == 0 {
+		t.Error("PrepareRequest never fired")
+	}
+}
+
+// TestLiveAgentAttachImageOnTaskTurn pins that a generated PNG rides on the task turn and the transcript's first request event carries that block byte-for-byte on the seed user turn.
+func TestLiveAgentAttachImageOnTaskTurn(t *testing.T) {
+	ctx, cl, _ := newLiveAgentClient(t)
+	if !cl.Capabilities().Images {
+		t.Skip("compat lane client reports Capabilities.Images=false: the Attach live case needs a vision-capable model to put an image block on the wire")
+	}
+
+	// 1x1 red PNG generated in-process.
+	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
+	img.Set(0, 0, color.RGBA{R: 0xff, A: 0xff})
+	var pngBuf bytes.Buffer
+	if err := png.Encode(&pngBuf, img); err != nil {
+		t.Fatalf("encode tiny PNG: %v", err)
+	}
+
+	runner := agent.NewRunner(cl, nil, "You are a terse assistant.", agent.WithMaxTokens(256))
+	out, err := runner.Run(ctx, "What color is the attached square? Answer in three words or fewer.",
+		agent.Attach(llmkit.Image("image/png", pngBuf.Bytes())))
+	if err != nil {
+		t.Fatalf("run with attachment: %v", err)
+	}
+
+	var seed *llmkit.Message
+	for i := range out.Transcript.Events {
+		ev := &out.Transcript.Events[i]
+		if ev.Kind == agent.EventRequest && len(ev.Messages) > 0 {
+			seed = &ev.Messages[0]
+			break
+		}
+	}
+	if seed == nil {
+		t.Fatal("transcript has no request event with messages")
+	}
+	found := false
+	for _, b := range seed.Content {
+		if b.Kind == llmkit.BlockImage && b.MediaType == "image/png" && bytes.Equal(b.Data, pngBuf.Bytes()) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		var kinds []string
+		for _, b := range seed.Content {
+			kinds = append(kinds, string(b.Kind))
+		}
+		t.Errorf("first request's user message carries no image block with the generated PNG; content kinds: %v", kinds)
+	}
+}
+
+// TestLiveAgentToolPolicyDeny pins that denying the only registered tool against the live lane never runs Tool.Run and still reaches a final answer; the deny tool_result must reach both the follow-up wire request and the transcript.
+func TestLiveAgentToolPolicyDeny(t *testing.T) {
+	ctx, cl, sess := newLiveAgentClient(t)
+	add := agent.Func("add", "adds two numbers",
+		func(_ context.Context, p addArgs) (string, error) {
+			return fmt.Sprintf("%g", p.A+p.B), nil
+		})
+
+	// runs counts Tool.Run executions (must stay 0); authorizations counts policy consultations — the premise probe retries with new phrasing.
+	var mu sync.Mutex
+	runs, authorizations := 0, 0
+	const denyReason = "add is denied by the live policy"
+	policy := agent.ToolPolicyFunc(func(_ context.Context, call *llmkit.ToolCall) error {
+		mu.Lock()
+		defer mu.Unlock()
+		authorizations++
+		if call.Name == "add" {
+			return errors.New(denyReason)
+		}
+		return nil
+	})
+	hooks := agent.Hooks{
+		ToolStart: func(_ context.Context, ev agent.ToolEvent) {
+			mu.Lock()
+			defer mu.Unlock()
+			runs++
+		},
+	}
+
+	system := "You are a helpful assistant. Call the `add` tool to compute sums when asked."
+	// Three distinct phrasings — byte-identical prompts re-elicits the same correlated noncompliance.
+	tasks := []string{
+		"You MUST call the `add` tool with a=41 and b=58. After the tool has been called, report the sum in one sentence.",
+		"Use the `add` tool to compute 41 plus 58, then answer with the sum in one sentence. You must invoke `add` before answering.",
+		"Call `add` (a=41, b=58). It is mandatory. Then state the sum in one sentence.",
+	}
+
+	var out *agent.Outcome
+	var err error
+	for attempt := 1; attempt <= 3; attempt++ {
+		mu.Lock()
+		runs, authorizations = 0, 0
+		mu.Unlock()
+		runner := agent.NewRunner(cl, []agent.Tool{add}, system,
+			agent.WithHooks(hooks), agent.WithToolPolicy(policy), agent.WithMaxTokens(2048))
+		out, err = runner.Run(ctx, tasks[attempt-1])
+		if err != nil {
+			t.Fatalf("run (attempt %d): %v", attempt, err)
+		}
+		mu.Lock()
+		auths, executed := authorizations, runs
+		mu.Unlock()
+		if auths > 0 {
+			// Compliant premise: the model requested the sole tool and the policy denied it.
+			if executed != 0 {
+				t.Fatalf("Tool.Run executed %d time(s) despite a deny-all policy", executed)
+			}
+			break
+		}
+		if attempt == 3 {
+			sess.Logf(t, "premise failure: the model never requested `add` in any attempt")
+			t.Fatal("after 3 differently-phrased attempts the model still never requested the `add` tool")
+		}
+		t.Logf("attempt %d: the model never requested `add`; retrying with different phrasing", attempt)
+	}
+
+	// Deny result reached the model: Outcome's tool-result message (and the follow-up wire request) carry it.
+	want := "ERROR: tool add denied: " + denyReason
+	sawMsg := false
+	for _, m := range out.Messages {
+		if m.Role == llmkit.RoleToolResult && m.IsError && m.Text() == want {
+			sawMsg = true
+		}
+	}
+	if !sawMsg {
+		t.Fatalf("Outcome.Messages lost the deny tool result %q", want)
+	}
+	// The transcript records the same tool_result event.
+	sawEvent := false
+	for _, ev := range out.Transcript.Events {
+		if ev.Kind == agent.EventToolResult && ev.IsError && ev.Result == want {
+			sawEvent = true
+		}
+	}
+	if !sawEvent {
+		t.Fatal("transcript lost the deny tool_result event")
+	}
+
+	// The run continued past the denial and reached a final answer.
+	if out.FinalText == "" {
+		t.Fatalf("no final text after the denial; outcome=%+v", out)
 	}
 }

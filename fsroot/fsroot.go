@@ -45,10 +45,8 @@ func NewFSRoot(dir string) (*FSRoot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve root %q: %w", dir, err)
 	}
-	// Canonicalize the root through any symlinks so containment comparisons are
-	// against the real path. If the root itself can't be resolved (e.g. doesn't
-	// exist), fall back to the cleaned absolute path — tool calls will then fail
-	// naturally on access.
+	// Canonicalize through any symlinks so containment compares like-with-like.
+	// Unresolvable roots fall back to the cleaned absolute path; access will fail naturally.
 	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
 		abs = resolved
 	}
@@ -62,11 +60,10 @@ func NewFSRoot(dir string) (*FSRoot, error) {
 // An empty path resolves to the root itself (useful for list_dir of the repo
 // root).
 func (r *FSRoot) Resolve(rel string) (string, error) {
-	// Normalize separators so callers may use forward slashes regardless of OS,
-	// matching the repo-relative, slash-normalized convention used elsewhere.
+	// Normalize separators so callers may use forward slashes regardless of OS.
 	rel = filepath.FromSlash(rel)
 
-	// Reject absolute inputs outright: tools take repo-relative paths only.
+	// Absolute inputs are rejected: tools take repo-relative paths only.
 	if filepath.IsAbs(rel) {
 		return "", fmt.Errorf("%w: absolute paths are not allowed (%q)", ErrPathEscape, rel)
 	}
@@ -74,15 +71,14 @@ func (r *FSRoot) Resolve(rel string) (string, error) {
 	joined := filepath.Join(r.root, rel)
 	cleaned := filepath.Clean(joined)
 
-	// Lexical containment check: cleaned must be the root or under root+sep.
+	// Lexical containment: cleaned must be the root or under root+sep.
 	if !r.contains(cleaned) {
 		return "", fmt.Errorf("%w: %q", ErrPathEscape, rel)
 	}
 
-	// Symlink containment check: resolve the longest existing prefix of the path
-	// and ensure it still lands inside the root. This defeats symlinks that point
-	// outside the tree. Non-existent tail components are fine (the access will
-	// fail naturally); we only validate what exists.
+	// Symlink containment: resolve the longest existing prefix and ensure it
+	// still lands inside the root. Non-existent tails are fine; validation runs
+	// only over what exists.
 	if resolved, err := evalExistingPrefixPath(cleaned); err == nil {
 		if !r.contains(resolved) {
 			return "", fmt.Errorf("%w: %q resolves outside the root via symlink", ErrPathEscape, rel)

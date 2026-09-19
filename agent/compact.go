@@ -26,17 +26,16 @@ const compactRearmFactor = 2
 
 // EstimateHistoryTokens approximates the billed token size of a message slice
 // using the same bytes/4 heuristic the Runner's compaction trigger uses. It is
-// exported so offline measurement harnesses report numbers that agree with the
-// live compaction decision.
+// exported so callers reporting size numbers can match the live compaction
+// decision.
 func EstimateHistoryTokens(msgs []llmkit.Message) int64 { return estimateTokens(msgs) }
 
 // SimulateCompaction applies the Runner's threshold-triggered history-compaction
 // policy to a single history snapshot, given the threshold currently in force
 // and the running tool-name map. It returns the (possibly) compacted snapshot
 // and the next threshold (re-armed upward iff a real prune occurred) — the
-// same policy the live Runner applies. It exists so an offline measurement
-// can replay a recorded run's request snapshots through that policy rather
-// than a re-implementation that could drift.
+// same policy the live Runner applies. Callers replaying recorded request
+// snapshots get the in-loop decision without re-implementing it.
 //
 // budget <= 0 disables compaction (returns the snapshot unchanged). recentK is
 // the trailing tool-result window to preserve; pass CompactRecentToolResults to
@@ -55,8 +54,8 @@ func SimulateCompaction(msgs []llmkit.Message, budget, threshold int64, recentK 
 	return compacted, threshold * compactRearmFactor
 }
 
-// CompactRecentToolResults exposes the Runner's trailing-window size so a
-// measurement harness preserves the same recent tool results the live loop does.
+// CompactRecentToolResults exposes the Runner's trailing-window size so callers
+// replaying compaction preserve the same recent tool results the live loop does.
 const CompactRecentToolResults = compactRecentToolResults
 
 // nonTextBlockEstimateBytes is the fixed byte estimate charged for every
@@ -74,8 +73,7 @@ const nonTextBlockEstimateBytes = 1024
 // turn carries, plus a fixed nonTextBlockEstimateBytes charge per image,
 // document, or thinking block. It deliberately ignores per-message framing
 // overhead; it is a relative signal for "is history big enough to compact",
-// not a billing oracle. The same heuristic is used by the offline measurement
-// harness so the trigger and the reported numbers agree.
+// not a billing oracle.
 func estimateTokens(msgs []llmkit.Message) int64 {
 	var b int64
 	for i := range msgs {

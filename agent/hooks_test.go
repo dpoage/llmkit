@@ -376,7 +376,7 @@ func TestHook_Finalize_FiresWithStopReason(t *testing.T) {
 	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys",
 		WithHooks(rec.hooks()),
 		WithLimits(Limits{MaxIterations: 1}))
-	out, err := r.run(context.Background(), nil, "task", finalizationPrompt(nil), nil)
+	out, err := r.run(context.Background(), nil, "task", nil, finalizationPrompt(nil), nil)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -495,9 +495,9 @@ func TestHook_TranscriptError_FiresOnStreamFailure(t *testing.T) {
 // TestHooks_FullRunSequence pins the FULL hook sequence of one RunJSON: a
 // tool-call turn, an unparseable final answer, then the repair pass (Repair
 // at entry, then the repair completion's Before/After pair). The repair's
-// step continues the parent run's sequence (shp.15): the parent recorded
-// steps 1 and 2, so the repair completion reports step 3 — consumers joining
-// hooks and transcript events on Step see one monotonic sequence.
+// step continues the parent run's sequence: the parent recorded steps 1
+// and 2, so the repair completion reports step 3 — consumers joining hooks
+// and transcript events on Step see one monotonic sequence.
 func TestHooks_FullRunSequence(t *testing.T) {
 	fc := newFakeClient(
 		toolResp("c1", "echo", `{"v":"hi"}`, 10, 4),

@@ -192,6 +192,23 @@ in its message.
   `ReplayClient`, schema derivation from Go types (`SchemaOf`/`Func`,
   feeding `RunJSON`/`RunJSONAs`), multi-turn continuation via the
   `Continue` run option, and the synchronous `Hooks` observer surface.
+  Two policy seams sit beside the observer hooks. Each is a single-method
+  interface with a `Func` adapter, so a policy written for one harness
+  works in another. `RequestPolicy` (`WithRequestPolicy`) edits the wire
+  request before every completion — main turn, continuation, finalization,
+  repair — and before `BeforeCompletion` fires; `req.Messages` is a
+  per-turn shallow clone of the history, and the transcript records the
+  post-policy request. `ToolPolicy` (`WithToolPolicy`) allows, denies, or
+  rewrites the arguments of each model-requested tool call. The Runner
+  authorizes every call of a turn in model order on the loop goroutine
+  before any `Tool.Run` starts, in both dispatch modes. A denial sends the
+  model `ERROR: tool <name> denied: …` with IsError; the hooks stay silent
+  and the run continues. Only Arguments may be rewritten; the history keeps
+  the model's original. To rewrite results, wrap the `Tool`. The `Attach`
+  run option adds image or document blocks to the task turn after
+  `Text(task)` (blocks only when the task is empty). Attachments never
+  appear on nudges, finalization, or repair turns; the adapters validate
+  block kinds.
   `Outcome.FinalText` holds the final completion's text (empty when that
   completion produced none). `WithBudgetPool` makes the Runner check a
   shared `BudgetPool` before every model call and charge it after every
@@ -280,10 +297,10 @@ in its message.
 - **Transcript format**: `Block` fields marshal snake_case with
   `omitempty` on every zero field (`Kind` is always present), so a text
   block serializes as exactly `{"kind":"text","text":"…"}` and a nil `Raw`
-  never emits `"raw":null`. The tags landed in this round; transcripts
-  recorded before them are not supported — their image and document blocks
-  decode with an empty MediaType (the pre-tag key was the Go field name)
-  and are refused pre-wire. Re-record them.
+  never emits `"raw":null`. Transcripts recorded before these tags existed
+  are not supported: their image and document blocks decode with an empty
+  MediaType (the old key was the Go field name) and are refused pre-wire.
+  Re-record them.
 - **Hooks are synchronous**: every `agent.Hooks` callback runs inline on
   the goroutine that reaches the fire point — a slow hook stalls the run.
   `ToolEvent.Step`, `CompactionEvent.Step`, and the transcript's

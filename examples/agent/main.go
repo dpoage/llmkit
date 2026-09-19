@@ -1,15 +1,14 @@
 // Command agent demonstrates the llmkit/agent tool-calling harness: a
 // Runner with two small tools (now, add), synchronous lifecycle hooks
-// logging ToolStart/ToolEnd/AfterCompletion, a per-tool timeout, and —
-// behind --parallel — concurrent dispatch of the tool calls a single
-// completion requests. It doubles as a compile-time contract check for the
-// agent surface: agent.NewRunner, agent.Func, agent.Hooks, WithToolTimeout,
-// and WithParallelTools.
+// logging ToolStart/ToolEnd/AfterCompletion, a per-tool timeout, a
+// ToolPolicy denying any tool named in --deny (decisions logged alongside
+// the hooks), and — behind --parallel — concurrent dispatch of the tool
+// calls a single completion requests.
 //
 // Usage:
 //
 //	# export the shared LLMKIT_* variables (examples/internal/envcfg), then:
-//	go run ./examples/agent [--parallel] [--task "..."]
+//	go run ./examples/agent [--parallel] [--task "..."] [--deny now,add]
 //
 // Without the environment variables set, the program prints usage and exits
 // non-zero without touching the network.
@@ -21,6 +20,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/dpoage/llmkit"
@@ -38,6 +38,7 @@ func main() {
 
 func run() error {
 	parallel := flag.Bool("parallel", false, "dispatch the tool calls of one turn concurrently (WithParallelTools)")
+	deny := flag.String("deny", "", "comma-separated tool names the ToolPolicy refuses to run (WithToolPolicy demo)")
 	task := flag.String("task", "What time is it right now, and what is 41 plus 58? Use the tools to answer both parts.",
 		"the task to give the agent")
 	flag.Parse()
@@ -54,9 +55,8 @@ func run() error {
 	}
 
 	// Hooks are synchronous: each runs inline on the goroutine that reaches
-	// the fire point (under --parallel, ToolStart/ToolEnd fire concurrently
-	// from the per-call goroutines, so a real hook must synchronize its own
-	// state).
+	// the fire point. Under --parallel, ToolStart/ToolEnd fire concurrently
+	// from the per-call goroutines, so a real hook must synchronize its own state.
 	hooks := agent.Hooks{
 		BeforeCompletion: func(_ context.Context, step int, req *llmkit.Request) {
 			log.Printf("step %d: completion (%d message(s), %d tool(s))", step, len(req.Messages), len(req.Tools))
@@ -77,16 +77,35 @@ func run() error {
 		},
 	}
 
+	// ToolPolicy is the permission seam: consulted once per model-requested
+	// call, in model order, on the loop goroutine before any Tool.Run of
+	// the turn dispatches. A denial feeds the model
+	// "ERROR: tool <name> denied: …" and the run continues; the decision is
+	// logged alongside the hooks.
+	denySet := map[string]bool{}
+	for _, name := range strings.Split(*deny, ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			denySet[name] = true
+		}
+	}
+	policy := agent.ToolPolicyFunc(func(_ context.Context, call *llmkit.ToolCall) error {
+		if denySet[call.Name] {
+			log.Printf("policy: tool %s DENIED (named in --deny)", call.Name)
+			return fmt.Errorf("%s is disabled in this demo", call.Name)
+		}
+		log.Printf("policy: tool %s allowed", call.Name)
+		return nil
+	})
+
 	opts := []agent.Option{
 		agent.WithHooks(hooks),
 		agent.WithToolTimeout(10 * time.Second),
+		agent.WithToolPolicy(policy),
 	}
 	if *parallel {
 		opts = append(opts, agent.WithParallelTools())
 	}
 
-	// now takes no arguments (struct{}); add's schema is derived from
-	// addArgs. agent.Func replaces the hand-written ToolDef + Run pairs.
 	now := agent.Func[struct{}]("now", "returns the current local date and time",
 		func(_ context.Context, _ struct{}) (string, error) {
 			return time.Now().Format(time.RFC3339), nil

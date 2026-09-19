@@ -2,8 +2,7 @@
 // llmkit/agent harness: agent.RunJSONAs[book] drives the tool loop with a
 // schema derived from the Go type via agent.SchemaOf, validates the model's
 // answer against it, and unmarshals it into book (with one repair round-trip
-// on failure). It doubles as a compile-time contract check for the
-// RunJSONAs/SchemaOf surface.
+// on failure).
 //
 // Usage:
 //
@@ -59,10 +58,9 @@ func run() error {
 		return fmt.Errorf("build client: %w", err)
 	}
 
-	// No tools: the run is a single schema-bearing completion. RunJSONAs
-	// derives the schema from book (see above), attaches it to the request
-	// when the client reports StructuredOutput capability, and deep-validates
-	// the answer either way before unmarshaling into a fresh book.
+	// RunJSONAs derives the schema from book, attaches it when the client
+	// reports StructuredOutput, and deep-validates the answer either way
+	// before unmarshaling into a fresh value.
 	runner := agent.NewRunner(client, nil,
 		"You are a precise reference assistant. Answer only in JSON matching the requested schema.",
 		agent.WithMaxTokens(1024))

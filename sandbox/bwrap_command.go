@@ -68,7 +68,7 @@ type bwrapParams struct {
 // Bound with --ro-bind-try (not --ro-bind): non-FHS hosts (NixOS, Guix)
 // genuinely lack /lib, /sbin, or even /bin as real paths — a strict --ro-bind
 // on an absent path makes bwrap exit 1 before the sandboxed command ever
-// runs, which previously failed EVERY run on such a host. A missing entry
+// runs. A missing entry
 // here just means that slice of the allowlist contributes nothing; it is
 // still narrower than the container backend's baked image, exactly as
 // intended.
@@ -146,10 +146,7 @@ var fixedROAllowlist = []string{
 //     something is already mounted at a subpath (e.g. /tmp) shadows that
 //     subpath's mount entirely: the new root's own (empty) /tmp directory
 //     wins, silently making the "earlier" /tmp completely inaccessible.
-//     Getting this backwards previously made HOME=/tmp — and therefore
-//     every toolchain cache that defaults under it (Go, npm, pip, ...) —
-//     unusable in every real run without ever raising an error. The size is
-//     REQUIRED here too, not just on /tmp below: every
+//     The size is REQUIRED here too, not just on /tmp below: every
 //     directory bwrap does not bind something else over remains part of
 //     this writable tmpfs, so an unsized root is just as real a RAM-DoS
 //     surface as an unsized /tmp when the allow-uncapped override is set.

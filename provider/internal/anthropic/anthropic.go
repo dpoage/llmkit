@@ -424,7 +424,7 @@ func toAnthropicMessages(msgs []llmkit.Message) ([]anthropic.MessageParam, error
 
 // anthropicUserBlocks maps a user message's content blocks onto Anthropic
 // content blocks. A message with no blocks yields one empty text block so
-// the wire shape of a previously-valid empty user turn is preserved.
+// an empty user turn still serializes the same wire shape.
 func anthropicUserBlocks(m llmkit.Message) ([]anthropic.ContentBlockParamUnion, error) {
 	blocks := make([]anthropic.ContentBlockParamUnion, 0, len(m.Content))
 	for _, b := range m.Content {
