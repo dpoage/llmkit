@@ -51,7 +51,8 @@ func TestProbeCapabilitiesIntegration(t *testing.T) {
 	t.Run("bwrap_generic_probe", func(t *testing.T) {
 		s := newTestBwrap(t)
 		// Bwrap has no image concept; the image string only feeds the cache
-		// key and Spec, both of which the backend ignores.
+		// key (probeSpecImage leaves Spec.Image empty — a non-empty one is
+		// refused at Exec).
 		const image = "kit-probe-integration-bwrap"
 		InvalidateCapabilityCache(image)
 		cs := ProbeCapabilities(ctx, s, image, repoDir, nil, nil, nil, testProbes)

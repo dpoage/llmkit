@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"errors"
 	"slices"
 	"strconv"
 	"strings"
@@ -255,28 +256,82 @@ func TestBuildBwrapArgsUserLogNameOverride(t *testing.T) {
 	}
 }
 
-func TestValidateBwrapNetwork(t *testing.T) {
+// TestValidateNetworkPerBackend pins the Spec honesty table's Network row
+// for every backend's resolver: the zero value resolves to the backend
+// default, supported modes pass through unchanged, and anything else is a
+// typed UnsupportedSpecError naming the backend — never a silent
+// substitution.
+func TestValidateNetworkPerBackend(t *testing.T) {
 	tests := []struct {
-		in      string
-		want    string
-		wantErr bool
+		backend   string
+		def       NetworkMode
+		requested NetworkMode
+		supported []NetworkMode
+		want      NetworkMode
+		wantErr   bool
 	}{
-		{"", "none", false},
-		{"none", "none", false},
-		{"host", "host", false},
-		{"bridge", "", true},
-		{"custom", "", true},
+		{"cli", NetworkNone, "", cliNetworks, NetworkNone, false},
+		{"cli", NetworkNone, NetworkHost, cliNetworks, NetworkHost, false},
+		{"cli", NetworkNone, NetworkBridge, cliNetworks, NetworkBridge, false},
+		{"cli", NetworkNone, "weasel", cliNetworks, "", true},
+		{"bwrap", NetworkNone, "", bwrapNetworks, NetworkNone, false},
+		{"bwrap", NetworkNone, NetworkHost, bwrapNetworks, NetworkHost, false},
+		{"bwrap", NetworkHost, NetworkNone, bwrapNetworks, NetworkNone, false},
+		{"bwrap", NetworkNone, NetworkBridge, bwrapNetworks, "", true},
+		{"host", NetworkHost, "", []NetworkMode{NetworkHost}, NetworkHost, false},
+		{"host", NetworkHost, NetworkHost, []NetworkMode{NetworkHost}, NetworkHost, false},
+		{"host", NetworkHost, NetworkNone, []NetworkMode{NetworkHost}, "", true},
+		{"host", NetworkHost, NetworkBridge, []NetworkMode{NetworkHost}, "", true},
 	}
 	for _, tc := range tests {
-		t.Run(tc.in, func(t *testing.T) {
-			got, err := validateBwrapNetwork(tc.in)
+		t.Run(tc.backend+"/"+string(tc.requested), func(t *testing.T) {
+			got, err := resolveNetworkMode(tc.backend, tc.def, tc.requested, tc.supported...)
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("validateBwrapNetwork(%q) err=%v wantErr=%v", tc.in, err, tc.wantErr)
+				t.Fatalf("resolveNetworkMode(%s, %q) err=%v wantErr=%v", tc.backend, tc.requested, err, tc.wantErr)
 			}
-			if !tc.wantErr && got != tc.want {
-				t.Errorf("validateBwrapNetwork(%q) = %q, want %q", tc.in, got, tc.want)
+			if tc.wantErr {
+				var ue *UnsupportedSpecError
+				if !errors.As(err, &ue) || ue.Backend != tc.backend {
+					t.Errorf("err = %v, want *UnsupportedSpecError naming backend %q", err, tc.backend)
+				}
+				return
+			}
+			if got != tc.want {
+				t.Errorf("resolveNetworkMode(%s, %q) = %q, want %q", tc.backend, tc.requested, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestFixedROAllowlistPinned pins fixedROAllowlist to an explicit literal
+// copy. The other allowlist tests LOOP over the const, so a silently ADDED
+// entry (the oracle mutant "add /home") survived them all; a literal copy
+// fails on any addition, removal, or reorder. The home-directory rule below
+// states WHY the mutant matters: a $HOME-wide bind exposes host secrets to
+// untrusted code, which can exfiltrate them through workspace → transcript →
+// LLM even with network=none (see fixedROAllowlist's doc).
+func TestFixedROAllowlistPinned(t *testing.T) {
+	want := []string{
+		"/usr",
+		"/lib",
+		"/lib64",
+		"/bin",
+		"/sbin",
+		"/etc/ssl",
+		"/etc/static",
+		"/nix/store",
+		"/gnu/store",
+		"/etc/alternatives",
+	}
+	if !slices.Equal(fixedROAllowlist, want) {
+		t.Fatalf("fixedROAllowlist drifted from the pinned allowlist.\n got: %q\nwant: %q\nAny change here widens (or narrows) what every sandboxed untrusted command can read — it must be a deliberate, reviewed security decision, and this literal must be updated with it.", fixedROAllowlist, want)
+	}
+	for _, entry := range fixedROAllowlist {
+		for _, home := range []string{"/home", "/root", "/Users"} {
+			if entry == home || strings.HasPrefix(entry, home+"/") {
+				t.Errorf("fixedROAllowlist entry %q is a home-directory bind: never allowlist anything under %s", entry, home)
+			}
+		}
 	}
 }
 

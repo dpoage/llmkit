@@ -27,7 +27,7 @@ import (
 // When NEITHER is available, resource limits would otherwise be silently
 // dropped — exactly the failure mode acceptance criterion 4 forbids. The run
 // FAILS with an actionable error unless the operator explicitly opts into
-// the WithBwrapAllowUncapped option.
+// the WithCapPolicy(CapBestEffort) option.
 
 // bwrapCapMethod names the resource-limit enforcement mechanism a Bwrap
 // backend resolved for the current host.
@@ -51,7 +51,7 @@ const systemdRunProbeTimeout = 5 * time.Second
 // Every step is best-effort and cheap; failures fall through to the next
 // method rather than erroring, since the ultimate "nothing worked" case is
 // handled by the caller (Exec), which decides whether that is fatal based on
-// allowUncapped.
+// capPolicy.
 func detectBwrapCapMethod(ctx context.Context) bwrapCapMethod {
 	if systemdRunUserAvailable(ctx) {
 		return bwrapCapSystemdRun
@@ -137,9 +137,9 @@ func delegatedCgroupV2Dir() (string, bool) {
 // ErrBwrapNoCapMethod is returned (possibly wrapped) by NewBwrap and Bwrap.Exec
 // when resource limits were requested (the normal case) but neither enforcement
 // mechanism is available and the operator has not opted into running uncapped
-// via WithBwrapAllowUncapped. Callers match it with errors.Is to attach their
-// own remediation (e.g. a config key) instead of string matching.
-var ErrBwrapNoCapMethod = errors.New("sandbox: bwrap backend found no resource-limit mechanism (systemd-run --user --scope or a delegated cgroup v2 subtree); set WithBwrapAllowUncapped(true) to run without enforced memory/CPU/pids limits")
+// via WithCapPolicy(CapBestEffort). Callers match it with errors.Is to attach
+// their own remediation (e.g. a config key) instead of string matching.
+var ErrBwrapNoCapMethod = errors.New("sandbox: bwrap backend found no resource-limit mechanism (systemd-run --user --scope or a delegated cgroup v2 subtree); set WithCapPolicy(CapBestEffort) to run without enforced memory/CPU/pids limits")
 
 // systemdRunWrapArgs prepends a systemd-run --user --scope invocation (with
 // MemoryMax/CPUQuota/TasksMax properties) around the given bwrap binary +
