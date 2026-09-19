@@ -121,7 +121,7 @@ func TestBwrapExec_NoCapMethod_IsSentinel(t *testing.T) {
 		t.Fatalf("Exec error = %v, want errors.Is ErrBwrapNoCapMethod", err)
 	}
 
-	WithBwrapAllowUncapped(true)(s)
+	s.capPolicy = CapBestEffort
 	_, err = s.Exec(context.Background(), Spec{RepoDir: repo, Cmd: []string{"true"}})
 	if errors.Is(err, ErrBwrapNoCapMethod) {
 		t.Fatalf("with allow-uncapped, Exec must not return ErrBwrapNoCapMethod; got %v", err)

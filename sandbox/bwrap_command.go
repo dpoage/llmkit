@@ -17,7 +17,7 @@ type bwrapParams struct {
 	// workspace is the host path of the prepared rw workspace bound at
 	// /workspace inside the sandbox.
 	workspace string
-	network   string
+	network   NetworkMode
 	env       []string
 	cmd       []string
 	// roMounts are extra read-only bind mounts (e.g. a dependency cache),
@@ -160,7 +160,7 @@ var fixedROAllowlist = []string{
 //     bwrap's --size flag applies to the SINGLE --tmpfs invocation
 //     immediately following it, never cumulatively — hence it is repeated
 //     before each of the two --tmpfs flags above and below, both driven by
-//     the SAME p.scratchSizeBytes (the WithBwrapScratchSizeMB value; <= 0 falls back
+//     the SAME p.scratchSizeBytes (the WithScratchSizeMB value; <= 0 falls back
 //     to fallbackScratchSizeMB).
 //   - --ro-bind-try allowlist   : ONLY the fixed allowlist (fixedROAllowlist)
 //     plus any resolved toolchain/extra RO mounts are bound in, read-only —
@@ -303,41 +303,25 @@ func buildBwrapArgs(p bwrapParams) []string {
 	return args
 }
 
-// bwrapNetworkEnabled reports whether network is an explicit opt-in to
-// network access. Only "host" enables it; "none" and the empty string (which
-// resolves to "none" as the package default) keep the network namespace
-// unshared. Any other value is rejected earlier by validateBwrapNetwork.
-func bwrapNetworkEnabled(network string) bool {
-	return network == "host"
+// bwrapNetworkEnabled reports whether the resolved network mode is an
+// explicit opt-in to network access. Only NetworkHost enables it; NetworkNone
+// (the resolved default) keeps the network namespace unshared. Any other
+// mode is refused before this point by resolveNetworkMode — bwrap has no
+// equivalent of the container backend's bridge mode, since --unshare-all
+// either shares the host's single network namespace wholesale or not at all.
+func bwrapNetworkEnabled(network NetworkMode) bool {
+	return network == NetworkHost
 }
 
 // splitEnvKV splits a KEY=VALUE environment entry. ok is false for a
 // malformed entry (no "="), which the caller then drops rather than passing
 // a broken --setenv invocation to bwrap.
 func splitEnvKV(kv string) (key, value string, ok bool) {
-	for i := 0; i < len(kv); i++ {
-		if kv[i] == '=' {
-			return kv[:i], kv[i+1:], true
-		}
+	key, value, found := strings.Cut(kv, "=")
+	if !found {
+		return "", "", false
 	}
-	return "", "", false
-}
-
-// validateBwrapNetwork resolves and validates a Spec's network mode against
-// the bwrap backend's narrower contract (acceptance criterion 2): only "none"
-// (the default) and "host" are meaningful — there is no bwrap equivalent of
-// the container backend's bridge/custom network modes, since --unshare-all
-// either shares the host's single network namespace wholesale or not at all.
-func validateBwrapNetwork(network string) (string, error) {
-	switch network {
-	case "", "none", "host":
-		if network == "" {
-			return "none", nil
-		}
-		return network, nil
-	default:
-		return "", fmt.Errorf("sandbox: bwrap backend supports network %q values none or host, got %q", "none/host", network)
-	}
+	return key, value, true
 }
 
 // bwrapAllowlistContainerPaths returns the fixed allowlist's container paths,

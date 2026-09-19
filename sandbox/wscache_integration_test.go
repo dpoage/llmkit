@@ -32,7 +32,7 @@ func TestWorkspaceCacheHitAcrossExecs(t *testing.T) {
 		t.Skip("no container runtime (podman/docker) found on PATH")
 	}
 	const image = "docker.io/library/alpine:latest"
-	cli, err := NewCLI(runtime, image)
+	cli, err := NewCLI(WithRuntime(runtime), WithImage(image))
 	if err != nil {
 		t.Skipf("sandbox unavailable: %v", err)
 	}

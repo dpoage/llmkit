@@ -459,3 +459,90 @@ func TestInvalidateCapabilityCache_DeletesComposedKey(t *testing.T) {
 		t.Errorf("re-probe after invalidation must actually execute: Exec ran %d times, want %d", n, 2*len(testProbes))
 	}
 }
+
+// TestProbeCapabilitiesPanickingInterpretEvictsCache pins the panic
+// contract of a shared flight, in two race-free phases:
+//
+// Phase A (single goroutine): a panicking Interpret is a caller bug, so the
+// claimant's panic propagates (after recover+re-panic in
+// ProbeCapabilities) AND the flight's poisoned nil entry is EVICTED — a
+// fresh ProbeCapabilities for the same key re-probes for real instead of
+// serving the cached nil forever.
+//
+// Phase B: a caller that joins an already-panicked flight — the cache
+// holds a done-closed flight whose cs is nil, exactly what a panicked
+// claimant leaves behind for waiters that loaded the entry before the
+// panic — must receive the nil (all-unavailable) set, never hang.
+func TestProbeCapabilitiesPanickingInterpretEvictsCache(t *testing.T) {
+	const image = "test-image-panicking-interpret"
+	InvalidateCapabilityCache(image) // clean slate regardless of prior test order
+
+	panicking := ProbeEntry{
+		Name:  "boom",
+		Probe: []string{"echo", "irrelevant"},
+		Interpret: func(ProbeResult) map[string]bool {
+			panic("buggy Interpret")
+		},
+	}
+	reprober := NewMock(MockResponse{Result: Result{ExitCode: 0, Stdout: "irrelevant\n"}})
+
+	// Phase A: the panic propagates to the claiming caller.
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("expected the panicking Interpret's panic to propagate in the claimant")
+			}
+		}()
+		ProbeCapabilities(context.Background(), NewMock(MockResponse{Result: Result{ExitCode: 0}}), image, t.TempDir(), nil, nil, nil, []ProbeEntry{panicking})
+	}()
+
+	// Phase A: the eviction — a fresh call for the SAME key (the probe-set
+	// identity is the entry's NAME, so a healthy Interpret named "boom"
+	// addresses the identical cache entry) must actually re-probe — its
+	// mock records the Exec — and return a healthy set, proving the
+	// poisoned nil entry was never served from the cache.
+	healthy := ProbeEntry{
+		Name:  "boom",
+		Probe: []string{"echo", "irrelevant"},
+		Interpret: func(ProbeResult) map[string]bool {
+			return map[string]bool{"ok": true}
+		},
+	}
+	cs := ProbeCapabilities(context.Background(), reprober, image, t.TempDir(), nil, nil, nil, []ProbeEntry{healthy})
+	if cs == nil {
+		t.Fatal("re-probe after a panicking flight got the poisoned nil set from the cache")
+	}
+	if !cs.Available("boom", "ok") {
+		t.Errorf("re-probed set should carry the healthy Interpret's verdict, got %v", cs)
+	}
+	if n := reprober.CallCount(); n != 1 {
+		t.Errorf("re-probe must execute the probe again after eviction: Exec ran %d times, want 1", n)
+	}
+	InvalidateCapabilityCache(image) // remove Phase A's healthy entry before Phase B
+
+	// Phase B: a caller joining a flight that a panicked claimant left
+	// behind (done closed, cs nil — stored here directly, so the join is
+	// deterministic: no claimant is running that could evict it) receives
+	// the nil set and does not hang.
+	flight := &capFlight{done: make(chan struct{})}
+	key := image + "|" + probeSetKey([]ProbeEntry{panicking}) + "|" + mountsEnvCacheKey(nil, nil, nil)
+	capCache.Store(key, flight)
+	t.Cleanup(func() { capCache.Delete(key) })
+
+	waiterDone := make(chan CapabilitySet, 1)
+	go func() {
+		waiterDone <- ProbeCapabilities(context.Background(), NewMock(MockResponse{}), image, t.TempDir(), nil, nil, nil, []ProbeEntry{panicking})
+	}()
+	// A panicked claimant's cleanup: close(done) with cs still nil (the
+	// defer ordering in ProbeCapabilities guarantees waiters are released
+	// even though the claimant re-panicked).
+	close(flight.done)
+	select {
+	case cs := <-waiterDone:
+		if cs != nil {
+			t.Errorf("waiter of a panicked flight should receive the nil (all-unavailable) set, got %v", cs)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter blocked forever on a panicked flight")
+	}
+}
