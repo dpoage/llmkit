@@ -251,3 +251,60 @@ func TestAttach_OptionsAccumulateInOrder(t *testing.T) {
 	assertMessageBlocks(t, "seed", fc.requests[0].Messages[0],
 		llmkit.Text("task"), attachSpec, attachPNG, second)
 }
+
+// TestAttach_NudgesStayAttachmentFree pins both nudge sites: the empty-turn
+// nudge (run loop) and the max-tokens continuation nudge (completeOnce) are
+// appended as plain single-text-block user turns — attachments ride on the
+// task turn only, so neither nudge may carry them. The seed still does.
+func TestAttach_NudgesStayAttachmentFree(t *testing.T) {
+	t.Run("empty-turn nudge", func(t *testing.T) {
+		fc := newFakeClient(
+			thinkOnlyResp("hmm", 5, 5),
+			textResp("done", 5, 5),
+		)
+		r := NewRunner(fc, nil, "sys")
+		if _, err := r.Run(context.Background(), "task", Attach(attachPNG)); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if fc.callCount() != 2 {
+			t.Fatalf("completions = %d, want 2 (nudged turn then answer)", fc.callCount())
+		}
+		assertNudgeTurn(t, fc.requests[1])
+		// Contrast: the seed turn still carries the attachment.
+		assertMessageBlocks(t, "seed", fc.requests[1].Messages[0],
+			llmkit.Text("task"), attachPNG)
+	})
+	t.Run("max-tokens continuation nudge", func(t *testing.T) {
+		fc := newFakeClient(
+			maxTokensResp("partial answ", 5, 5),
+			textResp("er", 5, 5),
+		)
+		r := NewRunner(fc, nil, "sys")
+		if _, err := r.Run(context.Background(), "task", Attach(attachPNG)); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if fc.callCount() != 2 {
+			t.Fatalf("completions = %d, want 2 (truncated turn then continuation)", fc.callCount())
+		}
+		assertNudgeTurn(t, fc.requests[1])
+		assertMessageBlocks(t, "seed", fc.requests[1].Messages[0],
+			llmkit.Text("task"), attachPNG)
+	})
+}
+
+// assertNudgeTurn requires req's LAST message to be a user turn whose
+// content is exactly one text block — no attachment may ride on a nudge.
+func assertNudgeTurn(t *testing.T, req llmkit.Request) {
+	t.Helper()
+	msgs := req.Messages
+	if len(msgs) == 0 {
+		t.Fatal("nudge request carries no messages")
+	}
+	last := msgs[len(msgs)-1]
+	if last.Role != llmkit.RoleUser {
+		t.Errorf("nudge turn role = %v, want user", last.Role)
+	}
+	if len(last.Content) != 1 || last.Content[0].Kind != llmkit.BlockText {
+		t.Errorf("nudge turn content = %+v, want exactly one text block", last.Content)
+	}
+}
