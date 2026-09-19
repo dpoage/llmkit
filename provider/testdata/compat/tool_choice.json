@@ -1,0 +1,331 @@
+{
+  "case": "tool_choice",
+  "lane": "compat",
+  "model": "MiniMax-M3",
+  "capabilities": {
+    "ContextWindow": 0,
+    "ParallelToolCalls": false,
+    "PromptCaching": false,
+    "StructuredOutput": false,
+    "Thinking": false,
+    "ToolChoice": true,
+    "Images": true,
+    "Documents": true,
+    "StopSequences": true,
+    "TopP": true,
+    "TopK": false,
+    "Seed": true
+  },
+  "inputs": [
+    {
+      "System": "",
+      "Messages": [
+        {
+          "Role": "user",
+          "Content": [
+            {
+              "Kind": "text",
+              "Text": "Call the add tool with a=2 and b=3.",
+              "MediaType": "",
+              "Data": null,
+              "URL": "",
+              "Title": "",
+              "Provider": "",
+              "Raw": null
+            }
+          ],
+          "ToolCalls": null,
+          "ToolCallID": "",
+          "IsError": false
+        }
+      ],
+      "Tools": [
+        {
+          "Name": "add",
+          "Description": "Adds two numbers.",
+          "Parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number"
+              },
+              "b": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "a",
+              "b"
+            ]
+          }
+        }
+      ],
+      "MaxTokens": 768,
+      "Temperature": null,
+      "Thinking": null,
+      "ToolChoice": {
+        "Mode": "none",
+        "Name": ""
+      },
+      "StopSequences": null,
+      "TopP": null,
+      "TopK": null,
+      "Seed": null,
+      "ResponseSchema": null,
+      "ResponseSchemaName": ""
+    },
+    {
+      "System": "",
+      "Messages": [
+        {
+          "Role": "user",
+          "Content": [
+            {
+              "Kind": "text",
+              "Text": "Call the add tool with a=2 and b=3.",
+              "MediaType": "",
+              "Data": null,
+              "URL": "",
+              "Title": "",
+              "Provider": "",
+              "Raw": null
+            }
+          ],
+          "ToolCalls": null,
+          "ToolCallID": "",
+          "IsError": false
+        }
+      ],
+      "Tools": [
+        {
+          "Name": "add",
+          "Description": "Adds two numbers.",
+          "Parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number"
+              },
+              "b": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "a",
+              "b"
+            ]
+          }
+        }
+      ],
+      "MaxTokens": 768,
+      "Temperature": null,
+      "Thinking": null,
+      "ToolChoice": {
+        "Mode": "required",
+        "Name": ""
+      },
+      "StopSequences": null,
+      "TopP": null,
+      "TopK": null,
+      "Seed": null,
+      "ResponseSchema": null,
+      "ResponseSchemaName": ""
+    },
+    {
+      "System": "",
+      "Messages": [
+        {
+          "Role": "user",
+          "Content": [
+            {
+              "Kind": "text",
+              "Text": "Call the add tool with a=2 and b=3.",
+              "MediaType": "",
+              "Data": null,
+              "URL": "",
+              "Title": "",
+              "Provider": "",
+              "Raw": null
+            }
+          ],
+          "ToolCalls": null,
+          "ToolCallID": "",
+          "IsError": false
+        }
+      ],
+      "Tools": [
+        {
+          "Name": "add",
+          "Description": "Adds two numbers.",
+          "Parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number"
+              },
+              "b": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "a",
+              "b"
+            ]
+          }
+        }
+      ],
+      "MaxTokens": 768,
+      "Temperature": null,
+      "Thinking": null,
+      "ToolChoice": {
+        "Mode": "tool",
+        "Name": "add"
+      },
+      "StopSequences": null,
+      "TopP": null,
+      "TopK": null,
+      "Seed": null,
+      "ResponseSchema": null,
+      "ResponseSchemaName": ""
+    }
+  ],
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "headers": {
+          "accept": "application/json",
+          "content-type": "application/json",
+          "user-agent": "OpenAI/Go 3.43.0",
+          "x-stainless-arch": "x64",
+          "x-stainless-lang": "go",
+          "x-stainless-os": "Linux",
+          "x-stainless-package-version": "3.43.0",
+          "x-stainless-retry-count": "0",
+          "x-stainless-runtime": "go",
+          "x-stainless-runtime-version": "go1.27.1-X:nodwarf5"
+        },
+        "body": "{\"messages\":[{\"content\":\"Call the add tool with a=2 and b=3.\",\"role\":\"user\"}],\"model\":\"MiniMax-M3\",\"max_completion_tokens\":768,\"tool_choice\":\"none\",\"tools\":[{\"function\":{\"name\":\"add\",\"description\":\"Adds two numbers.\",\"parameters\":{\"properties\":{\"a\":{\"type\":\"number\"},\"b\":{\"type\":\"number\"}},\"required\":[\"a\",\"b\"],\"type\":\"object\"}},\"type\":\"function\"}]}"
+      },
+      "response": {
+        "headers": {
+          "access-control-allow-origin": "*",
+          "alb_receive_time": "1789778455.51",
+          "alb_request_id": "36425d8f7e96f8ded25e5704b6574e525af1422e",
+          "cache-control": "max-age=0, no-cache, no-store",
+          "content-length": "762",
+          "content-type": "application/json; charset=utf-8",
+          "date": "Sat, 19 Sep 2026 00:40:56 GMT",
+          "expires": "Sat, 19 Sep 2026 00:40:56 GMT",
+          "minimax-request-id": "657439eca562cba2f05421091be1170f",
+          "pragma": "no-cache",
+          "trace-id": "06fd0d177098f033d429be489b6b5787",
+          "x-from": "ak",
+          "x-mm-request-id": "2022431855143301769_1789778456ngx0eg",
+          "x-session-id": "d41f06064b20b0e153a4e53424eaf14b"
+        },
+        "body": "{\"id\":\"06fd0d177098f033d429be489b6b5787\",\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"\u003cthink\u003e\\nThe user wants me to call the add tool with a=2 and b=3.\\n\u003c/think\u003e\\n\\n{\\\"name\\\": \\\"add\\\", \\\"arguments\\\": {\\\"a\\\": 2, \\\"b\\\": 3}}\",\"role\":\"assistant\",\"name\":\"MiniMax AI\",\"audio_content\":\"\"}}],\"created\":1789778455,\"model\":\"MiniMax-M3\",\"object\":\"chat.completion\",\"usage\":{\"total_tokens\":231,\"total_characters\":0,\"prompt_tokens\":189,\"completion_tokens\":42,\"completion_tokens_details\":{\"reasoning_tokens\":14},\"prompt_tokens_details\":{\"cached_tokens\":0}},\"input_sensitive\":false,\"output_sensitive\":false,\"input_sensitive_type\":0,\"output_sensitive_type\":0,\"output_sensitive_int\":0,\"service_tier\":\"standard\",\"base_resp\":{\"status_code\":0,\"status_msg\":\"\"}}\n",
+        "status": 200
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "headers": {
+          "accept": "application/json",
+          "content-type": "application/json",
+          "user-agent": "OpenAI/Go 3.43.0",
+          "x-stainless-arch": "x64",
+          "x-stainless-lang": "go",
+          "x-stainless-os": "Linux",
+          "x-stainless-package-version": "3.43.0",
+          "x-stainless-retry-count": "0",
+          "x-stainless-runtime": "go",
+          "x-stainless-runtime-version": "go1.27.1-X:nodwarf5"
+        },
+        "body": "{\"messages\":[{\"content\":\"Call the add tool with a=2 and b=3.\",\"role\":\"user\"}],\"model\":\"MiniMax-M3\",\"max_completion_tokens\":768,\"tool_choice\":\"required\",\"tools\":[{\"function\":{\"name\":\"add\",\"description\":\"Adds two numbers.\",\"parameters\":{\"properties\":{\"a\":{\"type\":\"number\"},\"b\":{\"type\":\"number\"}},\"required\":[\"a\",\"b\"],\"type\":\"object\"}},\"type\":\"function\"}]}"
+      },
+      "response": {
+        "headers": {
+          "access-control-allow-origin": "*",
+          "alb_receive_time": "1789778456.468",
+          "alb_request_id": "5a7be053231879fd78b7a42827c8e2b5bccba46a",
+          "cache-control": "max-age=0, no-cache, no-store",
+          "content-length": "854",
+          "content-type": "application/json; charset=utf-8",
+          "date": "Sat, 19 Sep 2026 00:40:57 GMT",
+          "expires": "Sat, 19 Sep 2026 00:40:57 GMT",
+          "minimax-request-id": "cda7b6c584e43950e0233423c47c1220",
+          "pragma": "no-cache",
+          "trace-id": "06fd0d18f76e41af0ac07632c6348d50",
+          "x-from": "ak",
+          "x-mm-request-id": "2022431855143301769_17897784573hbuzw",
+          "x-session-id": "d41f06064b20b0e153a4e53424eaf14b"
+        },
+        "body": "{\"id\":\"06fd0d18f76e41af0ac07632c6348d50\",\"choices\":[{\"finish_reason\":\"tool_calls\",\"index\":0,\"message\":{\"content\":\"\u003cthink\u003e\\nThe user wants me to call the add tool with a=2 and b=3\\n\u003c/think\u003e\\n\\n.\",\"role\":\"assistant\",\"name\":\"MiniMax AI\",\"tool_calls\":[{\"id\":\"call_53824f926b664c50a8c62515\",\"type\":\"function\",\"function\":{\"name\":\"add\",\"arguments\":\"{\\\"a\\\":2,\\\"b\\\":3}\"},\"index\":0}],\"audio_content\":\"\"}}],\"created\":1789778456,\"model\":\"MiniMax-M3\",\"object\":\"chat.completion\",\"usage\":{\"total_tokens\":460,\"total_characters\":0,\"prompt_tokens\":407,\"completion_tokens\":53,\"completion_tokens_details\":{\"reasoning_tokens\":14},\"prompt_tokens_details\":{\"cached_tokens\":256}},\"input_sensitive\":false,\"output_sensitive\":false,\"input_sensitive_type\":0,\"output_sensitive_type\":0,\"output_sensitive_int\":0,\"service_tier\":\"standard\",\"base_resp\":{\"status_code\":0,\"status_msg\":\"\"}}\n",
+        "status": 200
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "headers": {
+          "accept": "application/json",
+          "content-type": "application/json",
+          "user-agent": "OpenAI/Go 3.43.0",
+          "x-stainless-arch": "x64",
+          "x-stainless-lang": "go",
+          "x-stainless-os": "Linux",
+          "x-stainless-package-version": "3.43.0",
+          "x-stainless-retry-count": "0",
+          "x-stainless-runtime": "go",
+          "x-stainless-runtime-version": "go1.27.1-X:nodwarf5"
+        },
+        "body": "{\"messages\":[{\"content\":\"Call the add tool with a=2 and b=3.\",\"role\":\"user\"}],\"model\":\"MiniMax-M3\",\"max_completion_tokens\":768,\"tool_choice\":{\"function\":{\"name\":\"add\"},\"type\":\"function\"},\"tools\":[{\"function\":{\"name\":\"add\",\"description\":\"Adds two numbers.\",\"parameters\":{\"properties\":{\"a\":{\"type\":\"number\"},\"b\":{\"type\":\"number\"}},\"required\":[\"a\",\"b\"],\"type\":\"object\"}},\"type\":\"function\"}]}"
+      },
+      "response": {
+        "headers": {
+          "access-control-allow-origin": "*",
+          "alb_receive_time": "1789778457.447",
+          "alb_request_id": "c36eeba8d15c1f992933760e290ea094685c3cad",
+          "cache-control": "max-age=0, no-cache, no-store",
+          "content-length": "890",
+          "content-type": "application/json; charset=utf-8",
+          "date": "Sat, 19 Sep 2026 00:40:58 GMT",
+          "expires": "Sat, 19 Sep 2026 00:40:58 GMT",
+          "minimax-request-id": "6b24b89d2c808ad971bd9d6225e0cfa5",
+          "pragma": "no-cache",
+          "trace-id": "06fd0d19032ea3e671aee3ec507c8cad",
+          "x-from": "ak",
+          "x-mm-request-id": "2022431855143301769_1789778458bz9k4q",
+          "x-session-id": "d41f06064b20b0e153a4e53424eaf14b"
+        },
+        "body": "{\"id\":\"06fd0d19032ea3e671aee3ec507c8cad\",\"choices\":[{\"finish_reason\":\"tool_calls\",\"index\":0,\"message\":{\"content\":\"\u003cthink\u003e\\nThe user wants me to call the add tool with a=2 and b=3. This is a straightforward tool\\n\u003c/think\u003e\\n\\ncall.\",\"role\":\"assistant\",\"name\":\"MiniMax AI\",\"tool_calls\":[{\"id\":\"call_eeb084eae4ed4619be145af5\",\"type\":\"function\",\"function\":{\"name\":\"add\",\"arguments\":\"{\\\"a\\\":2,\\\"b\\\":3}\"},\"index\":0}],\"audio_content\":\"\"}}],\"created\":1789778457,\"model\":\"MiniMax-M3\",\"object\":\"chat.completion\",\"usage\":{\"total_tokens\":467,\"total_characters\":0,\"prompt_tokens\":407,\"completion_tokens\":60,\"completion_tokens_details\":{\"reasoning_tokens\":22},\"prompt_tokens_details\":{\"cached_tokens\":256}},\"input_sensitive\":false,\"output_sensitive\":false,\"input_sensitive_type\":0,\"output_sensitive_type\":0,\"output_sensitive_int\":0,\"service_tier\":\"standard\",\"base_resp\":{\"status_code\":0,\"status_msg\":\"\"}}\n",
+        "status": 200
+      }
+    }
+  ],
+  "normalized": {
+    "text": "\u003cthink\u003e\nThe user wants me to call the add tool with a=2 and b=3. This is a straightforward tool\n\u003c/think\u003e\n\ncall.",
+    "tool_calls": [
+      {
+        "ID": "call_eeb084eae4ed4619be145af5",
+        "Name": "add",
+        "Arguments": {
+          "a": 2,
+          "b": 3
+        }
+      }
+    ],
+    "stop_reason": "tool_use",
+    "usage": {
+      "InputTokens": 407,
+      "OutputTokens": 60,
+      "CacheReadInputTokens": 256,
+      "CacheCreationInputTokens": 0
+    }
+  }
+}

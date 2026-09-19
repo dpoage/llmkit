@@ -1,0 +1,108 @@
+{
+  "case": "error_bad_key",
+  "lane": "compat",
+  "model": "MiniMax-M3",
+  "capabilities": {
+    "ContextWindow": 0,
+    "ParallelToolCalls": false,
+    "PromptCaching": false,
+    "StructuredOutput": false,
+    "Thinking": false,
+    "ToolChoice": true,
+    "Images": true,
+    "Documents": true,
+    "StopSequences": true,
+    "TopP": true,
+    "TopK": false,
+    "Seed": true
+  },
+  "inputs": [
+    {
+      "System": "",
+      "Messages": [
+        {
+          "Role": "user",
+          "Content": [
+            {
+              "Kind": "text",
+              "Text": "Reply with exactly: OK",
+              "MediaType": "",
+              "Data": null,
+              "URL": "",
+              "Title": "",
+              "Provider": "",
+              "Raw": null
+            }
+          ],
+          "ToolCalls": null,
+          "ToolCallID": "",
+          "IsError": false
+        }
+      ],
+      "Tools": null,
+      "MaxTokens": 768,
+      "Temperature": null,
+      "Thinking": null,
+      "ToolChoice": {
+        "Mode": "",
+        "Name": ""
+      },
+      "StopSequences": null,
+      "TopP": null,
+      "TopK": null,
+      "Seed": null,
+      "ResponseSchema": null,
+      "ResponseSchemaName": ""
+    }
+  ],
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "headers": {
+          "accept": "application/json",
+          "content-type": "application/json",
+          "user-agent": "OpenAI/Go 3.43.0",
+          "x-stainless-arch": "x64",
+          "x-stainless-lang": "go",
+          "x-stainless-os": "Linux",
+          "x-stainless-package-version": "3.43.0",
+          "x-stainless-retry-count": "0",
+          "x-stainless-runtime": "go",
+          "x-stainless-runtime-version": "go1.27.1-X:nodwarf5"
+        },
+        "body": "{\"messages\":[{\"content\":\"Reply with exactly: OK\",\"role\":\"user\"}],\"model\":\"MiniMax-M3\",\"max_completion_tokens\":768}"
+      },
+      "response": {
+        "headers": {
+          "access-control-allow-origin": "*",
+          "alb_receive_time": "1789778454.515",
+          "alb_request_id": "18a3f7abf30f1246aae9189ac8b1c6b70bcb422d",
+          "cache-control": "max-age=0, no-cache, no-store",
+          "content-length": "232",
+          "content-type": "application/json; charset=utf-8",
+          "date": "Sat, 19 Sep 2026 00:40:54 GMT",
+          "expires": "Sat, 19 Sep 2026 00:40:54 GMT",
+          "minimax-request-id": "ae3b4dbcadd8528f0286817412721d87",
+          "pragma": "no-cache",
+          "trace-id": "06fd0d16e451c72d1db96cacbb3d242c",
+          "x-from": "ak"
+        },
+        "body": "{\"type\":\"error\",\"error\":{\"type\":\"authorized_error\",\"message\":\"login fail: Please carry the API secret key in the 'Authorization' field of the request header (1004)\",\"http_code\":\"401\"},\"request_id\":\"06fd0d16e451c72d1db96cacbb3d242c\"}",
+        "status": 401
+      }
+    }
+  ],
+  "normalized": {
+    "err_kind": "ErrAuth",
+    "text": "",
+    "stop_reason": "",
+    "usage": {
+      "InputTokens": 0,
+      "OutputTokens": 0,
+      "CacheReadInputTokens": 0,
+      "CacheCreationInputTokens": 0
+    }
+  }
+}

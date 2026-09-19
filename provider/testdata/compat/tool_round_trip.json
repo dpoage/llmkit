@@ -1,0 +1,252 @@
+{
+  "case": "tool_round_trip",
+  "lane": "compat",
+  "model": "MiniMax-M3",
+  "capabilities": {
+    "ContextWindow": 0,
+    "ParallelToolCalls": false,
+    "PromptCaching": false,
+    "StructuredOutput": false,
+    "Thinking": false,
+    "ToolChoice": true,
+    "Images": true,
+    "Documents": true,
+    "StopSequences": true,
+    "TopP": true,
+    "TopK": false,
+    "Seed": true
+  },
+  "inputs": [
+    {
+      "System": "",
+      "Messages": [
+        {
+          "Role": "user",
+          "Content": [
+            {
+              "Kind": "text",
+              "Text": "Read the file poetry.txt using the read_file tool, then quote its second line verbatim as your final answer.",
+              "MediaType": "",
+              "Data": null,
+              "URL": "",
+              "Title": "",
+              "Provider": "",
+              "Raw": null
+            }
+          ],
+          "ToolCalls": null,
+          "ToolCallID": "",
+          "IsError": false
+        }
+      ],
+      "Tools": [
+        {
+          "Name": "read_file",
+          "Description": "Reads a text file and returns its contents.",
+          "Parameters": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "file to read"
+              }
+            },
+            "required": [
+              "path"
+            ]
+          }
+        }
+      ],
+      "MaxTokens": 768,
+      "Temperature": null,
+      "Thinking": null,
+      "ToolChoice": {
+        "Mode": "",
+        "Name": ""
+      },
+      "StopSequences": null,
+      "TopP": null,
+      "TopK": null,
+      "Seed": null,
+      "ResponseSchema": null,
+      "ResponseSchemaName": ""
+    },
+    {
+      "System": "",
+      "Messages": [
+        {
+          "Role": "user",
+          "Content": [
+            {
+              "Kind": "text",
+              "Text": "Read the file poetry.txt using the read_file tool, then quote its second line verbatim as your final answer.",
+              "MediaType": "",
+              "Data": null,
+              "URL": "",
+              "Title": "",
+              "Provider": "",
+              "Raw": null
+            }
+          ],
+          "ToolCalls": null,
+          "ToolCallID": "",
+          "IsError": false
+        },
+        {
+          "Role": "assistant",
+          "Content": null,
+          "ToolCalls": [
+            {
+              "ID": "call_01a0b71be36572a69572fe50",
+              "Name": "read_file",
+              "Arguments": {
+                "path": "poetry.txt"
+              }
+            }
+          ],
+          "ToolCallID": "",
+          "IsError": false
+        },
+        {
+          "Role": "tool-result",
+          "Content": [
+            {
+              "Kind": "text",
+              "Text": "line one\nshall I compare thee to a summer's day\nline three",
+              "MediaType": "",
+              "Data": null,
+              "URL": "",
+              "Title": "",
+              "Provider": "",
+              "Raw": null
+            }
+          ],
+          "ToolCalls": null,
+          "ToolCallID": "call_01a0b71be36572a69572fe50",
+          "IsError": false
+        }
+      ],
+      "Tools": [
+        {
+          "Name": "read_file",
+          "Description": "Reads a text file and returns its contents.",
+          "Parameters": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "file to read"
+              }
+            },
+            "required": [
+              "path"
+            ]
+          }
+        }
+      ],
+      "MaxTokens": 768,
+      "Temperature": null,
+      "Thinking": null,
+      "ToolChoice": {
+        "Mode": "",
+        "Name": ""
+      },
+      "StopSequences": null,
+      "TopP": null,
+      "TopK": null,
+      "Seed": null,
+      "ResponseSchema": null,
+      "ResponseSchemaName": ""
+    }
+  ],
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "headers": {
+          "accept": "application/json",
+          "content-type": "application/json",
+          "user-agent": "OpenAI/Go 3.43.0",
+          "x-stainless-arch": "x64",
+          "x-stainless-lang": "go",
+          "x-stainless-os": "Linux",
+          "x-stainless-package-version": "3.43.0",
+          "x-stainless-retry-count": "0",
+          "x-stainless-runtime": "go",
+          "x-stainless-runtime-version": "go1.27.1-X:nodwarf5"
+        },
+        "body": "{\"messages\":[{\"content\":\"Read the file poetry.txt using the read_file tool, then quote its second line verbatim as your final answer.\",\"role\":\"user\"}],\"model\":\"MiniMax-M3\",\"max_completion_tokens\":768,\"tools\":[{\"function\":{\"name\":\"read_file\",\"description\":\"Reads a text file and returns its contents.\",\"parameters\":{\"properties\":{\"path\":{\"description\":\"file to read\",\"type\":\"string\"}},\"required\":[\"path\"],\"type\":\"object\"}},\"type\":\"function\"}]}"
+      },
+      "response": {
+        "headers": {
+          "access-control-allow-origin": "*",
+          "alb_receive_time": "1789778452.799",
+          "alb_request_id": "ed922e6f9b6a7a5c5260b0a902f58dec84da8308",
+          "cache-control": "max-age=0, no-cache, no-store",
+          "content-length": "922",
+          "content-type": "application/json; charset=utf-8",
+          "date": "Sat, 19 Sep 2026 00:40:53 GMT",
+          "expires": "Sat, 19 Sep 2026 00:40:53 GMT",
+          "minimax-request-id": "2aac061cc2969101078f493bf8de2664",
+          "pragma": "no-cache",
+          "trace-id": "06fd0d1445a785a97164489308e7c843",
+          "x-from": "ak",
+          "x-mm-request-id": "2022431855143301769_1789778453scr64n",
+          "x-session-id": "d54e836d6c7b4562ec13fffd46cc19aa"
+        },
+        "body": "{\"id\":\"06fd0d1445a785a97164489308e7c843\",\"choices\":[{\"finish_reason\":\"tool_calls\",\"index\":0,\"message\":{\"content\":\"\u003cthink\u003e\\nThe user wants me to read the file poetry.txt and quote its second line verbatim. Let me readthe file.\\n\u003c/think\u003e\\n\\n\u003c/think\u003e\",\"role\":\"assistant\",\"name\":\"MiniMax AI\",\"tool_calls\":[{\"id\":\"call_01a0b71be36572a69572fe50\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"poetry.txt\\\"}\"},\"index\":0}],\"audio_content\":\"\"}}],\"created\":1789778452,\"model\":\"MiniMax-M3\",\"object\":\"chat.completion\",\"usage\":{\"total_tokens\":488,\"total_characters\":0,\"prompt_tokens\":434,\"completion_tokens\":54,\"completion_tokens_details\":{\"reasoning_tokens\":23},\"prompt_tokens_details\":{\"cached_tokens\":433}},\"input_sensitive\":false,\"output_sensitive\":false,\"input_sensitive_type\":0,\"output_sensitive_type\":0,\"output_sensitive_int\":0,\"service_tier\":\"standard\",\"base_resp\":{\"status_code\":0,\"status_msg\":\"\"}}\n",
+        "status": 200
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "headers": {
+          "accept": "application/json",
+          "content-type": "application/json",
+          "user-agent": "OpenAI/Go 3.43.0",
+          "x-stainless-arch": "x64",
+          "x-stainless-lang": "go",
+          "x-stainless-os": "Linux",
+          "x-stainless-package-version": "3.43.0",
+          "x-stainless-retry-count": "0",
+          "x-stainless-runtime": "go",
+          "x-stainless-runtime-version": "go1.27.1-X:nodwarf5"
+        },
+        "body": "{\"messages\":[{\"content\":\"Read the file poetry.txt using the read_file tool, then quote its second line verbatim as your final answer.\",\"role\":\"user\"},{\"tool_calls\":[{\"id\":\"call_01a0b71be36572a69572fe50\",\"function\":{\"arguments\":\"{\\\"path\\\":\\\"poetry.txt\\\"}\",\"name\":\"read_file\"},\"type\":\"function\"}],\"role\":\"assistant\"},{\"content\":\"line one\\nshall I compare thee to a summer's day\\nline three\",\"tool_call_id\":\"call_01a0b71be36572a69572fe50\",\"role\":\"tool\"}],\"model\":\"MiniMax-M3\",\"max_completion_tokens\":768,\"tools\":[{\"function\":{\"name\":\"read_file\",\"description\":\"Reads a text file and returns its contents.\",\"parameters\":{\"properties\":{\"path\":{\"description\":\"file to read\",\"type\":\"string\"}},\"required\":[\"path\"],\"type\":\"object\"}},\"type\":\"function\"}]}"
+      },
+      "response": {
+        "headers": {
+          "access-control-allow-origin": "*",
+          "alb_receive_time": "1789778453.548",
+          "alb_request_id": "bc023c8d6b58f2dfe1fa43d64ef8dea4f1aec3b4",
+          "cache-control": "max-age=0, no-cache, no-store",
+          "content-length": "666",
+          "content-type": "application/json; charset=utf-8",
+          "date": "Sat, 19 Sep 2026 00:40:53 GMT",
+          "expires": "Sat, 19 Sep 2026 00:40:53 GMT",
+          "minimax-request-id": "a01bd62eb7c631447a8f2d8c9b4881cd",
+          "pragma": "no-cache",
+          "trace-id": "06fd0d15c7dc36f6c8826312793fcf19",
+          "x-from": "ak",
+          "x-mm-request-id": "2022431855143301769_1789778453m8092p",
+          "x-session-id": "d54e836d6c7b4562ec13fffd46cc19aa"
+        },
+        "body": "{\"id\":\"06fd0d15c7dc36f6c8826312793fcf19\",\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"shall I compare thee to a summer's day\",\"role\":\"assistant\",\"name\":\"MiniMax AI\",\"audio_content\":\"\"}}],\"created\":1789778453,\"model\":\"MiniMax-M3\",\"object\":\"chat.completion\",\"usage\":{\"total_tokens\":505,\"total_characters\":0,\"prompt_tokens\":494,\"completion_tokens\":11,\"completion_tokens_details\":{\"reasoning_tokens\":0},\"prompt_tokens_details\":{\"cached_tokens\":493}},\"input_sensitive\":false,\"output_sensitive\":false,\"input_sensitive_type\":0,\"output_sensitive_type\":0,\"output_sensitive_int\":0,\"service_tier\":\"standard\",\"base_resp\":{\"status_code\":0,\"status_msg\":\"\"}}\n",
+        "status": 200
+      }
+    }
+  ],
+  "normalized": {
+    "text": "shall I compare thee to a summer's day",
+    "stop_reason": "end_turn",
+    "usage": {
+      "InputTokens": 494,
+      "OutputTokens": 11,
+      "CacheReadInputTokens": 493,
+      "CacheCreationInputTokens": 0
+    }
+  }
+}
