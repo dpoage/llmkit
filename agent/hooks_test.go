@@ -436,7 +436,7 @@ func TestHook_Repair_FiresOnceAtRepairStart(t *testing.T) {
 	if rec.repairs != 1 {
 		t.Fatalf("repairs = %d, want 1", rec.repairs)
 	}
-	want := []string{"before:1", "after:1", "repair", "before:1", "after:1"}
+	want := []string{"before:1", "after:1", "repair", "before:2", "after:2"}
 	if len(rec.events) != len(want) {
 		t.Fatalf("events = %v, want %v", rec.events, want)
 	}
@@ -493,9 +493,11 @@ func TestHook_TranscriptError_FiresOnStreamFailure(t *testing.T) {
 }
 
 // TestHooks_FullRunSequence pins the FULL hook sequence of one RunJSON: a
-// tool-call turn, an unparseable final answer, then the repair pass (Repair at
-// entry, then the repair completion's Before/After pair with a fresh outcome —
-// step restarts at 0).
+// tool-call turn, an unparseable final answer, then the repair pass (Repair
+// at entry, then the repair completion's Before/After pair). The repair's
+// step continues the parent run's sequence (shp.15): the parent recorded
+// steps 1 and 2, so the repair completion reports step 3 — consumers joining
+// hooks and transcript events on Step see one monotonic sequence.
 func TestHooks_FullRunSequence(t *testing.T) {
 	fc := newFakeClient(
 		toolResp("c1", "echo", `{"v":"hi"}`, 10, 4),
@@ -514,7 +516,7 @@ func TestHooks_FullRunSequence(t *testing.T) {
 		"start:1:echo", "end:1:echo", // tool lifecycle
 		"before:2", "after:2", // main turn 2 (unparseable final answer)
 		"repair",              // repair pass entry
-		"before:1", "after:1", // repair completion (fresh outcome)
+		"before:3", "after:3", // repair completion — continues the parent sequence
 	}
 	if len(rec.events) != len(want) {
 		t.Fatalf("events = %v, want %v", rec.events, want)

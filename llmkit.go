@@ -76,31 +76,38 @@ const (
 // list of blocks; adapters translate each kind onto the provider's wire
 // format (Anthropic image/document/thinking blocks, OpenAI image_url/file
 // content parts, Gemini inline_data/file_data parts, ...).
+//
+// Build blocks with [Text], [Image], [ImageURL], [Document], and
+// [DocumentURL]. The struct stays flat so JSONL transcripts keep
+// round-tripping; hand-built literals remain legal and are validated by the
+// adapters before any wire call. The json tags exist for transcripts: zero
+// fields are omitted, so a text block serializes as exactly
+// {"kind":"text","text":"…"} and a nil Raw never emits "raw":null.
 type Block struct {
-	Kind BlockKind
+	Kind BlockKind `json:"kind"`
 	// Text holds text for BlockText and, informationally, the thinking
 	// payload for BlockThinking. Message.Text concatenates BlockText only.
-	Text string
+	Text string `json:"text,omitempty"`
 	// MediaType is the MIME type of Data (image/document only).
-	MediaType string
+	MediaType string `json:"media_type,omitempty"`
 	// Data holds inline bytes for image/document blocks (the raw bytes, NOT
 	// pre-encoded). encoding/json base64s Data in JSONL transcripts and
 	// decodes it back; adapters base64-encode it again per provider wire
 	// format. Mutually exclusive with URL: exactly one must be set.
-	Data []byte
+	Data []byte `json:"data,omitempty"`
 	// URL references an image/document instead of inlining it. Mutually
 	// exclusive with Data. Providers without a URL source for a kind reject
 	// such blocks with ErrInvalidRequest.
-	URL string
+	URL string `json:"url,omitempty"`
 	// Title is an optional document label (BlockDocument only).
-	Title string
+	Title string `json:"title,omitempty"`
 	// Provider names the adapter that produced/signed a BlockThinking block
 	// ("anthropic", "google"). See BlockThinking for the round-trip rule.
-	Provider string
+	Provider string `json:"provider,omitempty"`
 	// Raw carries a BlockThinking block's provider wire JSON verbatim and is
 	// never interpreted. When the vendor SDK does not expose the original
 	// bytes (google), Raw is a faithful re-encoding of the parsed block.
-	Raw json.RawMessage
+	Raw json.RawMessage `json:"raw,omitempty"`
 }
 
 // Message is a single normalized turn in a conversation.
@@ -149,6 +156,96 @@ func (m Message) Text() string {
 		}
 	}
 	return b.String()
+}
+
+// Text returns a Block carrying the plain text s.
+func Text(s string) Block { return Block{Kind: BlockText, Text: s} }
+
+// Image returns an inline image block: mediaType is the MIME type
+// ("image/png", "image/jpeg", ...), data the raw image bytes (not
+// base64-encoded; encoding/json handles that in transcripts). It panics on
+// an empty mediaType or data: an inline image without either cannot satisfy
+// the BlockImage contract on any provider, and the violation is a
+// programming error at the call site. Hand-built blocks skip this check;
+// the adapters reject them with ErrInvalidRequest before any wire call.
+func Image(mediaType string, data []byte) Block {
+	if mediaType == "" {
+		panic("llmkit.Image: empty mediaType")
+	}
+	if len(data) == 0 {
+		panic("llmkit.Image: empty data")
+	}
+	return Block{Kind: BlockImage, MediaType: mediaType, Data: data}
+}
+
+// ImageURL returns an image block referencing url instead of carrying
+// inline data. It panics on an empty url, like [Image].
+func ImageURL(url string) Block {
+	if url == "" {
+		panic("llmkit.ImageURL: empty url")
+	}
+	return Block{Kind: BlockImage, URL: url}
+}
+
+// Document returns an inline document block (e.g. a PDF). title is an
+// optional label and may be empty. It panics on an empty mediaType or
+// data, like [Image].
+func Document(mediaType, title string, data []byte) Block {
+	if mediaType == "" {
+		panic("llmkit.Document: empty mediaType")
+	}
+	if len(data) == 0 {
+		panic("llmkit.Document: empty data")
+	}
+	return Block{Kind: BlockDocument, MediaType: mediaType, Title: title, Data: data}
+}
+
+// DocumentURL returns a document block referencing url instead of carrying
+// inline data. title is an optional label and may be empty. It panics on an
+// empty url, like [Image].
+func DocumentURL(url, title string) Block {
+	if url == "" {
+		panic("llmkit.DocumentURL: empty url")
+	}
+	return Block{Kind: BlockDocument, URL: url, Title: title}
+}
+
+// UserMessage returns a user turn carrying the given blocks — the form for
+// a turn that mixes text with an image or document ([TextMessage] covers
+// the text-only case). It panics on zero blocks: a user turn with no
+// content is rejected by every adapter before any wire call.
+func UserMessage(blocks ...Block) Message {
+	if len(blocks) == 0 {
+		panic("llmkit.UserMessage: no blocks")
+	}
+	return Message{Role: RoleUser, Content: blocks}
+}
+
+// SystemMessage returns a system-instruction turn carrying the single text
+// block s.
+func SystemMessage(s string) Message {
+	return Message{Role: RoleSystem, Content: []Block{Text(s)}}
+}
+
+// ToolResult returns a tool-result message answering the call with the
+// given ID. callID must be non-empty: a result naming no call can never be
+// paired with its ToolCall, and building one is a programming error. Use
+// [ToolError] for a failed execution.
+func ToolResult(callID, text string) Message {
+	if callID == "" {
+		panic("llmkit.ToolResult: empty callID")
+	}
+	return Message{Role: RoleToolResult, Content: []Block{Text(text)}, ToolCallID: callID}
+}
+
+// ToolError returns a failed tool-result message answering the call with
+// the given ID: the IsError mark tells the model the execution failed.
+// callID must be non-empty, like [ToolResult].
+func ToolError(callID, text string) Message {
+	if callID == "" {
+		panic("llmkit.ToolError: empty callID")
+	}
+	return Message{Role: RoleToolResult, Content: []Block{Text(text)}, ToolCallID: callID, IsError: true}
 }
 
 // ToolDef declares a tool the model may call. Parameters is a JSON Schema object
@@ -356,39 +453,66 @@ type Response struct {
 
 // Capabilities describes what a given provider+model supports, so callers can
 // adapt (e.g. serialize tool calls when ParallelToolCalls is false) without
-// sniffing the provider type. The bools name features a Request can ask for;
-// a false feature is silently dropped by the adapter (see each field).
+// sniffing the provider type. Every field is classified by its first
+// sentence into one of four enforcement classes:
+//
+//   - Dropped silently when false: the adapter omits the request feature
+//     from the wire (no error). Check the field before relying on the
+//     feature.
+//   - Refused pre-wire: the adapter rejects the request with an error
+//     wrapping ErrInvalidRequest before any wire call.
+//   - Decorator: provider.New installs a wrapping Client whose behavior
+//     follows the field.
+//   - Advisory: information for callers; no adapter reads the field.
 type Capabilities struct {
-	// ContextWindow is the model's maximum input+output token window. Zero
-	// means unknown: adapters report 0 for any model outside their per-model
-	// table (on every provider, never a fabricated fallback number) and for
-	// arbitrary OpenAI-compatible endpoints. Pin a value for such models via
-	// provider.Spec.Capabilities.
+	// Advisory: the model's maximum input+output token window; no adapter
+	// reads it — callers use it to bound their own history (a zero value
+	// means unknown). Adapters report 0 for any model outside their
+	// per-model table (on every provider, never a fabricated fallback
+	// number) and for arbitrary OpenAI-compatible endpoints. Pin a value for
+	// such models via provider.Spec.Capabilities.
 	ContextWindow int
-	// ParallelToolCalls reports whether the model may return more than one tool
-	// call in a single response.
+	// Decorator: when false, provider.New installs the tool-call serializer,
+	// which truncates a multi-tool-call response to its first call so
+	// callers always see at most one call per turn; when true the client is
+	// passed through unwrapped. True also reports that the model may return
+	// more than one tool call in a single response.
 	ParallelToolCalls bool
-	// PromptCaching reports whether the provider supports prompt caching.
+	// Advisory: whether the provider supports prompt caching; no adapter
+	// reads it — callers use it to decide whether a stable request prefix
+	// pays off.
 	PromptCaching bool
-	// StructuredOutput reports whether the provider supports schema-constrained
-	// JSON output.
+	// Dropped silently when false: a Request.ResponseSchema is omitted from
+	// the wire (the prompt-embedded schema instruction, if any, is the only
+	// enforcement). When true, adapters honor the schema natively
+	// (grammar-constrained decoding / synthetic forced-output tool).
 	StructuredOutput bool
-	// Thinking reports whether the adapter forwards Request.Thinking (reasoning
-	// budgets) and returns BlockThinking blocks.
+	// Dropped silently when false: Request.Thinking is omitted from the wire
+	// and no BlockThinking blocks are returned. When true, the adapter
+	// forwards the reasoning budget and thinking blocks round-trip.
 	Thinking bool
-	// ToolChoice reports whether Request.ToolChoice is honored.
+	// Refused pre-wire: any explicit Request.ToolChoice mode other than auto
+	// makes the adapter return an error wrapping ErrInvalidRequest before
+	// the wire call (auto stays allowed — dropping an explicit "none" would
+	// let the model call tools the caller tried to forbid).
 	ToolChoice bool
-	// Images reports whether BlockImage content is sent on the wire.
+	// Advisory: whether BlockImage content is sent on the wire; no adapter
+	// reads it — image blocks are passed through to providers that accept
+	// them (conservatively false profiles on some endpoints still carry
+	// vision models).
 	Images bool
-	// Documents reports whether BlockDocument content is sent on the wire.
+	// Advisory: whether BlockDocument content is sent on the wire; no
+	// adapter reads it — document blocks are passed through to providers
+	// that accept them.
 	Documents bool
-	// StopSequences reports whether Request.StopSequences is honored.
+	// Dropped silently when false: Request.StopSequences is omitted from the
+	// wire.
 	StopSequences bool
-	// TopP reports whether Request.TopP is honored.
+	// Dropped silently when false: Request.TopP is omitted from the wire.
 	TopP bool
-	// TopK reports whether Request.TopK is honored.
+	// Dropped silently when false: Request.TopK is omitted from the wire.
 	TopK bool
-	// Seed reports whether Request.Seed is honored.
+	// Dropped silently when false: Request.Seed is omitted from the wire.
 	Seed bool
 }
 

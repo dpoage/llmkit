@@ -12,11 +12,11 @@ import (
 
 // bigSpendClient is a scripted llmkit.Client that reports a large, fixed Usage on
 // every completion and always requests a tool so the loop never finishes on its
-// own — it can only be stopped by a limit or the shared budget pool. Every
-// completion charges the pool, mirroring how a spend recorder feeds it.
+// own — it can only be stopped by a limit or the shared budget pool. The RUNNER
+// charges the pool after every successful completion (WithBudgetPool); the
+// client itself never touches it.
 type bigSpendClient struct {
-	pool      *BudgetPool
-	perCall   int64 // input+output tokens reported (and charged) per completion
+	perCall   int64 // input+output tokens reported per completion
 	callCount atomic.Int64
 }
 
@@ -27,12 +27,10 @@ func (c *bigSpendClient) Complete(ctx context.Context, req llmkit.Request) (llmk
 		return llmkit.Response{}, err
 	}
 	c.callCount.Add(1)
-	// Charge the pool exactly as a spend recorder would, on the same
-	// completion the model "spent" the tokens. Split across input/output to mimic
-	// the input-dominated reality from a typical run.
+	// Split across input/output to mimic the input-dominated reality from a
+	// typical run; ChargeableTokens at weight 1.0 sums back to perCall.
 	in := c.perCall - c.perCall/10
 	out := c.perCall - in
-	c.pool.Add(in + out)
 	return llmkit.Response{
 		StopReason: llmkit.StopToolUse,
 		ToolCalls:  []llmkit.ToolCall{{ID: "c", Name: "noop", Arguments: []byte(`{}`)}},
@@ -50,8 +48,9 @@ func (noopTool) Run(ctx context.Context, args json.RawMessage) (string, error) {
 
 // TestBudgetPool_OvershootBound is the acceptance test for shared-pool budget
 // enforcement: with a pool of B tokens, P concurrent runners that each report a
-// large per-call spend, and a pre-turn BudgetCheck hook, total spend must never
-// exceed B plus at most one in-flight model-call per concurrent runner.
+// large per-call spend — each Runner checking the pool pre-turn and charging it
+// post-completion via WithBudgetPool — total spend must never exceed B plus at
+// most one in-flight model-call per concurrent runner.
 func TestBudgetPool_OvershootBound(t *testing.T) {
 	const (
 		budget   int64 = 1_000_000
@@ -66,7 +65,6 @@ func TestBudgetPool_OvershootBound(t *testing.T) {
 	limits := Limits{
 		MaxIterations: -1,
 		TokenBudget:   -1,
-		BudgetCheck:   pool.Check,
 	}
 
 	var wg sync.WaitGroup
@@ -74,8 +72,8 @@ func TestBudgetPool_OvershootBound(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			client := &bigSpendClient{pool: pool, perCall: perCall}
-			r := NewRunner(client, []Tool{noopTool{}}, "sys", WithLimits(limits))
+			client := &bigSpendClient{perCall: perCall}
+			r := NewRunner(client, []Tool{noopTool{}}, "sys", WithLimits(limits), WithBudgetPool(pool))
 			out, err := r.Run(context.Background(), "task")
 			if err != nil {
 				t.Errorf("Run: %v", err)
@@ -115,10 +113,9 @@ func TestBudgetPool_StopsInFlight(t *testing.T) {
 	const perCall int64 = 60_000
 	pool := NewBudgetPool(budget)
 
-	client := &bigSpendClient{pool: pool, perCall: perCall}
-	r := NewRunner(client, []Tool{noopTool{}}, "sys", WithLimits(Limits{
-		MaxIterations: -1, TokenBudget: -1, BudgetCheck: pool.Check,
-	}))
+	client := &bigSpendClient{perCall: perCall}
+	r := NewRunner(client, []Tool{noopTool{}}, "sys",
+		WithLimits(Limits{MaxIterations: -1, TokenBudget: -1}), WithBudgetPool(pool))
 	out, err := r.Run(context.Background(), "task")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -131,6 +128,64 @@ func TestBudgetPool_StopsInFlight(t *testing.T) {
 	// after crossing.
 	if got, want := pool.Spent(), budget+perCall; got > want {
 		t.Fatalf("single-runner overshoot = %d, want <= %d", got, want)
+	}
+}
+
+// TestBudgetPool_RunnerChargesPerCompletion pins the charge side of
+// WithBudgetPool: the Runner adds every successful completion's
+// ChargeableTokens (CacheReadWeight-discounted) to the pool, so Spent() equals
+// the summed chargeable usage — with no Recorder and no caller-side Add
+// involved. Cache reads are discounted by the configured weight.
+func TestBudgetPool_RunnerChargesPerCompletion(t *testing.T) {
+	// Turn 1: 100 in (40 from cache), 10 out. Turn 2: 50 in (0 cache), 5 out.
+	// Weight 0.5: chargeable = (100-40)*1 + 40*0.5 + 10 + 50 + 5 = 60+20+65 = 145.
+	fc := newFakeClient(
+		withCache(toolResp("c1", "noop", `{}`, 100, 10), 40, 0),
+		withCache(textResp("done", 50, 5), 0, 0),
+	)
+	pool := NewBudgetPool(1_000_000)
+	r := NewRunner(fc, []Tool{noopTool{}}, "sys",
+		WithLimits(Limits{TokenBudget: -1, CacheReadWeight: 0.5}), WithBudgetPool(pool))
+	out, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out.Truncated() {
+		t.Fatalf("unexpected truncation: %s", out.TruncationReason)
+	}
+	want := int64(145)
+	if got := pool.Spent(); got != want {
+		t.Fatalf("pool.Spent() = %d, want %d (sum of ChargeableTokens at weight 0.5)", got, want)
+	}
+	// The charge is exactly the chargeable usage the outcome reports.
+	if got := out.Usage.ChargeableTokens(0.5); got != want {
+		t.Fatalf("outcome chargeable = %d, want %d", got, want)
+	}
+}
+
+// TestBudgetPool_ExhaustedStopsWithoutRecorder verifies a pool installed with
+// WithBudgetPool stops the run with TruncBudgetPool once exhausted — the pool
+// is charged only by the Runner; no llmkit.Recorder participates anywhere.
+func TestBudgetPool_ExhaustedStopsWithoutRecorder(t *testing.T) {
+	pool := NewBudgetPool(100)
+	// bigSpendClient never charges: only the Runner does.
+	client := &bigSpendClient{perCall: 60}
+	r := NewRunner(client, []Tool{noopTool{}}, "sys",
+		WithLimits(Limits{MaxIterations: -1, TokenBudget: -1}), WithBudgetPool(pool))
+	out, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out.TruncationReason != TruncBudgetPool {
+		t.Fatalf("reason = %q, want %q", out.TruncationReason, TruncBudgetPool)
+	}
+	// 60 per turn: two turns charge 120 >= 100, the pre-turn gate fires before
+	// the third completion.
+	if client.callCount.Load() != 2 {
+		t.Fatalf("completions = %d, want 2 (third is gated by the exhausted pool)", client.callCount.Load())
+	}
+	if got := pool.Spent(); got != 120 {
+		t.Fatalf("pool.Spent() = %d, want 120 (two charged turns)", got)
 	}
 }
 
