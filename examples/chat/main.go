@@ -7,7 +7,7 @@
 // agent.WithSteering): the turn joins the running conversation before the
 // next model call, or when the run would otherwise end. A line typed as
 // the run finishes becomes the next task; lines that queue after a run's
-// final drain are reported as not delivered instead of being dropped. When
+// final drain are sent as the next task instead of being dropped. When
 // the model stops
 // for a refusal/safety reason (agent.StopReasonError) a canned reply is
 // printed and the refusal turn stays in the history: the attached
@@ -117,16 +117,20 @@ func run() error {
 	fmt.Println("llmkit chat — type a message (/think toggles extended thinking, ctrl-d to exit).")
 
 	var (
-		prev        *agent.Outcome
-		steering    *agent.Steering
-		result      chan runResult
-		pendingLine string
+		prev     *agent.Outcome
+		steering *agent.Steering
+		result   chan runResult
+		// steered records the lines handed to the current run's Steering
+		// handle, in order, so lines the run never drained can be replayed.
+		steered []string
+		// pending holds lines that become the next tasks, in order: a line
+		// typed as the run finished, and steers the run did not deliver.
+		pending []string
 	)
 
 	// reportAndRetire prints a finished run and retires its steering
-	// handle. Turns queued in the race between the run's finish and the
-	// input loop never reached the model; they are called out instead of
-	// being dropped silently.
+	// handle. Steers queued after the run's final drain never reached the
+	// model; they become the next tasks instead of being dropped.
 	reportAndRetire := func(res runResult) error {
 		p, rerr := reportRun(res, streamed.Load())
 		prev = p
@@ -134,15 +138,20 @@ func run() error {
 			return rerr
 		}
 		if n := steering.Pending(); n > 0 {
-			fmt.Printf("(steering: %d line(s) typed as the run finished were not delivered — resend them)\n", n)
+			undelivered := steered[len(steered)-n:]
+			fmt.Printf("(steering: %d line(s) arrived as the run finished; sending as the next task)\n", n)
+			pending = append(pending, undelivered...)
 		}
 		steering = nil
+		steered = nil
 		return nil
 	}
 
 	for {
-		line := pendingLine
-		pendingLine = ""
+		var line string
+		if len(pending) > 0 {
+			line, pending = pending[0], pending[1:]
+		}
 		if line == "" {
 			fmt.Print("you> ")
 			l, ok := <-lines
@@ -199,8 +208,9 @@ func run() error {
 						if err := reportAndRetire(res); err != nil {
 							return err
 						}
-						pendingLine = l
+						pending = append(pending, l)
 					default:
+						steered = append(steered, l)
 						steering.Steer(llmkit.Text(l))
 					}
 				}
