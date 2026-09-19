@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -12,11 +13,24 @@ import (
 // builder and normalizer tail Complete uses.
 var _ llmkit.StreamingClient = (*anthropicAdapter)(nil)
 
+// errEarlyStreamEnd marks a connection that closed cleanly before the
+// vendor's terminal message_stop event: the accumulated Message is partial,
+// and Complete would have failed decoding the equivalent truncated body.
+var errEarlyStreamEnd = errors.New("anthropic: stream ended before message_stop")
+
+// streamProtocolError is an unnormalized wire-sequence violation inside one
+// stream event; Stream routes it through the same error path as the other
+// server-side stream failures.
+type streamProtocolError struct{ msg string }
+
+func (e streamProtocolError) Error() string { return e.msg }
+
 // Stream implements llmkit.StreamingClient: it builds params exactly like
 // Complete, streams the vendor's SSE events via Messages.NewStreaming,
 // accumulates them into an anthropic.Message with the SDK's Accumulate, and
 // returns the same normalized Response Complete would return for the same
-// wire exchange.
+// wire exchange. A connection that ends without message_stop is an error,
+// never a partial success.
 //
 // Fragment mapping (wire event → llmkit.Delta):
 //
@@ -51,6 +65,7 @@ func (a *anthropicAdapter) Stream(ctx context.Context, req llmkit.Request, fn fu
 	var (
 		acc     anthropic.Message // Accumulate's output feeds toResponse
 		toolSeq int               // tool_use blocks seen = next ToolCalls position
+		sawStop bool              // the terminal message_stop event arrived
 		started = map[int64]startedTool{}
 	)
 
@@ -80,64 +95,98 @@ func (a *anthropicAdapter) Stream(ctx context.Context, req llmkit.Request, fn fu
 		}
 
 		switch v := ev.AsAny().(type) {
+		case anthropic.MessageStopEvent:
+			sawStop = true
+
 		case anthropic.ContentBlockStartEvent:
-			tb, ok := v.ContentBlock.AsAny().(anthropic.ToolUseBlock)
-			if !ok {
-				continue
-			}
-			st := startedTool{pos: toolSeq, id: tb.ID, name: tb.Name}
-			toolSeq++
-			st.synthetic = hasSynthetic && tb.Name == synthTool
-			started[v.Index] = st
-			if st.synthetic {
-				continue
-			}
-			// Identity first, empty Arguments: consumers can render "calling
-			// get_weather(toolu_x)" before any argument byte arrives.
-			if err := forward(llmkit.Delta{Kind: llmkit.DeltaToolCall, Index: st.pos, ID: st.id, Name: st.name}); err != nil {
-				return llmkit.Response{}, err
+			switch tb := v.ContentBlock.AsAny().(type) {
+			case anthropic.ToolUseBlock:
+				st := startedTool{pos: toolSeq, id: tb.ID, name: tb.Name}
+				toolSeq++
+				st.synthetic = hasSynthetic && tb.Name == synthTool
+				started[v.Index] = st
+				if st.synthetic {
+					continue
+				}
+				// Identity first, empty Arguments: consumers can render
+				// "calling get_weather(toolu_x)" before any argument byte
+				// arrives.
+				if err := forward(llmkit.Delta{Kind: llmkit.DeltaToolCall, Index: st.pos, ID: st.id, Name: st.name}); err != nil {
+					return llmkit.Response{}, err
+				}
+			case anthropic.ServerToolUseBlock:
+				// The vendor also streams server-side tool calls (e.g.
+				// web_search) as input_json_delta fragments. toResponse
+				// drops that block, so its fragments are consumed silently
+				// to keep the deltas consistent with the final Response.
+				started[v.Index] = startedTool{serverTool: true}
 			}
 
 		case anthropic.ContentBlockDeltaEvent:
-			if err := a.forwardBlockDelta(v, started, forward); err != nil {
-				return llmkit.Response{}, err
+			fnErr, protoErr := a.forwardBlockDelta(v, started, forward)
+			if protoErr != nil {
+				// Same normalization bucket as the Accumulate violations
+				// above.
+				return llmkit.Response{}, a.normalizeErr(protoErr)
+			}
+			if fnErr != nil {
+				return llmkit.Response{}, fnErr
 			}
 		}
 	}
 	if err := stream.Err(); err != nil {
 		return llmkit.Response{}, a.normalizeErr(err)
 	}
+	if !sawStop {
+		// Clean EOF before message_stop: a partial message would hand the
+		// caller half-finished tool arguments as a success. Complete errors
+		// on the equivalent truncated body; this is the same server-class
+		// failure.
+		return llmkit.Response{}, a.normalizeErr(errEarlyStreamEnd)
+	}
 	return a.finalize(req, a.toResponse(&acc)), nil
 }
 
-// startedTool remembers one in-flight tool_use block: its position in
-// Response.ToolCalls, its wire identity, and whether it is the synthetic
-// structured-output tool (whose fragments surface as text).
+// startedTool remembers one in-flight input-bearing block: a tool_use
+// block's position in Response.ToolCalls, its wire identity, whether it is
+// the synthetic structured-output tool (whose fragments surface as text),
+// or a server-side tool call whose fragments are dropped.
 type startedTool struct {
-	pos       int
-	id, name  string
-	synthetic bool
+	pos        int
+	id, name   string
+	synthetic  bool
+	serverTool bool
 }
 
 // forwardBlockDelta maps one content_block_delta event onto Delta fragments.
-func (a *anthropicAdapter) forwardBlockDelta(ev anthropic.ContentBlockDeltaEvent, started map[int64]startedTool, forward func(llmkit.Delta) error) error {
+// fn's error is returned verbatim (it is already wrapped per the contract);
+// a wire-sequence violation comes back as an unnormalized
+// streamProtocolError for Stream to route through normalizeErr.
+func (a *anthropicAdapter) forwardBlockDelta(ev anthropic.ContentBlockDeltaEvent, started map[int64]startedTool, forward func(llmkit.Delta) error) (fnErr, protoErr error) {
 	switch d := ev.Delta.AsAny().(type) {
 	case anthropic.TextDelta:
-		return forward(llmkit.Delta{Kind: llmkit.DeltaText, Text: d.Text})
+		return forward(llmkit.Delta{Kind: llmkit.DeltaText, Text: d.Text}), nil
 	case anthropic.ThinkingDelta:
-		return forward(llmkit.Delta{Kind: llmkit.DeltaThinking, Text: d.Thinking})
+		return forward(llmkit.Delta{Kind: llmkit.DeltaThinking, Text: d.Thinking}), nil
 	case anthropic.InputJSONDelta:
 		// Empty partials carry nothing to concatenate; skip them instead of
 		// emitting no-op fragments.
 		if d.PartialJSON == "" {
-			return nil
+			return nil, nil
 		}
 		st, ok := started[ev.Index]
 		if !ok {
-			return nil
+			// A fragment for a block that never started, or started as a
+			// non-input block (text, thinking, redacted), is the same
+			// protocol-violation class as Accumulate's out-of-order checks
+			// reject.
+			return nil, streamProtocolError{fmt.Sprintf("anthropic: input_json_delta for content block %d with no input-bearing start event", ev.Index)}
+		}
+		if st.serverTool {
+			return nil, nil
 		}
 		if st.synthetic {
-			return forward(llmkit.Delta{Kind: llmkit.DeltaText, Text: d.PartialJSON})
+			return forward(llmkit.Delta{Kind: llmkit.DeltaText, Text: d.PartialJSON}), nil
 		}
 		return forward(llmkit.Delta{
 			Kind:      llmkit.DeltaToolCall,
@@ -145,10 +194,10 @@ func (a *anthropicAdapter) forwardBlockDelta(ev anthropic.ContentBlockDeltaEvent
 			ID:        st.id,
 			Name:      st.name,
 			Arguments: d.PartialJSON,
-		})
+		}), nil
 	}
 	// signature_delta and citations_delta carry no llmkit fragment: the
 	// signature arrives inside the final thinking block's Raw, and citations
 	// are not surfaced on llmkit.Response.
-	return nil
+	return nil, nil
 }
