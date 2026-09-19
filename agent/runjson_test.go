@@ -824,7 +824,7 @@ func TestRunJSON_BudgetFinalizeEmptyStillClassified(t *testing.T) {
 			TokenBudget:   -1,
 		}),
 		WithBudgetPool(pool))
-	out, _ := r2.run(context.Background(), nil, "audit", finalizationPrompt(json.RawMessage(`{"type":"object"}`)), nil)
+	out, _ := r2.run(context.Background(), nil, "audit", nil, finalizationPrompt(json.RawMessage(`{"type":"object"}`)), nil)
 	if !out.Truncated() {
 		t.Error("Outcome.Truncated() = false, want true (budget stop should still mark truncated)")
 	}
