@@ -16,6 +16,7 @@
     "TopK": false,
     "Seed": true
   },
+  "request_check": "strict",
   "inputs": [
     {
       "System": "",
@@ -87,31 +88,31 @@
       "response": {
         "headers": {
           "access-control-allow-origin": "*",
-          "alb_receive_time": "1789778458.916",
-          "alb_request_id": "e5e1c424fcd62d89474d1b72ed6408bafc9a3919",
+          "alb_receive_time": "1789780926.628",
+          "alb_request_id": "6676b68c04f5ab677caf45b7991fb270a930ddb1",
           "cache-control": "max-age=0, no-cache, no-store",
-          "content-length": "775",
+          "content-length": "653",
           "content-type": "application/json; charset=utf-8",
-          "date": "Sat, 19 Sep 2026 00:40:59 GMT",
-          "expires": "Sat, 19 Sep 2026 00:40:59 GMT",
-          "minimax-request-id": "2f437ee23ea476a414dd6dcb943c3bed",
+          "date": "Sat, 19 Sep 2026 01:22:06 GMT",
+          "expires": "Sat, 19 Sep 2026 01:22:06 GMT",
+          "minimax-request-id": "2aba8fead834fcaa8d5be03b2d6adfa9",
           "pragma": "no-cache",
-          "trace-id": "06fd0d1a7e22c8713a405546172560d6",
+          "trace-id": "06fd16beebd9502144411c6938a111e7",
           "x-from": "ak",
-          "x-mm-request-id": "2022431855143301769_1789778458jdd8fe",
+          "x-mm-request-id": "2022431855143301769_1789780926g8mcmk",
           "x-session-id": "233f06245926c1bbd5aa7d8d9cf4e2f6"
         },
-        "body": "{\"id\":\"06fd0d1a7e22c8713a405546172560d6\",\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"\u003cthink\u003eThe user has sent an image that appears to be completely black. They've asked me to reply with the single word \\\"OK\\\" if I received an image. I did receive an image, even though it appears to be entirely black/blank.\u003c/think\u003e\\n\\nOK\",\"role\":\"assistant\"}}],\"created\":1789778458,\"model\":\"MiniMax-M3\",\"object\":\"chat.completion\",\"usage\":{\"total_tokens\":258,\"total_characters\":0,\"prompt_tokens\":206,\"completion_tokens\":52,\"prompt_tokens_details\":{\"cached_tokens\":128}},\"input_sensitive\":false,\"output_sensitive\":false,\"input_sensitive_type\":0,\"output_sensitive_type\":0,\"output_sensitive_int\":0,\"service_tier\":\"standard\",\"base_resp\":{\"status_code\":0,\"status_msg\":\"\"}}\n",
+        "body": "{\"id\":\"06fd16beebd9502144411c6938a111e7\",\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"\u003cthink\u003eThe user has sent an image and asked me to reply with the single word \\\"OK\\\" if I received it.\u003c/think\u003e\\n\\nOK\",\"role\":\"assistant\"}}],\"created\":1789780926,\"model\":\"MiniMax-M3\",\"object\":\"chat.completion\",\"usage\":{\"total_tokens\":233,\"total_characters\":0,\"prompt_tokens\":206,\"completion_tokens\":27,\"prompt_tokens_details\":{\"cached_tokens\":128}},\"input_sensitive\":false,\"output_sensitive\":false,\"input_sensitive_type\":0,\"output_sensitive_type\":0,\"output_sensitive_int\":0,\"service_tier\":\"standard\",\"base_resp\":{\"status_code\":0,\"status_msg\":\"\"}}\n",
         "status": 200
       }
     }
   ],
   "normalized": {
-    "text": "\u003cthink\u003eThe user has sent an image that appears to be completely black. They've asked me to reply with the single word \"OK\" if I received an image. I did receive an image, even though it appears to be entirely black/blank.\u003c/think\u003e\n\nOK",
+    "text": "\u003cthink\u003eThe user has sent an image and asked me to reply with the single word \"OK\" if I received it.\u003c/think\u003e\n\nOK",
     "stop_reason": "end_turn",
     "usage": {
       "InputTokens": 206,
-      "OutputTokens": 52,
+      "OutputTokens": 27,
       "CacheReadInputTokens": 128,
       "CacheCreationInputTokens": 0
     }

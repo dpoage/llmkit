@@ -13,13 +13,12 @@
 # instructions and the verified capability set live in AGENTS.md
 # (Build & Test).
 #
-# The -update step re-records the fixtures in provider/testdata; the git
-# diff fails the job when the recorded wire truth changed. Nondeterministic
-# vendor fields (sample text, token counts) drift between runs, so a red
-# diff means: review the refreshed fixtures and re-commit them, or
-# investigate real vendor drift. The hermetic replay suite
-# (provider/fixture_replay_test.go) is the always-on drift gate that runs
-# in CI without credentials.
+# The job runs the suite WITHOUT -update: the live matrix's assertions
+# against real responses ARE the vendor-drift gate, and -v logs the
+# LIVE_TOKENS spend line per package. Re-recording fixtures (-update) is a
+# deliberate LOCAL operation; the committed fixtures under
+# provider/testdata are the always-on hermetic adapter-regression guard via
+# provider/fixture_replay_test.go, which runs in CI without credentials.
 
 name: Live
 
@@ -68,10 +67,6 @@ jobs:
             echo "available=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: run live suite (re-record fixtures)
+      - name: run live suite
         if: steps.creds.outputs.available == 'true'
-        run: go test -tags live -count=1 ./provider/ ./agent/ ./examples/... -update
-
-      - name: fail on recorded wire drift
-        if: steps.creds.outputs.available == 'true'
-        run: git diff --exit-code provider/testdata
+        run: go test -tags live -count=1 -v ./provider/ ./agent/ ./examples/...

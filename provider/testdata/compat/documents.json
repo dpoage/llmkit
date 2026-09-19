@@ -16,6 +16,7 @@
     "TopK": false,
     "Seed": true
   },
+  "request_check": "strict",
   "inputs": [
     {
       "System": "",
@@ -87,31 +88,31 @@
       "response": {
         "headers": {
           "access-control-allow-origin": "*",
-          "alb_receive_time": "1789778459.337",
-          "alb_request_id": "641179e0a7920acc0c3eaa7a4977aa06ae7654a3",
+          "alb_receive_time": "1789780927.04",
+          "alb_request_id": "4fbcea243f6e0abc7dd759f4f52140f5774d02c6",
           "cache-control": "max-age=0, no-cache, no-store",
-          "content-length": "826",
+          "content-length": "876",
           "content-type": "application/json; charset=utf-8",
-          "date": "Sat, 19 Sep 2026 00:41:01 GMT",
-          "expires": "Sat, 19 Sep 2026 00:41:01 GMT",
-          "minimax-request-id": "211313bc52c4359c0920c8f962d6d410",
+          "date": "Sat, 19 Sep 2026 01:22:09 GMT",
+          "expires": "Sat, 19 Sep 2026 01:22:09 GMT",
+          "minimax-request-id": "c4a46f70ed07a7ee5dab1b8fe1f71612",
           "pragma": "no-cache",
-          "trace-id": "06fd0d1bf1c3b12791610a08912f7da7",
+          "trace-id": "06fd16bf8ed5190abf62f6506087e9d5",
           "x-from": "ak",
-          "x-mm-request-id": "2022431855143301769_1789778461b3ej5m",
+          "x-mm-request-id": "2022431855143301769_1789780929qin472",
           "x-session-id": "65749afd81340eb4b01b52e1c5f7749f"
         },
-        "body": "{\"id\":\"06fd0d1bf1c3b12791610a08912f7da7\",\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"\u003cthink\u003e\\nThe user sent a file called \\\"hello.pdf\\\" with the content \\\"hello llmkit\\\" and asked me to reply with the single word \\\"OK\\\" if I received the document.\\n\u003c/think\u003e\\n\\nOK\",\"role\":\"assistant\",\"name\":\"MiniMax AI\",\"annotations\":[{}],\"audio_content\":\"\"}}],\"created\":1789778459,\"model\":\"MiniMax-M3\",\"object\":\"chat.completion\",\"usage\":{\"total_tokens\":242,\"total_characters\":0,\"prompt_tokens\":203,\"completion_tokens\":39,\"completion_tokens_details\":{\"reasoning_tokens\":37},\"prompt_tokens_details\":{\"cached_tokens\":128}},\"input_sensitive\":false,\"output_sensitive\":false,\"input_sensitive_type\":0,\"output_sensitive_type\":0,\"output_sensitive_int\":0,\"service_tier\":\"standard\",\"base_resp\":{\"status_code\":0,\"status_msg\":\"\"}}\n",
+        "body": "{\"id\":\"06fd16bf8ed5190abf62f6506087e9d5\",\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"\u003cthink\u003e\\nThe user has sent a file called \\\"hello.pdf\\\" containing the text \\\"hello llmkit\\\" and asked me to reply with the single word OK if I received a document.\\n\\nI should reply with just \\\"OK\\\" as requested.\\n\u003c/think\u003e\\n\\nOK\",\"role\":\"assistant\",\"name\":\"MiniMax AI\",\"annotations\":[{}],\"audio_content\":\"\"}}],\"created\":1789780927,\"model\":\"MiniMax-M3\",\"object\":\"chat.completion\",\"usage\":{\"total_tokens\":252,\"total_characters\":0,\"prompt_tokens\":203,\"completion_tokens\":49,\"completion_tokens_details\":{\"reasoning_tokens\":47},\"prompt_tokens_details\":{\"cached_tokens\":128}},\"input_sensitive\":false,\"output_sensitive\":false,\"input_sensitive_type\":0,\"output_sensitive_type\":0,\"output_sensitive_int\":0,\"service_tier\":\"standard\",\"base_resp\":{\"status_code\":0,\"status_msg\":\"\"}}\n",
         "status": 200
       }
     }
   ],
   "normalized": {
-    "text": "\u003cthink\u003e\nThe user sent a file called \"hello.pdf\" with the content \"hello llmkit\" and asked me to reply with the single word \"OK\" if I received the document.\n\u003c/think\u003e\n\nOK",
+    "text": "\u003cthink\u003e\nThe user has sent a file called \"hello.pdf\" containing the text \"hello llmkit\" and asked me to reply with the single word OK if I received a document.\n\nI should reply with just \"OK\" as requested.\n\u003c/think\u003e\n\nOK",
     "stop_reason": "end_turn",
     "usage": {
       "InputTokens": 203,
-      "OutputTokens": 39,
+      "OutputTokens": 49,
       "CacheReadInputTokens": 128,
       "CacheCreationInputTokens": 0
     }

@@ -195,14 +195,22 @@ go test -tags live -count=1 ./provider/ ./agent/ ./examples/... -v
 ```
 
 Add `-update` to the same command to re-record the compat fixtures
-(`provider/testdata/compat/*.json`). They are committed, proven secret-free
-(the writer refuses to store any header carrying the key or any `sk-`
-substring), and replayed hermetically by `provider/fixture_replay_test.go`
-in every plain `go test ./...`. Vendor responses are nondeterministic (token
-counts, sample text), so `-update` changes the files on every run — the
-`Live` workflow's `git diff --exit-code provider/testdata` step failing is
-the signal to review and re-commit refreshed fixtures, or investigate real
-vendor drift.
+(`provider/testdata/compat/*.json`) — a deliberate local operation, since
+every recording differs (model ids, sample text, token counts). The
+committed fixtures are proven secret-free (the writer refuses to store any
+header carrying the key or any `sk-` substring) and are two-sided under
+replay: single-exchange fixtures declare `request_check: "strict"` and
+assert the adapter's outgoing request (method, path, body as parsed JSON)
+AND the normalized response; multi-turn fixtures declare
+`"response_only"` (later requests echo model-generated ids) and compare
+response normalization only. `provider/fixture_replay_test.go` replays them
+hermetically in every plain `go test ./...`. The nightly `Live` workflow
+(`.github/workflows/live.yml`) runs the suite WITHOUT `-update`: the live
+matrix's assertions against real responses are the vendor-drift gate.
+
+The `LIVE_TOKENS` summary line covers each test binary's own calls; the
+examples package's line prints `note=child-process spend not tallied`
+because the example binaries it launches spend separately.
 
 `LLMKIT_LIVE_COMPAT_CAPS` is an optional comma list of `Capabilities` field
 names (snake_case) the operator asserts the compat endpoint supports; listed
