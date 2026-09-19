@@ -21,10 +21,14 @@
 package agent_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"maps"
 	"os"
 	"slices"
@@ -327,5 +331,60 @@ func TestLiveAgentPreservesInlineThink(t *testing.T) {
 	}
 	if ans.Sum != 42 {
 		t.Errorf("sum = %d, want 42", ans.Sum)
+	}
+}
+
+// TestLiveAgentAttachImageOnTaskTurn is the live case for [agent.Attach]: a
+// tiny generated PNG rides on the task turn next to the task text. The
+// premise needs a vision-capable model, so a compat lane client reporting
+// Images=false skips with the reason instead of failing. The assertions are
+// harness-side, not model-behavior-side: the run completes, and the
+// transcript's first request event carries the image block — same media
+// type, same bytes the test generated — on the seed user turn.
+func TestLiveAgentAttachImageOnTaskTurn(t *testing.T) {
+	ctx, cl, _ := newLiveAgentClient(t)
+	if !cl.Capabilities().Images {
+		t.Skip("compat lane client reports Capabilities.Images=false: the Attach live case needs a vision-capable model to put an image block on the wire")
+	}
+
+	// A 1x1 red PNG generated in-process — no fixture file, no network.
+	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
+	img.Set(0, 0, color.RGBA{R: 0xff, A: 0xff})
+	var pngBuf bytes.Buffer
+	if err := png.Encode(&pngBuf, img); err != nil {
+		t.Fatalf("encode tiny PNG: %v", err)
+	}
+
+	runner := agent.NewRunner(cl, nil, "You are a terse assistant.", agent.WithMaxTokens(256))
+	out, err := runner.Run(ctx, "What color is the attached square? Answer in three words or fewer.",
+		agent.Attach(llmkit.Image("image/png", pngBuf.Bytes())))
+	if err != nil {
+		t.Fatalf("run with attachment: %v", err)
+	}
+
+	var seed *llmkit.Message
+	for i := range out.Transcript.Events {
+		ev := &out.Transcript.Events[i]
+		if ev.Kind == agent.EventRequest && len(ev.Messages) > 0 {
+			seed = &ev.Messages[0]
+			break
+		}
+	}
+	if seed == nil {
+		t.Fatal("transcript has no request event with messages")
+	}
+	found := false
+	for _, b := range seed.Content {
+		if b.Kind == llmkit.BlockImage && b.MediaType == "image/png" && bytes.Equal(b.Data, pngBuf.Bytes()) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		var kinds []string
+		for _, b := range seed.Content {
+			kinds = append(kinds, string(b.Kind))
+		}
+		t.Errorf("first request's user message carries no image block with the generated PNG; content kinds: %v", kinds)
 	}
 }
