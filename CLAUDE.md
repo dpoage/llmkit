@@ -217,6 +217,10 @@ in its message.
   call's error result in both dispatch modes (sequential and
   `WithParallelTools`); hook panics propagate to the caller. The `RunJSON`
   repair turn continues the parent run's transcript step numbering.
+  `Hooks.Delta`, when set, streams every completion through `llmkit.Stream` —
+  native streaming when the client implements `StreamingClient`, deltas
+  synthesized from the finished `Response` otherwise — leaving the
+  transcript, history, and usage paths unchanged.
   Tool-failure typing: `ToolHealthError` for infra failures,
   `StopReasonError` for model refusal/safety stops.
 - **`llmkit/sandbox`** — isolated execution of untrusted, model-generated

@@ -509,3 +509,45 @@ func TestLiveAgentToolPolicyDeny(t *testing.T) {
 		t.Fatalf("no final text after the denial; outcome=%+v", out)
 	}
 }
+
+// TestLiveAgentDeltaHook pins the Hooks.Delta seam end to end against the
+// live lane: the hook fires at least once, and the concatenated text deltas
+// equal the run's FinalText. With today's adapters the llmkit.Stream fallback
+// synthesizes one delta per content block; as adapter streaming lands the
+// count rises — only >= 1 is pinned here.
+func TestLiveAgentDeltaHook(t *testing.T) {
+	ctx, cl, _ := newLiveAgentClient(t)
+
+	var mu sync.Mutex
+	var deltas int
+	var text strings.Builder
+	hooks := agent.Hooks{
+		Delta: func(_ context.Context, step int, d llmkit.Delta) {
+			mu.Lock()
+			defer mu.Unlock()
+			deltas++
+			if step < 1 {
+				t.Errorf("delta step = %d, want >= 1", step)
+			}
+			if d.Kind == llmkit.DeltaText {
+				text.WriteString(d.Text)
+			}
+		},
+	}
+	runner := agent.NewRunner(cl, nil, "You are a helpful assistant.",
+		agent.WithHooks(hooks), agent.WithMaxTokens(2048))
+
+	out, err := runner.Run(ctx, "Reply with exactly one short sentence: say hello.")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if deltas == 0 {
+		t.Fatal("Hooks.Delta never fired; want at least one delta")
+	}
+	if got := text.String(); got != out.FinalText {
+		t.Fatalf("concatenated text deltas %q != FinalText %q", got, out.FinalText)
+	}
+}
