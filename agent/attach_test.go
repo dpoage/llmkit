@@ -177,7 +177,7 @@ func TestAttach_TranscriptRoundTripsAndReplays(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open transcript: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	loaded, err := LoadJSONL(f)
 	if err != nil {
 		t.Fatalf("LoadJSONL: %v", err)
