@@ -2,7 +2,10 @@
 // harness: a stdin REPL where each line becomes the next task via
 // agent.Runner.Run with agent.Continue(prev), so the model keeps every
 // earlier turn of the session. One trivial tool (now) keeps the tool-calling
-// path exercised. When the model stops for a refusal/safety reason
+// path exercised. Assistant text prints incrementally through the
+// agent.Hooks.Delta hook — the Runner streams the completion when the client
+// can and synthesizes deltas otherwise — and the same run's FinalText is not
+// printed again afterwards. When the model stops for a refusal/safety reason
 // (agent.StopReasonError) a canned reply is printed and the refusal turn
 // stays in the history: the attached err.Outcome is threaded into the next
 // run's agent.Continue so the conversation continues from it. A /think
@@ -64,9 +67,32 @@ func run() error {
 	if !thinkingSupported {
 		fmt.Println("note: model reports no thinking support; /think stays off")
 	}
+
+	// streamed flips to true the moment a run's first text delta prints; the
+	// prefix goes out once per run, AfterCompletion ends the line after each
+	// completion, and the post-run code skips the FinalText reprint when the
+	// hook already rendered the answer.
+	streamed := false
+	hooks := agent.Hooks{
+		Delta: func(_ context.Context, _ int, d llmkit.Delta) {
+			if d.Kind != llmkit.DeltaText {
+				return
+			}
+			if !streamed {
+				fmt.Print("assistant> ")
+				streamed = true
+			}
+			fmt.Print(d.Text)
+		},
+		AfterCompletion: func(_ context.Context, _ int, _ *llmkit.Request, _ *llmkit.Response, err error) {
+			if err == nil && streamed {
+				fmt.Println()
+			}
+		},
+	}
 	runner := agent.NewRunner(client, []agent.Tool{now},
 		"You are a helpful assistant in a multi-turn chat. You remember every earlier turn of this conversation. Use the provided tool when it would help.",
-		agent.WithRequestPolicy(think))
+		agent.WithRequestPolicy(think), agent.WithHooks(hooks))
 
 	fmt.Println("llmkit chat — type a message (/think toggles extended thinking, ctrl-d to exit).")
 	sc := bufio.NewScanner(os.Stdin)
@@ -93,6 +119,7 @@ func run() error {
 			}
 			continue
 		}
+		streamed = false
 		outcome, err := runner.Run(context.Background(), line, agent.Continue(prev))
 		var stopErr *agent.StopReasonError
 		if errors.As(err, &stopErr) {
@@ -103,7 +130,10 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("run: %w", err)
 		}
-		if outcome.FinalText != "" {
+		if streamed {
+			// The Delta hook printed the answer incrementally and
+			// AfterCompletion ended the line.
+		} else if outcome.FinalText != "" {
 			fmt.Println("assistant>", outcome.FinalText)
 		} else {
 			fmt.Println("assistant> (no assistant text produced)")
