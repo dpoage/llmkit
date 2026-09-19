@@ -10,6 +10,18 @@ import (
 	"time"
 )
 
+const (
+	// defaultEmbedMaxAttempts is the embed default for Retry.MaxAttempts:
+	// embedding calls retry less than LLM completions (3 attempts total).
+	defaultEmbedMaxAttempts = 3
+
+	// defaultEmbedRequestTimeout bounds a single embedding attempt when
+	// Retry.RequestTimeout is unset. Embeddings are far lighter than LLM
+	// completions, so the kit's 5m default is tightened to 60s; worst case
+	// before giving up is roughly MaxAttempts * (60s + backoff).
+	defaultEmbedRequestTimeout = 60 * time.Second
+)
+
 // Config holds all embedder-related settings.
 type Config struct {
 	// Embedder selects the backend: "ollama" or "openai-compatible".
@@ -49,14 +61,16 @@ type Config struct {
 	CacheSize int
 
 	// Retry tunes transient-failure retries via the shared
-	// llmkit.RetryConfig. Unset knobs (<= 0) are filled from
-	// llmkit.DefaultRetryConfig when a backend is constructed, so a partial
+	// llmkit.RetryConfig. Unset knobs (<= 0) resolve when a backend is
+	// constructed: MaxAttempts to 3 and RequestTimeout to 60s (the embed
+	// bounds — embeddings retry less and are lighter than LLM completions),
+	// BaseDelay and MaxDelay from llmkit.DefaultRetryConfig — so a partial
 	// policy like llmkit.RetryConfig{MaxAttempts: 5} is safe to use as
 	// written. Retry.Jitter is the exception and is taken literally: 0 (the
 	// zero value) disables jitter for deterministic backoff, and values
-	// outside [0, 1] are rejected by Validate. LoadConfig seeds the whole
-	// policy from llmkit.DefaultRetryConfig, so environment-driven configs
-	// get the kit default 20% jitter.
+	// outside [0, 1] are rejected by Validate. LoadConfig seeds the kit
+	// default 20% jitter, so environment-driven configs jitter unless
+	// overridden.
 	Retry llmkit.RetryConfig
 }
 
@@ -66,7 +80,11 @@ func defaults() Config {
 		Embedder:     "ollama",
 		Model:        "nomic-embed-text",
 		CacheEnabled: false,
-		Retry:        llmkit.DefaultRetryConfig(),
+		Retry: llmkit.RetryConfig{
+			BaseDelay: llmkit.DefaultRetryConfig().BaseDelay,
+			MaxDelay:  llmkit.DefaultRetryConfig().MaxDelay,
+			Jitter:    llmkit.DefaultRetryConfig().Jitter,
+		},
 	}
 }
 
@@ -80,7 +98,7 @@ func defaults() Config {
 //	<PREFIX>_EMBED_API_KEY     - API key / bearer token
 //	<PREFIX>_EMBED_DIMENSIONS  - vector dimensions (integer; 0 = auto-detect)
 //	<PREFIX>_EMBED_CACHE       - "true" to enable caching
-//	<PREFIX>_EMBED_TIMEOUT     - per-attempt timeout (Go duration, e.g. "30s"; zero, negative, or unset: llmkit's 5m request timeout)
+//	<PREFIX>_EMBED_TIMEOUT     - per-attempt timeout (Go duration, e.g. "30s"; zero, negative, or unset: 60s embed default)
 //	<PREFIX>_EMBED_MAX_BATCH   - max texts per HTTP request (integer; 0 = no chunking)
 //	<PREFIX>_EMBED_CACHE_SIZE  - max cache entries (integer; 0 = unbounded)
 //
@@ -179,16 +197,19 @@ func (c Config) httpClient() *http.Client {
 }
 
 // retryPolicy returns the effective retry policy: c.Retry with unset knobs
-// (<= 0) filled from llmkit.DefaultRetryConfig — MaxAttempts, the delays, and
-// the per-attempt RequestTimeout. Jitter is deliberately not normalized here:
-// Validate has already bounded it to [0, 1] and it is taken literally, so 0
-// means no jitter; LoadConfig seeds it from the kit default, keeping the
-// default 20% jitter reachable for environment-driven configs.
+// (<= 0) resolved to the embed bounds — MaxAttempts 3 and a 60s per-attempt
+// RequestTimeout (embeddings retry less often and each attempt is far lighter
+// than an LLM completion, so the kit's 4 / 5m defaults are tightened; worst
+// case before giving up is roughly 3 * (60s + backoff)) — with BaseDelay and
+// MaxDelay from llmkit.DefaultRetryConfig. Jitter is deliberately not
+// normalized here: Validate has already bounded it to [0, 1] and it is taken
+// literally, so 0 means no jitter; LoadConfig seeds it from the kit default,
+// keeping the default 20% jitter reachable for environment-driven configs.
 func (c Config) retryPolicy() llmkit.RetryConfig {
 	p := c.Retry
 	def := llmkit.DefaultRetryConfig()
 	if p.MaxAttempts <= 0 {
-		p.MaxAttempts = def.MaxAttempts
+		p.MaxAttempts = defaultEmbedMaxAttempts
 	}
 	if p.BaseDelay <= 0 {
 		p.BaseDelay = def.BaseDelay
@@ -197,7 +218,7 @@ func (c Config) retryPolicy() llmkit.RetryConfig {
 		p.MaxDelay = def.MaxDelay
 	}
 	if p.RequestTimeout <= 0 {
-		p.RequestTimeout = def.RequestTimeout
+		p.RequestTimeout = defaultEmbedRequestTimeout
 	}
 	return p
 }

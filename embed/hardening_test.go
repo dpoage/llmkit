@@ -958,20 +958,26 @@ func TestRetry_PolicyNormalization(t *testing.T) {
 	if p.MaxAttempts != 5 {
 		t.Errorf("explicit MaxAttempts = %d, want 5 (kept)", p.MaxAttempts)
 	}
-	if p.BaseDelay != def.BaseDelay || p.MaxDelay != def.MaxDelay || p.RequestTimeout != def.RequestTimeout {
-		t.Errorf("MaxAttempts-only policy = %+v, want unset knobs filled from llmkit defaults", p)
+	if p.BaseDelay != def.BaseDelay || p.MaxDelay != def.MaxDelay {
+		t.Errorf("MaxAttempts-only policy = %+v, want unset delays filled from llmkit defaults", p)
+	}
+	if p.RequestTimeout != 60*time.Second {
+		t.Errorf("RequestTimeout = %v, want 60s (embed default)", p.RequestTimeout)
 	}
 	// Jitter is taken literally: a hand-built policy that leaves it zero is
 	// deterministic, never silently defaulted to 20%.
 	if p.Jitter != 0 {
 		t.Errorf("Jitter = %v, want 0 (explicit zero means no jitter)", p.Jitter)
 	}
-	// Literal pin: the zero policy fills exactly the kit defaults for
-	// attempts, delays, and per-attempt timeout — Jitter excepted.
+	// Literal pin: the zero policy resolves to the embed bounds — 3
+	// attempts and a 60s per-attempt timeout — with kit-default delays and
+	// Jitter left at 0.
 	got := (Config{}).retryPolicy()
-	if got.MaxAttempts != 4 || got.BaseDelay != 500*time.Millisecond ||
-		got.MaxDelay != 30*time.Second || got.RequestTimeout != llmkit.DefaultRequestTimeout || got.Jitter != 0 {
-		t.Errorf("Config{}.retryPolicy() = %+v, want kit defaults with Jitter left at 0", got)
+	if got.MaxAttempts != 3 || got.RequestTimeout != 60*time.Second {
+		t.Errorf("zero policy attempts/timeout = %d/%v, want 3/60s (embed bounds)", got.MaxAttempts, got.RequestTimeout)
+	}
+	if got.BaseDelay != def.BaseDelay || got.MaxDelay != def.MaxDelay || got.Jitter != 0 {
+		t.Errorf("Config{}.retryPolicy() = %+v, want kit-default delays with Jitter left at 0", got)
 	}
 
 	// Retry-After is capped at MaxDelay even under a normalized policy
@@ -1164,15 +1170,20 @@ func TestConfig_JitterTriState(t *testing.T) {
 		t.Error("Jitter above 1 must be rejected by Validate")
 	}
 
-	// Unset via LoadConfig: the whole default policy, 20% jitter included.
+	// Unset via LoadConfig: kit-default 20% jitter, and the resolved policy
+	// uses the embed bounds (3 attempts, 60s per attempt) with kit delays.
 	cfg, err := LoadConfig("S5JITTERUNSET")
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	def := llmkit.DefaultRetryConfig()
-	if cfg.Retry.MaxAttempts != def.MaxAttempts || cfg.Retry.BaseDelay != def.BaseDelay ||
-		cfg.Retry.MaxDelay != def.MaxDelay || cfg.Retry.Jitter != def.Jitter ||
-		cfg.Retry.RequestTimeout != def.RequestTimeout {
-		t.Errorf("LoadConfig default Retry = %+v, want %+v", cfg.Retry, def)
+	if cfg.Retry.Jitter != llmkit.DefaultRetryConfig().Jitter {
+		t.Errorf("LoadConfig Jitter = %v, want kit default %v", cfg.Retry.Jitter, llmkit.DefaultRetryConfig().Jitter)
+	}
+	p := cfg.retryPolicy()
+	if p.MaxAttempts != 3 || p.RequestTimeout != 60*time.Second {
+		t.Errorf("LoadConfig resolved attempts/timeout = %d/%v, want 3/60s (embed bounds)", p.MaxAttempts, p.RequestTimeout)
+	}
+	if p.BaseDelay != llmkit.DefaultRetryConfig().BaseDelay || p.MaxDelay != llmkit.DefaultRetryConfig().MaxDelay {
+		t.Errorf("LoadConfig resolved delays = %v/%v, want kit defaults", p.BaseDelay, p.MaxDelay)
 	}
 }
