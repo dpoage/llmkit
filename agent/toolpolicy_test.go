@@ -14,9 +14,7 @@ import (
 	"github.com/dpoage/llmkit"
 )
 
-// The policy tests use their own local fakes (tp-prefixed) instead of
-// fake_test.go's shared helpers, so this file stays hermetic against edits
-// to the shared test infrastructure.
+// The policy tests use their own local fakes (tp-prefixed) so this file stays hermetic against edits to shared test infrastructure.
 
 // tpScriptStep is one programmed turn of a tpScriptClient.
 type tpScriptStep struct {
@@ -24,8 +22,7 @@ type tpScriptStep struct {
 	err  error
 }
 
-// tpScriptClient is a scripted llmkit.Client: it returns each step in order
-// and records every request it received.
+// tpScriptClient is a scripted llmkit.Client: it returns each step in order and records every request it received.
 type tpScriptClient struct {
 	mu       sync.Mutex
 	steps    []tpScriptStep
@@ -43,8 +40,7 @@ func (c *tpScriptClient) Complete(ctx context.Context, req llmkit.Request) (llmk
 	defer c.mu.Unlock()
 	c.requests = append(c.requests, req)
 	if c.idx >= len(c.steps) {
-		// Benign end-turn default so over-running tests fail on assertions,
-		// not panics.
+		// Benign end-turn default so over-running tests fail on assertions, not panics.
 		return llmkit.Response{Text: "(unscripted)", StopReason: llmkit.StopEndTurn}, nil
 	}
 	step := c.steps[c.idx]
@@ -75,9 +71,7 @@ func tpToolCall(id, name, args string) llmkit.ToolCall {
 	return llmkit.ToolCall{ID: id, Name: name, Arguments: json.RawMessage(args)}
 }
 
-// tpCountingTool counts its Run invocations and remembers the last arguments
-// it received, so policy tests can assert whether — and with what arguments
-// — a call actually executed. Safe for concurrent use.
+// tpCountingTool counts its Run invocations and remembers the last arguments it received. Safe for concurrent use.
 type tpCountingTool struct {
 	name   string
 	result string
@@ -115,9 +109,7 @@ func (t *tpCountingTool) args() json.RawMessage {
 	return t.lastArgs
 }
 
-// tpTrace records policy/hook events under one mutex with a monotonic
-// sequence number, so a test can prove an ordering no single callback
-// observes by itself (all Authorizes before the first ToolStart).
+// tpTrace records policy/hook events under one mutex with a monotonic sequence number — ordering no single callback observes alone.
 type tpTrace struct {
 	mu     sync.Mutex
 	seq    int
@@ -159,8 +151,7 @@ type tpToolResult struct {
 	isError bool
 }
 
-// tpToolResults extracts the tool-result messages of msgs, in order, keyed
-// by the call ID each answers.
+// tpToolResults extracts the tool-result messages of msgs, in order, keyed by the call ID each answers.
 func tpToolResults(msgs []llmkit.Message) (order []string, byID map[string]tpToolResult) {
 	byID = map[string]tpToolResult{}
 	for _, m := range msgs {
@@ -172,11 +163,7 @@ func tpToolResults(msgs []llmkit.Message) (order []string, byID map[string]tpToo
 	return order, byID
 }
 
-// TestRun_ToolPolicy_DenySkipsToolAndFeedsModelError pins the deny contract
-// end to end: a denied call never runs its tool, the model receives the
-// "ERROR: tool <name> denied: …" tool result with IsError set (in the
-// follow-up request AND Outcome.Messages), ToolStart/ToolEnd/ToolHealth do
-// not fire for it, and the run continues to end_turn.
+// TestRun_ToolPolicy_DenySkipsToolAndFeedsModelError pins that a denied call never runs its tool, the model receives the "ERROR: tool <name> denied: …" tool result with IsError set in both the follow-up request and Outcome.Messages, no ToolStart/ToolEnd/ToolHealth fires for it, and the run continues to end_turn.
 func TestRun_ToolPolicy_DenySkipsToolAndFeedsModelError(t *testing.T) {
 	fc := &tpScriptClient{steps: []tpScriptStep{
 		tpToolCallsResp(tpToolCall("c1", "secret", `{"path":"/etc/passwd"}`)),
@@ -228,8 +215,6 @@ func TestRun_ToolPolicy_DenySkipsToolAndFeedsModelError(t *testing.T) {
 	if got := reqResults["c1"]; got.text != wantText || !got.isError {
 		t.Errorf("model saw tool result %q isError=%t, want %q isError=true", got.text, got.isError, wantText)
 	}
-	// The transcript records the deny as a tool_result event (IsError, same
-	// text) under c1.
 	sawEvent := false
 	for _, ev := range out.Transcript.Events {
 		if ev.Kind == EventToolResult && ev.ToolCallID == "c1" && ev.IsError && ev.Result == wantText {
@@ -241,11 +226,7 @@ func TestRun_ToolPolicy_DenySkipsToolAndFeedsModelError(t *testing.T) {
 	}
 }
 
-// TestRun_ToolPolicy_RewriteReachesToolAndHooksHistoryKeepsOriginal pins the
-// rewrite contract: the policy's rewritten Arguments are what Tool.Run
-// receives and what ToolEvent.Call carries, while the assistant turn — in
-// the outcome's history and on the wire — keeps the model's original
-// arguments.
+// TestRun_ToolPolicy_RewriteReachesToolAndHooksHistoryKeepsOriginal pins that the policy's rewritten Arguments reach Tool.Run and ToolEvent.Call, while the assistant turn in the outcome's history and on the wire keeps the model's original arguments.
 func TestRun_ToolPolicy_RewriteReachesToolAndHooksHistoryKeepsOriginal(t *testing.T) {
 	const origArgs = `{"a":1,"b":2}`
 	const newArgs = `{"a":40,"b":2}`
@@ -279,8 +260,6 @@ func TestRun_ToolPolicy_RewriteReachesToolAndHooksHistoryKeepsOriginal(t *testin
 	if string(endEv.Call.Arguments) != newArgs {
 		t.Errorf("ToolEvent.Call.Arguments = %s, want the rewritten %s", endEv.Call.Arguments, newArgs)
 	}
-	// The assistant turn keeps the model's originals — in the outcome's
-	// history and in the follow-up wire request alike.
 	assertAssistantArgs := func(label string, msgs []llmkit.Message) {
 		t.Helper()
 		for _, m := range msgs {
@@ -299,11 +278,7 @@ func TestRun_ToolPolicy_RewriteReachesToolAndHooksHistoryKeepsOriginal(t *testin
 	assertAssistantArgs("wire request", fc.requests[1].Messages)
 }
 
-// TestRun_ToolPolicy_ParallelAllAuthorizedBeforeFirstRun pins the ordering
-// guarantee under WithParallelTools: all three Authorize calls of the turn
-// run sequentially on the loop goroutine (a monotonic trace sequence) and
-// complete BEFORE the first ToolStart fires; the results then land in the
-// model's original call order under their own call IDs.
+// TestRun_ToolPolicy_ParallelAllAuthorizedBeforeFirstRun pins that under WithParallelTools, all Authorize calls of a turn run on the loop goroutine and complete before any ToolStart fires; results land under the model's call IDs in original order.
 func TestRun_ToolPolicy_ParallelAllAuthorizedBeforeFirstRun(t *testing.T) {
 	tools := []*tpCountingTool{
 		{name: "slow", result: "R_slow"},
@@ -370,10 +345,7 @@ func TestRun_ToolPolicy_ParallelAllAuthorizedBeforeFirstRun(t *testing.T) {
 	}
 }
 
-// TestRun_ToolPolicy_CancelInsideAuthorizeAbortsRun pins the cancellation
-// contract: a policy that cancels the run's context and denies aborts the
-// run — Run returns the context error and no Tool.Run executes. The call it
-// saw still gets its rendered deny result recorded before the abort.
+// TestRun_ToolPolicy_CancelInsideAuthorizeAbortsRun pins that a policy cancelling the run's context and denying aborts the run — Run returns the context error, no Tool.Run executes, but the rendered deny result for the call is recorded before the abort.
 func TestRun_ToolPolicy_CancelInsideAuthorizeAbortsRun(t *testing.T) {
 	fc := &tpScriptClient{steps: []tpScriptStep{
 		tpToolCallsResp(tpToolCall("c1", "secret", `{}`)),
@@ -404,10 +376,7 @@ func TestRun_ToolPolicy_CancelInsideAuthorizeAbortsRun(t *testing.T) {
 	}
 }
 
-// TestRun_ToolPolicy_MixedTurnDeniesOnlyMiddleCall pins a mixed turn: call 1
-// allowed, call 2 denied, call 3 allowed. All three results land in the
-// model's order (the deny with IsError in the middle slot), only the two
-// allowed tools run, and the run continues to end_turn.
+// TestRun_ToolPolicy_MixedTurnDeniesOnlyMiddleCall pins that with call 1 allowed, call 2 denied, call 3 allowed, all three results land in the model's order with the deny in the middle (IsError), only the two allowed tools run, and the run continues to end_turn.
 func TestRun_ToolPolicy_MixedTurnDeniesOnlyMiddleCall(t *testing.T) {
 	tools := []*tpCountingTool{
 		{name: "t1", result: "R1"},
@@ -454,7 +423,6 @@ func TestRun_ToolPolicy_MixedTurnDeniesOnlyMiddleCall(t *testing.T) {
 	if byID["c3"].text != "R3" || byID["c3"].isError {
 		t.Errorf("c3 result = %+v, want R3 isError=false", byID["c3"])
 	}
-	// The follow-up request carries all three results in the same order.
 	reqOrder, reqByID := tpToolResults(fc.requests[1].Messages)
 	if len(reqOrder) != 3 || reqOrder[0] != "c1" || reqOrder[1] != "c2" || reqOrder[2] != "c3" {
 		t.Fatalf("wire tool-result order = %v, want [c1 c2 c3]", reqOrder)
@@ -464,9 +432,7 @@ func TestRun_ToolPolicy_MixedTurnDeniesOnlyMiddleCall(t *testing.T) {
 	}
 }
 
-// TestRun_ToolPolicy_UnregisteredToolSkipsAuthorize pins the registered-only
-// rule: a model-requested call naming an unregistered tool never reaches the
-// policy and keeps today's "unknown tool" error text.
+// TestRun_ToolPolicy_UnregisteredToolSkipsAuthorize pins that a model-requested call naming an unregistered tool never reaches the policy and renders the existing "unknown tool" error.
 func TestRun_ToolPolicy_UnregisteredToolSkipsAuthorize(t *testing.T) {
 	fc := &tpScriptClient{steps: []tpScriptStep{
 		tpToolCallsResp(tpToolCall("c1", "nosuch", `{}`)),
@@ -495,9 +461,7 @@ func TestRun_ToolPolicy_UnregisteredToolSkipsAuthorize(t *testing.T) {
 	}
 }
 
-// TestRun_ToolPolicy_NilPolicyIsZeroBehaviorChange pins the zero default:
-// with no policy installed every call runs exactly as before the seam
-// existed.
+// TestRun_ToolPolicy_NilPolicyIsZeroBehaviorChange pins that with no policy installed, every call runs exactly as before the seam.
 func TestRun_ToolPolicy_NilPolicyIsZeroBehaviorChange(t *testing.T) {
 	fc := &tpScriptClient{steps: []tpScriptStep{
 		tpToolCallsResp(tpToolCall("c1", "add", `{"a":1}`)),
@@ -522,10 +486,7 @@ func TestRun_ToolPolicy_NilPolicyIsZeroBehaviorChange(t *testing.T) {
 	}
 }
 
-// TestRun_ToolPolicy_AuthorizePanicPropagates pins the panic contract in
-// sequential mode: a panic inside Authorize is a harness bug that propagates
-// out of Run with its original value — never rendered as tool output — and
-// the tool never runs.
+// TestRun_ToolPolicy_AuthorizePanicPropagates pins that a panic inside Authorize in sequential mode propagates out of Run with its original value — never rendered as tool output — and the tool never runs.
 func TestRun_ToolPolicy_AuthorizePanicPropagates(t *testing.T) {
 	fc := &tpScriptClient{steps: []tpScriptStep{
 		tpToolCallsResp(tpToolCall("c1", "add", `{}`)),
@@ -559,10 +520,7 @@ func TestRun_ToolPolicy_AuthorizePanicPropagates(t *testing.T) {
 	}
 }
 
-// TestRun_ToolPolicy_AuthorizePanicParallelPropagates pins the panic
-// contract under WithParallelTools: the pre-pass runs on the loop goroutine
-// BEFORE any fan-out goroutine exists, so the panic propagates unchanged and
-// no ToolStart ever fires.
+// TestRun_ToolPolicy_AuthorizePanicParallelPropagates pins that under WithParallelTools the Authorize pre-pass runs on the loop goroutine before any fan-out goroutine exists, so a panic propagates unchanged and no ToolStart ever fires.
 func TestRun_ToolPolicy_AuthorizePanicParallelPropagates(t *testing.T) {
 	fc := &tpScriptClient{steps: []tpScriptStep{
 		tpToolCallsResp(
@@ -601,13 +559,7 @@ func TestRun_ToolPolicy_AuthorizePanicParallelPropagates(t *testing.T) {
 	}
 }
 
-// TestRun_ToolPolicy_CancelInsideAuthorizeDeniesRemainderInBothModes pins
-// the cancellation rule that closes the parallel bypass: once the pre-pass
-// observes a cancelled ctx, NO later call is authorized or dispatched in
-// EITHER mode — the remainder is denied with the context error instead.
-// Removing the ctx check makes the policy consulted twice (authorize count
-// 2); removing the marking makes the parallel fan-out run the
-// never-authorized calls (ToolStart > 0). Both mutations must fail here.
+// TestRun_ToolPolicy_CancelInsideAuthorizeDeniesRemainderInBothModes pins that once the Authorize pre-pass observes a cancelled ctx, no later call is authorized or dispatched in either mode — the remainder is denied with the context error.
 func TestRun_ToolPolicy_CancelInsideAuthorizeDeniesRemainderInBothModes(t *testing.T) {
 	for _, mode := range []struct {
 		name     string
@@ -661,8 +613,6 @@ func TestRun_ToolPolicy_CancelInsideAuthorizeDeniesRemainderInBothModes(t *testi
 					t.Errorf("tool %s ran %d time(s), want 0", tool.name, got)
 				}
 			}
-			// The never-authorized remainder is denied with the context
-			// error; call 1 carries the policy's own denial.
 			order, byID := tpToolResults(out.Messages)
 			if len(order) != 3 || order[0] != "c1" || order[1] != "c2" || order[2] != "c3" {
 				t.Fatalf("tool-result order = %v, want [c1 c2 c3] (full-length slice, both modes)", order)
@@ -682,10 +632,7 @@ func TestRun_ToolPolicy_CancelInsideAuthorizeDeniesRemainderInBothModes(t *testi
 	}
 }
 
-// TestRun_ToolPolicy_ArgumentsMutationDoesNotAliasHistory pins the
-// isolation of the dispatch copy: a policy mutating the Arguments BYTES in
-// place must not corrupt the assistant turn already in the history or on
-// the wire — the dispatch copy owns its backing array.
+// TestRun_ToolPolicy_ArgumentsMutationDoesNotAliasHistory pins that a policy mutating the Arguments bytes in place must not corrupt the assistant turn in the history or on the wire — the dispatch copy owns its own backing array.
 func TestRun_ToolPolicy_ArgumentsMutationDoesNotAliasHistory(t *testing.T) {
 	const origArgs = `{"a":1,"b":2}`
 	const mutatedArgs = `{"a":9,"b":2}`
@@ -725,10 +672,7 @@ func TestRun_ToolPolicy_ArgumentsMutationDoesNotAliasHistory(t *testing.T) {
 	assertAssistantArgs("wire request", fc.requests[1].Messages)
 }
 
-// TestRun_ToolPolicy_RewriteOnlyArguments pins the rewrite contract's
-// boundary: a policy reassigning Name or ID gets both reverted — the
-// requested tool executes under the model's name and ID with the rewritten
-// arguments, and the result pairs under the model's call ID.
+// TestRun_ToolPolicy_RewriteOnlyArguments pins that a policy reassigning Name or ID gets both reverted — the requested tool executes under the model's name and ID with the rewritten arguments, and the result pairs under the model's call ID.
 func TestRun_ToolPolicy_RewriteOnlyArguments(t *testing.T) {
 	fc := &tpScriptClient{steps: []tpScriptStep{
 		tpToolCallsResp(tpToolCall("c1", "t1", `{"n":1}`)),
@@ -763,7 +707,6 @@ func TestRun_ToolPolicy_RewriteOnlyArguments(t *testing.T) {
 	if len(order) != 1 || order[0] != "c1" || byID["c1"].text != "R1" || byID["c1"].isError {
 		t.Errorf("tool results %v byID=%v, want R1 under c1 isError=false", order, byID)
 	}
-	// The history assistant turn keeps the model's name and ID too.
 	for _, m := range out.Messages {
 		if m.Role == llmkit.RoleAssistant && len(m.ToolCalls) > 0 {
 			if m.ToolCalls[0].ID != "c1" || m.ToolCalls[0].Name != "t1" {

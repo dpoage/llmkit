@@ -8,9 +8,8 @@
 // err.Outcome is threaded into the next run's agent.Continue so the
 // conversation continues from it. It doubles as a compile-time contract check
 // for agent.Continue and Outcome.Messages threading. A /think command
-// toggles extended thinking through an agent.RequestPolicy — the
-// runner's request-shaping seam — applied to every completion when the
-// model reports thinking support.
+// toggles extended thinking via an agent.RequestPolicy when the model
+// reports thinking support.
 //
 // Usage:
 //
@@ -62,12 +61,11 @@ func run() error {
 			return time.Now().Format(time.RFC3339), nil
 		})
 
-	// A RequestPolicy is the runner's request-shaping seam: it sees every
-	// fully built completion request just before the wire call. The /think
-	// command flips this one's atomic flag; while on, it stamps extended
-	// thinking onto each outgoing request. Gated on the client's Thinking
-	// capability — without it the toggle reports and stays off (the
-	// adapters would drop the field silently anyway).
+	// A RequestPolicy shapes every outgoing completion request just before
+	// the wire call. The /think command flips this one's atomic flag; while
+	// on, it stamps extended thinking onto each request. Gated on the
+	// client's Thinking capability — without it the toggle reports and
+	// stays off.
 	think := &thinkPolicy{}
 	thinkingSupported := client.Capabilities().Thinking
 	if !thinkingSupported {
@@ -123,10 +121,8 @@ func run() error {
 }
 
 // thinkPolicy is the [agent.RequestPolicy] behind the /think command: while
-// enabled it stamps Thinking on every outgoing completion request — every
-// completion (main turns, continuations, finalization, repair) passes
-// through the policy. The flag is atomic so toggling and running stay
-// race-free.
+// enabled it stamps Thinking on every outgoing completion request. The flag
+// is atomic so toggling and running stay race-free.
 type thinkPolicy struct {
 	on atomic.Bool
 }

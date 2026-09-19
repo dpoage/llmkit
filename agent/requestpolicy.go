@@ -6,52 +6,43 @@ import (
 	"github.com/dpoage/llmkit"
 )
 
-// RequestPolicy is the Runner's mutation seam for the wire request: run
-// before EVERY client.Complete — the main loop turn, a max-tokens
-// continuation turn, a forced-finalization turn, and a RunJSON repair turn
-// all pass through it (the same single fire point as
-// [Hooks.BeforeCompletion], which fires after it and is observe-only).
+// RequestPolicy edits the request the Runner is about to send. The Runner
+// calls PrepareRequest before every client.Complete: the main loop turn,
+// the max-tokens continuation turn, the forced-finalization turn, and the
+// RunJSON repair turn. [Hooks.BeforeCompletion] fires after the policy and
+// observes the result.
 //
-// PrepareRequest receives the fully built request for the completion
-// recorded under step — the same 1-based transcript step every hook family
-// reports — with the runner-owned fields already set: System, Messages,
-// Tools, MaxTokens, and ResponseSchema when the client's StructuredOutput
-// capability is on. On the forced finalization and repair turns (RunJSON
-// runs only) Tools is nil — as on every turn of a tool-less runner — so a
-// policy that needs to distinguish the forced turns checks Tools rather
-// than a separate flag.
+// The Runner builds the request first, then hands it to the policy. step is
+// the 1-based transcript step of the completion, the same number every hook
+// reports. System, Messages, Tools, MaxTokens, and ResponseSchema (when the
+// client's StructuredOutput capability is on) are already set. Tools is nil
+// on the finalization and repair turns of a RunJSON run and on every turn
+// of a Runner constructed with no tools.
 //
-// Message aliasing: req.Messages is a shallow clone of the loop's history,
-// so a policy may filter, append, and reorder messages freely — the edits
-// shape THIS turn's wire view only, and the loop's own history is never
-// changed. The Block and ToolCalls slices inside the messages are shared
-// with the history: replace a message wholesale instead of mutating its
-// blocks or tool calls in place. Every other field of *req is likewise the policy's to set —
-// Thinking, Temperature, ToolChoice, StopSequences, TopP, TopK, Seed — each
-// capability-gated by the adapters at the wire boundary (see
-// [llmkit.Request]).
+// req.Messages is a shallow clone of the loop's history. A policy may
+// filter, append, or reorder messages; the change applies to this turn's
+// wire request only, and the loop's history stays unchanged. The Block and
+// ToolCalls slices inside each message are shared with the history: replace
+// a message, do not edit its blocks or tool calls in place. Every other
+// field of req is the policy's to set: Thinking, Temperature, ToolChoice,
+// StopSequences, TopP, TopK, Seed. The adapters gate each field by
+// capability at the wire (see [llmkit.Request]).
 //
-// A non-nil error aborts the run BEFORE any wire call: [Runner.Run] and
-// [Runner.RunJSON] return it wrapped as
-// "agent: request policy at iteration <step>: …", with no completion issued
-// and nothing recorded for the step. This is the counterpart of the hook
-// panic rule: a policy error is data the harness author chose to surface,
-// so it comes back as an error, not a panic.
+// A non-nil error aborts the run before the wire call. [Runner.Run] and
+// [Runner.RunJSON] return the error wrapped as
+// "agent: request policy at iteration <step>: …". No completion is issued
+// and nothing is recorded for the step.
 //
-// A Runner is safe for concurrent Run calls, so a policy may fire
-// concurrently across runs; a stateful policy must synchronize its own
-// state. A policy written for one harness drops into another unchanged:
-// implement the single method directly, or wrap a function in
-// [RequestPolicyFunc].
+// A Runner is safe for concurrent Run calls, so a policy shared across runs
+// is called concurrently and must synchronize its own state. Implement the
+// interface directly or wrap a function in [RequestPolicyFunc].
 type RequestPolicy interface {
-	// PrepareRequest may rewrite any field of the request about to be sent
-	// for step, or return an error to abort the completion before the wire
-	// call. See [RequestPolicy] for the full contract.
+	// PrepareRequest edits the request for step or returns an error to
+	// abort the run before the wire call.
 	PrepareRequest(ctx context.Context, step int, req *llmkit.Request) error
 }
 
-// RequestPolicyFunc adapts a plain function to [RequestPolicy], so a static
-// per-turn tweak needs no named type:
+// RequestPolicyFunc adapts a function to [RequestPolicy]:
 //
 //	agent.WithRequestPolicy(agent.RequestPolicyFunc(
 //		func(_ context.Context, _ int, req *llmkit.Request) error {
@@ -60,15 +51,14 @@ type RequestPolicy interface {
 //		}))
 type RequestPolicyFunc func(ctx context.Context, step int, req *llmkit.Request) error
 
-// PrepareRequest calls f — see [RequestPolicy] for the contract.
+// PrepareRequest calls f(ctx, step, req).
 func (f RequestPolicyFunc) PrepareRequest(ctx context.Context, step int, req *llmkit.Request) error {
 	return f(ctx, step, req)
 }
 
-// WithRequestPolicy registers p as the Runner's [RequestPolicy]. A nil p —
-// like leaving the option unset — runs no policy: the request goes to the
-// client exactly as the runner built it, with no clone of the message slice
-// and zero overhead.
+// WithRequestPolicy installs p as the Runner's [RequestPolicy]. A nil p
+// installs no policy: the request goes to the client as the Runner built
+// it, and the message slice is not cloned.
 func WithRequestPolicy(p RequestPolicy) Option {
 	return func(r *Runner) { r.requestPolicy = p }
 }

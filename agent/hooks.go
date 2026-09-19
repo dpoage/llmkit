@@ -88,10 +88,9 @@ type Hooks struct {
 
 // ToolEvent is one tool call's lifecycle, as delivered to [Hooks.ToolStart]
 // and [Hooks.ToolEnd]. ToolStart sets Step and Call only; ToolEnd additionally
-// sets Result, IsError, and Duration. The [llmkit.ToolCall] is carried as
-// dispatched: rewritten by a [ToolPolicy] when it modified Arguments;
-// otherwise the model's call. Consumers do their own tool-name to
-// structured-activity mapping.
+// sets Result, IsError, and Duration. Consumers do their own tool-name to
+// structured-activity mapping; see [ToolEvent.Call] for how the dispatched
+// call relates to the model's.
 type ToolEvent struct {
 	// Step is the 1-based transcript step (Event.Step) of the tool-result
 	// event this call produced — the same number the completion hooks

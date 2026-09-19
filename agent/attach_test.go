@@ -15,15 +15,11 @@ import (
 )
 
 var (
-	// attachPNG is the inline image the Attach tests seed onto the task turn.
-	attachPNG = llmkit.Image("image/png", []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a})
-	// attachSpec is the URL-referenced document the empty-task tests seed.
+	attachPNG  = llmkit.Image("image/png", []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a})
 	attachSpec = llmkit.DocumentURL("https://example.com/spec.pdf", "spec")
 )
 
-// assertMessageBlocks requires msg's content to deep-equal want, block for
-// block, so the exact block order and payload bytes are pinned — not just
-// the text, which skips images and documents.
+// assertMessageBlocks pins msg.Content to want block-for-block so order and payload bytes — including images and documents — are asserted.
 func assertMessageBlocks(t *testing.T, label string, msg llmkit.Message, want ...llmkit.Block) {
 	t.Helper()
 	if !reflect.DeepEqual(msg.Content, want) {
@@ -31,9 +27,7 @@ func assertMessageBlocks(t *testing.T, label string, msg llmkit.Message, want ..
 	}
 }
 
-// TestAttach_RunSeedsTaskTurnWithBlocks pins the (a) acceptance case: the
-// seeded user turn becomes Text(task) followed by the attached blocks — not
-// a reseeded plain text message, and not blocks appended somewhere else.
+// TestAttach_RunSeedsTaskTurnWithBlocks pins that the seeded user turn is Text(task) followed by the attached blocks.
 func TestAttach_RunSeedsTaskTurnWithBlocks(t *testing.T) {
 	const task = "describe the diagram"
 	fc := newFakeClient(textResp("done", 5, 5))
@@ -59,18 +53,12 @@ func TestAttach_RunSeedsTaskTurnWithBlocks(t *testing.T) {
 	}
 }
 
-// TestAttach_RunJSON_TextCarriesInstructionAttachmentsStayOnTaskTurn is the
-// (b) acceptance case: the TEXT block carries the task prefix and the
-// jsonInstruction suffix with the image riding alongside; the forced
-// finalization prompt and the repair completion — reached here via an
-// iteration cap and two unparseable answers — carry no attachments.
+// TestAttach_RunJSON_TextCarriesInstructionAttachmentsStayOnTaskTurn pins that the task-turn TEXT block carries the jsonInstruction suffix and the attachment, while the forced finalization and repair completions carry no attachments.
 func TestAttach_RunJSON_TextCarriesInstructionAttachmentsStayOnTaskTurn(t *testing.T) {
 	const task = "read the diagram"
 	schema := json.RawMessage(`{"type":"object"}`)
 
-	// Turn 1 keeps investigating (the missing tool renders an ERROR result),
-	// the iteration cap then forces the finalization turn, whose unparseable
-	// answer forces the repair completion.
+	// Iteration cap forces finalization; two unparseable answers force repair.
 	fc := newFakeClient(
 		toolResp("c1", "echo", `{"v":"x"}`, 5, 5),
 		textResp("the answer is: still not json", 5, 5),
@@ -91,15 +79,11 @@ func TestAttach_RunJSON_TextCarriesInstructionAttachmentsStayOnTaskTurn(t *testi
 	assertMessageBlocks(t, "seed", seed,
 		llmkit.Text(task+"\n\n"+jsonInstruction(schema)), attachPNG)
 
-	// The injected finalization prompt is a plain text user turn — the
-	// attachment must not be duplicated onto it.
 	final := fc.requests[1]
 	finalPrompt := final.Messages[len(final.Messages)-1]
 	assertMessageBlocks(t, "finalization prompt", finalPrompt,
 		llmkit.Text(finalizationPrompt(schema)))
 
-	// The repair completion runs against a fresh single-turn history that
-	// never sees the attachment.
 	repair := fc.requests[2]
 	if len(repair.Messages) != 1 {
 		t.Fatalf("repair messages = %d, want 1", len(repair.Messages))
@@ -116,9 +100,7 @@ func TestAttach_RunJSON_TextCarriesInstructionAttachmentsStayOnTaskTurn(t *testi
 	}
 }
 
-// TestAttach_EmptyTaskCarriesBlocksOnly is the (c) acceptance case: an empty
-// task with attachments omits the Text block entirely — no empty text block
-// adapters may refuse — so the turn carries the document block alone.
+// TestAttach_EmptyTaskCarriesBlocksOnly pins that an empty task with attachments omits the Text block entirely.
 func TestAttach_EmptyTaskCarriesBlocksOnly(t *testing.T) {
 	fc := newFakeClient(textResp("done", 5, 5))
 	r := NewRunner(fc, nil, "sys")
@@ -133,9 +115,7 @@ func TestAttach_EmptyTaskCarriesBlocksOnly(t *testing.T) {
 	assertMessageBlocks(t, "seed", seed, attachSpec)
 }
 
-// TestAttach_EmptyTaskNoBlocksKeepsLegacyShape pins the observed-and-kept
-// behavior an empty task AND no attachments send: the exact pre-Attach turn
-// — a single (empty) text block. No new validation was added for this case.
+// TestAttach_EmptyTaskNoBlocksKeepsLegacyShape pins that an empty task with no attachments still sends a single empty text block — the pre-Attach turn shape.
 func TestAttach_EmptyTaskNoBlocksKeepsLegacyShape(t *testing.T) {
 	fc := newFakeClient(textResp("done", 5, 5))
 	r := NewRunner(fc, nil, "sys")
@@ -146,10 +126,7 @@ func TestAttach_EmptyTaskNoBlocksKeepsLegacyShape(t *testing.T) {
 	assertMessageBlocks(t, "seed", fc.requests[0].Messages[0], llmkit.Text(""))
 }
 
-// TestAttach_ContinueComposesAfterSeed is the (d) acceptance case: with
-// Continue, the attached turn is appended AFTER the seed — the request
-// carries the prior conversation element-wise plus exactly one new user turn
-// holding the task text and the blocks.
+// TestAttach_ContinueComposesAfterSeed pins that with Continue the attached turn is appended after the seed conversation element-wise.
 func TestAttach_ContinueComposesAfterSeed(t *testing.T) {
 	fc := newFakeClient(
 		textResp("first answer", 5, 5),
@@ -177,10 +154,7 @@ func TestAttach_ContinueComposesAfterSeed(t *testing.T) {
 		llmkit.Text("second task"), attachPNG)
 }
 
-// TestAttach_TranscriptRoundTripsAndReplays is the (e) acceptance case: the
-// autosaved JSONL carries the image block (MediaType and Data survive the
-// base64 round-trip through LoadJSONL), and NewReplayClient replays the same
-// Run+Attach to the same FinalText.
+// TestAttach_TranscriptRoundTripsAndReplays pins that the autosaved JSONL carries the image block (MediaType and Data survive the base64 round-trip) and NewReplayClient replays the same Run+Attach to the same FinalText.
 func TestAttach_TranscriptRoundTripsAndReplays(t *testing.T) {
 	const task = "describe the diagram"
 	dir := t.TempDir()
@@ -238,8 +212,7 @@ func TestAttach_TranscriptRoundTripsAndReplays(t *testing.T) {
 	}
 }
 
-// TestAttach_OptionsAccumulateInOrder is the (f) acceptance case: multiple
-// Attach options accumulate in the order given, after the task text.
+// TestAttach_OptionsAccumulateInOrder pins that multiple Attach options accumulate in the order given, after the task text.
 func TestAttach_OptionsAccumulateInOrder(t *testing.T) {
 	second := llmkit.ImageURL("https://example.com/b.png")
 	fc := newFakeClient(textResp("done", 5, 5))
@@ -252,10 +225,7 @@ func TestAttach_OptionsAccumulateInOrder(t *testing.T) {
 		llmkit.Text("task"), attachSpec, attachPNG, second)
 }
 
-// TestAttach_NudgesStayAttachmentFree pins both nudge sites: the empty-turn
-// nudge (run loop) and the max-tokens continuation nudge (completeOnce) are
-// appended as plain single-text-block user turns — attachments ride on the
-// task turn only, so neither nudge may carry them. The seed still does.
+// TestAttach_NudgesStayAttachmentFree pins that the empty-turn and max-tokens continuation nudges carry no attachments — only the task turn does.
 func TestAttach_NudgesStayAttachmentFree(t *testing.T) {
 	t.Run("empty-turn nudge", func(t *testing.T) {
 		fc := newFakeClient(
@@ -270,7 +240,6 @@ func TestAttach_NudgesStayAttachmentFree(t *testing.T) {
 			t.Fatalf("completions = %d, want 2 (nudged turn then answer)", fc.callCount())
 		}
 		assertNudgeTurn(t, fc.requests[1])
-		// Contrast: the seed turn still carries the attachment.
 		assertMessageBlocks(t, "seed", fc.requests[1].Messages[0],
 			llmkit.Text("task"), attachPNG)
 	})
@@ -292,8 +261,7 @@ func TestAttach_NudgesStayAttachmentFree(t *testing.T) {
 	})
 }
 
-// assertNudgeTurn requires req's LAST message to be a user turn whose
-// content is exactly one text block — no attachment may ride on a nudge.
+// assertNudgeTurn requires req's last message to be a user turn with exactly one text block.
 func assertNudgeTurn(t *testing.T, req llmkit.Request) {
 	t.Helper()
 	msgs := req.Messages

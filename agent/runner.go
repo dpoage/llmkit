@@ -138,11 +138,7 @@ func NewRunner(client llmkit.Client, tools []Tool, systemPrompt string, opts ...
 // Pass [Continue] to run the task inside a prior conversation instead of a
 // fresh one.
 //
-// Pass [Attach] to carry image or document blocks on the task turn itself:
-// the seed becomes [llmkit.UserMessage]([llmkit.Text](task), blocks...)
-// instead of the plain text form, while the empty-turn and max-tokens
-// nudges, forced finalization, and repair stay attachment-free user turns.
-// See [Attach] for the exact rules.
+// Pass [Attach] to carry image or document blocks on the task turn.
 //
 // Limit exhaustion is not an error: it returns an [Outcome] with a
 // non-empty [Outcome.TruncationReason] and the last completion's text in
@@ -778,13 +774,8 @@ func (r *Runner) complete(ctx context.Context, tr *Transcript, messages []llmkit
 	// incremented only after the call returns, keeping the hook pair's step
 	// identical.
 	step := outcome.Iterations + 1
-	// [RequestPolicy] is the wire-request mutation seam ([Hooks] below is
-	// observe-only): the policy sees the fully built request and may
-	// rewrite any field. The history is handed over as a shallow clone —
-	// only when a policy is registered, keeping the no-policy path
-	// allocation-free — and the clone is what goes on the wire and into the
-	// transcript, while the loop's own slice is never touched. A policy
-	// error aborts before any wire call.
+	// The clone isolates the loop's history from slice-level edits by the
+	// policy; the post-policy slice is what the wire and the transcript see.
 	if r.requestPolicy != nil {
 		req.Messages = slices.Clone(messages)
 		if err := r.requestPolicy.PrepareRequest(ctx, step, &req); err != nil {
@@ -954,9 +945,8 @@ type toolResult struct {
 // the same panic value in both modes.
 func (r *Runner) executeTools(ctx context.Context, outcome *Outcome, calls []llmkit.ToolCall) []toolResult {
 	results := make([]toolResult, len(calls))
-	// Policy pre-pass: every call of the turn is authorized (or denied)
-	// before the first Tool.Run dispatches, in BOTH modes, so an interactive
-	// policy never races the parallel fan-out.
+	// Every call of the turn is authorized before the first Tool.Run, in
+	// both modes, so an interactive policy never overlaps the fan-out.
 	dispatch, denied := r.authorizeCalls(ctx, calls, results)
 	if !r.parallelTools || len(calls) < 2 {
 		for i, call := range dispatch {
