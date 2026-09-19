@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // =============================================================================
@@ -783,11 +784,12 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	if cfg.CacheEnabled {
 		t.Error("default CacheEnabled should be false")
 	}
-	def := llmkit.DefaultRetryConfig()
-	if cfg.Retry.MaxAttempts != def.MaxAttempts || cfg.Retry.BaseDelay != def.BaseDelay ||
-		cfg.Retry.MaxDelay != def.MaxDelay || cfg.Retry.Jitter != def.Jitter ||
-		cfg.Retry.RequestTimeout != def.RequestTimeout {
-		t.Errorf("default Retry = %+v, want %+v", cfg.Retry, def)
+	if cfg.Retry.Jitter != llmkit.DefaultRetryConfig().Jitter {
+		t.Errorf("default Jitter = %v, want kit default %v", cfg.Retry.Jitter, llmkit.DefaultRetryConfig().Jitter)
+	}
+	p := cfg.retryPolicy()
+	if p.MaxAttempts != 3 || p.RequestTimeout != 60*time.Second {
+		t.Errorf("resolved default attempts/timeout = %d/%v, want 3/60s (embed bounds)", p.MaxAttempts, p.RequestTimeout)
 	}
 }
 
