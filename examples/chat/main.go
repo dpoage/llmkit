@@ -1,13 +1,17 @@
-// Command chat demonstrates multi-turn conversation through the llmkit/agent
-// harness: a stdin REPL where each line becomes the next task via
-// agent.Runner.Run with agent.Continue(prev), so the model keeps every
-// earlier turn of the session. One trivial tool (now) keeps the tool-calling
-// path exercised. When the model stops for a refusal/safety reason
-// (agent.StopReasonError) a canned reply is printed and the refusal turn
-// stays in the history: the attached err.Outcome is threaded into the next
-// run's agent.Continue so the conversation continues from it. A /think
-// command toggles extended thinking via an agent.RequestPolicy when the
-// model reports thinking support.
+// Command chat runs a stdin REPL on the llmkit/agent harness. Each line
+// becomes the next task via agent.Runner.Run with agent.Continue(prev), so
+// the model keeps every earlier turn. One trivial tool (now) exercises the
+// tool-calling path. While a run is in flight the prompt is "steered>" and
+// each typed line becomes mid-run steering through agent.NewSteering +
+// agent.WithSteering: it joins the conversation before the next model call,
+// or when the run would otherwise end. A line typed as the run finishes
+// becomes the next task; steers queued after the run's final drain are
+// replayed as the next task instead of being dropped. On
+// agent.StopReasonError a canned reply is printed and the refusal stays in
+// the history: err.Outcome feeds agent.Continue on the next run. /think
+// toggles extended thinking via an agent.RequestPolicy when the model
+// reports thinking support. Assistant text prints incrementally through
+// agent.Hooks.Delta.
 //
 // Usage:
 //
@@ -41,6 +45,12 @@ func main() {
 	}
 }
 
+// runResult carries one finished run back to the input loop.
+type runResult struct {
+	outcome *agent.Outcome
+	err     error
+}
+
 func run() error {
 	spec, err := envcfg.Load(envcfg.Usage("go run ./examples/chat", ""))
 	if err != nil {
@@ -64,53 +74,189 @@ func run() error {
 	if !thinkingSupported {
 		fmt.Println("note: model reports no thinking support; /think stays off")
 	}
+	// streamed flips the moment a run's first text delta prints: the prefix
+	// goes out once per run, AfterCompletion ends the line after each
+	// completion, and reportRun skips the FinalText reprint when the hook
+	// already rendered the answer. Atomic because the hook fires on the run
+	// goroutine while the input loop reads it.
+	var streamed atomic.Bool
+	hooks := agent.Hooks{
+		Delta: func(_ context.Context, _ int, d llmkit.Delta) {
+			if d.Kind != llmkit.DeltaText {
+				return
+			}
+			if streamed.CompareAndSwap(false, true) {
+				fmt.Print("\nassistant> ")
+			}
+			fmt.Print(d.Text)
+		},
+		AfterCompletion: func(_ context.Context, _ int, _ *llmkit.Request, _ *llmkit.Response, err error) {
+			if err == nil && streamed.Load() {
+				fmt.Println()
+			}
+		},
+	}
 	runner := agent.NewRunner(client, []agent.Tool{now},
 		"You are a helpful assistant in a multi-turn chat. You remember every earlier turn of this conversation. Use the provided tool when it would help.",
-		agent.WithRequestPolicy(think))
+		agent.WithRequestPolicy(think), agent.WithHooks(hooks))
+
+	// stdin feeds a channel so the input loop keeps reading while a run
+	// executes: each line typed mid-run becomes steering for that run.
+	lines := make(chan string)
+	go func() {
+		sc := bufio.NewScanner(os.Stdin)
+		for sc.Scan() {
+			lines <- sc.Text()
+		}
+		close(lines)
+	}()
 
 	fmt.Println("llmkit chat — type a message (/think toggles extended thinking, ctrl-d to exit).")
-	sc := bufio.NewScanner(os.Stdin)
-	var prev *agent.Outcome
+
+	var (
+		prev     *agent.Outcome
+		steering *agent.Steering
+		result   chan runResult
+		// steered records the lines handed to the current run's Steering
+		// handle, in order, so lines the run never drained can be replayed.
+		steered []string
+		// pending holds lines that become the next tasks, in order: a line
+		// typed as the run finished, and steers the run did not deliver.
+		pending []string
+	)
+
+	// reportAndRetire prints a finished run and retires its steering
+	// handle. Steers queued after the run's final drain never reached the
+	// model; they become the next tasks instead of being dropped.
+	reportAndRetire := func(res runResult) error {
+		p, rerr := reportRun(res, streamed.Load())
+		prev = p
+		if rerr != nil {
+			return rerr
+		}
+		if n := steering.Pending(); n > 0 {
+			undelivered := steered[len(steered)-n:]
+			fmt.Printf("(steering: %d line(s) arrived as the run finished; sending as the next task)\n", n)
+			pending = append(pending, undelivered...)
+		}
+		steering = nil
+		steered = nil
+		return nil
+	}
+
 	for {
-		fmt.Print("you> ")
-		if !sc.Scan() {
-			break
+		var line string
+		if len(pending) > 0 {
+			line, pending = pending[0], pending[1:]
 		}
-		line := strings.TrimSpace(sc.Text())
 		if line == "" {
-			continue
-		}
-		if line == "/think" {
-			if !thinkingSupported {
-				fmt.Println("(extended thinking is not supported by this model)")
+			fmt.Print("you> ")
+			l, ok := <-lines
+			if !ok {
+				break
+			}
+			line = strings.TrimSpace(l)
+			if line == "" {
 				continue
 			}
-			think.on.Store(!think.on.Load())
-			if think.on.Load() {
-				fmt.Println("(extended thinking on)")
-			} else {
-				fmt.Println("(extended thinking off)")
+			if line == "/think" {
+				toggleThink(think, thinkingSupported)
+				continue
 			}
-			continue
 		}
-		outcome, err := runner.Run(context.Background(), line, agent.Continue(prev))
-		var stopErr *agent.StopReasonError
-		if errors.As(err, &stopErr) {
-			fmt.Printf("assistant> (the model declined: %s)\n", stopErr.StopReason)
-			prev = stopErr.Outcome
-			continue
+
+		// Idle: start a run with a fresh steering handle.
+		steering = agent.NewSteering()
+		s := steering
+		p := prev
+		result = make(chan runResult, 1)
+		streamed.Store(false)
+		go func(task string) {
+			o, e := runner.Run(context.Background(), task,
+				agent.Continue(p), agent.WithSteering(s))
+			result <- runResult{outcome: o, err: e}
+		}(line)
+
+		// Serve stdin while the run is in flight; the prompt marks it.
+		for steering != nil {
+			fmt.Print("steered> ")
+			select {
+			case l, ok := <-lines:
+				if !ok {
+					// stdin closed mid-run: nothing more to steer; let the
+					// run finish, print its answer, and exit.
+					if err := reportAndRetire(<-result); err != nil {
+						return err
+					}
+					return nil
+				}
+				l = strings.TrimSpace(l)
+				switch l {
+				case "":
+				case "/think":
+					toggleThink(think, thinkingSupported)
+				default:
+					// The run may have finished while the line was being
+					// typed: take the finished result back first so the
+					// line becomes the next task instead of steering a
+					// run that already ended.
+					select {
+					case res := <-result:
+						if err := reportAndRetire(res); err != nil {
+							return err
+						}
+						pending = append(pending, l)
+					default:
+						steered = append(steered, l)
+						steering.Steer(llmkit.Text(l))
+					}
+				}
+			case res := <-result:
+				if err := reportAndRetire(res); err != nil {
+					return err
+				}
+			}
 		}
-		if err != nil {
-			return fmt.Errorf("run: %w", err)
-		}
-		if outcome.FinalText != "" {
-			fmt.Println("assistant>", outcome.FinalText)
-		} else {
-			fmt.Println("assistant> (no assistant text produced)")
-		}
-		prev = outcome
 	}
 	return nil
+}
+
+// reportRun prints one finished run and returns the conversation state to
+// continue from: the refusal outcome on a StopReasonError (the canned reply
+// keeps the refusal turn in the history), or the run's outcome on success.
+// streamed reports whether the Delta hook already printed the answer.
+func reportRun(res runResult, streamed bool) (*agent.Outcome, error) {
+	var stopErr *agent.StopReasonError
+	if errors.As(res.err, &stopErr) {
+		fmt.Printf("assistant> (the model declined: %s)\n", stopErr.StopReason)
+		return stopErr.Outcome, nil
+	}
+	if res.err != nil {
+		return nil, fmt.Errorf("run: %w", res.err)
+	}
+	if streamed {
+		// The Delta hook printed the answer incrementally and
+		// AfterCompletion ended the line.
+	} else if res.outcome.FinalText != "" {
+		fmt.Println("assistant>", res.outcome.FinalText)
+	} else {
+		fmt.Println("assistant> (no assistant text produced)")
+	}
+	return res.outcome, nil
+}
+
+// toggleThink flips the extended-thinking flag and prints the new state.
+func toggleThink(p *thinkPolicy, supported bool) {
+	if !supported {
+		fmt.Println("(extended thinking is not supported by this model)")
+		return
+	}
+	p.on.Store(!p.on.Load())
+	if p.on.Load() {
+		fmt.Println("(extended thinking on)")
+	} else {
+		fmt.Println("(extended thinking off)")
+	}
 }
 
 // thinkPolicy is the [agent.RequestPolicy] behind the /think command: while

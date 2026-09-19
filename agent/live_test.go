@@ -3,7 +3,8 @@
 // Live acceptance tests for the agent harness, run against the compat lane
 // through provider.New. Covers the Func tool loop, RunJSONAs's prompt-embedded
 // schema path, multi-turn continuation, WithMaxTokens continuation, the
-// RequestPolicy seam, Attach, ToolPolicy, and inline <think> preservation.
+// RequestPolicy seam, Attach, ToolPolicy, Steering, and inline <think>
+// preservation.
 //
 // Live-model flakes are handled, not hidden: where an assertion depends on
 // the model producing VISIBLE text or calling mandatory tools, the test
@@ -507,5 +508,89 @@ func TestLiveAgentToolPolicyDeny(t *testing.T) {
 	// The run continued past the denial and reached a final answer.
 	if out.FinalText == "" {
 		t.Fatalf("no final text after the denial; outcome=%+v", out)
+	}
+}
+
+// TestLiveAgentDeltaHook pins the Hooks.Delta seam end to end against the
+// live lane: the hook fires at least once and the concatenated text
+// deltas equal the run's FinalText. With today's adapters the
+// [llmkit.Stream] fallback synthesizes one delta per content block; as
+// adapter streaming lands the count rises — only >= 1 is pinned here.
+func TestLiveAgentDeltaHook(t *testing.T) {
+	ctx, cl, _ := newLiveAgentClient(t)
+
+	var mu sync.Mutex
+	var deltas int
+	var text strings.Builder
+	hooks := agent.Hooks{
+		Delta: func(_ context.Context, step int, d llmkit.Delta) {
+			mu.Lock()
+			defer mu.Unlock()
+			deltas++
+			if step < 1 {
+				t.Errorf("delta step = %d, want >= 1", step)
+			}
+			if d.Kind == llmkit.DeltaText {
+				text.WriteString(d.Text)
+			}
+		},
+	}
+	runner := agent.NewRunner(cl, nil, "You are a helpful assistant.",
+		agent.WithHooks(hooks), agent.WithMaxTokens(2048))
+
+	out, err := runner.Run(ctx, "Reply with exactly one short sentence: say hello.")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if deltas == 0 {
+		t.Fatal("Hooks.Delta never fired; want at least one delta")
+	}
+	if got := text.String(); got != out.FinalText {
+		t.Fatalf("concatenated text deltas %q != FinalText %q", got, out.FinalText)
+	}
+}
+
+// TestLiveAgentSteering pins that a FollowUp queued before Run turns the
+// would-be final turn into a second assistant turn against the live
+// lane: the follow-up user turn rides Outcome.Messages between the two
+// assistant turns and the handle ends with nothing pending.
+func TestLiveAgentSteering(t *testing.T) {
+	ctx, cl, _ := newLiveAgentClient(t)
+	runner := agent.NewRunner(cl, nil, "You are a terse assistant.", agent.WithMaxTokens(1024))
+
+	s := agent.NewSteering()
+	s.FollowUp(llmkit.Text("Now answer the same way for Japan: give just the capital city name, nothing else."))
+
+	out, err := runner.Run(ctx,
+		"What is the capital of France? Answer with just the city name, nothing else.",
+		agent.WithSteering(s))
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	assistants := 0
+	sawFollowUp := false
+	for _, m := range out.Messages {
+		switch {
+		case m.Role == llmkit.RoleAssistant:
+			assistants++
+		case m.Role == llmkit.RoleUser && strings.Contains(m.Text(), "capital city name"):
+			sawFollowUp = true
+		}
+	}
+	if assistants != 2 {
+		t.Errorf("assistant turns = %d, want 2 (task answer + follow-up answer)", assistants)
+	}
+	if !sawFollowUp {
+		t.Error("Outcome.Messages lost the queued follow-up user turn")
+	}
+	if out.FinalText == "" {
+		t.Error("no final text after the follow-up turn")
+	}
+	if s.Pending() != 0 {
+		t.Errorf("Pending = %d after the run, want 0", s.Pending())
 	}
 }

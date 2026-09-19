@@ -22,6 +22,11 @@ import (
 //
 // ReplayClient is safe for concurrent use, though a single Runner calls it
 // sequentially.
+//
+// ReplayClient implements only Complete. A Runner with [Hooks.Delta] set
+// still delivers deltas: [llmkit.Stream] falls back to Complete and
+// synthesizes one delta per content block of the recorded Response, so
+// the hook fires — just not at wire granularity.
 type ReplayClient struct {
 	mu        sync.Mutex
 	responses []replayStep

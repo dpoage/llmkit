@@ -26,6 +26,16 @@ import (
 //     request shaping (messages, sampling, tool choice) belongs to
 //     [RequestPolicy]. AfterCompletion receives resp == nil together with
 //     a non-nil err when the completion failed.
+//   - Delta, when set, fires once per incremental fragment of every
+//     completion: the Runner issues the completion via [llmkit.Stream] —
+//     the client's native stream when it implements
+//     [llmkit.StreamingClient], deltas synthesized from the finished
+//     [llmkit.Response] otherwise — so a non-streaming client still fires
+//     the hook and the completion the loop records is byte-identical to
+//     the un-streamed path. step matches BeforeCompletion and
+//     AfterCompletion for the same turn. Invocation is synchronous on the
+//     loop goroutine, between BeforeCompletion and AfterCompletion; a
+//     slow hook stalls the stream.
 //   - ToolStart / ToolEnd around each Tool.Run. ToolEnd carries the final
 //     Result, IsError, and measured Duration; ToolStart leaves those zero.
 //     A model naming an unregistered tool never reaches Tool.Run, so neither
@@ -69,6 +79,9 @@ type Hooks struct {
 	BeforeCompletion func(ctx context.Context, step int, req *llmkit.Request)
 	// AfterCompletion fires immediately after each client.Complete returns.
 	AfterCompletion func(ctx context.Context, step int, req *llmkit.Request, resp *llmkit.Response, err error)
+	// Delta fires once per incremental fragment of every completion; the
+	// Runner streams via [llmkit.Stream] only when this is set.
+	Delta func(ctx context.Context, step int, d llmkit.Delta)
 	// ToolStart fires immediately before each Tool.Run.
 	ToolStart func(ctx context.Context, ev ToolEvent)
 	// ToolEnd fires immediately after each Tool.Run, with Result, IsError,

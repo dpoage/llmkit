@@ -35,16 +35,42 @@ func (s *serializingClient) Capabilities() Capabilities {
 	return caps
 }
 
+// truncateToolCalls caps resp at its first tool call, keeping the normalized
+// tool_use stop reason so the agent loop continues feeding results.
+func truncateToolCalls(resp *Response) {
+	if len(resp.ToolCalls) > 1 {
+		resp.ToolCalls = resp.ToolCalls[:1]
+		resp.StopReason = StopToolUse
+	}
+}
+
 func (s *serializingClient) Complete(ctx context.Context, req Request) (Response, error) {
 	resp, err := s.inner.Complete(ctx, req)
 	if err != nil {
 		return resp, err
 	}
-	if len(resp.ToolCalls) > 1 {
-		resp.ToolCalls = resp.ToolCalls[:1]
-		// The model intended to use tools; keep the normalized tool_use stop
-		// reason so the agent loop continues feeding results.
-		resp.StopReason = StopToolUse
+	truncateToolCalls(&resp)
+	return resp, nil
+}
+
+// Stream streams from the wrapped client, forwarding text and thinking
+// deltas, dropping tool-call deltas for any Index beyond the first, and
+// truncating the final Response the same way Complete does — the delta
+// stream never announces a call the caller will not see. A nil fn is
+// replaced with a no-op so the inner Stream never sees a nil callback.
+func (s *serializingClient) Stream(ctx context.Context, req Request, fn func(Delta) error) (Response, error) {
+	if fn == nil {
+		fn = func(Delta) error { return nil }
 	}
+	resp, err := Stream(ctx, s.inner, req, func(d Delta) error {
+		if d.Kind == DeltaToolCall && d.Index != 0 {
+			return nil
+		}
+		return fn(d)
+	})
+	if err != nil {
+		return resp, err
+	}
+	truncateToolCalls(&resp)
 	return resp, nil
 }
