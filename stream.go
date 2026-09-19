@@ -13,9 +13,10 @@ const (
 	DeltaText DeltaKind = "text"
 	// DeltaThinking: Text holds a thinking fragment.
 	DeltaThinking DeltaKind = "thinking"
-	// DeltaToolCall: one tool call's fragment. Index identifies the call
-	// within the response; ID and Name are set on the first fragment for
-	// that Index (and may repeat); Arguments holds a raw JSON fragment to
+	// DeltaToolCall: one tool call's fragment. Index is the 0-based position
+	// of the call in [Response.ToolCalls] — adapters renumber vendor wire
+	// indices to this; ID and Name are set on the first fragment for that
+	// Index (and may repeat); Arguments holds a raw JSON fragment to
 	// concatenate with the other fragments of the same Index.
 	DeltaToolCall DeltaKind = "tool_call"
 )
@@ -26,7 +27,8 @@ type Delta struct {
 	Kind DeltaKind
 	// Text holds the fragment for DeltaText and DeltaThinking.
 	Text string
-	// Index identifies the tool call within the response (DeltaToolCall).
+	// Index is the 0-based position of the call in Response.ToolCalls
+	// (DeltaToolCall); adapters renumber vendor wire indices to this.
 	Index int
 	// ID and Name carry the tool call's identity, set on its first fragment.
 	ID, Name string
@@ -43,11 +45,12 @@ type StreamingClient interface {
 	// Stream is Complete with incremental delivery: fn is called on the
 	// calling goroutine, in wire order, once per fragment; a non-nil error
 	// from fn cancels the stream and is returned (wrapped) — no Response.
-	// The returned Response is byte-for-byte what Complete would have
-	// returned for the same wire exchange (same normalization: Usage
-	// convention, StopReason, verbatim thinking blocks, ToolCalls with
-	// concatenated Arguments). A nil fn is allowed and makes Stream
-	// equivalent to Complete.
+	// fn execution time counts toward the per-attempt RequestTimeout a
+	// wrapping WithRetry applies. The returned Response is byte-for-byte
+	// what Complete would have returned for the same wire exchange (same
+	// normalization: Usage convention, StopReason, verbatim thinking blocks,
+	// ToolCalls with concatenated Arguments). A nil fn is allowed and makes
+	// Stream equivalent to Complete.
 	Stream(ctx context.Context, req Request, fn func(Delta) error) (Response, error)
 }
 
@@ -56,14 +59,16 @@ type StreamingClient interface {
 // (text blocks → DeltaText, thinking blocks → DeltaThinking, each ToolCall →
 // one DeltaToolCall with ID/Name/Index and the full Arguments) before
 // returning it. Every caller that wants deltas uses this function, so a
-// non-streaming client is never a special case.
+// non-streaming client is never a special case. fn runs on the calling
+// goroutine, and its execution time counts toward the per-attempt
+// RequestTimeout when Stream is wrapped in WithRetry.
 func Stream(ctx context.Context, c Client, req Request, fn func(Delta) error) (Response, error) {
 	if sc, ok := c.(StreamingClient); ok {
 		return sc.Stream(ctx, req, fn)
 	}
 	resp, err := c.Complete(ctx, req)
 	if err != nil {
-		return resp, err
+		return Response{}, err
 	}
 	if fn == nil {
 		return resp, nil
