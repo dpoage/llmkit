@@ -126,8 +126,13 @@ compat lane.
   message's text blocks.
   `Block.Data` is base64 in JSONL transcripts, and `Block` fields marshal
   snake_case with `omitempty`. See the root package docs.
-- No streaming: none of the three donor projects used it; the interface stays
-  synchronous until a consumer needs otherwise.
+- Streaming without special cases: `Client` stays synchronous; clients that
+  can also stream implement `StreamingClient`, and `llmkit.Stream` gives any
+  client a delta stream — native when available, otherwise synthesized from
+  one `Complete` (same normalized `Response` either way). The decorators
+  compose: retry stops at the first delivered delta, the recorder books the
+  final usage, and the tool-call serializer forwards only the first call's
+  fragments.
 - Official vendor SDKs (anthropic-sdk-go, openai-go, google genai) rather than
   hand-rolled wire types.
 

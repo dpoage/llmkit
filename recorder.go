@@ -17,9 +17,9 @@ type UsageEvent struct {
 }
 
 // Recorder is a callback hook callers implement to ledger spend. Record is
-// invoked once per successful Complete. Implementations must be safe for
-// concurrent use and must not block for long, since they run on the request
-// path.
+// invoked once per successful completion (Complete or Stream).
+// Implementations must be safe for concurrent use and must not block for
+// long, since they run on the request path.
 type Recorder interface {
 	Record(ev UsageEvent)
 }
@@ -39,8 +39,9 @@ type recordingClient struct {
 	model    string
 }
 
-// WithRecorder wraps c so that every successful Complete reports its usage to
-// rec, tagged with provider and model. A nil rec returns c unchanged.
+// WithRecorder wraps c so that every successful Complete or Stream reports
+// its usage to rec, tagged with provider and model. A nil rec returns c
+// unchanged.
 //
 // Callers that want extra tags of their own (a pipeline role, a request ID)
 // wrap their Recorder instead of expecting this package to carry the strings:
@@ -66,6 +67,21 @@ func (r *recordingClient) Capabilities() Capabilities { return r.inner.Capabilit
 
 func (r *recordingClient) Complete(ctx context.Context, req Request) (Response, error) {
 	resp, err := r.inner.Complete(ctx, req)
+	if err != nil {
+		return resp, err
+	}
+	r.rec.Record(UsageEvent{
+		Provider: r.provider,
+		Model:    r.model,
+		Usage:    resp.Usage,
+	})
+	return resp, nil
+}
+
+// Stream streams from the wrapped client and reports the final Response's
+// usage to rec, exactly as Complete does. A failed stream records nothing.
+func (r *recordingClient) Stream(ctx context.Context, req Request, fn func(Delta) error) (Response, error) {
+	resp, err := Stream(ctx, r.inner, req, fn)
 	if err != nil {
 		return resp, err
 	}
