@@ -174,24 +174,21 @@ func runChatPaced(t *testing.T, bin string, env map[string]string, line1, line2 
 			t.Fatalf("write %q to stdin: %v", s, werr)
 		}
 	}
-	reader := bufio.NewReader(stdoutPipe)
-	readLine := func() (string, bool) {
-		line, rerr := reader.ReadString('\n')
-		stdoutBuf.WriteString(line)
-		if rerr != nil {
-			return line, false
-		}
-		return strings.TrimRight(line, "\n"), true
-	}
-
 	writeLine(line1)
+	// The REPL prints "you> " only when idle, so the second line goes in
+	// once a reply has appeared AND the idle prompt follows it; pacing on
+	// the reply alone would send line 2 while the first run is still
+	// streaming and turn it into mid-run steering.
+	reader := bufio.NewReader(stdoutPipe)
 	sawReply := false
 	for {
-		line, ok := readLine()
-		if !ok {
+		chunk, rerr := reader.ReadString('>')
+		stdoutBuf.WriteString(chunk)
+		if rerr != nil {
 			break
 		}
-		if strings.Contains(line, "assistant>") {
+		out := stdoutBuf.String()
+		if i := strings.Index(out, "assistant>"); i >= 0 && strings.Contains(out[i+len("assistant>"):], "you>") {
 			sawReply = true
 			break
 		}
