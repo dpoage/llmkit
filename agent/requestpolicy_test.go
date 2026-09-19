@@ -11,8 +11,7 @@ import (
 	"github.com/dpoage/llmkit"
 )
 
-// rpTool is a minimal always-succeeds tool for policy tests, so a scripted
-// tool turn lands deterministically in the transcript.
+// rpTool is a minimal always-succeeds tool for policy tests.
 type rpTool struct{ name string }
 
 func (t rpTool) Def() llmkit.ToolDef {
@@ -33,9 +32,7 @@ func (rec *rpRecorder) policy() RequestPolicy {
 	})
 }
 
-// TestRequestPolicySetsRequestFields pins the field seam: whatever the
-// policy writes onto the request is exactly what the client receives on the
-// wire.
+// TestRequestPolicySetsRequestFields pins that whatever the policy writes onto the request is what the client receives on the wire.
 func TestRequestPolicySetsRequestFields(t *testing.T) {
 	fake := newFakeClient(textResp("done", 10, 5))
 	temp := 0.2
@@ -69,10 +66,7 @@ func TestRequestPolicySetsRequestFields(t *testing.T) {
 	}
 }
 
-// TestRequestPolicyShapesWireMessagesOnly pins the aliasing contract: the
-// policy edits a per-turn clone of the history, so the wire view diverges
-// from the loop's history while Outcome.Messages and the loop itself stay
-// untouched, and the transcript records the post-policy wire messages.
+// TestRequestPolicyShapesWireMessagesOnly pins that the policy edits a per-turn clone, so the wire view diverges from the loop's history and the loop itself stays untouched, while the transcript records the post-policy wire messages.
 func TestRequestPolicyShapesWireMessagesOnly(t *testing.T) {
 	t.Run("drop first message", func(t *testing.T) {
 		fake := newFakeClient(textResp("a", 5, 2), textResp("b", 5, 2))
@@ -86,8 +80,6 @@ func TestRequestPolicyShapesWireMessagesOnly(t *testing.T) {
 		if err != nil {
 			t.Fatalf("run 1: %v", err)
 		}
-		// Run 1: history holds the single seed turn; the policy drops it, so
-		// the wire request is empty while the outcome keeps the seed turn.
 		if got := fake.requests[0].Messages; len(got) != 0 {
 			t.Errorf("wire messages run 1 = %d, want 0 (seed dropped)", len(got))
 		}
@@ -106,12 +98,9 @@ func TestRequestPolicyShapesWireMessagesOnly(t *testing.T) {
 		if wire[0].Role != llmkit.RoleAssistant || wire[0].Text() != "a" {
 			t.Errorf("wire[0] = %s %q, want assistant %q", wire[0].Role, wire[0].Text(), "a")
 		}
-		// The loop's history is untouched: the full 4-message conversation
-		// including the seed turn the policy dropped from the wire.
 		if len(out2.Messages) != 4 || out2.Messages[0].Text() != "a" {
 			t.Errorf("run 2 history = %+v, want the 4-message conversation incl. seed turn", out2.Messages)
 		}
-		// The transcript records the POST-policy wire view, byte for byte.
 		for _, ev := range out2.Transcript.Events {
 			if ev.Kind != EventRequest || ev.Step != 1 {
 				continue
@@ -148,9 +137,7 @@ func TestRequestPolicyShapesWireMessagesOnly(t *testing.T) {
 	})
 }
 
-// TestRequestPolicyErrorAbortsBeforeWire pins the error seam: a policy error
-// aborts the completion before any client call and comes back from Run
-// wrapped with the iteration number.
+// TestRequestPolicyErrorAbortsBeforeWire pins that a policy error aborts the completion before any client call and comes back from Run wrapped with the iteration number.
 func TestRequestPolicyErrorAbortsBeforeWire(t *testing.T) {
 	sentinel := errors.New("no thinking on tuesdays")
 	fake := newFakeClient(textResp("done", 10, 5))
@@ -173,9 +160,7 @@ func TestRequestPolicyErrorAbortsBeforeWire(t *testing.T) {
 	}
 }
 
-// TestRequestPolicyFiresOncePerCompletion pins the fire point: continuation,
-// forced finalization, and RunJSON repair turns all pass through the policy
-// exactly as often as through the client, under their transcript steps.
+// TestRequestPolicyFiresOncePerCompletion pins that continuation, forced finalization, and RunJSON repair turns all pass through the policy exactly as often as through the client, under their transcript steps.
 func TestRequestPolicyFiresOncePerCompletion(t *testing.T) {
 	fake := newFakeClient(
 		maxTokensResp("half an", 10, 5),
@@ -197,8 +182,6 @@ func TestRequestPolicyFiresOncePerCompletion(t *testing.T) {
 	if got := fake.callCount(); got != 4 {
 		t.Fatalf("completions = %d, want 4 (main, continuation, finalization, repair)", got)
 	}
-	// Finalization (step 3) and repair (step 4) went out tool-less and the
-	// policy saw them in that shape — no final flag needed to detect them.
 	for i, want := range map[int]string{2: "finalization", 3: "repair"} {
 		if got := fake.requests[i].Tools; len(got) != 0 {
 			t.Errorf("%s wire request carries %d tools, want 0", want, len(got))
@@ -209,9 +192,7 @@ func TestRequestPolicyFiresOncePerCompletion(t *testing.T) {
 	}
 }
 
-// TestReplayClientReplaysPolicyRecordedRun pins the transcript contract end
-// to end: a run recorded through a policy snapshots the POST-policy wire
-// messages, and ReplayClient still replays that transcript cleanly.
+// TestReplayClientReplaysPolicyRecordedRun pins that a run recorded through a policy snapshots the post-policy wire messages and ReplayClient still replays that transcript cleanly.
 func TestReplayClientReplaysPolicyRecordedRun(t *testing.T) {
 	prepend := RequestPolicyFunc(func(_ context.Context, _ int, req *llmkit.Request) error {
 		req.Messages = append([]llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "(context refresher)")}, req.Messages...)
@@ -245,12 +226,7 @@ func TestReplayClientReplaysPolicyRecordedRun(t *testing.T) {
 	}
 }
 
-// TestNilRequestPolicySendsRequestAsBuilt pins the zero-cost default: with
-// no policy the request reaches the client exactly as the runner built it.
-// (The runner-internal message slice's identity is not observable through
-// the client interface — the loop's own slice is unreachable and append
-// growth invalidates element addresses — so the no-clone guarantee is
-// asserted by code inspection of complete(), not at runtime.)
+// TestNilRequestPolicySendsRequestAsBuilt pins that with no policy the request reaches the client exactly as the runner built it.
 func TestNilRequestPolicySendsRequestAsBuilt(t *testing.T) {
 	fake := newFakeClient(textResp("done", 10, 5))
 	r := NewRunner(fake, nil, "sys")
@@ -263,11 +239,7 @@ func TestNilRequestPolicySendsRequestAsBuilt(t *testing.T) {
 	}
 }
 
-// TestRequestPolicyInPlaceWritesLeaveHistoryUntouched pins the shallow-clone
-// contract with IN-PLACE slice writes — the cases a re-slice would hide.
-// Removing the slices.Clone in complete() makes every subtest fail: the
-// policy's writes land in the loop's own array, corrupting Outcome.Messages
-// and retroactively rewriting the wire requests the fake client retained.
+// TestRequestPolicyInPlaceWritesLeaveHistoryUntouched pins the shallow-clone contract under in-place slice writes — cases a re-slice would hide.
 func TestRequestPolicyInPlaceWritesLeaveHistoryUntouched(t *testing.T) {
 	ctx := context.Background()
 
@@ -288,7 +260,6 @@ func TestRequestPolicyInPlaceWritesLeaveHistoryUntouched(t *testing.T) {
 		if err != nil {
 			t.Fatalf("run 2: %v", err)
 		}
-		// Wire: the continued run's 3-message history, first two swapped.
 		want := []llmkit.Message{
 			llmkit.TextMessage(llmkit.RoleAssistant, "a"),
 			llmkit.TextMessage(llmkit.RoleUser, "a"),
@@ -297,7 +268,6 @@ func TestRequestPolicyInPlaceWritesLeaveHistoryUntouched(t *testing.T) {
 		if !reflect.DeepEqual(fake.requests[1].Messages, want) {
 			t.Errorf("wire = %+v, want the swapped order %+v", fake.requests[1].Messages, want)
 		}
-		// The loop's history (and the seed) stay canonical.
 		wantOut := []llmkit.Message{
 			llmkit.TextMessage(llmkit.RoleUser, "a"),
 			llmkit.TextMessage(llmkit.RoleAssistant, "a"),
@@ -310,7 +280,6 @@ func TestRequestPolicyInPlaceWritesLeaveHistoryUntouched(t *testing.T) {
 		if !reflect.DeepEqual(out1.Messages, wantOut[:2]) {
 			t.Errorf("run-1 history = %+v, want untouched seed %+v", out1.Messages, wantOut[:2])
 		}
-		// The transcript records the swapped (post-policy) wire view.
 		for _, ev := range out2.Transcript.Events {
 			if ev.Kind == EventRequest && ev.Step == 1 && !reflect.DeepEqual(ev.Messages, want) {
 				t.Errorf("transcript step-1 request = %+v, want the wire messages", ev.Messages)
@@ -322,7 +291,6 @@ func TestRequestPolicyInPlaceWritesLeaveHistoryUntouched(t *testing.T) {
 		fake := newFakeClient(textResp("a", 5, 2), textResp("b", 5, 2))
 		rp := RequestPolicyFunc(func(_ context.Context, _ int, req *llmkit.Request) error {
 			if len(req.Messages) >= 3 {
-				// In-place element copy: writes m[1] = m[2] into the array.
 				req.Messages = append(req.Messages[:1], req.Messages[2:]...)
 			}
 			return nil
@@ -343,9 +311,6 @@ func TestRequestPolicyInPlaceWritesLeaveHistoryUntouched(t *testing.T) {
 		if !reflect.DeepEqual(fake.requests[1].Messages, want) {
 			t.Errorf("wire = %+v, want the filtered pair %+v", fake.requests[1].Messages, want)
 		}
-		// Without the clone the overlapping copy overwrites the assistant
-		// turn inside the loop's own array: history would read
-		// [user a, user b, user b, assistant b].
 		wantOut := []llmkit.Message{
 			llmkit.TextMessage(llmkit.RoleUser, "a"),
 			llmkit.TextMessage(llmkit.RoleAssistant, "a"),
@@ -358,10 +323,6 @@ func TestRequestPolicyInPlaceWritesLeaveHistoryUntouched(t *testing.T) {
 	})
 
 	t.Run("append into spare capacity on main and continuation fires", func(t *testing.T) {
-		// The loop's own appends (assistant turn, tool result) leave the
-		// history slice with spare capacity, so an append onto the uncloned
-		// wire view would write into the loop's array and be overwritten by
-		// the next append — silently rewriting the retained wire requests.
 		fake := newFakeClient(textResp("a", 5, 2), toolResp("t1", "now", "{}", 5, 2), textResp("done", 5, 2))
 		rp := RequestPolicyFunc(func(_ context.Context, _ int, req *llmkit.Request) error {
 			req.Messages = append(req.Messages, llmkit.TextMessage(llmkit.RoleUser, "steer"))
@@ -376,13 +337,9 @@ func TestRequestPolicyInPlaceWritesLeaveHistoryUntouched(t *testing.T) {
 		if err != nil {
 			t.Fatalf("run 2: %v", err)
 		}
-		// Fresh-run main turn: wire = seed + steer, retained verbatim.
 		if got := fake.requests[0].Messages; len(got) != 2 || got[1].Text() != "steer" {
 			t.Errorf("fire-1 wire = %+v, want seed plus steering turn", got)
 		}
-		// Continued run's main turn (len 3, cap 4) and its tool-follow-up
-		// turn (len 5, cap 8): the appended turn must still be the LAST
-		// element of the retained request after the run ends.
 		for i, wantLen := range map[int]int{1: 4, 2: 6} {
 			got := fake.requests[i].Messages
 			if len(got) != wantLen {
@@ -393,7 +350,6 @@ func TestRequestPolicyInPlaceWritesLeaveHistoryUntouched(t *testing.T) {
 				t.Errorf("fire-%d wire last = %q, want the steering turn", i+1, got[wantLen-1].Text())
 			}
 		}
-		// The loop's history gained exactly the model's turns, never "steer".
 		if len(out2.Messages) != 6 {
 			t.Fatalf("outcome history = %d messages, want 6", len(out2.Messages))
 		}
@@ -405,8 +361,6 @@ func TestRequestPolicyInPlaceWritesLeaveHistoryUntouched(t *testing.T) {
 				t.Error("appended steering turn leaked into the loop history")
 			}
 		}
-		// Transcript snapshots (copied at fire time) equal the retained wire
-		// requests — with the clone they are stable independently.
 		for _, step := range []int{1, 2} {
 			for _, ev := range out2.Transcript.Events {
 				if ev.Kind == EventRequest && ev.Step == step &&
@@ -447,11 +401,6 @@ func TestRequestPolicyInPlaceWritesLeaveHistoryUntouched(t *testing.T) {
 		if preps != 4 || fake.callCount() != 4 {
 			t.Errorf("PrepareRequest calls = %d, completions = %d, want 4 and 4", preps, fake.callCount())
 		}
-		// The continuation fire's wire view (history swapped in the clone)
-		// is retained verbatim: [task, assistant half, continuation nudge]
-		// swaps to [nudge, assistant half, task]. (Without the clone the
-		// finalization fire's in-place swap rewrites this shared array and
-		// wire[0] would read the finalization prompt instead.)
 		if got := fake.requests[1].Messages; len(got) != 3 ||
 			!strings.HasPrefix(got[0].Text(), "Your previous message was cut off") ||
 			got[1].Text() != "half an" ||
@@ -459,10 +408,6 @@ func TestRequestPolicyInPlaceWritesLeaveHistoryUntouched(t *testing.T) {
 			t.Errorf("continuation wire = %q, %q, %q; want [continuation nudge, assistant half, task]",
 				got[0].Text(), got[1].Text(), got[2].Text())
 		}
-		// The loop's canonical history is untouched by the swaps: it still
-		// STARTS with the seeded task (without the clone the finalization
-		// fire's in-place swap reorders the live array and the task lands
-		// mid-history) and ends with an assistant turn.
 		msgs := outcome.Messages
 		if len(msgs) == 0 {
 			t.Fatal("canonical history empty")

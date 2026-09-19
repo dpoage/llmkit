@@ -3,9 +3,9 @@
 // logging ToolStart/ToolEnd/AfterCompletion, a per-tool timeout, a
 // ToolPolicy denying any tool named in --deny (decisions logged alongside
 // the hooks), and — behind --parallel — concurrent dispatch of the tool
-// calls a single completion requests. It doubles as a compile-time contract
-// check for the agent surface: agent.NewRunner, agent.Func, agent.Hooks,
-// agent.ToolPolicyFunc, WithToolTimeout, and WithParallelTools.
+// calls a single completion requests. Compile-time check for the agent
+// surface: agent.NewRunner, agent.Func, agent.Hooks, agent.ToolPolicyFunc,
+// WithToolTimeout, WithParallelTools.
 //
 // Usage:
 //
@@ -80,12 +80,11 @@ func run() error {
 		},
 	}
 
-	// The ToolPolicy is the permission seam: consulted once per
-	// model-requested call, in the model's order, on the loop goroutine
-	// before any Tool.Run of the turn dispatches — so prompting here (the
-	// real version of this demo) would be safe even under --parallel. A
-	// denial feeds the model "ERROR: tool <name> denied: …" and the run
-	// continues; the decision is logged with the same output as the hooks.
+	// ToolPolicy is the permission seam: consulted once per model-requested
+	// call, in model order, on the loop goroutine before any Tool.Run of the
+	// turn dispatches. A denial feeds the model
+	// "ERROR: tool <name> denied: …" and the run continues; the decision is
+	// logged with the same output as the hooks.
 	denySet := map[string]bool{}
 	for _, name := range strings.Split(*deny, ",") {
 		if name = strings.TrimSpace(name); name != "" {

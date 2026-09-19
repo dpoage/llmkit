@@ -4,52 +4,40 @@ import (
 	"github.com/dpoage/llmkit"
 )
 
-// Attach appends blocks to the run's seeded task turn: instead of the plain
-// [llmkit.TextMessage]([llmkit.RoleUser], task), the user turn becomes
-// [llmkit.UserMessage]([llmkit.Text](task), blocks...) — the form for a
-// prompt that carries an image or document alongside the task text (a
-// diagram to read, a PDF to quote). Applies to [Runner.Run],
+// Attach adds blocks to the task turn of a run. The user turn becomes
+// [llmkit.UserMessage]([llmkit.Text](task), blocks...): the task text
+// first, then the blocks in the order given. Use Attach to send an image or
+// a document with the task. Attach applies to [Runner.Run],
 // [Runner.RunJSON], and [Runner.RunJSONAs].
 //
-// Multiple Attach options accumulate in the order given: Attach(a), Attach(b)
-// yields a then b after the task text. The task text stays the FIRST block;
-// an empty task with non-empty blocks omits the Text block entirely (the
-// turn carries the blocks only — no empty text block, which adapters may
-// refuse) — except on RunJSON, whose seeded Text block always exists even
-// for an empty user task, because it carries the jsonInstruction suffix. An
-// empty task AND no blocks keeps the exact plain-Run shape
-// ([llmkit.TextMessage]), byte-for-byte, so no-attachment callers and their
-// transcript fixtures are unaffected. On RunJSON the jsonInstruction suffix
-// is appended to the TEXT block only; the attached blocks ride alongside
-// untouched. A blocks-only turn (empty plain-Run task) also gives up the
-// task-derived transcript filename: with no task text to slug, the autosave
-// falls back to its existing empty-slug name ("run").
+// Repeated Attach options accumulate in order. With an empty task the turn
+// carries the blocks only; no empty text block is sent. RunJSON is the
+// exception: its text block always exists because it carries the JSON
+// instruction. With no blocks the turn keeps the plain
+// [llmkit.TextMessage] shape, so runs without attachments are unchanged.
+// A run with an empty task and attachments has no text to derive the
+// transcript filename from; the autosave uses the name "run".
 //
-// Attachments ride on the task turn ONLY: they never appear on the
-// empty-turn or max-tokens nudges, the forced finalization turn, or the
-// repair completion — none of those re-asks the task, so they stay
-// text-only user turns exactly as before. With [Continue] they compose: the
-// attached turn is appended after the seed, like any continued task turn.
+// Attachments appear on the task turn only. The empty-turn nudge, the
+// max-tokens continuation, the forced finalization turn, and the repair
+// turn stay text-only. With [Continue], the attached turn follows the seed.
 //
-// Attach performs no block-kind validation. Which role may carry which kind
-// is the adapters' per-role rule, enforced pre-wire: a block passed here
-// that a user turn cannot carry simply fails there with an error wrapping
-// [llmkit.ErrInvalidRequest] — do not expect the harness to duplicate that
-// rule. [llmkit.Capabilities].Images/Documents are advisory (information for
-// callers; no adapter reads them), so a caller consults them itself before
-// attaching, exactly as when building [llmkit.Message] values by hand.
+// Attach does not validate block kinds. The adapters enforce which block
+// kinds a user turn may carry and return an error wrapping
+// [llmkit.ErrInvalidRequest] before any wire call.
+// [llmkit.Capabilities].Images and Documents are advisory: no adapter reads
+// them, so check them before you attach.
 func Attach(blocks ...llmkit.Block) RunOption {
 	return func(c *runConfig) {
 		c.attach = append(c.attach, blocks...)
 	}
 }
 
-// taskTurn builds the seeded user turn for a run from the task text and the
-// caller's attachments — the single place [Attach]'s shape rules live. With
-// no attachments it returns exactly
-// [llmkit.TextMessage]([llmkit.RoleUser], task): the turn every pre-Attach
-// run sent, byte-for-byte. With an empty task the Text block is omitted;
-// [llmkit.UserMessage] still sees at least one block, so it cannot panic.
+// taskTurn builds the seeded user turn from task and attachments — the single
+// place [Attach]'s shape rules live. With no attachments it returns
+// [llmkit.TextMessage]([llmkit.RoleUser], task) byte-for-byte. With an empty
+// task and non-empty attachments the Text block is omitted so
+// [llmkit.UserMessage] still sees at least one block.
 func taskTurn(task string, attach []llmkit.Block) llmkit.Message {
 	if len(attach) == 0 {
 		return llmkit.TextMessage(llmkit.RoleUser, task)

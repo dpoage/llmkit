@@ -1,12 +1,9 @@
 //go:build live
 
 // Live acceptance tests for the agent harness, run against the compat lane
-// (the only lane with credentials today) through provider.New — the
-// production construction path. Covers the Func tool loop, RunJSONAs's
-// prompt-embedded schema path, multi-turn continuation, the WithMaxTokens
-// continuation stitch, the RequestPolicy wire-shaping seam, and raw-text
-// preservation of a reasoning model's
-// inline <think> blocks.
+// through provider.New. Covers the Func tool loop, RunJSONAs's prompt-embedded
+// schema path, multi-turn continuation, WithMaxTokens continuation, the
+// RequestPolicy seam, Attach, ToolPolicy, and inline <think> preservation.
 //
 // Live-model flakes are handled, not hidden: where an assertion depends on
 // the model producing VISIBLE text or calling mandatory tools, the test
@@ -336,13 +333,7 @@ func TestLiveAgentPreservesInlineThink(t *testing.T) {
 	}
 }
 
-// TestLiveAgentRequestPolicyShapesWire exercises the RequestPolicy seam
-// against the real lane: the policy stamps an explicit temperature on every
-// completion and adds extended thinking ONLY when the lane's model reports
-// Thinking support (the budget must stay under MaxTokens where honored).
-// The seam must fire exactly once per completion — PrepareRequest count ==
-// completions observed by BeforeCompletion, the shared fire point — and the
-// run must complete untruncated.
+// TestLiveAgentRequestPolicyShapesWire pins that the RequestPolicy seam fires exactly once per completion against the live lane and the run completes untruncated.
 func TestLiveAgentRequestPolicyShapesWire(t *testing.T) {
 	ctx, cl, _ := newLiveAgentClient(t)
 	var preps, completions atomic.Int64
@@ -376,20 +367,14 @@ func TestLiveAgentRequestPolicyShapesWire(t *testing.T) {
 	}
 }
 
-// TestLiveAgentAttachImageOnTaskTurn is the live case for [agent.Attach]: a
-// tiny generated PNG rides on the task turn next to the task text. The
-// premise needs a vision-capable model, so a compat lane client reporting
-// Images=false skips with the reason instead of failing. The assertions are
-// harness-side, not model-behavior-side: the run completes, and the
-// transcript's first request event carries the image block — same media
-// type, same bytes the test generated — on the seed user turn.
+// TestLiveAgentAttachImageOnTaskTurn pins that a generated PNG rides on the task turn and the transcript's first request event carries that block byte-for-byte on the seed user turn.
 func TestLiveAgentAttachImageOnTaskTurn(t *testing.T) {
 	ctx, cl, _ := newLiveAgentClient(t)
 	if !cl.Capabilities().Images {
 		t.Skip("compat lane client reports Capabilities.Images=false: the Attach live case needs a vision-capable model to put an image block on the wire")
 	}
 
-	// A 1x1 red PNG generated in-process — no fixture file, no network.
+	// 1x1 red PNG generated in-process.
 	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
 	img.Set(0, 0, color.RGBA{R: 0xff, A: 0xff})
 	var pngBuf bytes.Buffer
@@ -431,13 +416,7 @@ func TestLiveAgentAttachImageOnTaskTurn(t *testing.T) {
 	}
 }
 
-// TestLiveAgentToolPolicyDeny exercises the [agent.ToolPolicy] seam against
-// the live lane: the policy denies the ONLY registered tool, so Tool.Run
-// must never execute, the model must receive the
-// "ERROR: tool <name> denied: …" tool result (the Outcome's tool-result
-// message is exactly what the next wire request carries, and the
-// transcript records the same tool_result), and the run must still reach a
-// final answer without error.
+// TestLiveAgentToolPolicyDeny pins that denying the only registered tool against the live lane never runs Tool.Run and still reaches a final answer; the deny tool_result must reach both the follow-up wire request and the transcript.
 func TestLiveAgentToolPolicyDeny(t *testing.T) {
 	ctx, cl, sess := newLiveAgentClient(t)
 	add := agent.Func("add", "adds two numbers",
@@ -445,9 +424,7 @@ func TestLiveAgentToolPolicyDeny(t *testing.T) {
 			return fmt.Sprintf("%g", p.A+p.B), nil
 		})
 
-	// runs counts actual Tool.Run executions (must stay 0); authorizations
-	// counts policy consultations — the premise probe: a run where the
-	// model never REQUESTED `add` is noncompliant and retried.
+	// runs counts Tool.Run executions (must stay 0); authorizations counts policy consultations — the premise probe retries with new phrasing.
 	var mu sync.Mutex
 	runs, authorizations := 0, 0
 	const denyReason = "add is denied by the live policy"
@@ -469,8 +446,7 @@ func TestLiveAgentToolPolicyDeny(t *testing.T) {
 	}
 
 	system := "You are a helpful assistant. Call the `add` tool to compute sums when asked."
-	// Three DISTINCT phrasings: re-issuing a byte-identical prompt within
-	// seconds re-elicits the same correlated noncompliance.
+	// Three distinct phrasings — byte-identical prompts re-elicits the same correlated noncompliance.
 	tasks := []string{
 		"You MUST call the `add` tool with a=41 and b=58. After the tool has been called, report the sum in one sentence.",
 		"Use the `add` tool to compute 41 plus 58, then answer with the sum in one sentence. You must invoke `add` before answering.",
@@ -493,8 +469,7 @@ func TestLiveAgentToolPolicyDeny(t *testing.T) {
 		auths, executed := authorizations, runs
 		mu.Unlock()
 		if auths > 0 {
-			// Compliant premise: the model requested the (sole) tool and the
-			// policy denied it. Strict assertions follow below.
+			// Compliant premise: the model requested the sole tool and the policy denied it.
 			if executed != 0 {
 				t.Fatalf("Tool.Run executed %d time(s) despite a deny-all policy", executed)
 			}
@@ -507,8 +482,7 @@ func TestLiveAgentToolPolicyDeny(t *testing.T) {
 		t.Logf("attempt %d: the model never requested `add`; retrying with different phrasing", attempt)
 	}
 
-	// The deny result reached the model: the Outcome's tool-result message
-	// (exactly what the follow-up wire request carries)...
+	// Deny result reached the model: Outcome's tool-result message (and the follow-up wire request) carry it.
 	want := "ERROR: tool add denied: " + denyReason
 	sawMsg := false
 	for _, m := range out.Messages {
@@ -519,7 +493,7 @@ func TestLiveAgentToolPolicyDeny(t *testing.T) {
 	if !sawMsg {
 		t.Fatalf("Outcome.Messages lost the deny tool result %q", want)
 	}
-	// ...and the transcript's tool_result event says the same.
+	// The transcript records the same tool_result event.
 	sawEvent := false
 	for _, ev := range out.Transcript.Events {
 		if ev.Kind == agent.EventToolResult && ev.IsError && ev.Result == want {

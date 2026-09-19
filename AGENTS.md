@@ -260,28 +260,23 @@ in its message.
   `ReplayClient`, schema derivation from Go types (`SchemaOf`/`Func`,
   feeding `RunJSON`/`RunJSONAs`), multi-turn continuation via the
   `Continue` run option, and the synchronous `Hooks` observer surface.
-  Two policy seams sit beside the observer hooks, each a single-method
-  interface with a `Func` adapter so a component written for one harness
-  drops into another. `RequestPolicy`/`WithRequestPolicy` is the
-  per-completion wire-request mutation seam: it fires on every completion
-  (main turn, continuation, finalization, repair) just before
-  `BeforeCompletion`, and `req.Messages` is a per-turn shallow clone of the
-  loop's history. The transcript records the post-policy request, so it
-  always matches the wire. `WithToolPolicy` installs a `ToolPolicy`
-  permission gate consulted once per model-requested call: every call of a
-  turn is authorized in model order on the loop goroutine before any
-  `Tool.Run` dispatches, in both dispatch modes, so an interactive policy
-  never races the parallel fan-out. A denial feeds the model
-  `ERROR: tool <name> denied: …` with IsError, keeps the hooks silent, and
-  the run continues; a policy may rewrite a call's Arguments (Tool.Run and
-  ToolEvent.Call see the rewrite; wire history keeps the model's original),
-  while result rewriting composes via a `Tool` decorator instead. The
-  `Attach` run option seeds the task turn with image/document blocks:
-  `Text(task)` followed by the given blocks — blocks only when the task is
-  empty — and with `Continue` the attached turn lands after the seed.
-  Attachments ride on the task turn alone, never on the empty-turn or
-  max-tokens nudges, forced finalization, or repair prompts; the adapters
-  own block-kind validation.
+  Two policy seams sit beside the observer hooks. Each is a single-method
+  interface with a `Func` adapter, so a policy written for one harness
+  works in another. `RequestPolicy` (`WithRequestPolicy`) edits the wire
+  request before every completion — main turn, continuation, finalization,
+  repair — and before `BeforeCompletion` fires; `req.Messages` is a
+  per-turn shallow clone of the history, and the transcript records the
+  post-policy request. `ToolPolicy` (`WithToolPolicy`) allows, denies, or
+  rewrites the arguments of each model-requested tool call. The Runner
+  authorizes every call of a turn in model order on the loop goroutine
+  before any `Tool.Run` starts, in both dispatch modes. A denial sends the
+  model `ERROR: tool <name> denied: …` with IsError; the hooks stay silent
+  and the run continues. Only Arguments may be rewritten; the history keeps
+  the model's original. To rewrite results, wrap the `Tool`. The `Attach`
+  run option adds image or document blocks to the task turn after
+  `Text(task)` (blocks only when the task is empty). Attachments never
+  appear on nudges, finalization, or repair turns; the adapters validate
+  block kinds.
   `Outcome.FinalText` holds the final completion's text (empty when that
   completion produced none). `WithBudgetPool` makes the Runner check a
   shared `BudgetPool` before every model call and charge it after every
