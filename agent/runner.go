@@ -58,6 +58,9 @@ type Runner struct {
 	// charged after every successful one (see WithBudgetPool). A nil pool is
 	// unlimited.
 	budgetPool *BudgetPool
+	// toolPolicy, when non-nil, gates every model-requested tool call before
+	// dispatch (see WithToolPolicy). A nil policy allows all calls.
+	toolPolicy ToolPolicy
 }
 
 // Option configures a [Runner] at construction.
@@ -890,15 +893,20 @@ type toolResult struct {
 }
 
 // executeTools runs calls and returns one result per executed call, in the
-// model's original order. Sequential mode (the default) runs calls one at a
-// time and stops before dispatching the next call once ctx is cancelled —
-// the returned slice then holds only the already-executed results. Parallel
-// mode (WithParallelTools) runs each call on its own goroutine (bounded by
-// len(calls)) and waits for all of them: per-call failures are isolated (a
-// tool error or panic never fails its siblings — runTool renders a panic as
-// that call's error result), and the full-length result slice is always
-// returned. Neither mode mutates the conversation or the transcript; the
-// caller appends the results in call order after executeTools returns.
+// model's original order. A [ToolPolicy], when installed, authorizes — and
+// may rewrite — every call BEFORE the first Tool.Run dispatches (see
+// [Runner.authorizeCalls]); a denied call keeps its slot with its rendered
+// error result, so the returned slice stays index-aligned with the calls in
+// both modes. Sequential mode (the default) runs calls one at a time and
+// stops before dispatching the next call once ctx is cancelled — the
+// returned slice then holds only the already-executed (or policy-resolved)
+// results. Parallel mode (WithParallelTools) runs each call on its own
+// goroutine (bounded by len(calls)) and waits for all of them: per-call
+// failures are isolated (a tool error or panic never fails its siblings —
+// runTool renders a panic as that call's error result), and the full-length
+// result slice is always returned. Neither mode mutates the conversation or
+// the transcript; the caller appends the results in call order after
+// executeTools returns.
 //
 // Hook panics are harness bugs and are never rendered to the model. In
 // sequential mode a panicking hook propagates to [Runner.Run]'s caller
@@ -910,8 +918,15 @@ type toolResult struct {
 // the same panic value in both modes.
 func (r *Runner) executeTools(ctx context.Context, outcome *Outcome, calls []llmkit.ToolCall) []toolResult {
 	results := make([]toolResult, len(calls))
+	// Policy pre-pass: every call of the turn is authorized (or denied)
+	// before the first Tool.Run dispatches, in BOTH modes, so an interactive
+	// policy never races the parallel fan-out.
+	dispatch, denied := r.authorizeCalls(ctx, calls, results)
 	if !r.parallelTools || len(calls) < 2 {
-		for i, call := range calls {
+		for i, call := range dispatch {
+			if denied != nil && denied[i] {
+				continue // deny already rendered into results[i]
+			}
 			if err := ctx.Err(); err != nil {
 				return results[:i]
 			}
@@ -922,7 +937,7 @@ func (r *Runner) executeTools(ctx context.Context, outcome *Outcome, calls []llm
 	var wg sync.WaitGroup
 	var hookPanic any // the first hook panic, re-panicked below
 	var panicMu sync.Mutex
-	for i, call := range calls {
+	for i, call := range dispatch {
 		wg.Add(1)
 		go func(i int, call llmkit.ToolCall) {
 			defer wg.Done()
@@ -940,6 +955,9 @@ func (r *Runner) executeTools(ctx context.Context, outcome *Outcome, calls []llm
 					panicMu.Unlock()
 				}
 			}()
+			if denied != nil && denied[i] {
+				return // deny already rendered into results[i]
+			}
 			results[i].result, results[i].isErr = r.runTool(ctx, call, outcome.Iterations)
 		}(i, call)
 	}
