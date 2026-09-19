@@ -61,7 +61,7 @@ func (r *Runner) RunJSON(ctx context.Context, task string, schema json.RawMessag
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	return r.runJSON(ctx, cfg.seed, task, schema, out)
+	return r.runJSON(ctx, cfg.seed, task, cfg.attach, schema, out)
 }
 
 // RunJSONAs is [Runner.RunJSON] with the schema derived from T via [SchemaOf]
@@ -77,7 +77,8 @@ func RunJSONAs[T any](ctx context.Context, r *Runner, task string, opts ...RunOp
 
 // runJSON is the shared implementation behind RunJSON. seed is nil (reseed
 // every call) or a prior Outcome's Messages ([Continue]).
-func (r *Runner) runJSON(ctx context.Context, seed []llmkit.Message, task string, schema json.RawMessage, out any) (*Outcome, error) {
+// attach rides on the seeded task turn (see [Attach]).
+func (r *Runner) runJSON(ctx context.Context, seed []llmkit.Message, task string, attach []llmkit.Block, schema json.RawMessage, out any) (*Outcome, error) {
 	prompt := task + "\n\n" + jsonInstruction(schema)
 
 	// Reserve the last iteration for a forced finalization turn: if the model is
@@ -86,7 +87,7 @@ func (r *Runner) runJSON(ctx context.Context, seed []llmkit.Message, task string
 	// dangling exploration prose that can never parse. The schema is threaded
 	// natively so the finalization turn also benefits from grammar-constrained
 	// output on capable adapters.
-	outcome, err := r.run(ctx, seed, prompt, finalizationPrompt(schema), schema)
+	outcome, err := r.run(ctx, seed, prompt, attach, finalizationPrompt(schema), schema)
 	if err != nil {
 		return outcome, err
 	}

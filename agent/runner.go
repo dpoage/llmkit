@@ -129,6 +129,12 @@ func NewRunner(client llmkit.Client, tools []Tool, systemPrompt string, opts ...
 // Pass [Continue] to run the task inside a prior conversation instead of a
 // fresh one.
 //
+// Pass [Attach] to carry image or document blocks on the task turn itself:
+// the seed becomes [llmkit.UserMessage]([llmkit.Text](task), blocks...)
+// instead of the plain text form, while the empty-turn and max-tokens
+// nudges, forced finalization, and repair stay attachment-free user turns.
+// See [Attach] for the exact rules.
+//
 // Limit exhaustion is not an error: it returns an [Outcome] with a
 // non-empty [Outcome.TruncationReason] and the last completion's text in
 // [Outcome.FinalText]. Only context cancellation, client/IO failures, or
@@ -148,11 +154,12 @@ func (r *Runner) Run(ctx context.Context, task string, opts ...RunOption) (*Outc
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	return r.run(ctx, cfg.seed, task, "", nil)
+	return r.run(ctx, cfg.seed, task, cfg.attach, "", nil)
 }
 
 // RunOption is a per-call option for [Runner.Run], [Runner.RunJSON], and
-// [Runner.RunJSONAs]. Options apply in order; a later option wins.
+// [Runner.RunJSONAs]. Options apply in order; a later option wins, except
+// [Attach], which accumulates.
 type RunOption func(*runConfig)
 
 // runConfig carries the resolved per-call options. It is unexported so new
@@ -161,6 +168,9 @@ type runConfig struct {
 	// seed, when non-empty, continues this conversation instead of reseeding
 	// one; see [Continue].
 	seed []llmkit.Message
+	// attach, when non-empty, rides on the seeded task turn; see [Attach]
+	// and [taskTurn] for the shape rules.
+	attach []llmkit.Block
 }
 
 // Continue makes the run CONTINUE a prior conversation instead of reseeding
@@ -207,6 +217,8 @@ func Continue(prev *Outcome) RunOption {
 // becoming the conversation's sole seed message. Run and RunJSON pass seed ==
 // nil (reseed every call); [Continue] seeds a prior Outcome's Messages so the
 // next round lands in the SAME conversation as the one that produced it.
+// task and attach together form that seeded task turn (see [taskTurn]):
+// [Attach]'s blocks ride on it and nowhere else.
 // Before the task
 // is appended, a seed whose trailing assistant turn carries unanswered tool
 // calls is trimmed — see [trimDanglingToolTurn].
@@ -241,20 +253,21 @@ const maxEmptyTurnNudges = 2
 // call a tool or emit its final answer. See [maxEmptyTurnNudges].
 const emptyTurnNudge = "You made no tool call and produced no final answer. Continue: call a tool or emit your final answer now."
 
-func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task, finalizePrompt string, responseSchema json.RawMessage) (*Outcome, error) {
+func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task string, attach []llmkit.Block, finalizePrompt string, responseSchema json.RawMessage) (*Outcome, error) {
 	tr := NewTranscript()
 	if r.transcriptDir != "" {
 		tr.enableStreaming(r.transcriptPath(tr, task), r.hooks.TranscriptError)
 	}
 
 	var messages []llmkit.Message
+	taskMsg := taskTurn(task, attach)
 	if len(seed) > 0 {
 		seed = trimDanglingToolTurn(seed)
 		messages = make([]llmkit.Message, 0, len(seed)+1)
 		messages = append(messages, seed...)
-		messages = append(messages, llmkit.TextMessage(llmkit.RoleUser, task))
+		messages = append(messages, taskMsg)
 	} else {
-		messages = []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, task)}
+		messages = []llmkit.Message{taskMsg}
 	}
 
 	outcome := &Outcome{Transcript: tr}
