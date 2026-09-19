@@ -183,7 +183,10 @@ in its message.
   Groq, ...). `Spec.Capabilities`, when set, receives the adapter's
   model-table profile and returns the effective one — flip a single field
   or replace it wholesale (e.g. to pin `ContextWindow` for a model the
-  table doesn't know).
+  table doesn't know). Every adapter implements `StreamingClient`; its
+  `Stream` reuses the adapter's params builder and Complete's normalizer
+  tail, mapping the vendor's SSE events onto `Delta` fragments in wire
+  order.
 - **`llmkit/internal/adapter`** — helpers shared by the three adapters
   (status classification, error normalization, schema parsing); internal,
   not public API.
