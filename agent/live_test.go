@@ -4,7 +4,8 @@
 // (the only lane with credentials today) through provider.New — the
 // production construction path. Covers the Func tool loop, RunJSONAs's
 // prompt-embedded schema path, multi-turn continuation, the WithMaxTokens
-// continuation stitch, and raw-text preservation of a reasoning model's
+// continuation stitch, the RequestPolicy wire-shaping seam, and raw-text
+// preservation of a reasoning model's
 // inline <think> blocks.
 //
 // Live-model flakes are handled, not hidden: where an assertion depends on
@@ -30,6 +31,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	llmkit "github.com/dpoage/llmkit"
@@ -327,5 +329,45 @@ func TestLiveAgentPreservesInlineThink(t *testing.T) {
 	}
 	if ans.Sum != 42 {
 		t.Errorf("sum = %d, want 42", ans.Sum)
+	}
+}
+
+// TestLiveAgentRequestPolicyShapesWire exercises the RequestPolicy seam
+// against the real lane: the policy stamps an explicit temperature on every
+// completion and adds extended thinking ONLY when the lane's model reports
+// Thinking support (the budget must stay under MaxTokens where honored).
+// The seam must fire exactly once per completion — PrepareRequest count ==
+// completions observed by BeforeCompletion, the shared fire point — and the
+// run must complete untruncated.
+func TestLiveAgentRequestPolicyShapesWire(t *testing.T) {
+	ctx, cl, _ := newLiveAgentClient(t)
+	var preps, completions atomic.Int64
+	policy := agent.RequestPolicyFunc(func(_ context.Context, _ int, req *llmkit.Request) error {
+		preps.Add(1)
+		temp := 0.5
+		req.Temperature = &temp
+		if cl.Capabilities().Thinking {
+			req.Thinking = &llmkit.ThinkingConfig{BudgetTokens: 1024}
+		}
+		return nil
+	})
+	runner := agent.NewRunner(cl, nil, "You are a terse assistant.",
+		agent.WithMaxTokens(2048),
+		agent.WithHooks(agent.Hooks{
+			BeforeCompletion: func(context.Context, int, *llmkit.Request) { completions.Add(1) },
+		}),
+		agent.WithRequestPolicy(policy))
+	out, err := runner.Run(ctx, "Reply with the single word: ready.")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if out.TruncationReason != "" {
+		t.Fatalf("run truncated (%v): the policy case did not complete", out.TruncationReason)
+	}
+	if got := preps.Load(); got != completions.Load() {
+		t.Errorf("PrepareRequest calls = %d, completions = %d, want equal", got, completions.Load())
+	}
+	if preps.Load() == 0 {
+		t.Error("PrepareRequest never fired")
 	}
 }

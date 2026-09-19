@@ -19,9 +19,13 @@ import (
 //     the completion is recorded under — the SAME base every hook family
 //     uses: ToolEvent.Step, CompactionEvent.Step, and the transcript's
 //     Event.Step all carry this number for the same turn, so consumers can
-//     join on Step. req is the exact wire request; observe it only —
-//     mutating it is undefined. AfterCompletion receives resp == nil
-//     together with a non-nil err when the completion failed.
+//     join on Step. req is the FINAL wire request — the exact request
+//     client.Complete receives and the transcript's request event records —
+//     already passed through [RequestPolicy.PrepareRequest] when one is
+//     registered. Observe it only: mutating req here is undefined, and
+//     request shaping (messages, sampling, tool choice) belongs to
+//     [RequestPolicy]. AfterCompletion receives resp == nil together with
+//     a non-nil err when the completion failed.
 //   - ToolStart / ToolEnd around each Tool.Run. ToolEnd carries the final
 //     Result, IsError, and measured Duration; ToolStart leaves those zero.
 //     A model naming an unregistered tool never reaches Tool.Run, so neither

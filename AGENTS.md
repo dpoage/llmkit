@@ -260,6 +260,11 @@ in its message.
   `ReplayClient`, schema derivation from Go types (`SchemaOf`/`Func`,
   feeding `RunJSON`/`RunJSONAs`), multi-turn continuation via the
   `Continue` run option, and the synchronous `Hooks` observer surface.
+  `RequestPolicy`/`WithRequestPolicy` is the per-completion wire-request
+  mutation seam: it fires on every completion (main turn, continuation,
+  finalization, repair) just before `BeforeCompletion`, and `req.Messages`
+  is a per-turn shallow clone of the loop's history. The transcript records
+  the post-policy request, so it always matches the wire.
   `Outcome.FinalText` holds the final completion's text (empty when that
   completion produced none). `WithBudgetPool` makes the Runner check a
   shared `BudgetPool` before every model call and charge it after every
