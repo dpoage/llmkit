@@ -116,9 +116,25 @@ func (g *googleAdapter) Capabilities() llmkit.Capabilities { return g.caps }
 func (g *googleAdapter) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	// Per-request transport-status recorder for normalizeErr's fallback.
 	ctx = context.WithValue(ctx, transportStatusKey{}, &transportStatus{})
-	contents, err := toGoogleContents(req.Messages)
+	contents, cfg, err := g.buildRequest(req)
 	if err != nil {
 		return llmkit.Response{}, err
+	}
+	resp, err := g.client.Models.GenerateContent(ctx, g.model, contents, cfg)
+	if err != nil {
+		return llmkit.Response{}, g.normalizeErr(ctx, err)
+	}
+	return g.toResponse(resp), nil
+}
+
+// buildRequest maps a normalized request onto the genai wire types: the
+// conversation Contents and the GenerateContentConfig. Request validation,
+// capability gating, and config assembly happen exactly here, once —
+// Complete and Stream both send this builder's result to the wire.
+func (g *googleAdapter) buildRequest(req llmkit.Request) ([]*genai.Content, *genai.GenerateContentConfig, error) {
+	contents, err := toGoogleContents(req.Messages)
+	if err != nil {
+		return nil, nil, err
 	}
 	cfg := &genai.GenerateContentConfig{}
 	if req.System != "" {
@@ -152,7 +168,7 @@ func (g *googleAdapter) Complete(ctx context.Context, req llmkit.Request) (llmki
 		// genai carries seed as int32; reject out-of-range values instead of
 		// silently truncating to a different deterministic seed.
 		if *req.Seed < int64(math.MinInt32) || *req.Seed > int64(math.MaxInt32) {
-			return llmkit.Response{}, &llmkit.APIError{
+			return nil, nil, &llmkit.APIError{
 				Kind:     llmkit.ErrInvalidRequest,
 				Provider: "google",
 				Message:  "Seed out of range for int32",
@@ -166,7 +182,7 @@ func (g *googleAdapter) Complete(ctx context.Context, req llmkit.Request) (llmki
 	// false feature is a silent drop rather than a server 400.
 	if req.Thinking != nil && g.caps.Thinking {
 		if req.Thinking.BudgetTokens <= 0 {
-			return llmkit.Response{}, &llmkit.APIError{
+			return nil, nil, &llmkit.APIError{
 				Kind:     llmkit.ErrInvalidRequest,
 				Provider: "google",
 				Message:  "Thinking.BudgetTokens must be positive",
@@ -189,10 +205,10 @@ func (g *googleAdapter) Complete(ctx context.Context, req llmkit.Request) (llmki
 	// auto (and the zero value) is the provider default and is never
 	// serialized.
 	if err := adapter.GateToolChoice("google", req.ToolChoice, g.caps.ToolChoice); err != nil {
-		return llmkit.Response{}, err
+		return nil, nil, err
 	}
 	if err := applyGoogleToolChoice(cfg, req.ToolChoice); err != nil {
-		return llmkit.Response{}, err
+		return nil, nil, err
 	}
 
 	if len(req.Tools) > 0 {
@@ -205,7 +221,7 @@ func (g *googleAdapter) Complete(ctx context.Context, req llmkit.Request) (llmki
 			if len(t.Parameters) > 0 {
 				var schema any
 				if err := json.Unmarshal(t.Parameters, &schema); err != nil {
-					return llmkit.Response{}, &llmkit.APIError{
+					return nil, nil, &llmkit.APIError{
 						Kind:     llmkit.ErrInvalidRequest,
 						Provider: "google",
 						Message:  "tool " + t.Name + ": invalid parameters JSON schema",
@@ -238,7 +254,7 @@ func (g *googleAdapter) Complete(ctx context.Context, req llmkit.Request) (llmki
 		}
 		schema, _, err := adapter.ParseResponseSchema(req.ResponseSchema, defaultName)
 		if err != nil {
-			return llmkit.Response{}, &llmkit.APIError{
+			return nil, nil, &llmkit.APIError{
 				Kind:     llmkit.ErrInvalidRequest,
 				Provider: "google",
 				Message:  "ResponseSchema: invalid JSON",
@@ -251,11 +267,7 @@ func (g *googleAdapter) Complete(ctx context.Context, req llmkit.Request) (llmki
 		cfg.ResponseJsonSchema = schema
 	}
 
-	resp, err := g.client.Models.GenerateContent(ctx, g.model, contents, cfg)
-	if err != nil {
-		return llmkit.Response{}, g.normalizeErr(ctx, err)
-	}
-	return g.toResponse(resp), nil
+	return contents, cfg, nil
 }
 
 // applyGoogleToolChoice maps the normalized tool-choice request onto the
@@ -516,14 +528,10 @@ func (g *googleAdapter) toResponse(resp *genai.GenerateContentResponse) llmkit.R
 				}
 				switch {
 				case p.FunctionCall != nil:
-					args, _ := json.Marshal(p.FunctionCall.Args)
-					if len(args) == 0 || string(args) == "null" {
-						args = json.RawMessage("{}")
-					}
 					out.ToolCalls = append(out.ToolCalls, llmkit.ToolCall{
 						ID:        p.FunctionCall.ID,
 						Name:      p.FunctionCall.Name,
-						Arguments: json.RawMessage(args),
+						Arguments: functionCallArgs(p.FunctionCall.Args),
 					})
 					if len(p.ThoughtSignature) > 0 {
 						// Gemini 2.5+ signs function calls with an opaque
@@ -575,6 +583,19 @@ func (g *googleAdapter) toResponse(resp *genai.GenerateContentResponse) llmkit.R
 	}
 	out.StopReason = mapGoogleStop(stop, len(out.ToolCalls) > 0)
 	return out
+}
+
+// functionCallArgs renders a FunctionCall's Args as the canonical JSON the
+// normalized ToolCall carries: the marshaled object, or "{}" when the call
+// has none (the SDK decodes an absent object to nil). Stream reuses it for
+// tool-call deltas, so one call's delta Arguments concatenate to exactly
+// its final ToolCall.Arguments.
+func functionCallArgs(args any) json.RawMessage {
+	b, _ := json.Marshal(args)
+	if len(b) == 0 || string(b) == "null" {
+		return json.RawMessage("{}")
+	}
+	return b
 }
 
 func mapGoogleStop(reason genai.FinishReason, hasToolCalls bool) llmkit.StopReason {
