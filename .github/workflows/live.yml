@@ -1,15 +1,19 @@
 # Live acceptance suite: runs the `live`-tagged test binaries (provider
 # matrix, agent harness, example execution) against the REAL vendor through
-# the compat lane. Credentials come from three repo secrets — set exactly
-# these names:
+# the compat lane. Credentials come from one repo secret and two repo
+# variables — set exactly these names:
 #
-#   LLMKIT_LIVE_COMPAT_API_KEY   MiniMax API key (from ~/.config/bugbot/env:
-#                                $MINIMAX_API_KEY)
-#   LLMKIT_LIVE_COMPAT_BASE_URL  https://api.minimax.io/v1
-#   LLMKIT_LIVE_COMPAT_MODEL     MiniMax-M3
+#   secret   LLMKIT_LIVE_COMPAT_API_KEY   MiniMax API key (from
+#                                         ~/.config/bugbot/env: $MINIMAX_API_KEY)
+#   variable LLMKIT_LIVE_COMPAT_BASE_URL  https://api.minimax.io/v1
+#   variable LLMKIT_LIVE_COMPAT_MODEL     MiniMax-M3
 #
-# Without the API key the job prints "no live credentials — skipped" and
-# exits 0, so PRs from forks and secret-less repos stay green. Local
+# Triggers are push (master and round/** branches), nightly schedule, and
+# manual dispatch — deliberately NOT pull_request: a PR can edit this file,
+# and pairing that with a secret hands the key to anyone who can open one.
+# Push requires write access, which is the same trust the secret already
+# assumes. Without the API key the job prints "no live credentials —
+# skipped" and exits 0, so secret-less clones stay green. Local
 # instructions and the verified capability set live in AGENTS.md
 # (Build & Test).
 #
@@ -27,7 +31,10 @@ on:
   schedule:
     # Nightly.
     - cron: "17 3 * * *"
-  pull_request:
+  push:
+    branches:
+      - master
+      - "round/**"
     paths:
       - "provider/**"
       - "agent/**"
@@ -47,8 +54,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       LLMKIT_LIVE_COMPAT_API_KEY: ${{ secrets.LLMKIT_LIVE_COMPAT_API_KEY }}
-      LLMKIT_LIVE_COMPAT_BASE_URL: ${{ secrets.LLMKIT_LIVE_COMPAT_BASE_URL }}
-      LLMKIT_LIVE_COMPAT_MODEL: ${{ secrets.LLMKIT_LIVE_COMPAT_MODEL }}
+      LLMKIT_LIVE_COMPAT_BASE_URL: ${{ vars.LLMKIT_LIVE_COMPAT_BASE_URL }}
+      LLMKIT_LIVE_COMPAT_MODEL: ${{ vars.LLMKIT_LIVE_COMPAT_MODEL }}
       # MiniMax-M3-verified capability set (see AGENTS.md Build & Test): the
       # parallel_tool_calls and prompt_caching cases run and must pass rather
       # than skip on the conservative compat profile.
