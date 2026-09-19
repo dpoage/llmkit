@@ -86,12 +86,13 @@ fmt.Println(outcome.FinalText)
 
 ### Stream
 
-Stream the request instead of waiting for the full answer. `llmkit.Stream`
-works on any client: a client that cannot stream gets deltas synthesized from
-one `Complete`, and `resp` is the same normalized `Response` either way.
+Stream the request instead of waiting for the full answer. This snippet
+reuses `client` from the previous section. `llmkit.Stream` works on any
+client: a client that cannot stream gets deltas synthesized from one
+`Complete`, and `resp` is the same normalized `Response` either way.
 
-```go
-resp, err := llmkit.Stream(ctx, client, req,
+req := llmkit.Request{Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "Count to five.")}}
+resp, err := llmkit.Stream(context.Background(), client, req,
 	func(d llmkit.Delta) error { fmt.Print(d.Text); return nil })
 ```
 
@@ -139,16 +140,16 @@ go run ./examples/chat
 
 ## Testing
 
-CI runs the full gate on every push: build, vet, race-enabled tests, lint, and
-gofmt. The live acceptance suite runs against real vendors and skips itself
-without credentials. See [docs/testing.md](docs/testing.md).
+CI runs the full gate on every push and pull request: build, vet, race-enabled
+tests, lint, and gofmt. The live acceptance suite runs against real vendors
+and skips itself without credentials. See [docs/testing.md](docs/testing.md).
 
 ## Stability
 
 llmkit is pre-1.0. Semver minor versions may contain breaking changes; the
-[changelog](CHANGELOG.md) marks them. Every release so far has: v0.2.0 changed
-the message model to content blocks, and v0.3.0 changed `provider.New` and the
-recorder.
+[changelog](CHANGELOG.md) marks them. Every release so far has carried them:
+v0.2.0 changed the message model to content blocks, and v0.3.0 changed
+`provider.New` and the recorder.
 
 ## License
 

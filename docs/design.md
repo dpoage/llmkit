@@ -7,7 +7,7 @@ reference is [pkg.go.dev](https://pkg.go.dev/github.com/dpoage/llmkit).
 ## The layering
 
 Six packages face the caller; the vendor adapters do not. The import graph
-is a tree rooted at the `llmkit` package, and nothing imports upward:
+is a DAG rooted at the `llmkit` package, and nothing imports upward:
 
 ```mermaid
 flowchart TD
@@ -26,6 +26,8 @@ flowchart TD
 `sandbox` and `fsroot` import no other kit package. `embed` imports only the
 root, for `RetryConfig`. `agent` drives any `llmkit.Client`, so a `Runner`
 runs against a provider client, a replay client, or your own implementation.
+The diagram omits test-only packages: `internal/livetest` backs the `live`
+acceptance suite.
 
 ## One normalized vocabulary
 

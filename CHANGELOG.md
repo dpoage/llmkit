@@ -38,16 +38,24 @@ entry below is marked.
 - **Breaking:** the vendor adapters moved under
   `provider/internal/{anthropic,openai,google}`; `provider.New` is now the
   only construction path. `llmkit.APIError.Err` is exported.
-- sandbox: honest `Spec` — typed `NetworkMode`, per-backend refusals with
-  `UnsupportedSpecError`, one `Option` type for both container backends, and
-  `MaterializeWorkspace` on the `Sandbox` interface.
-- embed: `Config.Retry` is now `llmkit.RetryConfig`; unset retry knobs
-  resolve to 3 attempts with a 60 s per-attempt bound; the cache copies
-  vectors on read and exposes `Stats`/`Len`; `ErrEmptyVector` replaces the
-  silent zero vector.
-- agent: a tool panic becomes that call's `ERROR:`-prefixed result in both
-  dispatch modes; hook panics still propagate; `Outcome.FinalText` holds the
-  final completion's text.
+- **Breaking:** sandbox: honest `Spec` — typed `NetworkMode`, per-backend
+  refusals with `UnsupportedSpecError`, one `Option` type for both container
+  backends, and `MaterializeWorkspace` on the `Sandbox` interface. Compile
+  breaks: `NewCLI` takes options only (runtime and image moved to
+  `WithRuntime`/`WithImage`); `NewBwrap` takes `...Option`; `BwrapOption` and
+  the `WithBwrap*` family are deleted; `WithNetwork` takes a `NetworkMode`;
+  `Spec` lost `CPUs`, `MemoryMB`, and `IdleTimeout` (now backend options).
+- **Breaking:** embed: `Config.Retry` is now `llmkit.RetryConfig`; unset
+  retry knobs resolve to 3 attempts with a 60 s per-attempt bound; the cache
+  copies vectors on read and exposes `Stats`/`Len`; `ErrEmptyVector` replaces
+  the silent zero vector. Compile breaks: `Stats.Size` and `Config.Timeout`
+  are removed; `Config.Retry.Jitter` is literal — 0 means no jitter and
+  out-of-range values are rejected — instead of clamped.
+- **Breaking:** agent: a tool panic becomes that call's `ERROR:`-prefixed
+  result in both dispatch modes; hook panics still propagate;
+  `Outcome.FinalTextSet` is removed (non-empty `FinalText` is the signal).
+- **Breaking:** `llmkit.NewAPIError` is removed; construct `APIError`
+  literals directly. `fsroot.EvalExistingPrefixPath` is unexported.
 
 ### Fixed
 
@@ -75,6 +83,10 @@ entry below is marked.
   a typed mode with `AuthOAuthToken` refused on non-Anthropic types;
   `provider.ParseType` added; one `Spec.Capabilities` override replaces the
   wholesale pin; the usage `Recorder` lost its `Role` field.
+  `agent.ErrStopReason` is deleted (`StopReasonError` replaces it);
+  `Outcome.Truncated` is removed (`TruncationReason` covers it);
+  `provider.Spec.StructuredOutput` is removed (use the `Spec.Capabilities`
+  override).
 
 ## [0.2.0] - 2026-09-17
 
@@ -103,6 +115,8 @@ entry below is marked.
 - **Breaking:** agent bugbot residue removed (`ToolActivity`, health sinks,
   `Severity`); embed `LoadConfig` returns an error and reads the `LLMKIT_`
   environment prefix.
+- **Breaking:** `embed.NewCachedEmbedder` takes `(inner, maxSize)`; the
+  cache became bounded.
 
 ## [0.1.0] - 2026-09-17
 
