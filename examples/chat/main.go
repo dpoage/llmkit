@@ -5,7 +5,10 @@
 // path exercised. While a run is in flight the prompt changes to "steered>"
 // and a typed line becomes mid-run steering (agent.NewSteering +
 // agent.WithSteering): the turn joins the running conversation before the
-// next model call, or when the run would otherwise end. When the model stops
+// next model call, or when the run would otherwise end. A line typed as
+// the run finishes becomes the next task; lines that queue after a run's
+// final drain are reported as not delivered instead of being dropped. When
+// the model stops
 // for a refusal/safety reason (agent.StopReasonError) a canned reply is
 // printed and the refusal turn stays in the history: the attached
 // err.Outcome is threaded into the next run's agent.Continue so the
