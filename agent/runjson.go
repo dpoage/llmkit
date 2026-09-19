@@ -31,7 +31,9 @@ var ErrUnparseableOutput = errors.New("agent: model output did not parse as JSON
 // required/properties/items/enum/limit keywords, not merely unmarshaled),
 // RunJSON makes one repair round-trip: it sends the precise error back and
 // asks for valid JSON only. If the repair still fails, RunJSON returns an
-// error wrapping [ErrUnparseableOutput].
+// error wrapping [ErrUnparseableOutput]. A run already stopped by the token
+// budget or a budget pool skips the repair: it returns the error
+// immediately, and the Outcome keeps the budget TruncationReason.
 //
 // By default every call reseeds the conversation from scratch (task becomes
 // the sole seed message) — the right default for the single-shot callers that
