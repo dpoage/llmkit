@@ -16,7 +16,8 @@ go get github.com/dpoage/llmkit@latest
 ## Quick start
 
 The snippets assume an OpenAI-compatible endpoint, such as a local Ollama
-server. Export the variables before running:
+server. For Anthropic, OpenAI, or Google construction, see
+[providers](docs/providers.md). Export the variables before running:
 
 ```bash
 export LLMKIT_PROVIDER=openai-compatible
@@ -66,7 +67,7 @@ answer. This snippet reuses `client` from the previous section.
 
 ```go
 type weatherArgs struct {
-	City string `json:"city" jsonschema:"the city to look up"`
+	City string `json:"city" jsonschema:"description=the city to look up"`
 }
 
 weather := agent.Func("weather", "look up the current weather for a city",
@@ -103,7 +104,7 @@ resp, err := llmkit.Stream(ctx, client, req,
 | [`agent`](https://pkg.go.dev/github.com/dpoage/llmkit/agent) | The tool-calling loop: budgets, policies, hooks, steering, structured output, transcripts. | [agent loop](docs/agent-loop.md) |
 | [`sandbox`](https://pkg.go.dev/github.com/dpoage/llmkit/sandbox) | Isolated execution of untrusted commands: Bubblewrap, container CLIs, `HostExec`, `Mock`. | [sandbox](docs/sandbox.md) |
 | [`fsroot`](https://pkg.go.dev/github.com/dpoage/llmkit/fsroot) | Path containment for agent file tools. | [sandbox](docs/sandbox.md) |
-| [`embed`](https://pkg.go.dev/github.com/dpoage/llmkit/embed) | Embeddings: Ollama and OpenAI-compatible backends, batching, retry, LRU cache. | — |
+| [`embed`](https://pkg.go.dev/github.com/dpoage/llmkit/embed) | Embeddings: Ollama and OpenAI-compatible backends, batching, retry, least-recently-used (LRU) cache. | [reference](https://pkg.go.dev/github.com/dpoage/llmkit/embed) |
 
 ## Examples
 
@@ -112,7 +113,7 @@ Four runnable programs live under `examples/`:
 - `examples/basic` — one completion with content blocks and capability gating.
 - `examples/agent` — the agent loop with hooks, a tool policy, and optional parallel dispatch.
 - `examples/structured` — schema-constrained output with `RunJSONAs`.
-- `examples/chat` — a multi-turn REPL with mid-run steering.
+- `examples/chat` — a multi-turn read–eval–print loop (REPL) with mid-run steering.
 
 All four read `LLMKIT_PROVIDER`, `LLMKIT_MODEL`, and `LLMKIT_API_KEY`
 (`LLMKIT_BASE_URL` is required for `openai-compatible`, optional otherwise).

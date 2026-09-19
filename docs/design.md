@@ -11,9 +11,8 @@ is a tree rooted at the `llmkit` package, and nothing imports upward:
 
 ```mermaid
 flowchart TD
-    AGENT["agent"] --> PROV["provider"]
+    AGENT["agent"]
     PROV --> ADAPTERS["provider/internal (anthropic, openai, google)"]
-    PROV --> IA["internal/adapter"]
     ADAPTERS --> IA
     IA --> ROOT["llmkit (root vocabulary)"]
     ADAPTERS --> ROOT
@@ -97,8 +96,9 @@ adapter fabricates a context window; an unknown model reports `0`.
 
 The adapters drive `anthropic-sdk-go`, `openai-go`, and Google's `genai` SDK.
 
-- **What it buys:** wire formats, auth headers, and SSE parsing track the
-  vendors. llmkit normalizes at the edges and never re-implements a protocol.
+- **What it buys:** wire formats, auth headers, and server-sent events (SSE)
+  parsing track the vendors. llmkit normalizes at the edges and never
+  re-implements a protocol.
 - **What it costs:** dependency weight in `go.mod`, and a vendor SDK defect
   becomes our defect until the pin moves.
 
@@ -141,8 +141,9 @@ relative path stays inside a root. The packages share no code on purpose.
 ## embed stays dependency-light
 
 `embed` offers two HTTP backends, Ollama and OpenAI-compatible, with shared
-retry and a content-hash LRU cache. Local ONNX inference is deliberately
-excluded; it would drag the ONNX and GoMLX dependency trees.
+retry and a content-hash least-recently-used (LRU) cache. Local Open Neural
+Network Exchange (ONNX) inference is deliberately excluded; it would drag
+the ONNX and GoMLX dependency trees.
 
 - **What it buys:** a small dependency tree for the common case: call a
   serving endpoint, cache the vectors.
