@@ -19,7 +19,7 @@ import (
 // for tool-level problems (bad arguments, file not found); never use them to
 // signal that the loop should abort.
 //
-// A PANIC from Run is treated the same way, in BOTH dispatch modes
+// A panic from Run is treated the same way in both dispatch modes
 // (sequential and [WithParallelTools]): the harness recovers it and renders
 // it as that call's error result "ERROR: tool <name> panicked: <value>"
 // with IsError=true, [Hooks.ToolEnd] fires with that result, and the run
@@ -29,13 +29,14 @@ import (
 // opposite contract: it propagates out of [Runner.Run] and is never rendered
 // to the model — see [Hooks].)
 //
-// Run must honor ctx cancellation. Run MAY BE INVOKED CONCURRENTLY: within a
-// single run when the Runner was constructed with [WithParallelTools] (one
-// goroutine per tool call in a turn), and across simultaneous Run calls on
-// one Runner (a Runner is safe for concurrent Run calls). A Tool used under
-// either arrangement must be safe for concurrent calls — unsynchronized state
-// data-races rather than erroring, and races surface as silently wrong tool
-// results. See the [Runner] concurrency paragraph and [WithParallelTools].
+// Run must honor ctx cancellation. The harness may invoke Run concurrently:
+// within a single run when the Runner was constructed with
+// [WithParallelTools] (one goroutine per tool call in a turn), and across
+// simultaneous Run calls on one Runner (a Runner is safe for concurrent Run
+// calls). A Tool used under either arrangement must be safe for concurrent
+// calls — unsynchronized state data-races rather than erroring, and races
+// surface as silently wrong tool results. See the [Runner] concurrency
+// paragraph and [WithParallelTools].
 type Tool interface {
 	// Def returns the tool's declaration (name, description, JSON-schema
 	// parameters) as advertised to the model.

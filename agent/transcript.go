@@ -67,21 +67,18 @@ type Event struct {
 }
 
 // Transcript is the ordered record of a single [Runner.Run]. It stores full
-// content (not hashes) so the eval harness can replay it deterministically. A
-// Transcript is not safe for concurrent mutation, but a single Runner appends
-// to it sequentially.
+// content (not hashes) so offline evaluation can replay it deterministically.
+// A Transcript is not safe for concurrent mutation, but a single Runner
+// appends to it sequentially.
 //
-// Streaming: when enableStreaming is called, every record* call below also
-// appends the just-recorded event as one JSON line to a file, so an operator
-// can `tail -f` a stuck run's transcript instead of waiting for it to finish.
-// The file is opened lazily on the first recorded event (never for a run that
-// records nothing) and closed via closeStream at run end. Streaming is
-// best-effort: open/encode failures disable it for the rest of the
-// transcript — a broken disk never affects the run's result — and every
-// failure is reported through the callback passed to enableStreaming (the
-// Runner wires [Hooks.TranscriptError] there), so a silently-dropped line is
-// never the only trace. The Runner that owns a Transcript is single-goroutine
-// per run, so streamFile/streamEnc need no locking.
+// Streaming: the Runner arms streaming when [WithTranscriptDir] is set.
+// While streaming is armed, every recorded event is also appended as one
+// JSON line to the autosave file, so an operator can `tail -f` a stuck
+// run's transcript instead of waiting for the run to finish. The file opens
+// lazily on the first recorded event and closes at run end. Streaming is
+// best-effort: an open or encode failure disables it for the rest of the
+// transcript, a broken disk never affects the run's result, and every
+// failure is reported through [Hooks.TranscriptError].
 type Transcript struct {
 	Events []Event `json:"-"`
 	clock  func() time.Time
