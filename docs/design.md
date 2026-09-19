@@ -13,7 +13,7 @@ is a DAG rooted at the `llmkit` package, and nothing imports upward:
 flowchart TD
     AGENT["agent"]
     PROV["provider"] --> ADAPTERS["provider/internal (anthropic, openai, google)"]
-    ADAPTERS --> IA
+    ADAPTERS --> IA["internal/adapter"]
     IA --> ROOT["llmkit (root vocabulary)"]
     ADAPTERS --> ROOT
     PROV --> ROOT

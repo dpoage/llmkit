@@ -50,10 +50,13 @@ entry below is marked.
   copies vectors on read and exposes `Stats`/`Len`; `ErrEmptyVector` replaces
   the silent zero vector. Compile breaks: `Stats.Size` and `Config.Timeout`
   are removed; `Config.Retry.Jitter` is literal — 0 means no jitter and
-  out-of-range values are rejected — instead of clamped.
+  out-of-range values are rejected — instead of clamped. The package's own
+  `RetryConfig`, `DefaultRetryConfig`, and `DefaultEmbedTimeout` are deleted;
+  use `llmkit.RetryConfig`.
 - **Breaking:** agent: a tool panic becomes that call's `ERROR:`-prefixed
   result in both dispatch modes; hook panics still propagate;
-  `Outcome.FinalTextSet` is removed (non-empty `FinalText` is the signal).
+  `Outcome.FinalTextSet` is removed (non-empty `FinalText` is the signal);
+  `Limits.BudgetCheck` is removed (the `WithBudgetPool` option replaces it).
 - **Breaking:** `llmkit.NewAPIError` is removed; construct `APIError`
   literals directly. `fsroot.EvalExistingPrefixPath` is unexported.
 
@@ -82,7 +85,10 @@ entry below is marked.
 - **Breaking:** `provider.New` takes `(ctx, Spec, Options)`; `Spec.Auth` is
   a typed mode with `AuthOAuthToken` refused on non-Anthropic types;
   `provider.ParseType` added; one `Spec.Capabilities` override replaces the
-  wholesale pin; the usage `Recorder` lost its `Role` field.
+  wholesale pin; the usage `Recorder` lost its `Role` field. In the adapter
+  packages, `Options.Capabilities` was retyped from `*llmkit.Capabilities`
+  to `func(llmkit.Capabilities) llmkit.Capabilities`, and
+  `Options.StructuredOutput` was removed.
   `agent.ErrStopReason` is deleted (`StopReasonError` replaces it);
   `Outcome.Truncated` is removed (`TruncationReason` covers it);
   `provider.Spec.StructuredOutput` is removed (use the `Spec.Capabilities`
