@@ -45,7 +45,7 @@ func streamServer(t *testing.T, chunks ...map[string]any) string {
 		w.Header().Set("Content-Type", "text/event-stream")
 		for _, c := range chunks {
 			b, _ := json.Marshal(c)
-			fmt.Fprintf(w, "data: %s\n\n", b)
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", b)
 		}
 	})
 }
@@ -386,11 +386,11 @@ func TestStream_RateLimited(t *testing.T) {
 func TestStream_ErrorMidStream(t *testing.T) {
 	base := newServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, "data: "+mustJSON(t, textChunk("Hello"))+"\n\n")
+		_, _ = fmt.Fprint(w, "data: "+mustJSON(t, textChunk("Hello"))+"\n\n")
 		// In-band terminal error: a bare JSON object (no "data:" prefix) in
 		// Google's error shape, which the SDK parses into genai.APIError
 		// (api_client.go iterateResponseStream default branch).
-		fmt.Fprint(w, `{"error":{"code":500,"message":"generation failed","status":"INTERNAL"}}`+"\n\n")
+		_, _ = fmt.Fprint(w, `{"error":{"code":500,"message":"generation failed","status":"INTERNAL"}}`+"\n\n")
 	})
 	cl := newStreamClient(t, base)
 	resp, err := cl.Stream(context.Background(), simpleRequest(), func(llmkit.Delta) error { return nil })
@@ -431,7 +431,7 @@ func TestStream_ImplementsStreamingClient(t *testing.T) {
 func TestStream_ContextCanceledMidStream(t *testing.T) {
 	base := newServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, "data: "+mustJSON(t, textChunk("Hello"))+"\n\n")
+		_, _ = fmt.Fprint(w, "data: "+mustJSON(t, textChunk("Hello"))+"\n\n")
 		w.(http.Flusher).Flush()
 		<-r.Context().Done() // client goes away when the test cancels
 	})
@@ -494,7 +494,7 @@ func TestStream_ConnectionResetMidStream(t *testing.T) {
 			t.Errorf("hijack: %v", err)
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		// Hijacked conn: write the response head ourselves, then one SSE event.
 		head := "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
 		if _, err := conn.Write([]byte(head + "data: " + mustJSON(t, textChunk("Hello")) + "\n\n")); err != nil {

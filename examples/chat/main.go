@@ -194,9 +194,9 @@ func run() error {
 					return nil
 				}
 				l = strings.TrimSpace(l)
-				switch {
-				case l == "":
-				case l == "/think":
+				switch l {
+				case "":
+				case "/think":
 					toggleThink(think, thinkingSupported)
 				default:
 					// The run may have finished while the line was being
