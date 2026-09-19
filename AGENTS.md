@@ -151,10 +151,11 @@ localhost:11434); `go test -tags integration ./sandbox/` needs bwrap
 test auto-skips when its backend is missing, and CI runs the sandbox suite
 in the dedicated `sandbox-integration` job. The live suite also has its own
 workflow, `.github/workflows/live.yml` (workflow_dispatch, nightly schedule,
-and PRs touching provider/agent/examples/internal), driven by three repo
-secrets: `LLMKIT_LIVE_COMPAT_API_KEY`, `LLMKIT_LIVE_COMPAT_BASE_URL`,
-`LLMKIT_LIVE_COMPAT_MODEL`. Without the key the job prints
-`no live credentials — skipped` and exits 0.
+and pushes to `master` or `round/**` touching provider/agent/examples/internal
+— not pull_request, so a PR editing the workflow cannot read the key), driven
+by the repo secret `LLMKIT_LIVE_COMPAT_API_KEY` and the repo variables
+`LLMKIT_LIVE_COMPAT_BASE_URL`, `LLMKIT_LIVE_COMPAT_MODEL`. Without the key
+the job prints `no live credentials — skipped` and exits 0.
 
 `examples/` are runnable contract checks (also compiled by
 `go build ./...`): `go run ./examples/basic`, `go run ./examples/agent`,
