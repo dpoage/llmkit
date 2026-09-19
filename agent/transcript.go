@@ -67,9 +67,9 @@ type Event struct {
 }
 
 // Transcript is the ordered record of a single [Runner.Run]. It stores full
-// content (not hashes) so the eval harness can replay it deterministically. A
-// Transcript is not safe for concurrent mutation, but a single Runner appends
-// to it sequentially.
+// content (not hashes) so offline evaluation can replay it deterministically.
+// A Transcript is not safe for concurrent mutation, but a single Runner
+// appends to it sequentially.
 //
 // Streaming: the Runner arms streaming when [WithTranscriptDir] is set.
 // While streaming is armed, every recorded event is also appended as one

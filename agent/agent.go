@@ -17,13 +17,14 @@
 // same way, in both dispatch modes. Ordinary tool errors are data for the
 // model; a *ToolHealthError marks a failure as infrastructure, so it also
 // reaches [Hooks.ToolHealth]; a *StopReasonError ends the run, because the
-// model itself stopped for a provider error reason. Only infrastructure
-// failures (a failed [llmkit.Client.Complete], context cancellation) and
-// [StopReasonError] abort the loop. [Func] builds a Tool from a plain
-// function; the struct argument is the schema. Tools run one call at a time
-// by default; [WithParallelTools] runs a turn's calls concurrently, and
-// concurrent [Runner.Run] calls on one Runner are always allowed, so a Tool
-// must be safe for concurrent calls.
+// model itself stopped for a provider error reason. A tool error never
+// aborts the loop; a failed [llmkit.Client.Complete], a cancelled context,
+// a [RequestPolicy] error, or [StopReasonError] ends the run with a
+// non-nil error. [Func] builds a Tool from a plain function; the struct
+// argument is the schema. Tools run one call at a time by default;
+// [WithParallelTools] runs a turn's calls concurrently, and concurrent
+// [Runner.Run] calls on one Runner are always allowed, so a Tool must be
+// safe for concurrent calls.
 //
 // # Limits and outcomes
 //
@@ -77,16 +78,20 @@
 // delivers when the run would otherwise finish and continues the loop
 // instead. Undelivered turns stay queued when a limit stops the run;
 // [Steering.Pending] reports them, and [Continue] with the same handle
-// delivers them on the continued run. A refusal stop delivers nothing. A
-// second concurrent run on one handle fails with [ErrSteeringInUse].
+// delivers them on the continued run. A refusal stop skips the
+// would-be-finish drain, so queued turns stay pending; a steer queued
+// before the refusing completion delivers at the pre-completion boundary.
+// A second concurrent run on one handle fails with [ErrSteeringInUse].
 //
 // # Structured output
 //
 // [Runner.RunJSON] asks the model for a JSON answer that matches a schema,
 // deep-validates the answer, and unmarshals it into a caller pointer. On a
 // parse or schema violation it makes one repair round-trip before failing
-// with [ErrUnparseableOutput]. RunJSON reserves the last iteration for a
-// forced-finalization turn, so a capped run still emits its answer.
+// with [ErrUnparseableOutput]. A run already stopped by the token budget or
+// the budget pool skips the repair: it fails immediately, and the Outcome
+// keeps the budget TruncationReason. RunJSON reserves the last iteration
+// for a forced-finalization turn, so a capped run still emits its answer.
 // [RunJSONAs] derives the schema from a Go type with [SchemaOf] and returns
 // the decoded value, so the type the model must satisfy and the type that
 // decodes its answer cannot drift apart.
@@ -94,8 +99,10 @@
 // # Budgets
 //
 // [BudgetPool] ([WithBudgetPool]) shares one token budget across concurrent
-// Runner runs. The Runner checks the pool before every completion and
-// charges it after each success. An exhausted pool stops a run cleanly with
+// Runner runs. The Runner checks the pool once per loop turn and charges it
+// after every successful completion; continuation, finalization, and repair
+// completions are charged without a fresh check. An exhausted pool stops a
+// run cleanly with
 // [TruncBudgetPool]; [ErrBudgetExhausted] is the check failure. A nil pool
 // is the default and means unlimited.
 //
@@ -104,7 +111,7 @@
 // Every run records an ordered [Transcript] of events: requests, assistant
 // turns, tool results, and usage. Transcripts serialize to JSONL with
 // [Transcript.SaveJSONL], load back with [LoadJSONL], and replay offline
-// through [ReplayClient] — the building block for the eval harness.
+// through [ReplayClient] — the building block for offline evaluation.
 package agent
 
 import (

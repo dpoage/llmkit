@@ -53,8 +53,10 @@ type queuedTurn struct {
 // — [Steering.Pending] reports them, and [Continue] with the SAME Steering
 // delivers pending steers before the continued run's first completion and
 // pending follow-ups at its first would-be finish. A refusal stop
-// ([StopReasonError]) returns before any drain: queued turns stay pending
-// and the refusal is never papered over. At an empty turn the queued
+// ([StopReasonError]) returns before the would-be-finish drain: queued
+// turns stay pending and the refusal is never papered over. A steer already
+// queued delivers at the pre-completion boundary, before the refusing
+// completion. At an empty turn the queued
 // content replaces the synthetic nudge and does not consume a nudge
 // attempt (see [maxEmptyTurnNudges]).
 //
