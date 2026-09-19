@@ -6,8 +6,9 @@ import (
 	"time"
 )
 
-// RetryConfig tunes the shared retry wrapper. The zero value is not usable;
-// callers should start from DefaultRetryConfig.
+// RetryConfig tunes the shared retry wrapper. A zero MaxAttempts makes the
+// wrapper run no attempt and return a zero Response with a nil error, so the
+// zero value is not usable: start from [DefaultRetryConfig].
 type RetryConfig struct {
 	// MaxAttempts is the total number of attempts (initial try + retries). Must
 	// be >= 1.
