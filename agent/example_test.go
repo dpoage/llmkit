@@ -60,8 +60,8 @@ func ExampleNewRunner() {
 	// tool calls: 1
 }
 
-// addArgs is the schema for the ExampleFunc add tool.
-type addArgs struct {
+// exampleAddArgs is the schema for the ExampleFunc add tool.
+type exampleAddArgs struct {
 	A int `json:"a" jsonschema:"first addend"`
 	B int `json:"b" jsonschema:"second addend"`
 }
@@ -72,7 +72,7 @@ type addArgs struct {
 // the typed decoding.
 func ExampleFunc() {
 	tool := agent.Func("add", "add two integers",
-		func(_ context.Context, a addArgs) (string, error) {
+		func(_ context.Context, a exampleAddArgs) (string, error) {
 			return strconv.Itoa(a.A + a.B), nil
 		})
 
