@@ -144,7 +144,11 @@ func (a *anthropicAdapter) buildParams(req llmkit.Request) (anthropic.MessageNew
 	// feature is a silent drop rather than a server 400.
 	if req.Thinking != nil && a.caps.Thinking {
 		if req.Thinking.BudgetTokens <= 0 {
-			return anthropic.MessageNewParams{}, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: "anthropic", Message: "Thinking.BudgetTokens must be positive", Err: nil}
+			return anthropic.MessageNewParams{}, &llmkit.APIError{
+				Kind:     llmkit.ErrInvalidRequest,
+				Provider: "anthropic",
+				Message:  "Thinking.BudgetTokens must be positive",
+			}
 		}
 		params.Thinking = anthropic.ThinkingConfigParamUnion{
 			OfEnabled: &anthropic.ThinkingConfigEnabledParam{
@@ -208,7 +212,12 @@ func (a *anthropicAdapter) buildParams(req llmkit.Request) (anthropic.MessageNew
 		// the SDK would receive for a user tool.
 		properties, required, err := adapter.ParseToolParameters(req.ResponseSchema)
 		if err != nil {
-			return anthropic.MessageNewParams{}, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: "anthropic", Message: "ResponseSchema: invalid JSON", Err: err}
+			return anthropic.MessageNewParams{}, &llmkit.APIError{
+				Kind:     llmkit.ErrInvalidRequest,
+				Provider: "anthropic",
+				Message:  "ResponseSchema: invalid JSON",
+				Err:      err,
+			}
 		}
 		schema := anthropic.ToolInputSchemaParam{
 			Properties: properties,
@@ -239,13 +248,21 @@ func applyAnthropicToolChoice(params *anthropic.MessageNewParams, tc llmkit.Tool
 		params.ToolChoice = anthropic.ToolChoiceUnionParam{OfAny: &anthropic.ToolChoiceAnyParam{}}
 	case llmkit.ToolChoiceTool:
 		if tc.Name == "" {
-			return &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: "anthropic", Message: "ToolChoice.Mode=tool requires ToolChoice.Name", Err: nil}
+			return &llmkit.APIError{
+				Kind:     llmkit.ErrInvalidRequest,
+				Provider: "anthropic",
+				Message:  "ToolChoice.Mode=tool requires ToolChoice.Name",
+			}
 		}
 		params.ToolChoice = anthropic.ToolChoiceUnionParam{
 			OfTool: &anthropic.ToolChoiceToolParam{Name: tc.Name},
 		}
 	default:
-		return &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: "anthropic", Message: "unknown ToolChoice.Mode " + string(tc.Mode), Err: nil}
+		return &llmkit.APIError{
+			Kind:     llmkit.ErrInvalidRequest,
+			Provider: "anthropic",
+			Message:  "unknown ToolChoice.Mode " + string(tc.Mode),
+		}
 	}
 	return nil
 }
@@ -302,7 +319,12 @@ func markLastBlock(m *anthropic.MessageParam) bool {
 func toAnthropicTool(t llmkit.ToolDef) (*anthropic.ToolParam, error) {
 	properties, required, err := adapter.ParseToolParameters(t.Parameters)
 	if err != nil {
-		return nil, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: "anthropic", Message: "tool " + t.Name + ": invalid parameters JSON schema", Err: err}
+		return nil, &llmkit.APIError{
+			Kind:     llmkit.ErrInvalidRequest,
+			Provider: "anthropic",
+			Message:  "tool " + t.Name + ": invalid parameters JSON schema",
+			Err:      err,
+		}
 	}
 	schema := anthropic.ToolInputSchemaParam{
 		Properties: properties,
@@ -389,7 +411,11 @@ func toAnthropicMessages(msgs []llmkit.Message) ([]anthropic.MessageParam, error
 			pendingResults = append(pendingResults,
 				anthropic.NewToolResultBlock(m.ToolCallID, m.Text(), m.IsError))
 		default:
-			return nil, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: "anthropic", Message: "unknown message role " + string(m.Role), Err: nil}
+			return nil, &llmkit.APIError{
+				Kind:     llmkit.ErrInvalidRequest,
+				Provider: "anthropic",
+				Message:  "unknown message role " + string(m.Role),
+			}
 		}
 	}
 	flush()
@@ -426,7 +452,11 @@ func anthropicUserBlocks(m llmkit.Message) ([]anthropic.ContentBlockParamUnion, 
 				return nil, err
 			}
 			if len(b.Data) > 0 && b.MediaType != "application/pdf" {
-				return nil, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: "anthropic", Message: "document block: Anthropic base64 documents support application/pdf only", Err: nil}
+				return nil, &llmkit.APIError{
+					Kind:     llmkit.ErrInvalidRequest,
+					Provider: "anthropic",
+					Message:  "document block: Anthropic base64 documents support application/pdf only",
+				}
 			}
 			src := anthropic.DocumentBlockParamSourceUnion{}
 			if b.URL != "" {
@@ -478,7 +508,12 @@ func anthropicAssistantBlocks(m llmkit.Message) ([]anthropic.ContentBlockParamUn
 		var input any
 		if len(tc.Arguments) > 0 {
 			if err := json.Unmarshal(tc.Arguments, &input); err != nil {
-				return nil, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: "anthropic", Message: "assistant tool call " + tc.Name + ": invalid arguments JSON", Err: err}
+				return nil, &llmkit.APIError{
+					Kind:     llmkit.ErrInvalidRequest,
+					Provider: "anthropic",
+					Message:  "assistant tool call " + tc.Name + ": invalid arguments JSON",
+					Err:      err,
+				}
 			}
 		}
 		blocks = append(blocks, anthropic.ContentBlockParamUnion{
@@ -510,10 +545,19 @@ func anthropicThinkingBlock(b llmkit.Block) (anthropic.ContentBlockParamUnion, e
 	// the literal bytes "null" — treat both as missing, not as an empty
 	// payload to forward.
 	if len(b.Raw) == 0 || string(b.Raw) == "null" {
-		return anthropic.ContentBlockParamUnion{}, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: "anthropic", Message: "thinking block: Raw is empty; the verbatim provider payload is required", Err: nil}
+		return anthropic.ContentBlockParamUnion{}, &llmkit.APIError{
+			Kind:     llmkit.ErrInvalidRequest,
+			Provider: "anthropic",
+			Message:  "thinking block: Raw is empty; the verbatim provider payload is required",
+		}
 	}
 	if err := json.Unmarshal(b.Raw, &probe); err != nil {
-		return anthropic.ContentBlockParamUnion{}, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: "anthropic", Message: "thinking block: malformed Raw JSON", Err: err}
+		return anthropic.ContentBlockParamUnion{}, &llmkit.APIError{
+			Kind:     llmkit.ErrInvalidRequest,
+			Provider: "anthropic",
+			Message:  "thinking block: malformed Raw JSON",
+			Err:      err,
+		}
 	}
 	if probe.Type == "redacted_thinking" {
 		return anthropic.ContentBlockParamUnion{
@@ -603,7 +647,12 @@ func (a *anthropicAdapter) normalizeErr(err error) error {
 	}
 	// Transport/timeout error: leave status 0, mark as server-class so it is
 	// retried.
-	return &llmkit.APIError{Kind: llmkit.ErrServer, StatusCode: 0, RetryAfter: 0, Provider: "anthropic", Message: err.Error(), Err: err}
+	return &llmkit.APIError{
+		Kind:     llmkit.ErrServer,
+		Provider: "anthropic",
+		Message:  err.Error(),
+		Err:      err,
+	}
 }
 
 // Sources (vendor docs consulted for this table):

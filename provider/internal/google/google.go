@@ -64,7 +64,12 @@ func New(ctx context.Context, model string, opts Options) (llmkit.Client, error)
 	cc.HTTPClient = &wrapped
 	client, err := genai.NewClient(ctx, cc)
 	if err != nil {
-		return nil, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: "google", Message: "failed to construct genai client: " + err.Error(), Err: err}
+		return nil, &llmkit.APIError{
+			Kind:     llmkit.ErrInvalidRequest,
+			Provider: "google",
+			Message:  "failed to construct genai client: " + err.Error(),
+			Err:      err,
+		}
 	}
 	caps := adapter.ApplyOverride(googleCapabilities(model), opts.Capabilities)
 	return &googleAdapter{
@@ -147,7 +152,11 @@ func (g *googleAdapter) Complete(ctx context.Context, req llmkit.Request) (llmki
 		// genai carries seed as int32; reject out-of-range values instead of
 		// silently truncating to a different deterministic seed.
 		if *req.Seed < int64(math.MinInt32) || *req.Seed > int64(math.MaxInt32) {
-			return llmkit.Response{}, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: "google", Message: "Seed out of range for int32", Err: nil}
+			return llmkit.Response{}, &llmkit.APIError{
+				Kind:     llmkit.ErrInvalidRequest,
+				Provider: "google",
+				Message:  "Seed out of range for int32",
+			}
 		}
 		s := int32(*req.Seed)
 		cfg.Seed = &s
@@ -157,7 +166,11 @@ func (g *googleAdapter) Complete(ctx context.Context, req llmkit.Request) (llmki
 	// false feature is a silent drop rather than a server 400.
 	if req.Thinking != nil && g.caps.Thinking {
 		if req.Thinking.BudgetTokens <= 0 {
-			return llmkit.Response{}, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: "google", Message: "Thinking.BudgetTokens must be positive", Err: nil}
+			return llmkit.Response{}, &llmkit.APIError{
+				Kind:     llmkit.ErrInvalidRequest,
+				Provider: "google",
+				Message:  "Thinking.BudgetTokens must be positive",
+			}
 		}
 		// IncludeThoughts makes the model return thought-summary parts so
 		// reasoning is visible (and round-trippable) in Response.Blocks.
@@ -192,7 +205,12 @@ func (g *googleAdapter) Complete(ctx context.Context, req llmkit.Request) (llmki
 			if len(t.Parameters) > 0 {
 				var schema any
 				if err := json.Unmarshal(t.Parameters, &schema); err != nil {
-					return llmkit.Response{}, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: "google", Message: "tool " + t.Name + ": invalid parameters JSON schema", Err: err}
+					return llmkit.Response{}, &llmkit.APIError{
+						Kind:     llmkit.ErrInvalidRequest,
+						Provider: "google",
+						Message:  "tool " + t.Name + ": invalid parameters JSON schema",
+						Err:      err,
+					}
 				}
 				// ParametersJsonSchema accepts a raw JSON-schema object, avoiding a
 				// lossy conversion into genai's typed *Schema.
@@ -220,7 +238,12 @@ func (g *googleAdapter) Complete(ctx context.Context, req llmkit.Request) (llmki
 		}
 		schema, _, err := adapter.ParseResponseSchema(req.ResponseSchema, defaultName)
 		if err != nil {
-			return llmkit.Response{}, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: "google", Message: "ResponseSchema: invalid JSON", Err: err}
+			return llmkit.Response{}, &llmkit.APIError{
+				Kind:     llmkit.ErrInvalidRequest,
+				Provider: "google",
+				Message:  "ResponseSchema: invalid JSON",
+				Err:      err,
+			}
 		}
 		// ResponseJsonSchema accepts a raw JSON Schema object, mirroring
 		// ParametersJsonSchema — no lossy conversion to genai's typed *Schema.
@@ -249,12 +272,20 @@ func applyGoogleToolChoice(cfg *genai.GenerateContentConfig, tc llmkit.ToolChoic
 		fcc.Mode = genai.FunctionCallingConfigModeAny
 	case llmkit.ToolChoiceTool:
 		if tc.Name == "" {
-			return &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: "google", Message: "ToolChoice.Mode=tool requires ToolChoice.Name", Err: nil}
+			return &llmkit.APIError{
+				Kind:     llmkit.ErrInvalidRequest,
+				Provider: "google",
+				Message:  "ToolChoice.Mode=tool requires ToolChoice.Name",
+			}
 		}
 		fcc.Mode = genai.FunctionCallingConfigModeAny
 		fcc.AllowedFunctionNames = []string{tc.Name}
 	default:
-		return &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: "google", Message: "unknown ToolChoice.Mode " + string(tc.Mode), Err: nil}
+		return &llmkit.APIError{
+			Kind:     llmkit.ErrInvalidRequest,
+			Provider: "google",
+			Message:  "unknown ToolChoice.Mode " + string(tc.Mode),
+		}
 	}
 	cfg.ToolConfig = &genai.ToolConfig{FunctionCallingConfig: fcc}
 	return nil
@@ -340,7 +371,11 @@ func toGoogleContents(msgs []llmkit.Message) ([]*genai.Content, error) {
 				}},
 			})
 		default:
-			return nil, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: "google", Message: "unknown message role " + string(m.Role), Err: nil}
+			return nil, &llmkit.APIError{
+				Kind:     llmkit.ErrInvalidRequest,
+				Provider: "google",
+				Message:  "unknown message role " + string(m.Role),
+			}
 		}
 	}
 	return out, nil
@@ -411,7 +446,12 @@ func googleAssistantParts(m llmkit.Message) ([]*genai.Part, error) {
 			}
 			var p genai.Part
 			if err := json.Unmarshal(b.Raw, &p); err != nil {
-				return nil, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: "google", Message: "thinking block: malformed Raw JSON", Err: err}
+				return nil, &llmkit.APIError{
+					Kind:     llmkit.ErrInvalidRequest,
+					Provider: "google",
+					Message:  "thinking block: malformed Raw JSON",
+					Err:      err,
+				}
 			}
 			if p.FunctionCall != nil {
 				// Signature carrier, not a thought part.
@@ -427,7 +467,12 @@ func googleAssistantParts(m llmkit.Message) ([]*genai.Part, error) {
 		var args map[string]any
 		if len(tc.Arguments) > 0 {
 			if err := json.Unmarshal(tc.Arguments, &args); err != nil {
-				return nil, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: "google", Message: "assistant tool call " + tc.Name + ": invalid arguments JSON", Err: err}
+				return nil, &llmkit.APIError{
+					Kind:     llmkit.ErrInvalidRequest,
+					Provider: "google",
+					Message:  "assistant tool call " + tc.Name + ": invalid arguments JSON",
+					Err:      err,
+				}
 			}
 		}
 		part := &genai.Part{
