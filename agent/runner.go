@@ -770,7 +770,21 @@ func (r *Runner) complete(ctx context.Context, tr *Transcript, messages []llmkit
 	}
 	tr.recordRequest(step, req.Messages)
 
-	resp, err := r.client.Complete(ctx, req)
+	var resp llmkit.Response
+	var err error
+	if r.hooks.Delta != nil {
+		// Delta opts the turn into incremental delivery: llmkit.Stream uses
+		// the client's native stream when it implements StreamingClient and
+		// synthesizes deltas from the finished Response otherwise. The
+		// returned Response — and therefore everything below — is identical
+		// to the Complete path either way.
+		resp, err = llmkit.Stream(ctx, r.client, req, func(d llmkit.Delta) error {
+			r.hooks.Delta(ctx, step, d)
+			return nil
+		})
+	} else {
+		resp, err = r.client.Complete(ctx, req)
+	}
 	if r.hooks.AfterCompletion != nil {
 		var respPtr *llmkit.Response
 		if err == nil {
