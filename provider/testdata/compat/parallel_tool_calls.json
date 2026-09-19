@@ -1,0 +1,153 @@
+{
+  "case": "parallel_tool_calls",
+  "lane": "compat",
+  "model": "MiniMax-M3",
+  "capabilities": {
+    "ContextWindow": 0,
+    "ParallelToolCalls": true,
+    "PromptCaching": true,
+    "StructuredOutput": false,
+    "Thinking": false,
+    "ToolChoice": true,
+    "Images": true,
+    "Documents": true,
+    "StopSequences": true,
+    "TopP": true,
+    "TopK": false,
+    "Seed": true
+  },
+  "request_check": "strict",
+  "inputs": [
+    {
+      "System": "",
+      "Messages": [
+        {
+          "Role": "user",
+          "Content": [
+            {
+              "Kind": "text",
+              "Text": "Call BOTH the now tool and the add tool (a=41, b=58) in the SAME response, in parallel. Do not answer in words.",
+              "MediaType": "",
+              "Data": null,
+              "URL": "",
+              "Title": "",
+              "Provider": "",
+              "Raw": null
+            }
+          ],
+          "ToolCalls": null,
+          "ToolCallID": "",
+          "IsError": false
+        }
+      ],
+      "Tools": [
+        {
+          "Name": "now",
+          "Description": "Returns the current local date and time.",
+          "Parameters": {
+            "type": "object",
+            "properties": {}
+          }
+        },
+        {
+          "Name": "add",
+          "Description": "Adds two numbers.",
+          "Parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number"
+              },
+              "b": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "a",
+              "b"
+            ]
+          }
+        }
+      ],
+      "MaxTokens": 768,
+      "Temperature": null,
+      "Thinking": null,
+      "ToolChoice": {
+        "Mode": "",
+        "Name": ""
+      },
+      "StopSequences": null,
+      "TopP": null,
+      "TopK": null,
+      "Seed": null,
+      "ResponseSchema": null,
+      "ResponseSchemaName": ""
+    }
+  ],
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "headers": {
+          "accept": "application/json",
+          "content-type": "application/json",
+          "user-agent": "OpenAI/Go 3.43.0",
+          "x-stainless-arch": "x64",
+          "x-stainless-lang": "go",
+          "x-stainless-os": "Linux",
+          "x-stainless-package-version": "3.43.0",
+          "x-stainless-retry-count": "0",
+          "x-stainless-runtime": "go",
+          "x-stainless-runtime-version": "go1.27.1-X:nodwarf5"
+        },
+        "body": "{\"messages\":[{\"content\":\"Call BOTH the now tool and the add tool (a=41, b=58) in the SAME response, in parallel. Do not answer in words.\",\"role\":\"user\"}],\"model\":\"MiniMax-M3\",\"max_completion_tokens\":768,\"tools\":[{\"function\":{\"name\":\"now\",\"description\":\"Returns the current local date and time.\",\"parameters\":{\"properties\":{},\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"name\":\"add\",\"description\":\"Adds two numbers.\",\"parameters\":{\"properties\":{\"a\":{\"type\":\"number\"},\"b\":{\"type\":\"number\"}},\"required\":[\"a\",\"b\"],\"type\":\"object\"}},\"type\":\"function\"}]}"
+      },
+      "response": {
+        "headers": {
+          "access-control-allow-origin": "*",
+          "alb_receive_time": "1789780940.495",
+          "alb_request_id": "8d1e8959e6c86d9268a5b2cbf2c0dac054ebb111",
+          "cache-control": "max-age=0, no-cache, no-store",
+          "content-length": "1021",
+          "content-type": "application/json; charset=utf-8",
+          "date": "Sat, 19 Sep 2026 01:22:20 GMT",
+          "expires": "Sat, 19 Sep 2026 01:22:20 GMT",
+          "minimax-request-id": "ce8fab2e6ccde6857965bc3bd0000f30",
+          "pragma": "no-cache",
+          "trace-id": "06fd16cc742ca8b9071763b7f8bdd292",
+          "x-from": "ak",
+          "x-mm-request-id": "2022431855143301769_1789780940o0crje",
+          "x-session-id": "036c825b3ef069898a59237a6e39a023"
+        },
+        "body": "{\"id\":\"06fd16cc742ca8b9071763b7f8bdd292\",\"choices\":[{\"finish_reason\":\"tool_calls\",\"index\":0,\"message\":{\"content\":\"\u003cthink\u003e\\nThe user wants me to call both tools in the same response, in parallel. I should not add\\n\u003c/think\u003e\\n\\nany words, just make the tool calls.\",\"role\":\"assistant\",\"name\":\"MiniMax AI\",\"tool_calls\":[{\"id\":\"call_8eab4f6293603c9f\",\"type\":\"function\",\"function\":{\"name\":\"now\",\"arguments\":\"{}\"},\"index\":0},{\"id\":\"call_b0358762099b4b8a\",\"type\":\"function\",\"function\":{\"name\":\"add\",\"arguments\":\"{\\\"a\\\": 41, \\\"b\\\": 58}\"},\"index\":1}],\"audio_content\":\"\"}}],\"created\":1789780940,\"model\":\"MiniMax-M3\",\"object\":\"chat.completion\",\"usage\":{\"total_tokens\":555,\"total_characters\":0,\"prompt_tokens\":480,\"completion_tokens\":75,\"completion_tokens_details\":{\"reasoning_tokens\":22},\"prompt_tokens_details\":{\"cached_tokens\":384}},\"input_sensitive\":false,\"output_sensitive\":false,\"input_sensitive_type\":0,\"output_sensitive_type\":0,\"output_sensitive_int\":0,\"service_tier\":\"standard\",\"base_resp\":{\"status_code\":0,\"status_msg\":\"\"}}\n",
+        "status": 200
+      }
+    }
+  ],
+  "normalized": {
+    "text": "\u003cthink\u003e\nThe user wants me to call both tools in the same response, in parallel. I should not add\n\u003c/think\u003e\n\nany words, just make the tool calls.",
+    "tool_calls": [
+      {
+        "ID": "call_8eab4f6293603c9f",
+        "Name": "now",
+        "Arguments": {}
+      },
+      {
+        "ID": "call_b0358762099b4b8a",
+        "Name": "add",
+        "Arguments": {
+          "a": 41,
+          "b": 58
+        }
+      }
+    ],
+    "stop_reason": "tool_use",
+    "usage": {
+      "InputTokens": 480,
+      "OutputTokens": 75,
+      "CacheReadInputTokens": 384,
+      "CacheCreationInputTokens": 0
+    }
+  }
+}
