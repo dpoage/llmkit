@@ -1,0 +1,72 @@
+# Live acceptance suite: runs the `live`-tagged test binaries (provider
+# matrix, agent harness, example execution) against the REAL vendor through
+# the compat lane. Credentials come from three repo secrets — set exactly
+# these names:
+#
+#   LLMKIT_LIVE_COMPAT_API_KEY   MiniMax API key (from ~/.config/bugbot/env:
+#                                $MINIMAX_API_KEY)
+#   LLMKIT_LIVE_COMPAT_BASE_URL  https://api.minimax.io/v1
+#   LLMKIT_LIVE_COMPAT_MODEL     MiniMax-M3
+#
+# Without the API key the job prints "no live credentials — skipped" and
+# exits 0, so PRs from forks and secret-less repos stay green. Local
+# instructions and the verified capability set live in AGENTS.md
+# (Build & Test).
+#
+# The job runs the suite WITHOUT -update: the live matrix's assertions
+# against real responses ARE the vendor-drift gate, and -v logs the
+# LIVE_TOKENS spend line per package. Re-recording fixtures (-update) is a
+# deliberate LOCAL operation; the committed fixtures under
+# provider/testdata are the always-on hermetic adapter-regression guard via
+# provider/fixture_replay_test.go, which runs in CI without credentials.
+
+name: Live
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Nightly.
+    - cron: "17 3 * * *"
+  pull_request:
+    paths:
+      - "provider/**"
+      - "agent/**"
+      - "examples/**"
+      - "internal/**"
+      - "*.go"
+      - go.mod
+      - go.sum
+      - .github/workflows/live.yml
+
+permissions:
+  contents: read
+
+jobs:
+  live:
+    name: live acceptance (compat lane)
+    runs-on: ubuntu-latest
+    env:
+      LLMKIT_LIVE_COMPAT_API_KEY: ${{ secrets.LLMKIT_LIVE_COMPAT_API_KEY }}
+      LLMKIT_LIVE_COMPAT_BASE_URL: ${{ secrets.LLMKIT_LIVE_COMPAT_BASE_URL }}
+      LLMKIT_LIVE_COMPAT_MODEL: ${{ secrets.LLMKIT_LIVE_COMPAT_MODEL }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: check credentials
+        id: creds
+        run: |
+          if [ -z "$LLMKIT_LIVE_COMPAT_API_KEY" ]; then
+            echo "no live credentials — skipped"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: run live suite
+        if: steps.creds.outputs.available == 'true'
+        run: go test -tags live -count=1 -v ./provider/ ./agent/ ./examples/...

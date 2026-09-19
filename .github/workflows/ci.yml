@@ -27,10 +27,9 @@ jobs:
 
       - name: vet (tag-gated packages)
         run: |
-          go vet -tags live ./provider/
+          go vet -tags live ./provider/ ./agent/ ./examples/...
           go vet -tags integration ./embed/
           go vet -tags integration ./sandbox/
-
       - name: gofmt
         # Docs (CLAUDE.md / AGENTS.md Build & Test) promise a clean gofmt
         # tree; CI enforces it so the doc stays true.

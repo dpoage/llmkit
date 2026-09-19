@@ -1,0 +1,112 @@
+{
+  "case": "stop_sequences",
+  "lane": "compat",
+  "model": "MiniMax-M3",
+  "capabilities": {
+    "ContextWindow": 0,
+    "ParallelToolCalls": false,
+    "PromptCaching": false,
+    "StructuredOutput": false,
+    "Thinking": false,
+    "ToolChoice": true,
+    "Images": true,
+    "Documents": true,
+    "StopSequences": true,
+    "TopP": true,
+    "TopK": false,
+    "Seed": true
+  },
+  "request_check": "strict",
+  "inputs": [
+    {
+      "System": "",
+      "Messages": [
+        {
+          "Role": "user",
+          "Content": [
+            {
+              "Kind": "text",
+              "Text": "Write the word BANANA. On a new line write exactly XQ-END-77. On a new line after that write the word CHERRY.",
+              "MediaType": "",
+              "Data": null,
+              "URL": "",
+              "Title": "",
+              "Provider": "",
+              "Raw": null
+            }
+          ],
+          "ToolCalls": null,
+          "ToolCallID": "",
+          "IsError": false
+        }
+      ],
+      "Tools": null,
+      "MaxTokens": 768,
+      "Temperature": null,
+      "Thinking": null,
+      "ToolChoice": {
+        "Mode": "",
+        "Name": ""
+      },
+      "StopSequences": [
+        "XQ-END-77"
+      ],
+      "TopP": null,
+      "TopK": null,
+      "Seed": null,
+      "ResponseSchema": null,
+      "ResponseSchemaName": ""
+    }
+  ],
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "headers": {
+          "accept": "application/json",
+          "content-type": "application/json",
+          "user-agent": "OpenAI/Go 3.43.0",
+          "x-stainless-arch": "x64",
+          "x-stainless-lang": "go",
+          "x-stainless-os": "Linux",
+          "x-stainless-package-version": "3.43.0",
+          "x-stainless-retry-count": "0",
+          "x-stainless-runtime": "go",
+          "x-stainless-runtime-version": "go1.27.1-X:nodwarf5"
+        },
+        "body": "{\"messages\":[{\"content\":\"Write the word BANANA. On a new line write exactly XQ-END-77. On a new line after that write the word CHERRY.\",\"role\":\"user\"}],\"model\":\"MiniMax-M3\",\"max_completion_tokens\":768,\"stop\":[\"XQ-END-77\"]}"
+      },
+      "response": {
+        "headers": {
+          "access-control-allow-origin": "*",
+          "alb_receive_time": "1789780929.952",
+          "alb_request_id": "e7c4419d71d999e2b3b952a33e6a9b420831c81a",
+          "cache-control": "max-age=0, no-cache, no-store",
+          "content-length": "817",
+          "content-type": "application/json; charset=utf-8",
+          "date": "Sat, 19 Sep 2026 01:22:10 GMT",
+          "expires": "Sat, 19 Sep 2026 01:22:10 GMT",
+          "minimax-request-id": "1e59c0253c7f528cb3eb04d847186ae7",
+          "pragma": "no-cache",
+          "trace-id": "06fd16c1e4a9655fe2666aa8b76fd821",
+          "x-from": "ak",
+          "x-mm-request-id": "2022431855143301769_17897809308dyu3u",
+          "x-session-id": "058d456219c99aa157f19d34a307a2c0"
+        },
+        "body": "{\"id\":\"06fd16c1e4a9655fe2666aa8b76fd821\",\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"\u003cthink\u003e\\nThe user is asking me to write some text. This is a straightforward request with no ethical issues. Let me write exactly what they askedfor.\\n\u003c/think\u003e\\n\\nBANANA\\nXQ-END-77\\nCHERRY\",\"role\":\"assistant\",\"name\":\"MiniMax AI\",\"audio_content\":\"\"}}],\"created\":1789780929,\"model\":\"MiniMax-M3\",\"object\":\"chat.completion\",\"usage\":{\"total_tokens\":250,\"total_characters\":0,\"prompt_tokens\":207,\"completion_tokens\":43,\"completion_tokens_details\":{\"reasoning_tokens\":29},\"prompt_tokens_details\":{\"cached_tokens\":206}},\"input_sensitive\":false,\"output_sensitive\":false,\"input_sensitive_type\":0,\"output_sensitive_type\":0,\"output_sensitive_int\":0,\"service_tier\":\"standard\",\"base_resp\":{\"status_code\":0,\"status_msg\":\"\"}}\n",
+        "status": 200
+      }
+    }
+  ],
+  "normalized": {
+    "text": "\u003cthink\u003e\nThe user is asking me to write some text. This is a straightforward request with no ethical issues. Let me write exactly what they askedfor.\n\u003c/think\u003e\n\nBANANA\nXQ-END-77\nCHERRY",
+    "stop_reason": "end_turn",
+    "usage": {
+      "InputTokens": 207,
+      "OutputTokens": 43,
+      "CacheReadInputTokens": 206,
+      "CacheCreationInputTokens": 0
+    }
+  }
+}
