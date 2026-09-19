@@ -31,9 +31,45 @@ type Fixture struct {
 	Lane         string              `json:"lane"`
 	Model        string              `json:"model"`
 	Capabilities llmkit.Capabilities `json:"capabilities"`
-	Inputs       []llmkit.Request    `json:"inputs"`
-	Exchanges    []Exchange          `json:"exchanges"`
-	Normalized   Normalized          `json:"normalized"`
+	// RequestCheck declares the replay's request-side mode:
+	//
+	//   - RequestCheckStrict: the replay asserts the adapter's outgoing
+	//     request (method, path, body compared as parsed JSON; headers
+	//     excluded) equals the recorded request, AND the normalized
+	//     response matches.
+	//   - RequestCheckResponseOnly: multi-turn fixtures whose later requests
+	//     echo model-generated ids (tool-call ids, thinking signatures)
+	//     compare response normalization only.
+	//
+	// The recorder sets strict for single-exchange cases. A fixture without
+	// the field (legacy) replays as strict when it holds exactly one
+	// exchange, response_only otherwise.
+	RequestCheck string           `json:"request_check,omitempty"`
+	Inputs       []llmkit.Request `json:"inputs"`
+	Exchanges    []Exchange       `json:"exchanges"`
+	Normalized   Normalized       `json:"normalized"`
+}
+
+// Replay request-side modes; see Fixture.RequestCheck.
+const (
+	RequestCheckStrict       = "strict"
+	RequestCheckResponseOnly = "response_only"
+)
+
+// RequestCheckMode resolves a fixture's effective request-side mode,
+// deriving the pre-request_check legacy default from the exchange count.
+func (f *Fixture) RequestCheckMode() string {
+	switch f.RequestCheck {
+	case RequestCheckStrict, RequestCheckResponseOnly:
+		return f.RequestCheck
+	case "":
+		if len(f.Exchanges) == 1 {
+			return RequestCheckStrict
+		}
+		return RequestCheckResponseOnly
+	default:
+		return "unknown:" + f.RequestCheck
+	}
 }
 
 // Normalized is the recorded outcome of a case's final completion: the
@@ -99,6 +135,15 @@ func WriteFixture(t testing.TB, path string, f *Fixture, secret string) {
 }
 
 func writeFixture(path string, f *Fixture, secret string) error {
+	// The recorder rule: single-exchange fixtures carry the full request
+	// side; multi-exchange fixtures default to response-only unless the
+	// caller set the mode explicitly.
+	if f.RequestCheck == "" {
+		f.RequestCheck = RequestCheckStrict
+		if len(f.Exchanges) != 1 {
+			f.RequestCheck = RequestCheckResponseOnly
+		}
+	}
 	b, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal fixture: %w", err)

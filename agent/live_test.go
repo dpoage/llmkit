@@ -17,8 +17,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	llmkit "github.com/dpoage/llmkit"
@@ -58,14 +61,59 @@ func TestLiveAgentFuncToolLoop(t *testing.T) {
 		func(_ context.Context, p addArgs) (string, error) {
 			return fmt.Sprintf("%g", p.A+p.B), nil
 		})
-	runner := agent.NewRunner(cl, []agent.Tool{now, add},
-		"You are a helpful assistant. Use the provided tools whenever they would help answer.",
-		agent.WithMaxTokens(2048))
 
-	out, err := runner.Run(ctx, "Use the now tool AND the add tool (a=41, b=58). Then report the time and the sum in one sentence.")
-	if err != nil {
-		t.Fatalf("run: %v", err)
+	// toolCalls records which tools the run actually invoked, so the retry
+	// below can tell a compliant run from a noncompliant one.
+	var mu sync.Mutex
+	toolCalls := map[string]int{}
+	hooks := agent.Hooks{
+		ToolStart: func(_ context.Context, ev agent.ToolEvent) {
+			mu.Lock()
+			defer mu.Unlock()
+			toolCalls[ev.Call.Name]++
+		},
 	}
+	opts := []agent.Option{
+		agent.WithHooks(hooks),
+		agent.WithMaxTokens(2048),
+	}
+	system := "You are a helpful assistant. You MUST call both the `now` tool and the `add` tool before answering. Never claim a tool is missing: both `now` and `add` are provided."
+	task := "You MUST call both the `now` tool and the `add` tool. Call `now` for the current time and `add` with a=41 and b=58. After both tools have been called, report the time and the sum in one sentence."
+
+	// Live models occasionally ignore one of the two mandatory tools.
+	// A noncompliant run (fewer than 2 distinct tools invoked) gets at most
+	// two additional attempts; a compliant run's assertions are strict.
+	var out *agent.Outcome
+	var err error
+	for attempt := 1; attempt <= 3; attempt++ {
+		mu.Lock()
+		clear(toolCalls)
+		mu.Unlock()
+		runner := agent.NewRunner(cl, []agent.Tool{now, add}, system, opts...)
+		out, err = runner.Run(ctx, task)
+		if err != nil {
+			t.Fatalf("run (attempt %d): %v", attempt, err)
+		}
+		mu.Lock()
+		distinct := len(toolCalls)
+		called := slices.Sorted(maps.Keys(toolCalls))
+		mu.Unlock()
+		if distinct >= 2 {
+			break
+		}
+		if attempt == 3 {
+			t.Fatalf("after 3 attempts the model still did not call both tools (called %v)", called)
+		}
+		t.Logf("attempt %d: only %v called; retrying with a fresh run", attempt, called)
+	}
+
+	// Both mandatory tools must appear in the transcript...
+	mu.Lock()
+	defer mu.Unlock()
+	if toolCalls["now"] == 0 || toolCalls["add"] == 0 {
+		t.Fatalf("transcript missing a mandatory tool call: %v", toolCalls)
+	}
+	// ...and the final answer must carry both tool-reported facts.
 	if !out.FinalTextSet {
 		t.Fatalf("no final text; outcome=%+v", out)
 	}

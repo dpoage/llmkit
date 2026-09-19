@@ -14,6 +14,7 @@
 package examples_test
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -24,6 +25,9 @@ import (
 func TestMain(m *testing.M) {
 	code := m.Run()
 	livetest.DefaultTally().PrintSummary()
+	// The example binaries are separate processes: their vendor spend is
+	// visible in their own output, not in this binary's tally.
+	fmt.Println("LIVE_TOKENS note=child-process spend not tallied")
 	os.Exit(code)
 }
 

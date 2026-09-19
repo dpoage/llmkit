@@ -615,6 +615,11 @@ func caseStopSequences(t *testing.T, lc *liveClient) {
 	if err != nil {
 		t.Fatalf("complete: %v", err)
 	}
+	// Record the exchange BEFORE the skip below: the single-exchange
+	// fixture is strict-mode, so deleting the stop serialization from an
+	// adapter makes hermetic replay fail on the request side even though
+	// this vendor never honors the parameter.
+	lc.finish(resp, err)
 	if strings.Contains(resp.Text, tail) {
 		// The stop sequence is SERVER-enforced: if the guard string and
 		// anything after it are both in the output, the endpoint ignored
@@ -627,7 +632,6 @@ func caseStopSequences(t *testing.T, lc *liveClient) {
 	if resp.StopReason != llmkit.StopEndTurn {
 		t.Fatalf("stop reason = %q, want %q", resp.StopReason, llmkit.StopEndTurn)
 	}
-	lc.finish(resp, err)
 }
 
 func caseTopP(t *testing.T, lc *liveClient) {

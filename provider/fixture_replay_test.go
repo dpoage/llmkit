@@ -65,9 +65,16 @@ func replayFixture(t *testing.T, f *livetest.Fixture) {
 		t.Fatal("fixture records no exchanges")
 	}
 
-	// Pretty-printed fixtures re-indent embedded RawMessage bytes (tool
-	// arguments, schemas); compact them back so the re-issued wire bodies
-	// match the recorded ones.
+	// Two-sided replay per the fixture's declared mode: strict fixtures
+	// (single exchange) gate the REQUEST side — method, path, and body as
+	// parsed JSON, headers excluded — so deleting a serialization path
+	// (e.g. the stop parameter) fails here, not just at run time.
+	// response_only fixtures (multi-turn; later requests echo
+	// model-generated ids) compare response normalization only.
+	mode := f.RequestCheckMode()
+	if mode != livetest.RequestCheckStrict && mode != livetest.RequestCheckResponseOnly {
+		t.Fatalf("fixture declares unknown request_check mode %q", mode)
+	}
 	livetest.NormalizeFixture(f)
 	var mu sync.Mutex
 	served := 0
@@ -83,22 +90,29 @@ func replayFixture(t *testing.T, f *livetest.Fixture) {
 			return
 		}
 		ex := f.Exchanges[i]
-		if !sameEndpoint(r.URL.Path, ex.Request.Path) {
-			t.Errorf("replay step %d: request path %q, fixture recorded %q", i+1, r.URL.Path, ex.Request.Path)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Errorf("replay step %d: read request body: %v", i+1, err)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		if !sameJSON(body, []byte(ex.Request.Body)) {
-			t.Errorf("replay step %d: re-issued request body drifted from the recorded wire request\nrecorded: %s\nre-issued: %s",
-				i+1, ex.Request.Body, body)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
+		if mode == livetest.RequestCheckStrict {
+			if ex.Request.Method != "" && r.Method != ex.Request.Method {
+				t.Errorf("replay step %d: request method %q, fixture recorded %q", i+1, r.Method, ex.Request.Method)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			if !sameEndpoint(r.URL.Path, ex.Request.Path) {
+				t.Errorf("replay step %d: request path %q, fixture recorded %q", i+1, r.URL.Path, ex.Request.Path)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("replay step %d: read request body: %v", i+1, err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			if !sameJSON(body, []byte(ex.Request.Body)) {
+				t.Errorf("replay step %d: re-issued request body drifted from the recorded wire request\nrecorded: %s\nre-issued: %s",
+					i+1, ex.Request.Body, body)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
 		}
 
 		for k, v := range ex.Response.Headers {
@@ -162,9 +176,27 @@ func replayFixture(t *testing.T, f *livetest.Fixture) {
 	if resp.Usage != n.Usage {
 		t.Errorf("replay usage drifted: recorded %+v, re-issued %+v", n.Usage, resp.Usage)
 	}
-	if !reflect.DeepEqual(resp.ToolCalls, n.ToolCalls) {
+	if !sameToolCalls(resp.ToolCalls, n.ToolCalls) {
 		t.Errorf("replay tool calls drifted:\nrecorded: %+v\nre-issued: %+v", n.ToolCalls, resp.ToolCalls)
 	}
+}
+
+// sameToolCalls compares tool calls with Arguments as parsed JSON: the
+// arguments are a JSON value the adapter carries through verbatim, so the
+// vendor's formatting (whitespace, key order) is not adapter behavior.
+func sameToolCalls(got, want []llmkit.ToolCall) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i].ID != want[i].ID || got[i].Name != want[i].Name {
+			return false
+		}
+		if !sameJSON(got[i].Arguments, want[i].Arguments) {
+			return false
+		}
+	}
+	return true
 }
 
 // sameEndpoint compares request paths. The replay host has no vendor base
