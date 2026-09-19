@@ -14,9 +14,8 @@ import (
 // returns genai.APIError (Code/Message/Status only — no *http.Response, no
 // Unwrap); when the error body parses as a Google error object WITHOUT a
 // "code" field, the SDK reports Code=0 and drops the transport response
-// entirely, which used to classify every such failure as non-retryable
-// ErrInvalidRequest. The status the wrapping transport recorded must take
-// over. The HTML-body case is the other half of the same contract: a body
+// entirely. The status the wrapping transport recorded must take over.
+// The HTML-body case is the other half of the same contract: a body
 // that is not Google error JSON at all makes the SDK fill Code from the
 // transport status itself.
 func TestNormalizeErr_ClassifiesFromTransportStatus(t *testing.T) {

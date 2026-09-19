@@ -1,15 +1,13 @@
 // Command chat demonstrates multi-turn conversation through the llmkit/agent
 // harness: a stdin REPL where each line becomes the next task via
 // agent.Runner.Run with agent.Continue(prev), so the model keeps every
-// earlier turn of the session instead of re-orienting from scratch. One
-// trivial tool (now) keeps the tool-calling path exercised. When the model
-// stops for a refusal/safety reason (agent.StopReasonError) a canned reply is
-// printed and the refusal turn stays in the history: the attached
-// err.Outcome is threaded into the next run's agent.Continue so the
-// conversation continues from it. It doubles as a compile-time contract check
-// for agent.Continue and Outcome.Messages threading. A /think command
-// toggles extended thinking via an agent.RequestPolicy when the model
-// reports thinking support.
+// earlier turn of the session. One trivial tool (now) keeps the tool-calling
+// path exercised. When the model stops for a refusal/safety reason
+// (agent.StopReasonError) a canned reply is printed and the refusal turn
+// stays in the history: the attached err.Outcome is threaded into the next
+// run's agent.Continue so the conversation continues from it. A /think
+// command toggles extended thinking via an agent.RequestPolicy when the
+// model reports thinking support.
 //
 // Usage:
 //
@@ -54,18 +52,13 @@ func run() error {
 		return fmt.Errorf("build client: %w", err)
 	}
 
-	// now takes no arguments (struct{}); agent.Func derives its parameter
-	// schema and replaces the hand-written ToolDef + Run pair.
 	now := agent.Func[struct{}]("now", "returns the current local date and time",
 		func(_ context.Context, _ struct{}) (string, error) {
 			return time.Now().Format(time.RFC3339), nil
 		})
 
 	// A RequestPolicy shapes every outgoing completion request just before
-	// the wire call. The /think command flips this one's atomic flag; while
-	// on, it stamps extended thinking onto each request. Gated on the
-	// client's Thinking capability — without it the toggle reports and
-	// stays off.
+	// the wire call. The /think command flips this one's atomic flag.
 	think := &thinkPolicy{}
 	thinkingSupported := client.Capabilities().Thinking
 	if !thinkingSupported {
@@ -81,7 +74,7 @@ func run() error {
 	for {
 		fmt.Print("you> ")
 		if !sc.Scan() {
-			break // EOF: exit cleanly
+			break
 		}
 		line := strings.TrimSpace(sc.Text())
 		if line == "" {
@@ -104,7 +97,7 @@ func run() error {
 		var stopErr *agent.StopReasonError
 		if errors.As(err, &stopErr) {
 			fmt.Printf("assistant> (the model declined: %s)\n", stopErr.StopReason)
-			prev = stopErr.Outcome // keep the refusal turn in the history
+			prev = stopErr.Outcome
 			continue
 		}
 		if err != nil {

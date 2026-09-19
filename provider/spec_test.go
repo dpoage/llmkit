@@ -326,7 +326,7 @@ func (t *hostCapturingTransport) observed() *url.URL {
 // than only being caught by reading source.
 // Retry is capped at one attempt: the transport always fails the round
 // trip, and the shared retry wrapper would otherwise spend several
-// seconds backing off a failure this test induces on purpose.
+// seconds backing off this induced failure.
 func TestNew_VendorHosts(t *testing.T) {
 	for _, name := range []string{"ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "GOOGLE_GEMINI_BASE_URL"} {
 		if old, had := os.LookupEnv(name); had {

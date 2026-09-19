@@ -104,8 +104,7 @@ func idlePollInterval(idleTimeout time.Duration) time.Duration {
 // breach overshoot the ceiling by tens of GB under the SHIPPED DEFAULT
 // (a 120s idle window -> idlePollInterval = 30s; a host writing at
 // ~2 GB/s overshoots the default 2 GiB ceiling by ~4-60 GiB inside one
-// window before the tick that would have caught it — oracle-measured
-// 72x-1024x overshoot in review). 1s is a DELIBERATE, hardcoded constant —
+// window before the tick that would have caught it). 1s is a DELIBERATE, hardcoded constant —
 // not idlePollInterval(0)'s [1s,30s]-clamped floor, which is an ACCIDENT of
 // a disabled idle window, not a chosen cadence for this knob. It is tight
 // enough to bound worst-case overshoot at multi-GB/s NVMe throughput to a
@@ -158,10 +157,9 @@ type watchdogLimits struct {
 	growthCeilingBytes int64
 }
 
-// watchdogArgs bundles every input watchIdle needs. Introduced (alongside
-// effectivePollInterval and checkGrowthCeiling) when an oracle review
-// required a growth-ceiling baseline shared between the tick loop AND
-// Exec's post-run check (see checkGrowthCeiling's doc) — bundling avoids
+// watchdogArgs bundles every input watchIdle needs. The shared
+// growth-ceiling baseline lives here so the tick loop AND Exec's post-run
+// check see the same value (see checkGrowthCeiling's doc) — bundling avoids
 // the parameter list growing without bound as future kill conditions are
 // added.
 type watchdogArgs struct {

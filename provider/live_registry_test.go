@@ -7,8 +7,8 @@ package provider_test
 // llmkit.Capabilities field (Gate) or unconditional. The case BODIES live in
 // the `live`-tagged live_test.go (liveCaseBodies); the tagged runner enforces
 // descriptor↔body parity in both directions. This file — and the reflection
-// test below — have no build tag, so a capability cannot be added (or a case
-// silently deleted) without the hermetic suite failing.
+// test below — have no build tag, so the hermetic suite fails whenever a
+// capability is added or a case is deleted without a paired update.
 
 import (
 	"reflect"

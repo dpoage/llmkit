@@ -526,16 +526,9 @@ func mustStrings(t *testing.T, v any) []string {
 	return out
 }
 
-// BenchmarkFuncTool_Run measures funcTool.Run's steady-state cost (schema
-// derived once by Func, then reused across every call). shp.10's fourth nit:
-// funcTool's doc claimed the schema was "derived once at construction", but
-// before caching a parsed [parsedSchema] node alongside the marshaled bytes,
-// validateSchema re-unmarshaled the schema JSON on every single call — only
-// the marshal (SchemaOf) was actually amortized. Run `go test -run ^$
-// -bench BenchmarkFuncTool_Run -benchmem ./agent/` and compare allocs/op
-// against a build that reverts funcTool.Run to call validateSchema(t.schema,
-// args) (re-parsing every time) to see the schema-unmarshal allocations
-// disappear from the steady-state path.
+// BenchmarkFuncTool_Run measures funcTool.Run's steady-state cost. The schema
+// is parsed once into a [parsedSchema] at Func construction, then reused on
+// every call — only the per-call args body is parsed.
 func BenchmarkFuncTool_Run(b *testing.B) {
 	tool := Func[addArgs]("add", "adds two numbers", func(_ context.Context, a addArgs) (string, error) {
 		return "", nil

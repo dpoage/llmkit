@@ -35,7 +35,6 @@ type CachedEmbedder struct {
 	misses int64
 }
 
-// lruEntry is the value stored in each list element.
 type lruEntry struct {
 	key string
 	emb []float32

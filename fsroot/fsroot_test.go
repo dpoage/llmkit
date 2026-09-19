@@ -92,12 +92,10 @@ func TestFSRoot_SymlinkEscape(t *testing.T) {
 	outside := t.TempDir()
 	mustWrite(t, filepath.Join(outside, "secret.txt"), "top secret\n")
 
-	// A symlink inside the root pointing at a file outside it.
 	link := filepath.Join(root, "escape")
 	if err := os.Symlink(filepath.Join(outside, "secret.txt"), link); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
-	// A symlink inside the root pointing at a directory outside it.
 	dirLink := filepath.Join(root, "outdir")
 	if err := os.Symlink(outside, dirLink); err != nil {
 		t.Fatalf("symlink dir: %v", err)
@@ -124,8 +122,6 @@ func TestEvalExistingPrefixPath_ExistingPrefixMissingTail(t *testing.T) {
 	root := t.TempDir()
 	mustMkdir(t, filepath.Join(root, "a", "b"))
 
-	// Only root/a/b exists; the tail (c/d.txt) does not. The longest existing
-	// prefix must resolve and the tail must be re-appended unchanged.
 	got, err := evalExistingPrefixPath(filepath.Join(root, "a", "b", "c", "d.txt"))
 	if err != nil {
 		t.Fatalf("evalExistingPrefixPath: %v", err)
@@ -170,9 +166,6 @@ func TestEvalExistingPrefixPath_SymlinkedPrefix(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 
-	// The symlinked directory exists, so it is resolved even though the final
-	// component does not — this is what lets callers catch a symlinked
-	// intermediate directory that escapes a containment root.
 	got, err := evalExistingPrefixPath(filepath.Join(link, "missing.txt"))
 	if err != nil {
 		t.Fatalf("evalExistingPrefixPath: %v", err)
@@ -197,7 +190,6 @@ func TestFSRoot_SiblingSymlinkBackIntoRoot(t *testing.T) {
 		t.Skip("symlink semantics differ on windows")
 	}
 	root := fixtureTree(t)
-	// Sibling of the root, pointing back at a directory inside it.
 	sibling := filepath.Join(filepath.Dir(root), "backlink")
 	if err := os.Symlink(filepath.Join(root, "pkg"), sibling); err != nil {
 		t.Fatalf("symlink: %v", err)
@@ -208,14 +200,11 @@ func TestFSRoot_SiblingSymlinkBackIntoRoot(t *testing.T) {
 		t.Fatalf("NewFSRoot: %v", err)
 	}
 
-	// The literal path climbs out of the root even though its
-	// symlink-resolved form lands back inside it. It must be rejected.
 	_, err = fr.Resolve("../backlink/util.go")
 	if !errors.Is(err, ErrPathEscape) {
 		t.Fatalf("resolve(../backlink/util.go) error = %v, want ErrPathEscape", err)
 	}
 
-	// The in-root route to the same target stays allowed.
 	if _, err := fr.Resolve("pkg/util.go"); err != nil {
 		t.Errorf("resolve(pkg/util.go): %v", err)
 	}

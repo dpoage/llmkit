@@ -2,13 +2,11 @@ package sandbox
 
 // toolchain.go implements host toolchain provisioning: resolving named
 // toolchains (or explicit host directories) into read-only bind mounts, a
-// PATH prefix, and provenance fingerprints. This generalizes the existing
-// ROMount mechanism (previously used only for dependency-cache mounts) to
-// host-installed TOOLCHAINS
-// (node, python, cargo, ...) so a sandbox image that lacks a toolchain can
-// still run it: the host demonstrably has every toolchain it needs to
-// build/test its own targets daily, and mounting it read-only exposes that
-// without granting the untrusted run write access or network egress.
+// PATH prefix, and provenance fingerprints, so a sandbox image that lacks a
+// toolchain (node, python, cargo, ...) can still run it: the host demonstrably
+// has every toolchain it needs to build/test its own targets daily, and
+// mounting it read-only exposes that without granting the untrusted run
+// write access or network egress.
 //
 // # Security posture
 //

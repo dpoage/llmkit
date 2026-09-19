@@ -72,10 +72,10 @@ type Limits struct {
 	// HistoryTokenBudget enables threshold-triggered history compaction. When the
 	// estimated size of the growing message history (bytes/4 over message content
 	// and tool-call arguments) exceeds this many tokens, the Runner compacts ONCE:
-	// it replaces the Content of tool-result messages older than the most recent
-	// few turns with short stubs, preserving the task message, every assistant
-	// turn (the reasoning chain), and tool_call/tool_result ID pairing. The
-	// threshold then re-arms at a higher level so compaction fires at most a few
+	// tool-result content older than the most recent few turns is replaced with
+	// short stubs, preserving the task message, every assistant turn (the
+	// reasoning chain), and tool_call/tool_result ID pairing. The threshold
+	// then re-arms at a higher level so compaction fires at most a few
 	// bounded times per run.
 	//
 	// Compaction trades cost against the provider's prompt cache: each firing

@@ -13,10 +13,6 @@ import (
 	"time"
 )
 
-// =============================================================================
-// Ollama Embedder Tests
-// =============================================================================
-
 func TestOllamaEmbedder_Embed(t *testing.T) {
 	want := []float64{0.1, 0.2, 0.3, 0.4}
 
@@ -71,7 +67,6 @@ func TestOllamaEmbedder_Embed(t *testing.T) {
 		}
 	}
 
-	// Dimensions should be auto-detected.
 	if emb.Dimensions() != len(want) {
 		t.Errorf("Dimensions() = %d, want %d", emb.Dimensions(), len(want))
 	}
@@ -232,10 +227,6 @@ func TestOllamaEmbedder_ConfiguredDimensions(t *testing.T) {
 	}
 }
 
-// =============================================================================
-// OpenAI-Compatible Embedder Tests
-// =============================================================================
-
 func TestOpenAIEmbedder_Embed(t *testing.T) {
 	want := []float64{0.5, 0.6, 0.7}
 
@@ -344,7 +335,6 @@ func TestOpenAIEmbedder_EmbedBatch(t *testing.T) {
 func TestOpenAIEmbedder_EmbedBatch_UnorderedResponse(t *testing.T) {
 	// The OpenAI API does not guarantee ordering by index.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Return indices in reverse order.
 		resp := openaiResponse{
 			Model: "model",
 			Data: []openaiEmbedding{
@@ -371,7 +361,6 @@ func TestOpenAIEmbedder_EmbedBatch_UnorderedResponse(t *testing.T) {
 		t.Fatalf("EmbedBatch: %v", err)
 	}
 
-	// Verify order matches input, not response order.
 	if math.Abs(float64(results[0][0])-0.1) > 1e-6 {
 		t.Errorf("results[0][0] = %f, want 0.1", results[0][0])
 	}
@@ -470,7 +459,6 @@ func TestOpenAIEmbedder_NoAuthHeader_WithoutAPIKey(t *testing.T) {
 		Embedder: "openai-compatible",
 		Model:    "model",
 		URL:      srv.URL,
-		// No APIKey set.
 	})
 	if err != nil {
 		t.Fatalf("NewOpenAICompatibleEmbedder: %v", err)
@@ -486,10 +474,6 @@ func TestOpenAIEmbedder_NoAuthHeader_WithoutAPIKey(t *testing.T) {
 	}
 }
 
-// =============================================================================
-// Cache Tests
-// =============================================================================
-
 func TestCachedEmbedder_Embed(t *testing.T) {
 	var callCount atomic.Int32
 	inner := &fakeEmbedder{
@@ -503,7 +487,6 @@ func TestCachedEmbedder_Embed(t *testing.T) {
 
 	cached := NewCachedEmbedder(inner, 0)
 
-	// First call should hit the inner embedder.
 	result1, err := cached.Embed(context.Background(), "hello")
 	if err != nil {
 		t.Fatalf("first Embed: %v", err)
@@ -515,7 +498,6 @@ func TestCachedEmbedder_Embed(t *testing.T) {
 		t.Errorf("expected 3 dims, got %d", len(result1))
 	}
 
-	// Second call with same text should be cached.
 	result2, err := cached.Embed(context.Background(), "hello")
 	if err != nil {
 		t.Fatalf("second Embed: %v", err)
@@ -527,7 +509,6 @@ func TestCachedEmbedder_Embed(t *testing.T) {
 		t.Errorf("expected 3 dims, got %d", len(result2))
 	}
 
-	// Different text should hit the inner embedder.
 	_, err = cached.Embed(context.Background(), "world")
 	if err != nil {
 		t.Fatalf("third Embed: %v", err)
@@ -558,7 +539,6 @@ func TestCachedEmbedder_EmbedBatch(t *testing.T) {
 
 	cached := NewCachedEmbedder(inner, 0)
 
-	// First batch call.
 	results1, err := cached.EmbedBatch(context.Background(), []string{"a", "b", "c"})
 	if err != nil {
 		t.Fatalf("first EmbedBatch: %v", err)
@@ -570,7 +550,6 @@ func TestCachedEmbedder_EmbedBatch(t *testing.T) {
 		t.Fatalf("expected 3 results, got %d", len(results1))
 	}
 
-	// Second batch with partial overlap: "a" cached, "d" new.
 	results2, err := cached.EmbedBatch(context.Background(), []string{"a", "d"})
 	if err != nil {
 		t.Fatalf("second EmbedBatch: %v", err)
@@ -582,7 +561,6 @@ func TestCachedEmbedder_EmbedBatch(t *testing.T) {
 		t.Fatalf("expected 2 results, got %d", len(results2))
 	}
 
-	// Fully cached batch.
 	_, err = cached.EmbedBatch(context.Background(), []string{"a", "b"})
 	if err != nil {
 		t.Fatalf("third EmbedBatch: %v", err)
@@ -638,10 +616,6 @@ func TestCachedEmbedder_DelegatesMethods(t *testing.T) {
 		t.Errorf("ModelName() = %q, want %q", cached.ModelName(), "nomic-embed-text")
 	}
 }
-
-// =============================================================================
-// Factory Tests
-// =============================================================================
 
 func TestNewEmbedder_Ollama(t *testing.T) {
 	emb, err := NewEmbedder(Config{
@@ -706,15 +680,10 @@ func TestNewEmbedder_WithCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEmbedder(ollama+cache): %v", err)
 	}
-	// Verify it's wrapped in a CachedEmbedder.
 	if _, ok := emb.(*CachedEmbedder); !ok {
 		t.Errorf("expected *CachedEmbedder, got %T", emb)
 	}
 }
-
-// =============================================================================
-// Config Tests
-// =============================================================================
 
 func TestConfig_Validate(t *testing.T) {
 	tests := []struct {
@@ -770,7 +739,6 @@ func TestConfig_Validate(t *testing.T) {
 }
 
 func TestLoadConfig_Defaults(t *testing.T) {
-	// Ensure no test env vars are set.
 	cfg, err := LoadConfig("LLMKIT_TEST_UNSET")
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
@@ -831,7 +799,7 @@ func TestLoadConfig_PrefixIsCaseInsensitive(t *testing.T) {
 	t.Setenv("LLMKIT_EMBED_MODEL", "nomic-embed-text")
 	t.Setenv("LLMKIT_EMBED_URL", "http://localhost:11434")
 
-	cfg, err := LoadConfig("llmkit") // lowercase prefix should work
+	cfg, err := LoadConfig("llmkit")
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
@@ -840,10 +808,6 @@ func TestLoadConfig_PrefixIsCaseInsensitive(t *testing.T) {
 		t.Errorf("Embedder = %q, want ollama", cfg.Embedder)
 	}
 }
-
-// =============================================================================
-// Test Helpers
-// =============================================================================
 
 // fakeEmbedder is a test double that records calls and returns configured results.
 type fakeEmbedder struct {

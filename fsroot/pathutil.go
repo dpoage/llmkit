@@ -9,8 +9,7 @@ import "path/filepath"
 // the root. Keeping one copy ensures any hardening applied to this walk is
 // the one containment check relies on.
 func evalExistingPrefixPath(p string) (string, error) {
-	// Walk from the full path up toward the filesystem root, finding the longest
-	// prefix that EvalSymlinks can resolve.
+	// Walk upward for the longest prefix EvalSymlinks can resolve.
 	tail := ""
 	cur := p
 	for {

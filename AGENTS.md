@@ -365,10 +365,10 @@ in its message.
 - **Transcript format**: `Block` fields marshal snake_case with
   `omitempty` on every zero field (`Kind` is always present), so a text
   block serializes as exactly `{"kind":"text","text":"…"}` and a nil `Raw`
-  never emits `"raw":null`. The tags landed in this round; transcripts
-  recorded before them are not supported — their image and document blocks
-  decode with an empty MediaType (the pre-tag key was the Go field name)
-  and are refused pre-wire. Re-record them.
+  never emits `"raw":null`. Transcripts recorded before these tags existed
+  are not supported: their image and document blocks decode with an empty
+  MediaType (the old key was the Go field name) and are refused pre-wire.
+  Re-record them.
 - **Hooks are synchronous**: every `agent.Hooks` callback runs inline on
   the goroutine that reaches the fire point — a slow hook stalls the run.
   `ToolEvent.Step`, `CompactionEvent.Step`, and the transcript's
