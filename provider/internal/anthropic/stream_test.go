@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -75,7 +76,7 @@ func streamReasoningEvents() []sseEvent {
 		{"content_block_start", `{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`},
 		{"content_block_delta", `{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"The answer is 4."}}`},
 		{"content_block_stop", `{"type":"content_block_stop","index":1}`},
-		{"message_delta", `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":42,"input_tokens":11,"cache_creation_input_tokens":3,"cache_read_input_tokens":4}}`},
+		{"message_delta", `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":42}}`},
 		{"message_stop", `{"type":"message_stop"}`},
 	}
 }
@@ -103,7 +104,7 @@ func streamToolEvents() []sseEvent {
 		{"content_block_delta", `{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"tz\":\"UTC\"}"}}`},
 		{"content_block_delta", `{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":""}}`},
 		{"content_block_stop", `{"type":"content_block_stop","index":2}`},
-		{"message_delta", `{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":30,"input_tokens":9}}`},
+		{"message_delta", `{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":30}}`},
 		{"message_stop", `{"type":"message_stop"}`},
 	}
 }
@@ -128,7 +129,7 @@ func structuredOutputEvents() []sseEvent {
 		{"content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"answer\":"}}`},
 		{"content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"42\"}"}}`},
 		{"content_block_stop", `{"type":"content_block_stop","index":0}`},
-		{"message_delta", `{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":5,"input_tokens":7}}`},
+		{"message_delta", `{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":5}}`},
 		{"message_stop", `{"type":"message_stop"}`},
 	}
 }
@@ -350,25 +351,29 @@ func TestAnthropicStreamNilFn(t *testing.T) {
 
 // stripRaw returns resp with every Block.Raw cleared: the only field the
 // Complete and Stream paths cannot share byte-for-byte (see
-// TestAnthropicStreamMatchesComplete).
+// TestAnthropicStreamMatchesComplete). Blocks is cloned so the caller's
+// responses keep their Raw for the decoded-payload assertion.
 func stripRaw(resp llmkit.Response) llmkit.Response {
+	resp.Blocks = slices.Clone(resp.Blocks)
 	for i := range resp.Blocks {
 		resp.Blocks[i].Raw = nil
 	}
 	return resp
 }
 
-// assertThinkingRawDecodedEqual proves the stream path's thinking Raw still
-// decodes to the verbatim thinking text and signature that
+// assertThinkingRawDecodedEqual proves the stream path's thinking Raws still
+// decode to the verbatim thinking text and signatures that
 // anthropicThinkingBlock re-emits on the next request — the property Raw
-// exists to guarantee.
+// exists to guarantee. EVERY thinking block on both sides is compared, so a
+// corrupted streamed signature fails here even though no other field shows it.
 func assertThinkingRawDecodedEqual(t *testing.T, complete, stream llmkit.Response) {
 	t.Helper()
 	type thinkingRaw struct {
 		Thinking  string `json:"thinking"`
 		Signature string `json:"signature"`
 	}
-	decoded := func(resp llmkit.Response) (thinkingRaw, bool) {
+	decoded := func(resp llmkit.Response) []thinkingRaw {
+		var out []thinkingRaw
 		for _, b := range resp.Blocks {
 			if b.Kind != llmkit.BlockThinking || len(b.Raw) == 0 {
 				continue
@@ -377,17 +382,14 @@ func assertThinkingRawDecodedEqual(t *testing.T, complete, stream llmkit.Respons
 			if err := json.Unmarshal(b.Raw, &tr); err != nil {
 				t.Fatalf("decoding thinking Raw: %v", err)
 			}
-			return tr, true
+			out = append(out, tr)
 		}
-		return thinkingRaw{}, false
+		return out
 	}
-	cRaw, cOK := decoded(complete)
-	sRaw, sOK := decoded(stream)
-	if cOK != sOK {
-		t.Fatalf("thinking block presence mismatch: complete=%v stream=%v", cOK, sOK)
-	}
-	if cOK && cRaw != sRaw {
-		t.Errorf("thinking Raw payload diverged:\ncomplete: %#v\nstream:   %#v", cRaw, sRaw)
+	cRaw := decoded(complete)
+	sRaw := decoded(stream)
+	if !reflect.DeepEqual(cRaw, sRaw) {
+		t.Errorf("thinking Raw payloads diverged:\ncomplete: %#v\nstream:   %#v", cRaw, sRaw)
 	}
 }
 
@@ -407,7 +409,7 @@ func TestAnthropicStreamFnErrorCancels(t *testing.T) {
 		// can unblock this handler before the fallback timer fires.
 		select {
 		case <-r.Context().Done():
-		case <-time.After(5 * time.Second):
+		case <-time.After(1 * time.Second):
 		}
 		close(handlerDone)
 	})
@@ -482,26 +484,133 @@ func TestAnthropicStreamErrorEvent(t *testing.T) {
 	}
 }
 
-// TestAnthropicStreamProtocolViolation routes Accumulate failures through
-// the adapter's error normalization: a delta for a block that never started
-// is a server-class error, not a panic.
+// TestAnthropicStreamTruncated pins the partial-stream clause: a connection
+// that closes cleanly before message_stop is an error, never a partial
+// success — Complete fails on the equivalent truncated body, and a caller
+// must never receive half-finished tool arguments as a Response.
+func TestAnthropicStreamTruncated(t *testing.T) {
+	tests := []struct {
+		name   string
+		events []sseEvent
+	}{
+		{
+			name: "mid_block",
+			events: []sseEvent{
+				{"message_start", `{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-test","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}`},
+				{"content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`},
+				{"content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"par"}}`},
+			},
+		},
+		{
+			name: "after_content_block_stop",
+			events: []sseEvent{
+				{"message_start", `{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-test","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}`},
+				{"content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`},
+				{"content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"all of it"}}`},
+				{"content_block_stop", `{"type":"content_block_stop","index":0}`},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := newServer(t, sseHandler(tt.events))
+			ad := newStreamAdapter(t, base)
+
+			resp, err := ad.Stream(t.Context(), simpleRequest(), func(d llmkit.Delta) error { return nil })
+			var apiErr *llmkit.APIError
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("err = %v, want *llmkit.APIError", err)
+			}
+			if apiErr.Kind != llmkit.ErrServer {
+				t.Errorf("Kind = %v, want ErrServer", apiErr.Kind)
+			}
+			if !strings.Contains(err.Error(), "message_stop") {
+				t.Errorf("err = %v, want a message_stop mention", err)
+			}
+			if !reflect.DeepEqual(resp, llmkit.Response{}) {
+				t.Errorf("resp = %#v, want zero Response", resp)
+			}
+		})
+	}
+}
+
+// TestAnthropicStreamProtocolViolation routes wire-sequence violations
+// through the adapter's error normalization — both the out-of-order index
+// the SDK's Accumulate rejects and an input_json_delta aimed at a started
+// non-input block (a text block), which Accumulate tolerates silently.
 func TestAnthropicStreamProtocolViolation(t *testing.T) {
+	tests := []struct {
+		name   string
+		events []sseEvent
+	}{
+		{
+			name: "delta_for_never_started_block",
+			events: []sseEvent{
+				{"message_start", `{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-test","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}`},
+				{"content_block_delta", `{"type":"content_block_delta","index":4,"delta":{"type":"text_delta","text":"orphan"}}`},
+			},
+		},
+		{
+			name: "input_json_delta_for_text_block",
+			events: []sseEvent{
+				{"message_start", `{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-test","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}`},
+				{"content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`},
+				{"content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"x\":1}"}}`},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := newServer(t, sseHandler(tt.events))
+			ad := newStreamAdapter(t, base)
+
+			resp, err := ad.Stream(t.Context(), simpleRequest(), func(d llmkit.Delta) error { return nil })
+			var apiErr *llmkit.APIError
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("err = %v, want *llmkit.APIError", err)
+			}
+			if apiErr.Kind != llmkit.ErrServer {
+				t.Errorf("Kind = %v, want ErrServer", apiErr.Kind)
+			}
+			if !reflect.DeepEqual(resp, llmkit.Response{}) {
+				t.Errorf("resp = %#v, want zero Response", resp)
+			}
+		})
+	}
+}
+
+// TestAnthropicStreamServerToolDropped pins parity with Complete for
+// server-side tools: the vendor streams web_search-style calls as
+// input_json_delta fragments too, but toResponse drops that block, so no
+// fragment is surfaced and the final Response carries no tool call.
+func TestAnthropicStreamServerToolDropped(t *testing.T) {
 	events := []sseEvent{
-		{"message_start", `{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-test","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}`},
-		{"content_block_delta", `{"type":"content_block_delta","index":4,"delta":{"type":"text_delta","text":"orphan"}}`},
+		{"message_start", `{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-test","content":[],"usage":{"input_tokens":5,"output_tokens":0}}}`},
+		{"content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{}}}`},
+		{"content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\": \"weather\"}"}}`},
+		{"content_block_stop", `{"type":"content_block_stop","index":0}`},
+		{"content_block_start", `{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`},
+		{"content_block_delta", `{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Sunny."}}`},
+		{"content_block_stop", `{"type":"content_block_stop","index":1}`},
+		{"message_delta", `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":12}}`},
+		{"message_stop", `{"type":"message_stop"}`},
 	}
 	base := newServer(t, sseHandler(events))
 	ad := newStreamAdapter(t, base)
 
-	resp, err := ad.Stream(t.Context(), simpleRequest(), func(d llmkit.Delta) error { return nil })
-	var apiErr *llmkit.APIError
-	if !errors.As(err, &apiErr) {
-		t.Fatalf("err = %v, want *llmkit.APIError", err)
+	var got []llmkit.Delta
+	resp, err := ad.Stream(t.Context(), simpleRequest(), func(d llmkit.Delta) error {
+		got = append(got, d)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
 	}
-	if apiErr.Kind != llmkit.ErrServer {
-		t.Errorf("Kind = %v, want ErrServer", apiErr.Kind)
+	want := []llmkit.Delta{{Kind: llmkit.DeltaText, Text: "Sunny."}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("deltas = %#v, want only the text fragment (server tool dropped)", got)
 	}
-	if !reflect.DeepEqual(resp, llmkit.Response{}) {
-		t.Errorf("resp = %#v, want zero Response", resp)
+	if len(resp.ToolCalls) != 0 {
+		t.Errorf("ToolCalls = %#v, want none", resp.ToolCalls)
 	}
 }
