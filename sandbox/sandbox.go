@@ -210,10 +210,13 @@ type Spec struct {
 	// ecosystems use: e.g. a pytest run asked to emit
 	// `--junitxml=report.xml` writes machine-readable results to a file
 	// rather than (only) stdout, and the caller needs that file's bytes,
-	// not just the exit code. Each path is validated with the same rule as
-	// WriteFiles keys (no escaping the workspace); a path the command never
-	// wrote is silently absent from Result.Captured rather than failing the
-	// run.
+	// not just the exit code. The container backends pre-validate each
+	// path with the same lexical rule as WriteFiles keys (no escaping the
+	// workspace) before spending a run. HostExec skips that pre-check and
+	// relies on the hardened read-back, which resolves symlinks and
+	// silently omits any path that escapes the workspace. A path the
+	// command never wrote is silently absent from Result.Captured rather
+	// than failing the run.
 	CaptureFiles []string
 }
 
