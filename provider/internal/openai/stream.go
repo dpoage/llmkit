@@ -3,6 +3,7 @@ package openai
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/dpoage/llmkit"
@@ -72,12 +73,39 @@ func (o *openaiAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(
 	if err := stream.Err(); err != nil {
 		return llmkit.Response{}, o.normalizeErr(err)
 	}
+	// A clean stream end without a finish_reason is a truncated generation:
+	// Complete over the same wire would fail, and returning the partial text
+	// or tool arguments would mask that as success.
+	if len(acc.Choices) == 0 || acc.Choices[0].FinishReason == "" {
+		return llmkit.Response{}, o.normalizeErr(errors.New("stream ended before finish_reason"))
+	}
+	compactGhostToolCalls(&acc.ChatCompletion)
 	return o.toResponse(&acc.ChatCompletion), nil
 }
 
-// deltas maps one choice's delta onto the llmkit fragments it carries.
-// Empty text and reasoning fragments emit nothing, mirroring the
-// synthesized path in llmkit.Stream, which never emits empty fragments.
+// compactGhostToolCalls drops never-populated entries the accumulator leaves
+// when the wire's tool-call indices are non-contiguous: it places each
+// fragment by the raw vendor index, so a gap becomes a zero entry. Such an
+// entry is not a call — no fragment ever carried it an ID, name, or
+// arguments — and dropping it keeps Response.ToolCalls aligned with the
+// renumbered Delta.Index positions.
+func compactGhostToolCalls(cc *openai.ChatCompletion) {
+	if len(cc.Choices) == 0 {
+		return
+	}
+	tcs := cc.Choices[0].Message.ToolCalls
+	kept := tcs[:0]
+	for _, tc := range tcs {
+		if tc.ID == "" && tc.Function.Name == "" && tc.Function.Arguments == "" {
+			continue
+		}
+		kept = append(kept, tc)
+	}
+	cc.Choices[0].Message.ToolCalls = kept
+}
+
+// deltas maps one choice's delta onto the llmkit fragments it carries;
+// empty text and reasoning fragments emit nothing.
 func deltas(d openai.ChatCompletionChunkChoiceDelta, calls *toolCallTracker) []llmkit.Delta {
 	var out []llmkit.Delta
 	// reasoning_content is not a typed SDK field: compatible endpoints send
@@ -127,12 +155,14 @@ func (t *toolCallTracker) delta(tc openai.ChatCompletionChunkChoiceDeltaToolCall
 		p = len(t.pos)
 		t.pos[tc.Index] = p
 	}
+	// IDs travel whole on the wire (never fragmented), so the latest wins;
+	// names may fragment across chunks, so they concatenate exactly like the
+	// accumulator does — every fragment then repeats the same accumulated
+	// name the final Response carries.
 	if tc.ID != "" {
 		t.ids[p] = tc.ID
 	}
-	if tc.Function.Name != "" {
-		t.names[p] = tc.Function.Name
-	}
+	t.names[p] += tc.Function.Name
 	return llmkit.Delta{
 		Kind:      llmkit.DeltaToolCall,
 		Index:     p,
