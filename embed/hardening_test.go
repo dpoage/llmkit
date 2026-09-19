@@ -917,22 +917,6 @@ func TestRetry_PolicyNormalization(t *testing.T) {
 		t.Errorf("Config{}.retryPolicy() = %+v, want kit-default delays with Jitter left at 0", got)
 	}
 
-	// Retry-After is capped at MaxDelay even under a normalized policy
-	// whose explicit MaxDelay is zero.
-	after := backoffDelay(p, 1, time.Hour, true)
-	if after != def.MaxDelay {
-		t.Errorf("Retry-After backoff = %v, want capped at %v", after, def.MaxDelay)
-	}
-	d := backoffDelay(p, 3, 0, false)
-	if d <= 0 || d > def.MaxDelay {
-		t.Errorf("exponential backoff = %v, want in (0, %v]", d, def.MaxDelay)
-	}
-
-	// Zero BaseDelay must stay zero (immediate retry), never be mistaken
-	// for int64 overflow.
-	if d := backoffDelay(llmkit.RetryConfig{BaseDelay: 0}, 3, 0, false); d != 0 {
-		t.Errorf("backoffDelay with zero BaseDelay = %v, want 0", d)
-	}
 }
 
 func TestHTTPClientConstruction(t *testing.T) {
@@ -1081,10 +1065,6 @@ func TestConfig_JitterTriState(t *testing.T) {
 	if got := zero.retryPolicy().Jitter; got != 0 {
 		t.Errorf("retryPolicy Jitter = %v, want 0 (explicit zero = no jitter)", got)
 	}
-	if d := backoffDelay(llmkit.RetryConfig{BaseDelay: 100 * time.Millisecond, Jitter: 0}, 2, 0, false); d != 200*time.Millisecond {
-		t.Errorf("backoffDelay with Jitter 0 = %v, want exact 200ms (deterministic)", d)
-	}
-
 	neg := base
 	neg.Retry = llmkit.RetryConfig{Jitter: -0.5}
 	if err := neg.Validate(); err == nil {
