@@ -138,6 +138,8 @@ type Outcome struct {
 	// finalization turn, or the RunJSON repair completion, whichever ran
 	// last. Empty when that completion produced no text; never text from an
 	// earlier turn. Callers can present it as the run's answer verbatim.
+	// On a run that ended in [StopReasonError], it holds the refusing
+	// turn's text (refusal prose) — never present it as the answer.
 	// After a RunJSON repair, it is the repair completion's text (see
 	// [Runner.RunJSON]).
 	FinalText string

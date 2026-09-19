@@ -505,14 +505,22 @@ type Capabilities struct {
 	// adapter reads it — document blocks are passed through to providers
 	// that accept them.
 	Documents bool
-	// Dropped silently when false: Request.StopSequences is omitted from the
-	// wire.
+	// Dropped silently when false: adapters whose profile reports false
+	// never serialize Request.StopSequences. The field reports the
+	// adapter's own mapping — it is not a gate a caller-pinned profile can
+	// use to disable a supported feature.
 	StopSequences bool
-	// Dropped silently when false: Request.TopP is omitted from the wire.
+	// Dropped silently when false: adapters whose profile reports false
+	// never serialize Request.TopP (same adapter-mapping semantics as
+	// [Capabilities.StopSequences]).
 	TopP bool
-	// Dropped silently when false: Request.TopK is omitted from the wire.
+	// Dropped silently when false: adapters whose profile reports false
+	// never serialize Request.TopK (same adapter-mapping semantics as
+	// [Capabilities.StopSequences]).
 	TopK bool
-	// Dropped silently when false: Request.Seed is omitted from the wire.
+	// Dropped silently when false: adapters whose profile reports false
+	// never serialize Request.Seed (same adapter-mapping semantics as
+	// [Capabilities.StopSequences]).
 	Seed bool
 }
 

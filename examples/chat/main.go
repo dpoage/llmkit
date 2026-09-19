@@ -97,6 +97,7 @@ set the variables above, then re-run:
 		} else {
 			fmt.Println("assistant> (no assistant text produced)")
 		}
+		prev = outcome
 	}
 	return nil
 }

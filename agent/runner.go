@@ -315,24 +315,15 @@ func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task, finalizeP
 		// run-spanning ceiling is hit rather than running to completion. This is a
 		// read-only check: it does not touch System/Tools/Messages, so request
 		// prefix stability is preserved.
-		if r.budgetPool != nil {
-			if err := r.budgetPool.Check(); err != nil {
-				if !errors.Is(err, ErrBudgetExhausted) {
-					// A pool failure that isn't a budget stop is an
-					// infrastructure error; surface it rather than
-					// misreporting a clean stop.
-					tr.closeStream()
-					return outcome, fmt.Errorf("agent: budget check: %w", err)
-				}
-				// Shared pool exhausted: give the model one reserved finalization
-				// turn (RunJSON only) so a near-budget agent can still emit its
-				// answer before we classify the stop as TruncBudgetPool.
-				if err := r.finalizeAndTruncate(ctx, tr, &messages, outcome, finalizePrompt, responseSchema, compactThreshold, toolNameByID, TruncBudgetPool); err != nil {
-					return outcome, err
-				}
-				r.finishTruncated(outcome, TruncBudgetPool)
-				break
+		if r.budgetPool != nil && r.budgetPool.Check() != nil {
+			// Shared pool exhausted: give the model one reserved finalization
+			// turn (RunJSON only) so a near-budget agent can still emit its
+			// answer before we classify the stop as TruncBudgetPool.
+			if err := r.finalizeAndTruncate(ctx, tr, &messages, outcome, finalizePrompt, responseSchema, compactThreshold, toolNameByID, TruncBudgetPool); err != nil {
+				return outcome, err
 			}
+			r.finishTruncated(outcome, TruncBudgetPool)
+			break
 		}
 
 		if err := ctx.Err(); err != nil {
@@ -835,7 +826,7 @@ func (r *Runner) runTool(ctx context.Context, call llmkit.ToolCall, step int) (r
 		r.hooks.ToolStart(ctx, ToolEvent{Step: step, Call: call})
 	}
 	start := time.Now()
-	out, err, panicVal := invokeTool(runCtx, tool, call.Arguments)
+	out, panicVal, err := invokeTool(runCtx, tool, call.Arguments)
 	duration := time.Since(start)
 	if panicVal != nil {
 		// A panicking Tool.Run is model-recoverable data: render it as this
@@ -876,20 +867,20 @@ func (r *Runner) runTool(ctx context.Context, call llmkit.ToolCall, step int) (r
 	return out, false
 }
 
-// invokeTool invokes Tool.Run once, converting a panic into a non-nil third
-// return so the harness decides how to render it. A panic recovered here
-// never reaches the dispatching goroutine's own recover, which (in parallel
-// mode) is reserved for harness bugs — hook panics — only. A tool that
-// panics with nil still yields a non-nil marker: runtime turns panic(nil)
-// into a *runtime.PanicNilError.
-func invokeTool(ctx context.Context, tool Tool, args json.RawMessage) (out string, err error, panicVal any) {
+// invokeTool invokes Tool.Run once, converting a panic into a non-nil
+// second return so the harness decides how to render it. A panic recovered
+// here never reaches the dispatching goroutine's own recover, which (in
+// parallel mode) is reserved for harness bugs — hook panics — only. A tool
+// that panics with nil still yields a non-nil marker: runtime turns
+// panic(nil) into a *runtime.PanicNilError.
+func invokeTool(ctx context.Context, tool Tool, args json.RawMessage) (out string, panicVal any, err error) {
 	defer func() {
 		if v := recover(); v != nil {
-			out, err, panicVal = "", nil, v
+			out, panicVal, err = "", v, nil
 		}
 	}()
 	out, err = tool.Run(ctx, args)
-	return out, err, nil
+	return out, nil, err
 }
 
 // toolResult is one executed tool call's outcome, as returned by [Runner.executeTools].
