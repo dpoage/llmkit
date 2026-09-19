@@ -15,11 +15,15 @@ import (
 // yields a then b after the task text. The task text stays the FIRST block;
 // an empty task with non-empty blocks omits the Text block entirely (the
 // turn carries the blocks only — no empty text block, which adapters may
-// refuse); an empty task AND no blocks keeps the exact plain-Run shape
+// refuse) — except on RunJSON, whose seeded Text block always exists even
+// for an empty user task, because it carries the jsonInstruction suffix. An
+// empty task AND no blocks keeps the exact plain-Run shape
 // ([llmkit.TextMessage]), byte-for-byte, so no-attachment callers and their
 // transcript fixtures are unaffected. On RunJSON the jsonInstruction suffix
 // is appended to the TEXT block only; the attached blocks ride alongside
-// untouched.
+// untouched. A blocks-only turn (empty plain-Run task) also gives up the
+// task-derived transcript filename: with no task text to slug, the autosave
+// falls back to its existing empty-slug name ("run").
 //
 // Attachments ride on the task turn ONLY: they never appear on the
 // empty-turn or max-tokens nudges, the forced finalization turn, or the
