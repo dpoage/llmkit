@@ -87,12 +87,13 @@ fmt.Println(outcome.FinalText)
 ### Stream
 
 Stream the request instead of waiting for the full answer. This snippet
-reuses `client` from the previous section. `llmkit.Stream` works on any
-client: a client that cannot stream gets deltas synthesized from one
-`Complete`, and `resp` is the same normalized `Response` either way.
+reuses `client`, `resp`, and `err` from the previous snippets. `llmkit.Stream`
+works on any client: a client that cannot stream gets deltas synthesized from
+one `Complete`, and `resp` is the same normalized `Response` either way.
 
+```go
 req := llmkit.Request{Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "Count to five.")}}
-resp, err := llmkit.Stream(context.Background(), client, req,
+resp, err = llmkit.Stream(context.Background(), client, req,
 	func(d llmkit.Delta) error { fmt.Print(d.Text); return nil })
 ```
 
