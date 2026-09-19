@@ -46,7 +46,7 @@ A `Tool` is one capability the model may invoke. The harness advertises every to
 
 ```go
 type weatherArgs struct {
-	City string `json:"city" jsonschema:"the city to look up"`
+	City string `json:"city" jsonschema:"description=the city to look up"`
 }
 
 weather := agent.Func("weather", "look up the current weather for a city",
@@ -176,8 +176,8 @@ When to use: human-in-the-loop corrections, mid-run priority changes, or a REPL 
 
 ```go
 type tripAnswer struct {
-	City string `json:"city" jsonschema:"destination city"`
-	Days int    `json:"days" jsonschema:"trip length in days"`
+	City string `json:"city" jsonschema:"description=destination city"`
+	Days int    `json:"days" jsonschema:"description=trip length in days"`
 }
 
 answer, outcome, err := agent.RunJSONAs[tripAnswer](ctx, runner, "Plan a 3-day trip to Paris.")
