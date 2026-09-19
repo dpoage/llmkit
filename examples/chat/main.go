@@ -7,7 +7,10 @@
 // printed and the refusal turn stays in the history: the attached
 // err.Outcome is threaded into the next run's agent.Continue so the
 // conversation continues from it. It doubles as a compile-time contract check
-// for agent.Continue and Outcome.Messages threading.
+// for agent.Continue and Outcome.Messages threading. A /think command
+// toggles extended thinking through an agent.RequestPolicy — the
+// runner's request-shaping seam — applied to every completion when the
+// model reports thinking support.
 //
 // Usage:
 //
@@ -25,8 +28,10 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/agent"
 	"github.com/dpoage/llmkit/examples/internal/envcfg"
 	"github.com/dpoage/llmkit/provider"
@@ -57,10 +62,22 @@ func run() error {
 			return time.Now().Format(time.RFC3339), nil
 		})
 
+	// A RequestPolicy is the runner's request-shaping seam: it sees every
+	// fully built completion request just before the wire call. The /think
+	// command flips this one's atomic flag; while on, it stamps extended
+	// thinking onto each outgoing request. Gated on the client's Thinking
+	// capability — without it the toggle reports and stays off (the
+	// adapters would drop the field silently anyway).
+	think := &thinkPolicy{}
+	thinkingSupported := client.Capabilities().Thinking
+	if !thinkingSupported {
+		fmt.Println("note: model reports no thinking support; /think stays off")
+	}
 	runner := agent.NewRunner(client, []agent.Tool{now},
-		"You are a helpful assistant in a multi-turn chat. You remember every earlier turn of this conversation. Use the provided tool when it would help.")
+		"You are a helpful assistant in a multi-turn chat. You remember every earlier turn of this conversation. Use the provided tool when it would help.",
+		agent.WithRequestPolicy(think))
 
-	fmt.Println("llmkit chat — type a message (ctrl-d to exit).")
+	fmt.Println("llmkit chat — type a message (/think toggles extended thinking, ctrl-d to exit).")
 	sc := bufio.NewScanner(os.Stdin)
 	var prev *agent.Outcome
 	for {
@@ -70,6 +87,19 @@ func run() error {
 		}
 		line := strings.TrimSpace(sc.Text())
 		if line == "" {
+			continue
+		}
+		if line == "/think" {
+			if !thinkingSupported {
+				fmt.Println("(extended thinking is not supported by this model)")
+				continue
+			}
+			think.on.Store(!think.on.Load())
+			if think.on.Load() {
+				fmt.Println("(extended thinking on)")
+			} else {
+				fmt.Println("(extended thinking off)")
+			}
 			continue
 		}
 		outcome, err := runner.Run(context.Background(), line, agent.Continue(prev))
@@ -88,6 +118,22 @@ func run() error {
 			fmt.Println("assistant> (no assistant text produced)")
 		}
 		prev = outcome
+	}
+	return nil
+}
+
+// thinkPolicy is the [agent.RequestPolicy] behind the /think command: while
+// enabled it stamps Thinking on every outgoing completion request — every
+// completion (main turns, continuations, finalization, repair) passes
+// through the policy. The flag is atomic so toggling and running stay
+// race-free.
+type thinkPolicy struct {
+	on atomic.Bool
+}
+
+func (p *thinkPolicy) PrepareRequest(_ context.Context, _ int, req *llmkit.Request) error {
+	if p.on.Load() {
+		req.Thinking = &llmkit.ThinkingConfig{BudgetTokens: 1024}
 	}
 	return nil
 }
