@@ -6,12 +6,12 @@ import (
 	"time"
 )
 
-// RetryConfig tunes the shared retry wrapper. A zero MaxAttempts makes the
-// wrapper run no attempt and return a zero Response with a nil error, so the
-// zero value is not usable: start from [DefaultRetryConfig].
+// RetryConfig tunes the shared retry wrapper. WithRetry clamps a zero or
+// negative MaxAttempts to 1, so the zero value means "one attempt, no
+// retries" — not usable as-is: start from [DefaultRetryConfig].
 type RetryConfig struct {
-	// MaxAttempts is the total number of attempts (initial try + retries). Must
-	// be >= 1.
+	// MaxAttempts is the total number of attempts (initial try + retries).
+	// WithRetry clamps values below 1 to 1.
 	MaxAttempts int
 	// BaseDelay is the first backoff interval; subsequent delays grow
 	// exponentially.
@@ -20,7 +20,7 @@ type RetryConfig struct {
 	MaxDelay time.Duration
 	// Jitter, in [0,1], is the fraction of each delay randomized to avoid
 	// thundering herds. 0.2 means the delay is multiplied by a random factor in
-	// [0.8, 1.2].
+	// [0.8, 1.2]. WithRetry clamps values outside [0,1].
 	Jitter float64
 
 	// RequestTimeout is the per-attempt wall-clock deadline applied to

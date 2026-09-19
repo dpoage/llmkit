@@ -24,8 +24,8 @@
 // # Credentials
 //
 // [Spec.Auth] selects the credential mode: [AuthAPIKey] (the zero value)
-// sends Secret as a standard API key; [AuthOAuthToken] sends it as an OAuth
-// bearer token and is Anthropic-only. [Spec.Secret] must be a non-empty value
+// sends Secret as the provider's standard API-key credential; [AuthOAuthToken]
+// sends it as an OAuth bearer token and is Anthropic-only. [Spec.Secret] must be a non-empty value
 // without surrounding whitespace. New never reads the environment for
 // credentials and never logs the Secret. A credential-less endpoint (a local
 // Ollama or vLLM server) takes any non-empty placeholder.
@@ -85,8 +85,10 @@ const (
 type Auth string
 
 const (
-	// AuthAPIKey sends Secret as a standard API key (e.g. the x-api-key
-	// header). It is the zero value.
+	// AuthAPIKey sends Secret as the provider's standard API-key credential:
+	// the x-api-key header on Anthropic, an Authorization bearer token on
+	// OpenAI and openai-compatible, and the x-goog-api-key header on Google.
+	// It is the zero value.
 	AuthAPIKey Auth = ""
 	// AuthOAuthToken sends Secret as an OAuth bearer token (Authorization
 	// header). Anthropic only.
@@ -135,7 +137,8 @@ type Spec struct {
 	// — so New refuses it with an error wrapping ErrInvalidRequest.
 	BaseURL string
 	// Auth selects the credential mode. The zero value [AuthAPIKey] sends
-	// Secret as a standard API key (x-api-key header); [AuthOAuthToken]
+	// Secret as the provider's standard API-key credential (see the const
+	// list for the per-provider wire form); [AuthOAuthToken]
 	// sends it as an OAuth bearer token (Authorization header) and is
 	// Anthropic-only. New refuses AuthOAuthToken on any other Type with an
 	// error wrapping llmkit.ErrInvalidRequest, and refuses any other Auth

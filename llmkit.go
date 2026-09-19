@@ -62,10 +62,12 @@
 // Complete and Stream return [*APIError] for provider-side failures. Each
 // APIError wraps exactly one sentinel ([ErrRateLimited], [ErrAuth],
 // [ErrContextTooLong], [ErrInvalidRequest], [ErrServer], [ErrOverloaded]);
-// match it with errors.Is. Rate-limit and overload errors carry any
-// Retry-After the server sent. Unclassifiable transport failures (timeouts,
-// connection resets) surface as [ErrServer]. See docs/providers.md for the
-// HTTP-status-to-sentinel table.
+// match it with errors.Is. Rate-limit and overload errors carry the server's
+// Retry-After when the adapter can read the response header (Anthropic and
+// OpenAI; the Google SDK hides response headers, so Google reports none), and
+// a Retry-After above [RetryConfig.MaxDelay] is truncated to MaxDelay.
+// Unclassifiable transport failures (timeouts, connection resets) surface as
+// [ErrServer]. See docs/providers.md for the HTTP-status-to-sentinel table.
 //
 // # Capabilities
 //
