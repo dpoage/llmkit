@@ -20,7 +20,7 @@ import (
 // skipping when the backend is unusable on this host.
 func newConformanceBwrap(t *testing.T) *Bwrap {
 	t.Helper()
-	s := newTestBwrap(t, WithBwrapMaxOutputBytes(64))
+	s := newTestBwrap(t, WithMaxOutputBytes(64))
 	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
@@ -33,13 +33,16 @@ func newConformanceCLI(t *testing.T) *CLI {
 	if !ok {
 		t.Skip("no container runtime detected; skipping CLI conformance leg")
 	}
-	s, err := NewCLI(rt, testImage,
+	base := []Option{
+		WithRuntime(rt),
+		WithImage(testImage),
 		WithCPUs(1),
 		WithMemoryMB(256),
 		WithPidsLimit(128),
-		WithTimeout(30*time.Second),
+		WithTimeout(30 * time.Second),
 		WithMaxOutputBytes(64),
-	)
+	}
+	s, err := NewCLI(base...)
 	if err != nil {
 		t.Skipf("NewCLI: %v", err)
 	}

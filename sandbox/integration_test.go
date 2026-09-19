@@ -20,19 +20,24 @@ import (
 const testImage = "docker.io/library/alpine:latest"
 
 // newTestCLI builds a CLI against the detected runtime, skipping the test when
-// none is available or the image cannot be pulled/used.
-func newTestCLI(t *testing.T) *CLI {
+// none is available or the image cannot be pulled/used. Extra opts configure
+// backend defaults for a specific test (e.g. WithIdleTimeout for the watchdog
+// tests).
+func newTestCLI(t *testing.T, opts ...Option) *CLI {
 	t.Helper()
 	rt, ok := Detect()
 	if !ok {
 		t.Skip("no container runtime detected; skipping integration test")
 	}
-	s, err := NewCLI(rt, testImage,
+	base := []Option{
+		WithRuntime(rt),
+		WithImage(testImage),
 		WithCPUs(1),
 		WithMemoryMB(256),
 		WithPidsLimit(128),
-		WithTimeout(30*time.Second),
-	)
+		WithTimeout(30 * time.Second),
+	}
+	s, err := NewCLI(append(base, opts...)...)
 	if err != nil {
 		t.Skipf("NewCLI: %v", err)
 	}
@@ -297,13 +302,12 @@ func TestIntegrationOriginalRepoReadOnly(t *testing.T) {
 // workspace writes is cancelled after the idle window, well before its generous
 // absolute ceiling.
 func TestIntegrationIdleWatchdogKillsStall(t *testing.T) {
-	s := newTestCLI(t)
+	s := newTestCLI(t, WithIdleTimeout(2*time.Second))
 	start := time.Now()
 	res, err := s.Exec(context.Background(), Spec{
-		RepoDir:     t.TempDir(),
-		Cmd:         []string{"sleep", "60"},
-		Timeout:     50 * time.Second, // generous hard ceiling
-		IdleTimeout: 2 * time.Second,  // no progress -> idle kill
+		RepoDir: t.TempDir(),
+		Cmd:     []string{"sleep", "60"},
+		Timeout: 50 * time.Second, // generous hard ceiling; the 2s idle window does the killing
 	})
 	if err != nil {
 		t.Fatalf("Exec: %v", err)
@@ -323,13 +327,12 @@ func TestIntegrationIdleWatchdogKillsStall(t *testing.T) {
 // the idle window survives because it keeps writing to the workspace within each
 // window — the dynamic timeout lets a slow-but-progressing build finish.
 func TestIntegrationIdleWatchdogAllowsProgress(t *testing.T) {
-	s := newTestCLI(t)
+	s := newTestCLI(t, WithIdleTimeout(3*time.Second))
 	res, err := s.Exec(context.Background(), Spec{
 		RepoDir: t.TempDir(),
+		Cmd:     []string{"sh", "-c", "i=0; while [ $i -lt 6 ]; do echo step$i >> /workspace/progress.log; i=$((i+1)); sleep 1; done"},
 		// ~6s total, a workspace write every 1s; idle window is 3s.
-		Cmd:         []string{"sh", "-c", "i=0; while [ $i -lt 6 ]; do echo step$i >> /workspace/progress.log; i=$((i+1)); sleep 1; done"},
-		Timeout:     50 * time.Second,
-		IdleTimeout: 3 * time.Second,
+		Timeout: 50 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("Exec: %v", err)
@@ -350,14 +353,13 @@ func TestIntegrationIdleWatchdogAllowsProgress(t *testing.T) {
 // churning silently on one large translation unit) is kept alive by the CPU
 // fallback signal and completes, rather than being falsely idle-killed.
 func TestIntegrationIdleWatchdogCPUBusySurvives(t *testing.T) {
-	s := newTestCLI(t)
+	s := newTestCLI(t, WithIdleTimeout(3*time.Second))
 	res, err := s.Exec(context.Background(), Spec{
 		RepoDir: t.TempDir(),
+		Cmd:     []string{"sh", "-c", "end=$(( $(date +%s) + 8 )); while [ $(date +%s) -lt $end ]; do :; done"},
 		// ~8s of pure CPU spin: no stdout, no filesystem writes. Only the CPU
 		// probe can tell this apart from a hang.
-		Cmd:         []string{"sh", "-c", "end=$(( $(date +%s) + 8 )); while [ $(date +%s) -lt $end ]; do :; done"},
-		Timeout:     50 * time.Second,
-		IdleTimeout: 3 * time.Second,
+		Timeout: 50 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("Exec: %v", err)

@@ -2,7 +2,7 @@
 // untrusted, model-generated commands against snapshots of arbitrary
 // repositories, through one interface:
 //
-//	Sandbox: Exec(ctx, Spec) (Result, error)
+//	Sandbox: Exec(ctx, Spec) (Result, error); MaterializeWorkspace(repoDir) (string, error)
 //
 // # Backends
 //
@@ -13,7 +13,7 @@
 //     the host can run it; NewBwrap fails fast with an actionable reason
 //     when it cannot — including when no resource-limit mechanism (a
 //     systemd-run user scope or a delegated cgroup v2 subtree) is available,
-//     which WithBwrapAllowUncapped deliberately opts out of.
+//     which WithCapPolicy(CapBestEffort) deliberately opts out of.
 //     DescribeBwrapCapMethod reports which mechanism (if any) enforces
 //     memory/CPU/pids limits.
 //   - NewCLI (*CLI): a container-runtime backend (podman, then docker) driven
@@ -28,6 +28,21 @@
 //   - NewMock (*Mock): a scriptable Sandbox for tests; it enqueues responses
 //     and records the calls it receives, so callers can be tested without a
 //     real container runtime or bwrap.
+//
+// # Specs and options
+//
+// Spec fields are HONEST per backend: every backend either honors a
+// non-empty per-call field or refuses the run at Exec with an
+// UnsupportedSpecError naming the backend, field, and value — never a
+// silent drop or substitution. Notably Spec.Network is a typed NetworkMode
+// (none/host/bridge; bridge is container-runtime-only), and Spec.Image is
+// honored only by the container backend (the image is what is probed and
+// run there); the imageless backends refuse a non-empty Image. Fields only
+// some backends can honor as knobs (runtime, image, resource caps, scratch
+// size, growth ceiling, idle window) are backend OPTIONS, configured
+// through ONE shared Option type passed to both NewCLI and NewBwrap; a
+// constructor refuses an option (or a default network mode) its backend
+// cannot honor with an error naming it.
 //
 // # Capability probes
 //

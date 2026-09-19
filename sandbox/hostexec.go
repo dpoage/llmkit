@@ -41,19 +41,45 @@ func NewHostExec() *HostExec { return &HostExec{} }
 // the live checkout either way), applies spec.WriteFiles, and runs spec.Cmd
 // directly via os/exec with spec.Env appended to the host's own environment.
 //
-// spec.ROMounts / RWMounts / SetupCmds / Image / CPUs / MemoryMB / Network are
-// intentionally IGNORED: there is no container to apply them to. SetupCmds in
-// particular are dropped rather than approximated, because the CLI backend's
-// guarantee that a failed setup step exits 125 (interpreted as
-// an environment error, never the command's own outcome — see command.go)
-// has no equivalent here; silently chaining them via a shell would
-// reintroduce that exact fragility without the guarantee.
+// The isolation-shaped Spec fields are REFUSED rather than silently ignored —
+// there is no container to apply them to, and running without a requested
+// knob would be a silently weaker posture than the Spec asked for:
+//   - Image, ROMounts, RWMounts, SetupCmds: UnsupportedSpecError. SetupCmds
+//     in particular are refused rather than approximated, because the
+//     container backends' guarantee that a failed setup step exits 125
+//     (interpreted as an environment error, never the command's own outcome —
+//     see command.go) has no equivalent here; silently chaining them via a
+//     shell would reintroduce that exact fragility without the guarantee.
+//   - Network: "" (the default) and NetworkHost are honored — both mean "run
+//     with the host's network", which is what a bare host process does.
+//     NetworkNone, NetworkBridge, or any other mode is refused: HostExec
+//     cannot cut the host's network, and pretending otherwise would silently
+//     run a network-isolated Spec with full access.
+//
+// There are no resource caps and no idle watchdog on this backend, so
+// Result.WorkspaceQuotaExceeded is always false; only the absolute
+// Spec.Timeout can kill a run.
 func (h *HostExec) Exec(ctx context.Context, spec Spec) (Result, error) {
 	if len(spec.Cmd) == 0 {
 		return Result{}, fmt.Errorf("sandbox: HostExec requires a non-empty Cmd")
 	}
 	if spec.RepoDir == "" && spec.Workspace == "" {
 		return Result{}, fmt.Errorf("sandbox: HostExec requires RepoDir or Workspace")
+	}
+	if spec.Image != "" {
+		return Result{}, &UnsupportedSpecError{Backend: "host", Field: "Image", Value: spec.Image}
+	}
+	if len(spec.ROMounts) > 0 {
+		return Result{}, &UnsupportedSpecError{Backend: "host", Field: "ROMounts", Value: fmt.Sprintf("%d mount(s)", len(spec.ROMounts))}
+	}
+	if len(spec.RWMounts) > 0 {
+		return Result{}, &UnsupportedSpecError{Backend: "host", Field: "RWMounts", Value: fmt.Sprintf("%d mount(s)", len(spec.RWMounts))}
+	}
+	if len(spec.SetupCmds) > 0 {
+		return Result{}, &UnsupportedSpecError{Backend: "host", Field: "SetupCmds", Value: fmt.Sprintf("%d command(s)", len(spec.SetupCmds))}
+	}
+	if _, err := resolveNetworkMode("host", NetworkHost, spec.Network, NetworkHost); err != nil {
+		return Result{}, err
 	}
 
 	prepStart := time.Now()
@@ -134,3 +160,12 @@ func (h *HostExec) Exec(ctx context.Context, spec Spec) (Result, error) {
 }
 
 var _ Sandbox = (*HostExec)(nil)
+
+// MaterializeWorkspace implements Sandbox. HostExec has no pristine cache to
+// consult: it performs a fresh full copy of repoDir into a caller-owned
+// temporary directory (the standalone prepareWorkspace, no WriteFiles). The
+// caller owns the returned directory's lifecycle — the same contract as the
+// container-backed backends; see the Sandbox interface.
+func (h *HostExec) MaterializeWorkspace(repoDir string) (string, error) {
+	return prepareWorkspace(repoDir, nil)
+}

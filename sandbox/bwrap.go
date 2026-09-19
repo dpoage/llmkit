@@ -93,39 +93,23 @@ func probeBwrapUserns(bwrapPath string) error {
 // posture). It is safe for concurrent use: each Exec prepares its own
 // workspace and launches its own bwrap process.
 //
-// Spec.Image is meaningless here — there is no image to select — so it is
-// ignored; ProbeCapabilities callers should key the probe cache on the
-// resolved host-toolchain mounts/env instead (see
-// engine.depProbeInputs and ProbeCapabilities' mounts/env cache
-// key), the same mechanism used to key a mounted toolchain for the
-// container backend.
+// There is no image concept here: a non-empty Spec.Image is REFUSED at Exec
+// (UnsupportedSpecError) rather than silently ignored, and ProbeCapabilities
+// callers key the probe cache on the resolved host-toolchain mounts/env
+// instead (see ProbeCapabilities' mounts/env cache key), the same mechanism
+// used to key a mounted toolchain for the container backend.
 type Bwrap struct {
-	bwrapPath          string
-	defaultCPUs        float64
-	defaultMemory      int
-	defaultTimeout     time.Duration
-	defaultIdleTimeout time.Duration
-	defaultNetwork     string
-	pidsLimit          int
-	maxOutputBytes     int
-	// defaultScratchSizeMB is the size (MB) of the writable tmpfs scratch
-	// space applied to BOTH /tmp and the tmpfs root ("/").
-	// <= 0 is treated as unset and falls back to fallbackScratchSizeMB (the
-	// package constant, shared with the container backend) in
-	// buildBwrapArgs.
-	defaultScratchSizeMB int
-	// defaultGrowthCeilingBytes bounds NET workspace growth (the fsSize
-	// delta, not cumulative bytes written — see workspaceProgress) since a
-	// run starts, tolerated by the shared idle watchdog before
-	// killing the run with the distinct Result.WorkspaceQuotaExceeded
-	// reason, independent of idle-stall detection. <= 0 disables the
-	// ceiling.
-	defaultGrowthCeilingBytes int64
-	// allowUncapped permits Exec to proceed with no resource-limit
-	// enforcement when neither systemd-run --user --scope nor a delegated
-	// cgroup v2 subtree is available (the WithBwrapAllowUncapped option). Default false:
-	// Exec fails loudly instead of silently running uncapped.
-	allowUncapped bool
+	bwrapPath string
+	// defaults is the shared per-run default state (see the defaults type):
+	// CPU/memory/pids caps, absolute+idle timeouts, network mode, output cap,
+	// scratch size, and workspace-growth ceiling. Backed by
+	// options.baseDefaults and configured via the one shared Option type.
+	defaults
+	// capPolicy selects what Exec does when no resource-limit enforcement
+	// mechanism (neither systemd-run --user --scope nor a delegated cgroup
+	// v2 subtree) is available: CapRequired (the default) fails loudly with
+	// ErrBwrapNoCapMethod; CapBestEffort (WithCapPolicy) runs uncapped.
+	capPolicy CapPolicy
 	// toolchainBinds are extra read-only binds (beyond fixedROAllowlist)
 	// resolved by the host-toolchain resolver, applied to every run.
 	toolchainBinds []ROMount
@@ -145,85 +129,20 @@ type Bwrap struct {
 	wsCache wsCache
 }
 
-// BwrapOption configures a Bwrap sandbox.
-type BwrapOption func(*Bwrap)
-
-// WithBwrapCPUs sets the default CPU limit applied when a Spec leaves CPUs
-// unset.
-func WithBwrapCPUs(c float64) BwrapOption { return func(s *Bwrap) { s.defaultCPUs = c } }
-
-// WithBwrapMemoryMB sets the default memory limit (MB) applied when a Spec
-// leaves MemoryMB unset.
-func WithBwrapMemoryMB(m int) BwrapOption { return func(s *Bwrap) { s.defaultMemory = m } }
-
-// WithBwrapTimeout sets the default execution timeout applied when a Spec
-// leaves Timeout unset.
-func WithBwrapTimeout(d time.Duration) BwrapOption {
-	return func(s *Bwrap) { s.defaultTimeout = d }
-}
-
-// WithBwrapIdleTimeout sets the default idle (no-progress) window applied
-// when a Spec leaves IdleTimeout unset. Zero disables the watchdog.
-func WithBwrapIdleTimeout(d time.Duration) BwrapOption {
-	return func(s *Bwrap) { s.defaultIdleTimeout = d }
-}
-
-// WithBwrapNetwork sets the default network mode ("none" or "host") applied
-// when a Spec leaves Network unset.
-func WithBwrapNetwork(n string) BwrapOption { return func(s *Bwrap) { s.defaultNetwork = n } }
-
-// WithBwrapPidsLimit sets the process-count cap enforced via the resolved
-// resource-limit mechanism. A value <= 0 disables the cap.
-func WithBwrapPidsLimit(n int) BwrapOption { return func(s *Bwrap) { s.pidsLimit = n } }
-
-// WithBwrapMaxOutputBytes overrides the per-stream output cap.
-func WithBwrapMaxOutputBytes(n int) BwrapOption {
-	return func(s *Bwrap) { s.maxOutputBytes = n }
-}
-
-// WithBwrapScratchSizeMB sets the size (MB) of the writable tmpfs scratch
-// space applied to BOTH /tmp and the tmpfs root ("/"). Values <= 0 fall back
-// to fallbackScratchSizeMB.
-func WithBwrapScratchSizeMB(mb int) BwrapOption {
-	return func(s *Bwrap) { s.defaultScratchSizeMB = mb }
-}
-
-// WithBwrapWorkspaceGrowthCeilingMB sets the workspace-growth ceiling (MB of
-// NET workspace-size growth, not cumulative bytes written) the shared idle watchdog
-// enforces independent of idle-stall detection. <= 0 disables the ceiling
-// entirely.
-func WithBwrapWorkspaceGrowthCeilingMB(mb int) BwrapOption {
-	return func(s *Bwrap) { s.defaultGrowthCeilingBytes = int64(mb) * 1024 * 1024 }
-}
-
-// WithBwrapAllowUncapped permits Exec to run without enforced resource
-// limits when no enforcement mechanism (systemd-run --user --scope or a
-// delegated cgroup v2 subtree) is available on this host, instead of
-// failing. Mirrors the WithBwrapAllowUncapped option.
-func WithBwrapAllowUncapped(allow bool) BwrapOption {
-	return func(s *Bwrap) { s.allowUncapped = allow }
-}
-
-// WithBwrapToolchainBinds adds extra read-only binds (beyond fixedROAllowlist)
-// to every run, resolved by the host-toolchain resolver.
-func WithBwrapToolchainBinds(mounts []ROMount) BwrapOption {
-	return func(s *Bwrap) { s.toolchainBinds = mounts }
-}
-
-// WithBwrapToolchainPath sets the PATH prefix (ResolveHostToolchains'
-// PathPrepend) for the same resolution passed to WithBwrapToolchainBinds, so
-// resolved toolchain binaries are actually reachable via PATH inside the
-// sandbox rather than merely bind-mounted. Callers pass both options from
-// the same ToolchainResolution.
-func WithBwrapToolchainPath(prepend string) BwrapOption {
-	return func(s *Bwrap) { s.toolchainPathPrepend = prepend }
-}
-
 // NewBwrap constructs a Bwrap sandbox. It fails fast with the same
 // actionable reasons as DetectBwrap when the backend is not usable on this
 // host, so a misconfigured backend choice is caught at
-// construction time rather than on the first real run.
-func NewBwrap(opts ...BwrapOption) (*Bwrap, error) {
+// construction time rather than on the first real run. The CLI-only options
+// (WithRuntime, WithImage) are refused here with an error naming the option,
+// and a WithNetwork mode bwrap could never honor fails at construction.
+func NewBwrap(opts ...Option) (*Bwrap, error) {
+	o := newOptions(opts)
+	if err := o.checkSupported("bwrap", cliOnlyOptions); err != nil {
+		return nil, err
+	}
+	if err := validateNetworkDefault("bwrap", o.network, bwrapNetworks); err != nil {
+		return nil, err
+	}
 	ok, reason := DetectBwrap()
 	if !ok {
 		return nil, errors.New("sandbox: " + reason)
@@ -232,19 +151,17 @@ func NewBwrap(opts ...BwrapOption) (*Bwrap, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sandbox: bwrap not found on PATH: %w", err)
 	}
-	s := &Bwrap{
-		bwrapPath:                 path,
-		defaultCPUs:               2,
-		defaultMemory:             2048,
-		defaultTimeout:            10 * time.Minute,
-		defaultNetwork:            "none",
-		pidsLimit:                 256,
-		maxOutputBytes:            DefaultMaxOutputBytes,
-		defaultScratchSizeMB:      fallbackScratchSizeMB,
-		defaultGrowthCeilingBytes: defaultWorkspaceGrowthCeilingBytes,
+	s := &Bwrap{bwrapPath: path}
+	s.defaults = baseDefaults()
+	o.applyDefaults(&s.defaults)
+	if o.has("WithCapPolicy") {
+		s.capPolicy = o.capPolicy
 	}
-	for _, o := range opts {
-		o(s)
+	if o.has("WithToolchainBinds") {
+		s.toolchainBinds = o.toolchainBinds
+	}
+	if o.has("WithToolchainPath") {
+		s.toolchainPathPrepend = o.toolchainPathPrepend
 	}
 
 	// POSIX baseline provisioning: container images guarantee
@@ -255,7 +172,7 @@ func NewBwrap(opts ...BwrapOption) (*Bwrap, error) {
 	// "mkdir: command not found". Resolve the baseline from the host once
 	// per construction; on FHS hosts this is a no-op (empty baseline).
 	// Operator toolchainBinds win any ContainerPath collision — an operator
-	// pinning e.g. "bash" via WithBwrapToolchainBinds overrides the baseline
+	// pinning e.g. "bash" via WithToolchainBinds overrides the baseline
 	// resolution of the same name.
 	baseMounts, basePath := resolveBwrapBaseline(exec.LookPath, filepath.EvalSymlinks)
 	s.baselinePathAppend = basePath
@@ -399,13 +316,14 @@ func (s *Bwrap) ScratchAndGrowthCeiling() (scratchSizeMB int, growthCeilingBytes
 }
 
 // resolveBwrapParams applies backend defaults to a Spec, producing the
-// concrete bwrapParams for the run (workspace is filled in by Exec).
+// concrete bwrapParams for the run (workspace is filled in by Exec). A
+// non-empty Spec.Image is refused — there is no image to select on this
+// backend — and the network mode must be one bwrap can honor.
 func (s *Bwrap) resolveBwrapParams(spec Spec) (bwrapParams, error) {
-	network := s.defaultNetwork
-	if spec.Network != "" {
-		network = spec.Network
+	if spec.Image != "" {
+		return bwrapParams{}, &UnsupportedSpecError{Backend: "bwrap", Field: "Image", Value: spec.Image}
 	}
-	network, err := validateBwrapNetwork(network)
+	network, err := resolveNetworkMode("bwrap", s.defaultNetwork, spec.Network, bwrapNetworks...)
 	if err != nil {
 		return bwrapParams{}, err
 	}
@@ -477,27 +395,18 @@ func (s *Bwrap) Exec(ctx context.Context, spec Spec) (Result, error) {
 	p.workspace = ws
 
 	cpus := s.defaultCPUs
-	if spec.CPUs > 0 {
-		cpus = spec.CPUs
-	}
 	memoryMB := s.defaultMemory
-	if spec.MemoryMB > 0 {
-		memoryMB = spec.MemoryMB
-	}
 
 	capMethod := detectCapMethod(ctx)
-	if capMethod == bwrapCapNone && !s.allowUncapped {
+	if capMethod == bwrapCapNone && s.capPolicy != CapBestEffort {
 		return Result{}, ErrBwrapNoCapMethod
 	}
-
 	timeout := spec.Timeout
 	if timeout <= 0 {
 		timeout = s.defaultTimeout
 	}
-	idleTimeout := spec.IdleTimeout
-	if idleTimeout <= 0 {
-		idleTimeout = s.defaultIdleTimeout
-	}
+
+	idleTimeout := s.defaultIdleTimeout
 
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -655,7 +564,7 @@ type resourceCapWrap struct {
 //     joined pid subsequently forks/execs, so bwrap and everything it runs
 //     inside the sandbox is covered. cleanup removes the (by-then-empty)
 //     subtree.
-//   - none (only reachable with allowUncapped): bwrap execs directly with
+//   - none (only reachable with CapBestEffort): bwrap execs directly with
 //     no wrapper and no cap enforcement.
 func (s *Bwrap) newResourceCapWrap(method bwrapCapMethod, bwrapArgv []string, cpus float64, memoryMB, pidsLimit int) (resourceCapWrap, error) {
 	noop := func(int) error { return nil }
