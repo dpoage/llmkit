@@ -80,6 +80,17 @@ go run ./examples/structured
 go run ./examples/chat
 ```
 
+The examples are executed for real by the live acceptance suite:
+`go test -tags live ./examples/...` builds and runs each binary against a
+live backend, and a hermetic test asserts each exits 1 with its usage
+message when the environment is unset. Adapter, agent-loop, and capability
+changes are additionally gated by a live vendor matrix with recorded,
+secret-free wire fixtures (`provider/testdata/`, replayed hermetically in
+every plain `go test ./...`); the acceptance rule and exact commands live in
+[AGENTS.md](AGENTS.md) (Build & Test → Live acceptance suite), and the
+nightly `.github/workflows/live.yml` runs the whole suite against the
+compat lane.
+
 ## Design decisions
 
 - Message model: content-block `Message{Role, Content []Block, ...}` — text,

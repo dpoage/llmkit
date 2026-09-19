@@ -1,0 +1,109 @@
+{
+  "case": "seed",
+  "lane": "compat",
+  "model": "MiniMax-M3",
+  "capabilities": {
+    "ContextWindow": 0,
+    "ParallelToolCalls": false,
+    "PromptCaching": false,
+    "StructuredOutput": false,
+    "Thinking": false,
+    "ToolChoice": true,
+    "Images": true,
+    "Documents": true,
+    "StopSequences": true,
+    "TopP": true,
+    "TopK": false,
+    "Seed": true
+  },
+  "inputs": [
+    {
+      "System": "",
+      "Messages": [
+        {
+          "Role": "user",
+          "Content": [
+            {
+              "Kind": "text",
+              "Text": "Reply with exactly: OK",
+              "MediaType": "",
+              "Data": null,
+              "URL": "",
+              "Title": "",
+              "Provider": "",
+              "Raw": null
+            }
+          ],
+          "ToolCalls": null,
+          "ToolCallID": "",
+          "IsError": false
+        }
+      ],
+      "Tools": null,
+      "MaxTokens": 768,
+      "Temperature": null,
+      "Thinking": null,
+      "ToolChoice": {
+        "Mode": "",
+        "Name": ""
+      },
+      "StopSequences": null,
+      "TopP": null,
+      "TopK": null,
+      "Seed": 42,
+      "ResponseSchema": null,
+      "ResponseSchemaName": ""
+    }
+  ],
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "headers": {
+          "accept": "application/json",
+          "content-type": "application/json",
+          "user-agent": "OpenAI/Go 3.43.0",
+          "x-stainless-arch": "x64",
+          "x-stainless-lang": "go",
+          "x-stainless-os": "Linux",
+          "x-stainless-package-version": "3.43.0",
+          "x-stainless-retry-count": "0",
+          "x-stainless-runtime": "go",
+          "x-stainless-runtime-version": "go1.27.1-X:nodwarf5"
+        },
+        "body": "{\"messages\":[{\"content\":\"Reply with exactly: OK\",\"role\":\"user\"}],\"model\":\"MiniMax-M3\",\"max_completion_tokens\":768,\"seed\":42}"
+      },
+      "response": {
+        "headers": {
+          "access-control-allow-origin": "*",
+          "alb_receive_time": "1789778464.691",
+          "alb_request_id": "efdd9f9b84ffd050208a95a1542ec32c936ce9de",
+          "cache-control": "max-age=0, no-cache, no-store",
+          "content-length": "747",
+          "content-type": "application/json; charset=utf-8",
+          "date": "Sat, 19 Sep 2026 00:41:05 GMT",
+          "expires": "Sat, 19 Sep 2026 00:41:05 GMT",
+          "minimax-request-id": "c135bb9fe526efda586dfb6394849404",
+          "pragma": "no-cache",
+          "trace-id": "06fd0d20aa80e13914e58b20f6cb9b8c",
+          "x-from": "ak",
+          "x-mm-request-id": "2022431855143301769_17897784656fbivd",
+          "x-session-id": "415add720ac4193e163e6f6b1c7d7a46"
+        },
+        "body": "{\"id\":\"06fd0d20aa80e13914e58b20f6cb9b8c\",\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"\u003cthink\u003e\\nThe user is asking me to reply with exactly \\\"OK\\\". I should comply with this simple request.\\n\u003c/think\u003e\\n\\nOK\",\"role\":\"assistant\",\"name\":\"MiniMax AI\",\"audio_content\":\"\"}}],\"created\":1789778464,\"model\":\"MiniMax-M3\",\"object\":\"chat.completion\",\"usage\":{\"total_tokens\":203,\"total_characters\":0,\"prompt_tokens\":181,\"completion_tokens\":22,\"completion_tokens_details\":{\"reasoning_tokens\":20},\"prompt_tokens_details\":{\"cached_tokens\":128}},\"input_sensitive\":false,\"output_sensitive\":false,\"input_sensitive_type\":0,\"output_sensitive_type\":0,\"output_sensitive_int\":0,\"service_tier\":\"standard\",\"base_resp\":{\"status_code\":0,\"status_msg\":\"\"}}\n",
+        "status": 200
+      }
+    }
+  ],
+  "normalized": {
+    "text": "\u003cthink\u003e\nThe user is asking me to reply with exactly \"OK\". I should comply with this simple request.\n\u003c/think\u003e\n\nOK",
+    "stop_reason": "end_turn",
+    "usage": {
+      "InputTokens": 181,
+      "OutputTokens": 22,
+      "CacheReadInputTokens": 128,
+      "CacheCreationInputTokens": 0
+    }
+  }
+}
