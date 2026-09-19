@@ -3,7 +3,8 @@
 // Live acceptance tests for the agent harness, run against the compat lane
 // through provider.New. Covers the Func tool loop, RunJSONAs's prompt-embedded
 // schema path, multi-turn continuation, WithMaxTokens continuation, the
-// RequestPolicy seam, Attach, ToolPolicy, and inline <think> preservation.
+// RequestPolicy seam, Attach, ToolPolicy, Steering, and inline <think>
+// preservation.
 //
 // Live-model flakes are handled, not hidden: where an assertion depends on
 // the model producing VISIBLE text or calling mandatory tools, the test
@@ -507,5 +508,47 @@ func TestLiveAgentToolPolicyDeny(t *testing.T) {
 	// The run continued past the denial and reached a final answer.
 	if out.FinalText == "" {
 		t.Fatalf("no final text after the denial; outcome=%+v", out)
+	}
+}
+
+// TestLiveAgentSteering pins that a FollowUp queued before Run turns the
+// would-be final turn into a second assistant turn against the live lane:
+// the follow-up user turn rides Outcome.Messages between the two assistant
+// turns and the handle ends with nothing pending.
+func TestLiveAgentSteering(t *testing.T) {
+	ctx, cl, _ := newLiveAgentClient(t)
+	runner := agent.NewRunner(cl, nil, "You are a terse assistant.", agent.WithMaxTokens(1024))
+
+	s := agent.NewSteering()
+	s.FollowUp(llmkit.Text("Now answer the same way for Japan: give just the capital city name, nothing else."))
+
+	out, err := runner.Run(ctx,
+		"What is the capital of France? Answer with just the city name, nothing else.",
+		agent.WithSteering(s))
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	assistants := 0
+	sawFollowUp := false
+	for _, m := range out.Messages {
+		switch {
+		case m.Role == llmkit.RoleAssistant:
+			assistants++
+		case m.Role == llmkit.RoleUser && strings.Contains(m.Text(), "capital city name"):
+			sawFollowUp = true
+		}
+	}
+	if assistants != 2 {
+		t.Errorf("assistant turns = %d, want 2 (task answer + follow-up answer)", assistants)
+	}
+	if !sawFollowUp {
+		t.Error("Outcome.Messages lost the queued follow-up user turn")
+	}
+	if out.FinalText == "" {
+		t.Error("no final text after the follow-up turn")
+	}
+	if s.Pending() != 0 {
+		t.Errorf("Pending = %d after the run, want 0", s.Pending())
 	}
 }
