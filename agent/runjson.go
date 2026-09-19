@@ -14,22 +14,23 @@ import (
 	"github.com/dpoage/llmkit"
 )
 
-// ErrUnparseableOutput marks a RunJSON failure whose cause is the model's final
-// answer itself: it could not be parsed as JSON, or it parsed but violated the
-// declared schema. This is distinct from an infrastructure failure (LLM
-// transport, context cancellation) in the underlying tool loop, which RunJSON
-// returns unwrapped from r.run / r.repair. Callers that drive their own
+// ErrUnparseableOutput marks a RunJSON failure whose cause is the model's
+// final answer itself: it could not be parsed as JSON, or it parsed but
+// violated the declared schema. This is distinct from an infrastructure
+// failure (LLM transport, context cancellation) in the underlying tool
+// loop, which RunJSON returns unwrapped. Callers that drive their own
 // revision loop can test errors.Is(err, ErrUnparseableOutput) to treat a
-// malformed model answer as a recoverable, retry-able outcome instead of a hard
-// abort.
-var ErrUnparseableOutput = errors.New("model output did not parse as JSON")
+// malformed model answer as a recoverable, retry-able outcome instead of a
+// hard abort.
+var ErrUnparseableOutput = errors.New("agent: model output did not parse as JSON")
 
-// RunJSON runs the tool loop for task, instructing the model to return its final
-// answer as a single JSON value matching schema, then unmarshals that answer
-// into out (a pointer). If the model's output fails to parse OR fails deep
-// schema validation (see [validateSchema]), RunJSON makes one repair
-// round-trip — sending the precise error back and asking for valid JSON only —
-// before failing.
+// RunJSON runs the tool loop for task, instructing the model to return its
+// final answer as a single JSON value matching schema, then unmarshals that
+// answer into out (a pointer). If the model's output fails to parse OR fails
+// deep schema validation — the answer is walked against the schema's
+// required/properties/items/enum/limit keywords, not merely unmarshaled —
+// RunJSON makes one repair round-trip — sending the precise error back and
+// asking for valid JSON only — before failing.
 //
 // By default every call reseeds the conversation from scratch (task becomes
 // the sole seed message) — the right default for the single-shot callers that
@@ -49,10 +50,12 @@ var ErrUnparseableOutput = errors.New("model output did not parse as JSON")
 // required and no native schema is sent.
 //
 // The returned [Outcome] is the underlying loop outcome (including the full
-// transcript and any truncation). On a successful parse, out is populated and
-// err is nil. If the run truncates before producing parseable JSON, or the
-// repair round-trip still fails, err is non-nil but the Outcome is still
-// returned for inspection.
+// transcript and any truncation). On a successful parse, out is populated
+// and err is nil. If the run truncates before producing parseable JSON, or
+// the repair round-trip still fails, err is non-nil but the Outcome is
+// still returned for inspection. When a repair ran, the returned Outcome's
+// [Outcome.FinalText] is the REPAIR completion's text — the last completion
+// of the run — not the unparseable pre-repair answer.
 func (r *Runner) RunJSON(ctx context.Context, task string, schema json.RawMessage, out any, opts ...RunOption) (*Outcome, error) {
 	var cfg runConfig
 	for _, opt := range opts {
@@ -137,7 +140,7 @@ func (r *Runner) runJSON(ctx context.Context, seed []llmkit.Message, task string
 		repair += "\nIt must match this JSON schema:\n" + string(schema)
 	}
 
-	repairOutcome, rerr := r.repair(ctx, outcome.Transcript, repair, schema)
+	repairOutcome, rerr := r.repair(ctx, outcome.Transcript, repair, schema, outcome.Iterations)
 	// repair() reopened the streamed transcript (O_APPEND) to record its
 	// turn; close that fd here so it does not outlive the call. Over a long
 	// backlog run every repaired call would otherwise leak one fd until a
@@ -153,17 +156,15 @@ func (r *Runner) runJSON(ctx context.Context, seed []llmkit.Message, task string
 	// that needed repair still continues from the real investigation instead
 	// of an empty history.
 	repairOutcome.Messages = outcome.Messages
-	// repairOutcome is a FRESH Outcome (see [Runner.repair]): it only knows
-	// about its own completion, so without this fold the caller would lose the
-	// original run's truncation signal and undercount the round's cost. Carry
-	// the original run's TruncationReason/Finalized through and make
-	// Usage/Iterations cumulative; LastStopReason keeps reflecting the repair
-	// completion itself (set by completeOnce), so a caller distinguishing
-	// "repair output cut off at the token cap" from a genuine parse failure
-	// still can.
+	// repairOutcome starts from the parent run's Iterations (repair seeds it
+	// with baseIter so transcript steps continue the parent's sequence), so
+	// Iterations is already cumulative; carry the original run's
+	// TruncationReason/Finalized through and make Usage cumulative.
+	// LastStopReason keeps reflecting the repair completion itself (set by
+	// completeOnce), so a caller distinguishing "repair output cut off at
+	// the token cap" from a genuine parse failure still can.
 	repairOutcome.TruncationReason = outcome.TruncationReason
 	repairOutcome.Finalized = outcome.Finalized
-	repairOutcome.Iterations += outcome.Iterations
 	repairOutcome.Usage.InputTokens += outcome.Usage.InputTokens
 	repairOutcome.Usage.OutputTokens += outcome.Usage.OutputTokens
 	repairOutcome.Usage.CacheReadInputTokens += outcome.Usage.CacheReadInputTokens

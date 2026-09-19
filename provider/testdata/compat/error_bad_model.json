@@ -4,8 +4,8 @@
   "model": "llmkit-no-such-model-x9",
   "capabilities": {
     "ContextWindow": 0,
-    "ParallelToolCalls": false,
-    "PromptCaching": false,
+    "ParallelToolCalls": true,
+    "PromptCaching": true,
     "StructuredOutput": false,
     "Thinking": false,
     "ToolChoice": true,
@@ -25,14 +25,8 @@
           "Role": "user",
           "Content": [
             {
-              "Kind": "text",
-              "Text": "Reply with exactly: OK",
-              "MediaType": "",
-              "Data": null,
-              "URL": "",
-              "Title": "",
-              "Provider": "",
-              "Raw": null
+              "kind": "text",
+              "text": "Reply with exactly: OK"
             }
           ],
           "ToolCalls": null,
@@ -78,19 +72,19 @@
       "response": {
         "headers": {
           "access-control-allow-origin": "*",
-          "alb_receive_time": "1789780922.051",
-          "alb_request_id": "008f24c725cac467b5427e04906aee15c1b5b242",
+          "alb_receive_time": "1789786175.853",
+          "alb_request_id": "e570bf2f7eb9f16e0a1b359ed7d3b21bc2e216ab",
           "cache-control": "max-age=0, no-cache, no-store",
           "content-length": "194",
           "content-type": "application/json; charset=utf-8",
-          "date": "Sat, 19 Sep 2026 01:22:02 GMT",
-          "expires": "Sat, 19 Sep 2026 01:22:02 GMT",
-          "minimax-request-id": "385429fbd1b0a240d214fd108ce0e03c",
+          "date": "Sat, 19 Sep 2026 02:49:35 GMT",
+          "expires": "Sat, 19 Sep 2026 02:49:35 GMT",
+          "minimax-request-id": "08921d7b33bada289969ad4be62158f9",
           "pragma": "no-cache",
-          "trace-id": "06fd16ba1d2a45d324c9642ff6801e8d",
+          "trace-id": "06fd2b3f0da24d6e6f975051621e2dc3",
           "x-from": "ak"
         },
-        "body": "{\"type\":\"error\",\"error\":{\"type\":\"bad_request_error\",\"message\":\"invalid params, unknown model 'llmkit-no-such-model-x9' (2013)\",\"http_code\":\"400\"},\"request_id\":\"06fd16ba1d2a45d324c9642ff6801e8d\"}",
+        "body": "{\"type\":\"error\",\"error\":{\"type\":\"bad_request_error\",\"message\":\"invalid params, unknown model 'llmkit-no-such-model-x9' (2013)\",\"http_code\":\"400\"},\"request_id\":\"06fd2b3f0da24d6e6f975051621e2dc3\"}",
         "status": 400
       }
     }

@@ -4,8 +4,8 @@
   "model": "MiniMax-M3",
   "capabilities": {
     "ContextWindow": 0,
-    "ParallelToolCalls": false,
-    "PromptCaching": false,
+    "ParallelToolCalls": true,
+    "PromptCaching": true,
     "StructuredOutput": false,
     "Thinking": false,
     "ToolChoice": true,
@@ -25,14 +25,8 @@
           "Role": "user",
           "Content": [
             {
-              "Kind": "text",
-              "Text": "Reply with exactly: OK",
-              "MediaType": "",
-              "Data": null,
-              "URL": "",
-              "Title": "",
-              "Provider": "",
-              "Raw": null
+              "kind": "text",
+              "text": "Reply with exactly: OK"
             }
           ],
           "ToolCalls": null,
@@ -78,31 +72,31 @@
       "response": {
         "headers": {
           "access-control-allow-origin": "*",
-          "alb_receive_time": "1789780930.343",
-          "alb_request_id": "d405ac5335f6c79fef30092688b4add904d29cef",
+          "alb_receive_time": "1789786185.057",
+          "alb_request_id": "9d23897d9834f1b6a46c6a44b999e57bcc0dcf33",
           "cache-control": "max-age=0, no-cache, no-store",
-          "content-length": "752",
+          "content-length": "819",
           "content-type": "application/json; charset=utf-8",
-          "date": "Sat, 19 Sep 2026 01:22:12 GMT",
-          "expires": "Sat, 19 Sep 2026 01:22:12 GMT",
-          "minimax-request-id": "999201d8a78ef0d0b6ea700cba96a7a9",
+          "date": "Sat, 19 Sep 2026 02:49:46 GMT",
+          "expires": "Sat, 19 Sep 2026 02:49:46 GMT",
+          "minimax-request-id": "5ab4afcea9d7f9e2d181abaf238797b8",
           "pragma": "no-cache",
-          "trace-id": "06fd16c278337870d7daea4a13451d51",
+          "trace-id": "06fd2b491ca7eac0840328524f966948",
           "x-from": "ak",
-          "x-mm-request-id": "2022431855143301769_1789780932rtz2rf",
+          "x-mm-request-id": "2022431855143301769_1789786186ttxmbi",
           "x-session-id": "415add720ac4193e163e6f6b1c7d7a46"
         },
-        "body": "{\"id\":\"06fd16c278337870d7daea4a13451d51\",\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"\u003cthink\u003e\\nThe user is asking me to reply with exactly \\\"OK\\\". This is a simple request that I should follow.\\n\u003c/think\u003e\\n\\nOK\",\"role\":\"assistant\",\"name\":\"MiniMax AI\",\"audio_content\":\"\"}}],\"created\":1789780930,\"model\":\"MiniMax-M3\",\"object\":\"chat.completion\",\"usage\":{\"total_tokens\":205,\"total_characters\":0,\"prompt_tokens\":181,\"completion_tokens\":24,\"completion_tokens_details\":{\"reasoning_tokens\":22},\"prompt_tokens_details\":{\"cached_tokens\":128}},\"input_sensitive\":false,\"output_sensitive\":false,\"input_sensitive_type\":0,\"output_sensitive_type\":0,\"output_sensitive_int\":0,\"service_tier\":\"standard\",\"base_resp\":{\"status_code\":0,\"status_msg\":\"\"}}\n",
+        "body": "{\"id\":\"06fd2b491ca7eac0840328524f966948\",\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"\u003cthink\u003e\\nThe user is asking me to reply with exactly \\\"OK\\\". This is a simple request that doesn't conflict with any policies. I should just respond with \\\"OK\\\" as requested.\\n\u003c/think\u003e\\n\\nOK\",\"role\":\"assistant\",\"name\":\"MiniMax AI\",\"audio_content\":\"\"}}],\"created\":1789786185,\"model\":\"MiniMax-M3\",\"object\":\"chat.completion\",\"usage\":{\"total_tokens\":218,\"total_characters\":0,\"prompt_tokens\":181,\"completion_tokens\":37,\"completion_tokens_details\":{\"reasoning_tokens\":35},\"prompt_tokens_details\":{\"cached_tokens\":128}},\"input_sensitive\":false,\"output_sensitive\":false,\"input_sensitive_type\":0,\"output_sensitive_type\":0,\"output_sensitive_int\":0,\"service_tier\":\"standard\",\"base_resp\":{\"status_code\":0,\"status_msg\":\"\"}}\n",
         "status": 200
       }
     }
   ],
   "normalized": {
-    "text": "\u003cthink\u003e\nThe user is asking me to reply with exactly \"OK\". This is a simple request that I should follow.\n\u003c/think\u003e\n\nOK",
+    "text": "\u003cthink\u003e\nThe user is asking me to reply with exactly \"OK\". This is a simple request that doesn't conflict with any policies. I should just respond with \"OK\" as requested.\n\u003c/think\u003e\n\nOK",
     "stop_reason": "end_turn",
     "usage": {
       "InputTokens": 181,
-      "OutputTokens": 24,
+      "OutputTokens": 37,
       "CacheReadInputTokens": 128,
       "CacheCreationInputTokens": 0
     }

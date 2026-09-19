@@ -4,8 +4,8 @@
   "model": "MiniMax-M3",
   "capabilities": {
     "ContextWindow": 0,
-    "ParallelToolCalls": false,
-    "PromptCaching": false,
+    "ParallelToolCalls": true,
+    "PromptCaching": true,
     "StructuredOutput": false,
     "Thinking": false,
     "ToolChoice": true,
@@ -25,14 +25,8 @@
           "Role": "user",
           "Content": [
             {
-              "Kind": "text",
-              "Text": "Reply with exactly: OK",
-              "MediaType": "",
-              "Data": null,
-              "URL": "",
-              "Title": "",
-              "Provider": "",
-              "Raw": null
+              "kind": "text",
+              "text": "Reply with exactly: OK"
             }
           ],
           "ToolCalls": null,
@@ -78,19 +72,19 @@
       "response": {
         "headers": {
           "access-control-allow-origin": "*",
-          "alb_receive_time": "1789780921.973",
-          "alb_request_id": "9fe6a2f918beaf0f1570c715f0ffaac797dc831e",
+          "alb_receive_time": "1789786175.708",
+          "alb_request_id": "780c5c6acd06cfc98f46048f60522591660df464",
           "cache-control": "max-age=0, no-cache, no-store",
           "content-length": "232",
           "content-type": "application/json; charset=utf-8",
-          "date": "Sat, 19 Sep 2026 01:22:01 GMT",
-          "expires": "Sat, 19 Sep 2026 01:22:01 GMT",
-          "minimax-request-id": "5b5725c42b60b043f7178ac4b423ba0a",
+          "date": "Sat, 19 Sep 2026 02:49:35 GMT",
+          "expires": "Sat, 19 Sep 2026 02:49:35 GMT",
+          "minimax-request-id": "e8484e76353ce414ab185daea242b8c2",
           "pragma": "no-cache",
-          "trace-id": "06fd16b937f44ac928370776b829c5b7",
+          "trace-id": "06fd2b3f1d64d47a9dea8f55286c0358",
           "x-from": "ak"
         },
-        "body": "{\"type\":\"error\",\"error\":{\"type\":\"authorized_error\",\"message\":\"login fail: Please carry the API secret key in the 'Authorization' field of the request header (1004)\",\"http_code\":\"401\"},\"request_id\":\"06fd16b937f44ac928370776b829c5b7\"}",
+        "body": "{\"type\":\"error\",\"error\":{\"type\":\"authorized_error\",\"message\":\"login fail: Please carry the API secret key in the 'Authorization' field of the request header (1004)\",\"http_code\":\"401\"},\"request_id\":\"06fd2b3f1d64d47a9dea8f55286c0358\"}",
         "status": 401
       }
     }

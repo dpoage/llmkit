@@ -685,15 +685,15 @@ func TestStripFences(t *testing.T) {
 // always requests a tool (so the loop never naturally finishes) and reports
 // a large, fixed Usage on every completion. The first N-1 completions also
 // report a tool call, and the final one (the reserved finalization turn)
-// returns a text answer. An optional chargeFn is called before each
-// completion to model the shared pool spending.
+// returns a text answer. The RUNNER charges the shared pool after each
+// completion (WithBudgetPool): at the default weight 1.0 each tool turn
+// costs 2*perCall chargeable tokens.
 type budgetCutClient struct {
 	mu        sync.Mutex
 	calls     int
 	finalAt   int    // call index (1-based) at which to return text
 	finalText string // text to return on the finalization turn
 	perCall   int64
-	chargeFn  func() // optional: called before each completion
 }
 
 func (c *budgetCutClient) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
@@ -704,9 +704,6 @@ func (c *budgetCutClient) Complete(ctx context.Context, req llmkit.Request) (llm
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.calls++
-	if c.chargeFn != nil {
-		c.chargeFn()
-	}
 	if c.calls == c.finalAt {
 		return llmkit.Response{
 			Text:       c.finalText,
@@ -722,26 +719,27 @@ func (c *budgetCutClient) Complete(ctx context.Context, req llmkit.Request) (llm
 }
 
 // TestRunJSON_BudgetPoolFinalizesAndParses proves that a RunJSON run whose
-// shared pool BudgetCheck is exhausted now TAKES a finalization turn
-// (outcome.Finalized==true) and, when the model emits valid JSON on that turn,
-// RunJSON parses it successfully — no "empty model output" failure. This is
-// the core fix for budget-pressured agents.
+// shared pool is exhausted (WithBudgetPool; the Runner charges each turn and
+// checks pre-turn) now TAKES a finalization turn (outcome.Finalized==true)
+// and, when the model emits valid JSON on that turn, RunJSON parses it
+// successfully — no "empty model output" failure. This is the core fix for
+// budget-pressured agents.
 func TestRunJSON_BudgetPoolFinalizesAndParses(t *testing.T) {
 	const maxIter = 10
 	pool := NewBudgetPool(100) // tiny pool
-	// finalAt = 3: first 2 calls request tools (charging pool), 3rd call is the
-	// finalization turn after the pool is exhausted.
+	// Each tool turn charges 2*perCall = 60; after 2 turns 120 >= 100, so the
+	// pre-turn gate fires and the 3rd call is the finalization turn.
 	c := &budgetCutClient{
 		finalAt:   3,
 		finalText: `{"path":"x.go","note":"recovered"}`,
-		perCall:   60,
-		chargeFn:  func() { pool.Add(60) },
+		perCall:   30,
 	}
-	r := NewRunner(c, []Tool{echoTool{name: "echo"}}, "sys", WithLimits(Limits{
-		MaxIterations: maxIter,
-		TokenBudget:   -1,
-		BudgetCheck:   pool.Check,
-	}))
+	r := NewRunner(c, []Tool{echoTool{name: "echo"}}, "sys",
+		WithLimits(Limits{
+			MaxIterations: maxIter,
+			TokenBudget:   -1,
+		}),
+		WithBudgetPool(pool))
 	var got item
 	out, err := r.RunJSON(context.Background(), "audit", json.RawMessage(`{"type":"object"}`), &got)
 	if err != nil {
@@ -795,17 +793,18 @@ func TestRunJSON_PerRunTokenBudgetFinalizesAndParses(t *testing.T) {
 func TestRunJSON_BudgetFinalizeEmptyStillClassified(t *testing.T) {
 	pool := NewBudgetPool(100)
 	// finalization turn returns empty text — model fails to emit a useful answer.
+	// Each tool turn charges 2*perCall = 60; the 3rd call is the finalization turn.
 	c := &budgetCutClient{
 		finalAt:   3,
 		finalText: "",
-		perCall:   60,
-		chargeFn:  func() { pool.Add(60) },
+		perCall:   30,
 	}
-	r := NewRunner(c, []Tool{echoTool{name: "echo"}}, "sys", WithLimits(Limits{
-		MaxIterations: 10,
-		TokenBudget:   -1,
-		BudgetCheck:   pool.Check,
-	}))
+	r := NewRunner(c, []Tool{echoTool{name: "echo"}}, "sys",
+		WithLimits(Limits{
+			MaxIterations: 10,
+			TokenBudget:   -1,
+		}),
+		WithBudgetPool(pool))
 	var got item
 	_, err := r.RunJSON(context.Background(), "audit", json.RawMessage(`{"type":"object"}`), &got)
 	if err == nil {
@@ -817,14 +816,14 @@ func TestRunJSON_BudgetFinalizeEmptyStillClassified(t *testing.T) {
 	c2 := &budgetCutClient{
 		finalAt:   3,
 		finalText: "",
-		perCall:   60,
-		chargeFn:  func() { pool.Add(60) },
+		perCall:   30,
 	}
-	r2 := NewRunner(c2, []Tool{echoTool{name: "echo"}}, "sys", WithLimits(Limits{
-		MaxIterations: 10,
-		TokenBudget:   -1,
-		BudgetCheck:   pool.Check,
-	}))
+	r2 := NewRunner(c2, []Tool{echoTool{name: "echo"}}, "sys",
+		WithLimits(Limits{
+			MaxIterations: 10,
+			TokenBudget:   -1,
+		}),
+		WithBudgetPool(pool))
 	out, _ := r2.run(context.Background(), nil, "audit", finalizationPrompt(json.RawMessage(`{"type":"object"}`)), nil)
 	if !out.Truncated() {
 		t.Error("Outcome.Truncated() = false, want true (budget stop should still mark truncated)")
@@ -845,14 +844,15 @@ func TestRunJSON_BudgetFinalizeEmptyStillClassified(t *testing.T) {
 // completions as before the fix.
 func TestRunJSON_RunPathNoExtraCall(t *testing.T) {
 	pool := NewBudgetPool(100)
-	// bigSpendClient from budget_test.go: charges the pool, always requests a tool.
-	// We import its behavior inline so this test is self-contained.
-	c := &bigSpendClient{pool: pool, perCall: 60}
-	r := NewRunner(c, []Tool{noopTool{}}, "sys", WithLimits(Limits{
-		MaxIterations: -1,
-		TokenBudget:   -1,
-		BudgetCheck:   pool.Check,
-	}))
+	// bigSpendClient from budget_test.go: always requests a tool; the RUNNER
+	// charges the pool after each completion (WithBudgetPool).
+	c := &bigSpendClient{perCall: 60}
+	r := NewRunner(c, []Tool{noopTool{}}, "sys",
+		WithLimits(Limits{
+			MaxIterations: -1,
+			TokenBudget:   -1,
+		}),
+		WithBudgetPool(pool))
 	out, err := r.Run(context.Background(), "task")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -1533,5 +1533,67 @@ func TestRunJSON_EmptyTurnNudgeCapExhausted(t *testing.T) {
 	}
 	if nudgeCount != maxEmptyTurnNudges {
 		t.Errorf("nudge count = %d, want %d (cap)", nudgeCount, maxEmptyTurnNudges)
+	}
+}
+
+// TestRunJSON_RepairStepContinuesParentSequence is the shp.15 regression:
+// the repair completion's transcript step continues the parent run's
+// iteration sequence instead of restarting at 1. A repaired run records
+// steps 1,2 then 3 (not 1,2 then 1) while Outcome.Iterations is 3, so a
+// consumer joining ToolEvent.Step / CompactionEvent.Step / Event.Step on
+// Step sees one monotonic sequence.
+func TestRunJSON_RepairStepContinuesParentSequence(t *testing.T) {
+	fc := newFakeClient(
+		toolResp("c1", "echo", `{"v":"hi"}`, 10, 4),
+		textResp("this is not json", 5, 5),
+		textResp(validItemJSON, 5, 5), // the repair completion
+	)
+	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys")
+
+	var got item
+	out, err := r.RunJSON(context.Background(), "task", json.RawMessage(itemsSchema), &got)
+	if err != nil {
+		t.Fatalf("RunJSON should succeed after repair: %v", err)
+	}
+	if out.Iterations != 3 {
+		t.Errorf("Iterations = %d, want 3 (2 main-loop turns + 1 repair)", out.Iterations)
+	}
+	// Events within one turn SHARE that turn's Step (it is the join key);
+	// across turns the number must never go backwards, and the repair's
+	// request/assistant pair must sit at step 3 — one continuous sequence.
+	prev := 0
+	repairSteps := map[EventKind]bool{}
+	for _, ev := range out.Transcript.Events {
+		if ev.Step < prev {
+			t.Errorf("transcript Step went backwards: step %d after %d (kind %s)", ev.Step, prev, ev.Kind)
+		}
+		prev = ev.Step
+		if ev.Step == 3 {
+			repairSteps[ev.Kind] = true
+		}
+	}
+	if !repairSteps[EventRequest] || !repairSteps[EventAssistant] {
+		t.Errorf("repair completion not recorded at step 3 (events at step 3: %v)", repairSteps)
+	}
+}
+
+// TestRunJSON_RepairFinalTextIsRepairText pins the Outcome.FinalText
+// contract on the repair path: after a repair round-trip, the returned
+// Outcome's FinalText is the REPAIR completion's text — the last completion
+// of the run — not the unparseable pre-repair answer.
+func TestRunJSON_RepairFinalTextIsRepairText(t *testing.T) {
+	fc := newFakeClient(
+		textResp("this is prose, not JSON", 5, 5),
+		textResp(validItemJSON, 5, 5),
+	)
+	r := NewRunner(fc, nil, "sys")
+
+	var got item
+	out, err := r.RunJSON(context.Background(), "task", json.RawMessage(itemsSchema), &got)
+	if err != nil {
+		t.Fatalf("RunJSON should succeed after repair: %v", err)
+	}
+	if out.FinalText != validItemJSON {
+		t.Errorf("FinalText = %q, want the repair completion's text %q", out.FinalText, validItemJSON)
 	}
 }

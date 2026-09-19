@@ -21,8 +21,9 @@
 // The loop enforces two limits: [Limits.MaxIterations] (model turns) and
 // [Limits.TokenBudget] (cumulative input+output tokens from [llmkit.Usage]).
 // Exceeding either stops the loop cleanly, returning an [Outcome] with a
-// non-empty [Outcome.TruncationReason] and the last assistant text
-// preserved — partial results are data, not errors. Only context
+// non-empty [Outcome.TruncationReason]; Outcome.FinalText holds the text of
+// the LAST completion of the run (empty when that completion produced no
+// text) — partial results are data, not errors. Only context
 // cancellation, infra failures, and [StopReasonError] return a non-nil error
 // from [Runner.Run].
 //
@@ -64,9 +65,9 @@ type Limits struct {
 	// negative value disables the budget.
 	TokenBudget int64
 	// CacheReadWeight discounts cache-read input tokens in the per-run budget
-	// check. Valid range is (0,1]; the caller always passes an already-resolved
-	// non-zero weight (config 0 -> DefaultCacheReadBudgetWeight upstream). A
-	// zero/negative value is resolved to 1.0 (no discount) by resolve().
+	// check and in the shared budget pool's charge (see [WithBudgetPool]).
+	// Valid range is (0,1]; a zero or negative value resolves to 1.0 (no
+	// discount).
 	CacheReadWeight float64
 	// HistoryTokenBudget enables threshold-triggered history compaction. When the
 	// estimated size of the growing message history (bytes/4 over message content
@@ -87,17 +88,6 @@ type Limits struct {
 	// Zero disables compaction (pure append-only history). A negative value also
 	// disables it.
 	HistoryTokenBudget int64
-	// BudgetCheck, when non-nil, is consulted by the Runner BEFORE each model
-	// call. It lets a shared budget pool (see BudgetPool) stop an in-flight run
-	// at the next turn boundary once a run-spanning ceiling is hit, independent
-	// of this run's own per-run TokenBudget. Returning ErrBudgetExhausted stops
-	// the run cleanly with TruncBudgetPool; any other non-nil error is treated
-	// as an infrastructure failure and returned from Run rather than being
-	// misreported as a budget stop. The hook MUST be read-only with respect
-	// to the request (it must not mutate system/tools/history), so it cannot
-	// break request prefix stability. It may be invoked concurrently across
-	// parallel runs, so it must be safe for concurrent use.
-	BudgetCheck func() error
 }
 
 // resolve returns the effective limits, substituting defaults for zero values.
@@ -127,31 +117,30 @@ const (
 	TruncMaxIterations TruncationReason = "max_iterations"
 	// TruncTokenBudget means cumulative token usage exceeded the budget.
 	TruncTokenBudget TruncationReason = "token_budget"
-	// TruncBudgetPool means a shared budget pool (via Limits.BudgetCheck) was
-	// exhausted before this run's own per-run budget, so the run stopped
-	// pre-turn. It is distinct from TruncTokenBudget so the caller can tell a
-	// run that was stopped by the run-spanning ceiling ("budget-stopped") from
-	// one that merely exhausted its own allowance.
+	// TruncBudgetPool means a shared budget pool (installed with
+	// [WithBudgetPool]) was exhausted before this run's own per-run budget,
+	// so the run stopped pre-turn. It is distinct from TruncTokenBudget so
+	// the caller can tell a run that was stopped by the run-spanning ceiling
+	// ("budget-stopped") from one that merely exhausted its own allowance.
 	TruncBudgetPool TruncationReason = "budget_pool"
 )
 
 // Outcome is the result of a [Runner.Run]. A truncated run is still a valid
-// outcome: FinalText holds whatever the model produced last, and the Transcript
+// outcome: FinalText holds the last completion's text, and the Transcript
 // captures the full interaction.
 //
 // A truncated outcome is exactly one whose TruncationReason is non-empty (see
 // [Outcome.Truncated]); the type makes any other encoding unrepresentable.
 // finishTruncated is the sole point that sets it.
 type Outcome struct {
-	// FinalText is the model's last assistant text. On a clean finish it is the
-	// model's answer; on truncation it is the most recent assistant text (which
-	// may be empty if the model only ever requested tools).
+	// FinalText is the text of the LAST completion of the run — the
+	// main-loop turn, a stitched max-tokens continuation, the forced
+	// finalization turn, or the RunJSON repair completion, whichever ran
+	// last. Empty when that completion produced no text; never text from an
+	// earlier turn. Callers can present it as the run's answer verbatim.
+	// After a RunJSON repair, it is the repair completion's text (see
+	// [Runner.RunJSON]).
 	FinalText string
-	// FinalTextSet reports whether the final turn of the run produced any text.
-	// When false, FinalText is either empty (model only used tools) or stale
-	// text carried over from an earlier turn — callers must not present it as
-	// the model's answer.
-	FinalTextSet bool
 	// TruncationReason is set when the run stopped because it hit a limit
 	// rather than the model finishing its turn: one of the Trunc* constants.
 	// Empty means the model finished cleanly.
@@ -160,9 +149,11 @@ type Outcome struct {
 	Iterations int
 	// Usage is cumulative token consumption across the run.
 	Usage llmkit.Usage
-	// Finalized reports whether forced finalization fired: the loop reserved its
-	// last turn, injected the finalization prompt, and took one final completion
-	// instead of returning dangling exploration prose. See [WithFinalization].
+	// Finalized reports whether forced finalization fired: the loop reserved
+	// its last turn, injected the finalization prompt, and took one final
+	// completion instead of returning dangling exploration prose. Only
+	// [Runner.RunJSON] reserves that turn (the public [Runner.Run] passes no
+	// finalize prompt).
 	Finalized bool
 	// LastStopReason is the stop reason of the final completion in the run. It is
 	// StopMaxTokens when the model's last output was truncated at the token cap,
@@ -187,12 +178,13 @@ type Outcome struct {
 // than the model finishing its turn — i.e. whether TruncationReason is set.
 func (o *Outcome) Truncated() bool { return o.TruncationReason != "" }
 
-// StopReasonError is returned by [Runner.Run] when the model's final turn ended
-// with [llmkit.StopError] (refusal, safety filter, recitation) and no tool calls.
-// Before this error existed the loop treated such turns as clean completions,
-// recording refusal prose — or stale text from an earlier turn — as the answer
-// (observed in production). The partial Outcome is attached so callers can
-// still inspect usage and the transcript.
+// StopReasonError is returned by [Runner.Run] when the model's final turn
+// ended with a provider error stop reason ([llmkit.StopError],
+// [llmkit.StopRefusal], or [llmkit.StopContentFilter] — refusal, safety
+// filter, recitation) and no tool calls. The refusal prose is carried in
+// Text and is never presented as the run's answer. The partial Outcome is
+// attached so callers can still inspect usage and the transcript, and can
+// be threaded into [Continue] to keep the conversation going.
 type StopReasonError struct {
 	// StopReason is the provider stop reason that ended the run.
 	StopReason llmkit.StopReason

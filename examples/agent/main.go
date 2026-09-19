@@ -115,7 +115,7 @@ set the variables above, then re-run:
 	}
 
 	fmt.Println()
-	if outcome.FinalTextSet {
+	if outcome.FinalText != "" {
 		fmt.Println("final:     ", outcome.FinalText)
 	} else {
 		fmt.Println("final:      (no assistant text produced)")

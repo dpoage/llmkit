@@ -7,8 +7,8 @@ import "context"
 // per-dimension.
 type UsageEvent struct {
 	// Provider is the provider tag: the provider type by default
-	// ("anthropic", "openai", ...), or the caller's own config name via
-	// provider.Options.Provider.
+	// ("anthropic", "openai", ...), or the caller's own config name via the
+	// provider package's Options.Provider.
 	Provider string
 	// Model is the model identifier.
 	Model string
