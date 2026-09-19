@@ -4,8 +4,8 @@
   "model": "MiniMax-M3",
   "capabilities": {
     "ContextWindow": 0,
-    "ParallelToolCalls": false,
-    "PromptCaching": false,
+    "ParallelToolCalls": true,
+    "PromptCaching": true,
     "StructuredOutput": false,
     "Thinking": false,
     "ToolChoice": true,
@@ -25,24 +25,13 @@
           "Role": "user",
           "Content": [
             {
-              "Kind": "image",
-              "Text": "",
-              "MediaType": "image/png",
-              "Data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
-              "URL": "",
-              "Title": "",
-              "Provider": "",
-              "Raw": null
+              "kind": "image",
+              "media_type": "image/png",
+              "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
             },
             {
-              "Kind": "text",
-              "Text": "Reply with the single word OK if you received an image.",
-              "MediaType": "",
-              "Data": null,
-              "URL": "",
-              "Title": "",
-              "Provider": "",
-              "Raw": null
+              "kind": "text",
+              "text": "Reply with the single word OK if you received an image."
             }
           ],
           "ToolCalls": null,
@@ -88,31 +77,31 @@
       "response": {
         "headers": {
           "access-control-allow-origin": "*",
-          "alb_receive_time": "1789780926.628",
-          "alb_request_id": "6676b68c04f5ab677caf45b7991fb270a930ddb1",
+          "alb_receive_time": "1789786181.944",
+          "alb_request_id": "3e5f86207c798ec355205d859eebedab68e76e41",
           "cache-control": "max-age=0, no-cache, no-store",
-          "content-length": "653",
+          "content-length": "763",
           "content-type": "application/json; charset=utf-8",
-          "date": "Sat, 19 Sep 2026 01:22:06 GMT",
-          "expires": "Sat, 19 Sep 2026 01:22:06 GMT",
-          "minimax-request-id": "2aba8fead834fcaa8d5be03b2d6adfa9",
+          "date": "Sat, 19 Sep 2026 02:49:42 GMT",
+          "expires": "Sat, 19 Sep 2026 02:49:42 GMT",
+          "minimax-request-id": "bcd6089ffece4696cee6ee3ea51a0ba7",
           "pragma": "no-cache",
-          "trace-id": "06fd16beebd9502144411c6938a111e7",
+          "trace-id": "06fd2b453a9a2ecf21ef8414e243e98b",
           "x-from": "ak",
-          "x-mm-request-id": "2022431855143301769_1789780926g8mcmk",
+          "x-mm-request-id": "2022431855143301769_1789786181jdj5uw",
           "x-session-id": "233f06245926c1bbd5aa7d8d9cf4e2f6"
         },
-        "body": "{\"id\":\"06fd16beebd9502144411c6938a111e7\",\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"\u003cthink\u003eThe user has sent an image and asked me to reply with the single word \\\"OK\\\" if I received it.\u003c/think\u003e\\n\\nOK\",\"role\":\"assistant\"}}],\"created\":1789780926,\"model\":\"MiniMax-M3\",\"object\":\"chat.completion\",\"usage\":{\"total_tokens\":233,\"total_characters\":0,\"prompt_tokens\":206,\"completion_tokens\":27,\"prompt_tokens_details\":{\"cached_tokens\":128}},\"input_sensitive\":false,\"output_sensitive\":false,\"input_sensitive_type\":0,\"output_sensitive_type\":0,\"output_sensitive_int\":0,\"service_tier\":\"standard\",\"base_resp\":{\"status_code\":0,\"status_msg\":\"\"}}\n",
+        "body": "{\"id\":\"06fd2b453a9a2ecf21ef8414e243e98b\",\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"\u003cthink\u003eThe user has sent an image that appears to be a completely black/dark image. They're asking me to reply with \\\"OK\\\" if I received the image. I should follow their instruction and respond with just \\\"OK\\\".\u003c/think\u003e\\n\\nOK\",\"role\":\"assistant\"}}],\"created\":1789786182,\"model\":\"MiniMax-M3\",\"object\":\"chat.completion\",\"usage\":{\"total_tokens\":254,\"total_characters\":0,\"prompt_tokens\":206,\"completion_tokens\":48,\"prompt_tokens_details\":{\"cached_tokens\":128}},\"input_sensitive\":false,\"output_sensitive\":false,\"input_sensitive_type\":0,\"output_sensitive_type\":0,\"output_sensitive_int\":0,\"service_tier\":\"standard\",\"base_resp\":{\"status_code\":0,\"status_msg\":\"\"}}\n",
         "status": 200
       }
     }
   ],
   "normalized": {
-    "text": "\u003cthink\u003eThe user has sent an image and asked me to reply with the single word \"OK\" if I received it.\u003c/think\u003e\n\nOK",
+    "text": "\u003cthink\u003eThe user has sent an image that appears to be a completely black/dark image. They're asking me to reply with \"OK\" if I received the image. I should follow their instruction and respond with just \"OK\".\u003c/think\u003e\n\nOK",
     "stop_reason": "end_turn",
     "usage": {
       "InputTokens": 206,
-      "OutputTokens": 27,
+      "OutputTokens": 48,
       "CacheReadInputTokens": 128,
       "CacheCreationInputTokens": 0
     }

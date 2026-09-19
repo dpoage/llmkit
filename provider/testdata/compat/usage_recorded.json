@@ -4,8 +4,8 @@
   "model": "MiniMax-M3",
   "capabilities": {
     "ContextWindow": 0,
-    "ParallelToolCalls": false,
-    "PromptCaching": false,
+    "ParallelToolCalls": true,
+    "PromptCaching": true,
     "StructuredOutput": false,
     "Thinking": false,
     "ToolChoice": true,
@@ -25,14 +25,8 @@
           "Role": "user",
           "Content": [
             {
-              "Kind": "text",
-              "Text": "Reply with exactly: OK",
-              "MediaType": "",
-              "Data": null,
-              "URL": "",
-              "Title": "",
-              "Provider": "",
-              "Raw": null
+              "kind": "text",
+              "text": "Reply with exactly: OK"
             }
           ],
           "ToolCalls": null,
@@ -78,31 +72,31 @@
       "response": {
         "headers": {
           "access-control-allow-origin": "*",
-          "alb_receive_time": "1789780922.242",
-          "alb_request_id": "852a9e36ab5184c92f83dfe90a0d6ca3b104c9c3",
+          "alb_receive_time": "1789786175.96",
+          "alb_request_id": "8e4ea2fb02fc87858aac830fccabf2cddbcde29e",
           "cache-control": "max-age=0, no-cache, no-store",
-          "content-length": "749",
+          "content-length": "701",
           "content-type": "application/json; charset=utf-8",
-          "date": "Sat, 19 Sep 2026 01:22:03 GMT",
-          "expires": "Sat, 19 Sep 2026 01:22:03 GMT",
-          "minimax-request-id": "092ee773b34ea00e595e175fdb97e9d6",
+          "date": "Sat, 19 Sep 2026 02:49:36 GMT",
+          "expires": "Sat, 19 Sep 2026 02:49:36 GMT",
+          "minimax-request-id": "1243f13b877d3ce4b76bea7e4d6313c7",
           "pragma": "no-cache",
-          "trace-id": "06fd16babb620aa5d180ebd223b68fcd",
+          "trace-id": "06fd2b3f1339bfa16f3624d91e1e0889",
           "x-from": "ak",
-          "x-mm-request-id": "2022431855143301769_1789780923h10ovx",
+          "x-mm-request-id": "2022431855143301769_1789786176gyc7u8",
           "x-session-id": "415add720ac4193e163e6f6b1c7d7a46"
         },
-        "body": "{\"id\":\"06fd16babb620aa5d180ebd223b68fcd\",\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"\u003cthink\u003e\\nThe user is asking me to reply with exactly \\\"OK\\\". I should follow this instruction precisely.\\n\u003c/think\u003e\\n\\nOK\",\"role\":\"assistant\",\"name\":\"MiniMax AI\",\"audio_content\":\"\"}}],\"created\":1789780922,\"model\":\"MiniMax-M3\",\"object\":\"chat.completion\",\"usage\":{\"total_tokens\":202,\"total_characters\":0,\"prompt_tokens\":181,\"completion_tokens\":21,\"completion_tokens_details\":{\"reasoning_tokens\":19},\"prompt_tokens_details\":{\"cached_tokens\":128}},\"input_sensitive\":false,\"output_sensitive\":false,\"input_sensitive_type\":0,\"output_sensitive_type\":0,\"output_sensitive_int\":0,\"service_tier\":\"standard\",\"base_resp\":{\"status_code\":0,\"status_msg\":\"\"}}\n",
+        "body": "{\"id\":\"06fd2b3f1339bfa16f3624d91e1e0889\",\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"\u003cthink\u003e\\nThe user wants me to reply with exactly \\\"OK\\\".\\n\u003c/think\u003e\\n\\nOK\",\"role\":\"assistant\",\"name\":\"MiniMax AI\",\"audio_content\":\"\"}}],\"created\":1789786175,\"model\":\"MiniMax-M3\",\"object\":\"chat.completion\",\"usage\":{\"total_tokens\":194,\"total_characters\":0,\"prompt_tokens\":181,\"completion_tokens\":13,\"completion_tokens_details\":{\"reasoning_tokens\":11},\"prompt_tokens_details\":{\"cached_tokens\":128}},\"input_sensitive\":false,\"output_sensitive\":false,\"input_sensitive_type\":0,\"output_sensitive_type\":0,\"output_sensitive_int\":0,\"service_tier\":\"standard\",\"base_resp\":{\"status_code\":0,\"status_msg\":\"\"}}\n",
         "status": 200
       }
     }
   ],
   "normalized": {
-    "text": "\u003cthink\u003e\nThe user is asking me to reply with exactly \"OK\". I should follow this instruction precisely.\n\u003c/think\u003e\n\nOK",
+    "text": "\u003cthink\u003e\nThe user wants me to reply with exactly \"OK\".\n\u003c/think\u003e\n\nOK",
     "stop_reason": "end_turn",
     "usage": {
       "InputTokens": 181,
-      "OutputTokens": 21,
+      "OutputTokens": 13,
       "CacheReadInputTokens": 128,
       "CacheCreationInputTokens": 0
     }

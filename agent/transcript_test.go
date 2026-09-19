@@ -53,6 +53,74 @@ func TestTranscript_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestTranscript_TextBlockJSONExactShape pins the transcript wire shape for
+// the common case: a request event whose message carries one text block
+// serializes that block as exactly {"kind":"text","text":"…"} — no zero
+// fields, no "raw":null noise on every line.
+func TestTranscript_TextBlockJSONExactShape(t *testing.T) {
+	fc := newFakeClient(textResp("answer", 1, 1))
+	r := NewRunner(fc, nil, "sys")
+	out, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var buf bytes.Buffer
+	if err := out.Transcript.SaveJSONL(&buf); err != nil {
+		t.Fatalf("SaveJSONL: %v", err)
+	}
+	sc := bufio.NewScanner(&buf)
+	sawTextBlock := false
+	for sc.Scan() {
+		line := sc.Bytes()
+		if bytes.Contains(line, []byte(`"kind":"text"`)) && !bytes.Contains(line, []byte(`"tool_calls"`)) {
+			// A text block inside this line must carry exactly kind+text.
+			if bytes.Contains(line, []byte(`{"kind":"text","text":"task"}`)) {
+				sawTextBlock = true
+			}
+			if bytes.Contains(line, []byte(`"raw":null`)) {
+				t.Errorf("line emits raw:null: %.200s", line)
+			}
+		}
+	}
+	if !sawTextBlock {
+		t.Error("no line carries the exact text-block shape {\"kind\":\"text\",\"text\":\"task\"}")
+	}
+}
+
+// TestTranscript_LoadsPreTagJSONLLine pins backward load compatibility: a
+// transcript line written before Block carried json tags — every zero field
+// explicit and "raw":null — still decodes, and the message content it
+// carries survives.
+func TestTranscript_LoadsPreTagJSONLLine(t *testing.T) {
+	line := `{"kind":"request","step":1,"time":"2026-01-01T00:00:00Z","messages":[{"role":"user","content":[{"kind":"text","text":"old line","media_type":"","data":null,"url":"","title":"","provider":"","raw":null}],"tool_calls":null,"tool_call_id":"","is_error":false}]}`
+	tr, err := LoadJSONL(strings.NewReader(line + "\n"))
+	if err != nil {
+		t.Fatalf("LoadJSONL of a pre-change line: %v", err)
+	}
+	if len(tr.Events) != 1 || len(tr.Events[0].Messages) != 1 {
+		t.Fatalf("decoded events = %+v", tr.Events)
+	}
+	m := tr.Events[0].Messages[0]
+	if m.Role != llmkit.RoleUser || m.Text() != "old line" {
+		t.Errorf("pre-change line decoded to %+v", m)
+	}
+	// A second literal line whose text block already has the new minimal
+	// shape must decode to the same in-memory value.
+	newLine := `{"kind":"request","step":2,"time":"2026-01-01T00:00:01Z","messages":[{"role":"user","content":[{"kind":"text","text":"old line"}]}]}`
+	tr2, err := LoadJSONL(strings.NewReader(newLine + "\n"))
+	if err != nil {
+		t.Fatalf("LoadJSONL: %v", err)
+	}
+	if got, want := tr2.Events[0].Messages[0].Text(), m.Text(); got != want {
+		t.Errorf("old/new line decode mismatch: %q vs %q", got, want)
+	}
+	// Known, accepted quirk: json.RawMessage captures the literal null
+	// bytes when decoding the old line, so the loaded block's Raw is
+	// non-nil ("null") and a re-marshal keeps "raw":null. The line still
+	// loads — the compatibility contract — and every FRESH block (nil Raw)
+	// never emits it; that half is pinned by llmkit's TestBlockJSONShape.
+}
+
 func TestReplayClient_ReplaysRun(t *testing.T) {
 	// Record a run.
 	fc := newFakeClient(

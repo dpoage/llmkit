@@ -584,13 +584,15 @@ func TestRun_StopErrorAfterToolsYieldsTypedError(t *testing.T) {
 	}
 }
 
-// TestRun_EmptyFinalTurnFinalTextSet verifies that a final turn with no text
-// leaves FinalTextSet false even when an earlier turn produced text, so
-// callers can tell stale FinalText from a genuine final answer. The two
-// trailing empty responses exhaust the empty-turn-nudge cap
-// (maxEmptyTurnNudges=2) before the loop breaks, so the assertions below
-// still exercise a genuine "model finished with nothing" turn.
-func TestRun_EmptyFinalTurnFinalTextSet(t *testing.T) {
+// TestRun_ToolOnlyFinalTurnEmptiesFinalText pins the Outcome.FinalText
+// contract: the text of the LAST completion of the run, empty when that
+// completion produced no text — never text carried over from an earlier
+// turn. An earlier turn's "thinking out loud" must not leak into the
+// outcome as a fake answer. The two trailing empty responses exhaust the
+// empty-turn-nudge cap (maxEmptyTurnNudges=2) before the loop breaks, so
+// the assertions below still exercise a genuine "model finished with
+// nothing" turn.
+func TestRun_ToolOnlyFinalTurnEmptiesFinalText(t *testing.T) {
 	withText := toolResp("c1", "ghost", `{}`, 5, 2)
 	withText.resp.Text = "thinking out loud"
 	emptyFinal := scriptStep{resp: llmkit.Response{StopReason: llmkit.StopEndTurn, Usage: llmkit.Usage{InputTokens: 5, OutputTokens: 1}}}
@@ -606,17 +608,14 @@ func TestRun_EmptyFinalTurnFinalTextSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if out.FinalTextSet {
-		t.Error("FinalTextSet = true, want false: final turn emitted no text")
-	}
-	if out.FinalText != "thinking out loud" {
-		t.Errorf("FinalText = %q, want stale text preserved for transparency", out.FinalText)
+	if out.FinalText != "" {
+		t.Errorf("FinalText = %q, want empty: the final turn produced no text and earlier-turn text must never leak", out.FinalText)
 	}
 }
 
-// TestRun_NonEmptyFinalTurnFinalTextSet is the positive counterpart: a final
-// turn that emits text sets FinalTextSet.
-func TestRun_NonEmptyFinalTurnFinalTextSet(t *testing.T) {
+// TestRun_TextFinalTurnCarriesFinalText is the positive counterpart: a
+// final turn that emits text makes that text FinalText.
+func TestRun_TextFinalTurnCarriesFinalText(t *testing.T) {
 	fc := newFakeClient(textResp("the answer", 10, 5))
 	r := NewRunner(fc, nil, "sys")
 
@@ -624,10 +623,27 @@ func TestRun_NonEmptyFinalTurnFinalTextSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if !out.FinalTextSet {
-		t.Error("FinalTextSet = false, want true")
-	}
 	if out.FinalText != "the answer" {
 		t.Errorf("FinalText = %q, want 'the answer'", out.FinalText)
+	}
+}
+
+// TestRun_TextAfterToolsReplacesFinalText pins the replace-not-carry rule:
+// an earlier turn that carries text alongside a tool call, followed by a
+// final text turn, leaves the LAST completion's text standing.
+func TestRun_TextAfterToolsReplacesFinalText(t *testing.T) {
+	toolWithText := toolResp("c1", "ghost", `{}`, 5, 2)
+	toolWithText.resp.Text = "earlier prose"
+	fc := newFakeClient(
+		toolWithText,
+		textResp("final answer", 5, 2),
+	)
+	r := NewRunner(fc, nil, "sys")
+	out, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out.FinalText != "final answer" {
+		t.Errorf("FinalText = %q, want the LAST completion's text", out.FinalText)
 	}
 }
