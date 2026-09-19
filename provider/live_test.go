@@ -851,9 +851,9 @@ func tinyPDF() []byte {
 // streamTextCase is the shared body of the per-lane streaming acceptance
 // tests: a tiny prompt streamed through the production client stack via
 // llmkit.Stream must deliver more than one DeltaText (true incremental
-// delivery, not one synthesized fragment), and the final Response must have
-// the Complete shape — the fragments concatenate to the response text, usage
-// is accounted, and the turn ends with StopEndTurn.
+// delivery, not one synthesized fragment), and the final Response must
+// have the Complete shape — fragments concatenate to response text,
+// usage is accounted, and the turn ends with StopEndTurn.
 func streamTextCase(t *testing.T, lane string) {
 	sess := livetest.Resolve(t, lane)
 	lc := newLiveClient(t, sess)
@@ -889,8 +889,8 @@ func streamTextCase(t *testing.T, lane string) {
 
 // TestLiveCompatStreamText runs the streaming acceptance case on the
 // openai-compatible lane (MiniMax-M3 in CI). The case counts DeltaText
-// fragments only and requires more than one; reasoning_content deltas are
-// not asserted here.
+// fragments only and requires more than one; reasoning_content deltas
+// are not asserted here.
 func TestLiveCompatStreamText(t *testing.T) {
 	streamTextCase(t, "compat")
 }
@@ -901,12 +901,12 @@ func TestLiveOpenAIStreamText(t *testing.T) {
 	streamTextCase(t, "openai")
 }
 
-// TestLiveAnthropicStreaming exercises the anthropic lane's StreamingClient
-// path through the production construction chain (provider.New with its
-// decorator stack): text fragments must arrive incrementally, the joined
-// fragments must equal the final Response.Text, and usage must be populated.
-// It is a standalone lane test — the case registry stays untouched — and
-// skips with the lane when no credentials are configured.
+// TestLiveAnthropicStreaming: a standalone lane test (the case registry
+// stays untouched) that exercises the anthropic lane's StreamingClient
+// path through the production construction chain — text fragments must
+// arrive incrementally, the joined fragments must equal the final
+// Response.Text, and usage must be populated. Skips with the lane when
+// no credentials are configured.
 func TestLiveAnthropicStreaming(t *testing.T) {
 	sess := livetest.Resolve(t, "anthropic")
 	lc := newLiveClient(t, sess)
@@ -942,12 +942,13 @@ func TestLiveAnthropicStreaming(t *testing.T) {
 	}
 }
 
-// TestLiveGoogleStream runs the google lane's streaming path against the
-// live API through the same production construction as the matrix: llmkit.Stream
-// must deliver at least one delta over the SSE endpoint, and the aggregated
-// Response must carry text, accounted usage, and StopEndTurn — the same
-// outcome the lane's text_usage case asserts for Complete. Skips without the
-// google-lane credentials, like every matrix case.
+// TestLiveGoogleStream runs the google lane's streaming path against
+// the live API through the same production construction as the matrix:
+// llmkit.Stream must deliver at least one delta over the SSE endpoint,
+// and the aggregated Response must carry text, accounted usage, and
+// StopEndTurn — the same outcome the lane's text_usage case asserts for
+// Complete. Skips without the google-lane credentials, like every matrix
+// case.
 func TestLiveGoogleStream(t *testing.T) {
 	sess := livetest.Resolve(t, "google")
 	lc := newLiveClient(t, sess)

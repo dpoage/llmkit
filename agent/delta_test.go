@@ -338,10 +338,9 @@ func TestDelta_SynthesizedFromCompleteOnlyClient(t *testing.T) {
 	}
 }
 
-// TestDelta_HookPanicPropagates pins that a panicking Delta hook is a harness
-// bug like any other hook panic: it propagates out of Run with the ORIGINAL
-// value — nothing recovers it inside Stream — and the run aborts instead of
-// rendering the turn.
+// TestDelta_HookPanicPropagates: a panicking Delta hook is a harness bug
+// like any other hook panic — it propagates out of Run with the original
+// value and the run aborts.
 func TestDelta_HookPanicPropagates(t *testing.T) {
 	sf := &streamFakeClient{fakeClient: newFakeClient(
 		toolResp("c1", "echo", `{}`, 10, 4),

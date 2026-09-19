@@ -19,10 +19,11 @@ import (
 // SSE event shapes follow the Gemini API's streamGenerateContent?alt=sse
 // format: one `data: {json}` event per GenerateContentResponse chunk,
 // blank-line separated. The genai SDK parses exactly this shape
-// (google.golang.org/genai v1.64.0 api_client.go: scan + iterateResponseStream);
-// chunk layouts mirror the streaming and function-calling examples at
-// https://ai.google.dev/gemini-api/docs (text parts, thought parts with
-// thoughtSignature, functionCall parts, usageMetadata on the final chunk).
+// (google.golang.org/genai v1.64.0 api_client.go: scan +
+// iterateResponseStream); chunk layouts mirror the streaming and
+// function-calling examples at https://ai.google.dev/gemini-api/docs
+// (text parts, thought parts with thoughtSignature, functionCall parts,
+// usageMetadata on the final chunk).
 
 // testSig is a thoughtSignature in its wire form (base64 of "signature-1");
 // testSig2 distinguishes the signed function call's signature.
@@ -88,10 +89,10 @@ func newStreamClient(t *testing.T, base string) *googleAdapter {
 	return cl.(*googleAdapter)
 }
 
-// TestStream_TextAcrossChunks streams one reply's text across two chunks and
-// usage/finishReason on the last: deltas arrive per chunk, the aggregate
-// merges the consecutive text parts into one block, and the usage is the
-// LAST chunk's (Gemini repeats cumulative usageMetadata on every chunk).
+// TestStream_TextAcrossChunks: text streams across chunks; deltas arrive
+// per chunk, the aggregate merges consecutive text parts into one block,
+// and usage is the LAST chunk's (Gemini repeats cumulative usageMetadata
+// on every chunk).
 func TestStream_TextAcrossChunks(t *testing.T) {
 	base := streamServer(t,
 		textChunk("Hello"),
@@ -134,10 +135,9 @@ func TestStream_TextAcrossChunks(t *testing.T) {
 	}
 }
 
-// TestStream_ThoughtThenText streams a thought part carrying a
-// thoughtSignature followed by plain text: the thought delta precedes the
-// text delta, and the aggregated thinking block's Raw keeps the signature
-// bytes verbatim so googleAssistantParts can re-emit them next turn.
+// TestStream_ThoughtThenText: the thought delta precedes the text delta,
+// and the aggregated thinking block's Raw keeps the signature bytes
+// verbatim so googleAssistantParts can re-emit them next turn.
 func TestStream_ThoughtThenText(t *testing.T) {
 	base := streamServer(t,
 		map[string]any{"candidates": []any{map[string]any{
@@ -193,11 +193,10 @@ func TestStream_ThoughtThenText(t *testing.T) {
 	}
 }
 
-// TestStream_FunctionCalls streams one chunk carrying two functionCall
-// parts: one delta per call in arrival order with the full arguments —
-// Arguments render exactly the final ToolCall.Arguments, and a call the
-// server sent without an id keeps the empty id the Complete normalizer
-// produces (no synthetic scheme).
+// TestStream_FunctionCalls: one delta per call in arrival order with the
+// full arguments — Arguments render exactly the final ToolCall.Arguments,
+// and a call the server sent without an id keeps the empty id the
+// Complete normalizer produces (no synthetic scheme).
 func TestStream_FunctionCalls(t *testing.T) {
 	base := streamServer(t,
 		map[string]any{"candidates": []any{map[string]any{
@@ -243,10 +242,10 @@ func TestStream_FunctionCalls(t *testing.T) {
 	}
 }
 
-// TestStream_IdentityWithComplete feeds the same exchange to Complete
+// TestStream_IdentityWithComplete: the same exchange to Complete
 // (single-shot JSON) and Stream (the same content split across SSE chunks,
-// text re-merged) and requires byte-identical normalized Responses. There
-// is no vendor Raw object on the Response to except: llmkit.Response is
+// text re-merged) yields byte-identical normalized Responses. There is
+// no vendor Raw object on the Response to except: llmkit.Response is
 // compared with reflect.DeepEqual as-is.
 func TestStream_IdentityWithComplete(t *testing.T) {
 	parts := []any{
@@ -313,8 +312,8 @@ func TestStream_IdentityWithComplete(t *testing.T) {
 	}
 }
 
-// TestStream_NilFn pins the contract that a nil fn is allowed and makes
-// Stream equivalent to Complete's response.
+// TestStream_NilFn: a nil fn makes Stream equivalent to Complete's
+// response.
 func TestStream_NilFn(t *testing.T) {
 	base := streamServer(t, textChunk("Hello"), finalChunk("STOP", map[string]any{"promptTokenCount": 3, "candidatesTokenCount": 1, "totalTokenCount": 4}))
 	cl := newStreamClient(t, base)
@@ -327,8 +326,8 @@ func TestStream_NilFn(t *testing.T) {
 	}
 }
 
-// TestStream_FnErrorCancels pins the contract that a fn error cancels the
-// stream, is returned wrapped, and no Response is produced.
+// TestStream_FnErrorCancels: a fn error cancels the stream, is returned
+// wrapped, and no Response is produced.
 func TestStream_FnErrorCancels(t *testing.T) {
 	base := streamServer(t, textChunk("Hello"), textChunk(" world"), finalChunk("STOP", nil))
 	cl := newStreamClient(t, base)
@@ -358,8 +357,8 @@ func TestStream_FnErrorCancels(t *testing.T) {
 	}
 }
 
-// TestStream_RateLimited pins that a 429 before the stream starts
-// normalizes through the same normalizeErr Complete uses.
+// TestStream_RateLimited: a 429 before the stream starts normalizes
+// through the same normalizeErr Complete uses.
 func TestStream_RateLimited(t *testing.T) {
 	base := newServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -380,16 +379,17 @@ func TestStream_RateLimited(t *testing.T) {
 	}
 }
 
-// TestStream_ErrorMidStream pins that an in-band error event after good
-// chunks normalizes the same way — genai reports it as its only error type,
+// TestStream_ErrorMidStream: an in-band error event after good chunks
+// normalizes the same way — genai reports it as its only error type,
 // genai.APIError, and normalizeErr classifies it from the error code.
 func TestStream_ErrorMidStream(t *testing.T) {
 	base := newServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = fmt.Fprint(w, "data: "+mustJSON(t, textChunk("Hello"))+"\n\n")
-		// In-band terminal error: a bare JSON object (no "data:" prefix) in
-		// Google's error shape, which the SDK parses into genai.APIError
-		// (api_client.go iterateResponseStream default branch).
+		// In-band terminal error: a bare JSON object (no "data:" prefix)
+		// in Google's error shape, which the SDK parses into
+		// genai.APIError (api_client.go iterateResponseStream default
+		// branch).
 		_, _ = fmt.Fprint(w, `{"error":{"code":500,"message":"generation failed","status":"INTERNAL"}}`+"\n\n")
 	})
 	cl := newStreamClient(t, base)
@@ -421,13 +421,14 @@ func TestStream_ImplementsStreamingClient(t *testing.T) {
 
 // genai v1.64.0's iterateResponseStream never yields transport errors that
 // surface after scanning starts — context cancellation, deadlines, and
-// connection resets only reach its log — and a clean EOF is indistinguishable
-// from a stream cut short. The tests below pin that Stream fails such
+// connection resets only reach its log — and a clean EOF is
+// indistinguishable from a stream cut short. Stream must fail such
 // exchanges loudly instead of returning a truncated partial as StopEndTurn.
 
-// TestStream_ContextCanceledMidStream: the caller cancels while the stream
-// is open. No Response, and context.Canceled reachable through the error
-// chain — the same normalization Complete applies to a canceled request.
+// TestStream_ContextCanceledMidStream: the caller cancels while the
+// stream is open. No Response, and context.Canceled reachable through
+// the error chain — the same normalization Complete applies to a
+// canceled request.
 func TestStream_ContextCanceledMidStream(t *testing.T) {
 	base := newServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -457,9 +458,10 @@ func TestStream_ContextCanceledMidStream(t *testing.T) {
 	}
 }
 
-// TestStream_CleanEOFWithoutFinishReason: the server closes the stream after
-// content chunks without ever sending a finishReason. That is a truncated
-// exchange, not a completion — mapGoogleStop would dress it up as StopEndTurn.
+// TestStream_CleanEOFWithoutFinishReason: the server closes the stream
+// after content chunks without ever sending a finishReason — a truncated
+// exchange, not a completion (mapGoogleStop would dress it up as
+// StopEndTurn).
 func TestStream_CleanEOFWithoutFinishReason(t *testing.T) {
 	base := streamServer(t, textChunk("Hello"))
 	cl := newStreamClient(t, base)
@@ -480,7 +482,8 @@ func TestStream_CleanEOFWithoutFinishReason(t *testing.T) {
 
 // TestStream_ConnectionResetMidStream: the server resets the connection
 // (RST via SO_LINGER 0) after the first chunk was consumed. The SDK's
-// iterator logs the read error and stops silently; Stream must still fail.
+// iterator logs the read error and stops silently; Stream must still
+// fail.
 func TestStream_ConnectionResetMidStream(t *testing.T) {
 	firstSeen := make(chan struct{})
 	base := newServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -532,10 +535,10 @@ func TestStream_ConnectionResetMidStream(t *testing.T) {
 }
 
 // TestStream_RetryTimeoutStalledStream: WithRetry's per-attempt
-// RequestTimeout must abort a stream that stalls after delivering a chunk —
-// a silent partial would make the attempt look successful and defeat the
-// timeout entirely. The attempt fails with context.DeadlineExceeded in the
-// chain and no Response.
+// RequestTimeout must abort a stream that stalls after delivering a
+// chunk — a silent partial would make the attempt look successful and
+// defeat the timeout entirely. The attempt fails with
+// context.DeadlineExceeded in the chain and no Response.
 func TestStream_RetryTimeoutStalledStream(t *testing.T) {
 	base := newServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -568,8 +571,8 @@ func TestStream_RetryTimeoutStalledStream(t *testing.T) {
 	}
 }
 
-// TestStream_FnErrorStopsIteration pins the cancellation: after fn errors,
-// no further part may reach fn, even with more chunks queued on the wire.
+// TestStream_FnErrorStopsIteration: after fn errors, no further part may
+// reach fn, even with more chunks queued on the wire.
 func TestStream_FnErrorStopsIteration(t *testing.T) {
 	base := streamServer(t, textChunk("A"), textChunk("B"), textChunk("C"))
 	cl := newStreamClient(t, base)
@@ -590,8 +593,8 @@ func TestStream_FnErrorStopsIteration(t *testing.T) {
 	}
 }
 
-// TestStream_FinishReasonLastCarrierWins pins that the finishReason of the
-// last chunk carrying one decides the stop reason.
+// TestStream_FinishReasonLastCarrierWins: the finishReason of the last
+// chunk carrying one decides the stop reason.
 func TestStream_FinishReasonLastCarrierWins(t *testing.T) {
 	base := streamServer(t,
 		map[string]any{"candidates": []any{map[string]any{"finishReason": "MAX_TOKENS"}}},
@@ -610,10 +613,10 @@ func TestStream_FinishReasonLastCarrierWins(t *testing.T) {
 	}
 }
 
-// TestStream_UnspecifiedFinishReasonStillFinishes pins that a chunk carrying
-// only FINISH_REASON_UNSPECIFIED counts as having seen a finish reason (so a
-// stream ending after it is not an error) while the aggregate keeps none —
-// the same EndTurn Complete produces for an unspecified stop.
+// TestStream_UnspecifiedFinishReasonStillFinishes: a chunk carrying only
+// FINISH_REASON_UNSPECIFIED counts as having seen a finish reason (so a
+// stream ending after it is not an error) while the aggregate keeps
+// none — the same EndTurn Complete produces for an unspecified stop.
 func TestStream_UnspecifiedFinishReasonStillFinishes(t *testing.T) {
 	base := streamServer(t, map[string]any{"candidates": []any{map[string]any{
 		"finishReason": "FINISH_REASON_UNSPECIFIED",
@@ -631,8 +634,8 @@ func TestStream_UnspecifiedFinishReasonStillFinishes(t *testing.T) {
 	}
 }
 
-// TestStream_EmptyTextPartsSuppressed pins that empty text parts emit no
-// delta and do not break the merge of the text around them.
+// TestStream_EmptyTextPartsSuppressed: empty text parts emit no delta
+// and do not break the merge of the text around them.
 func TestStream_EmptyTextPartsSuppressed(t *testing.T) {
 	base := streamServer(t,
 		map[string]any{"candidates": []any{map[string]any{

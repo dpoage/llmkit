@@ -11,9 +11,9 @@ import (
 )
 
 // scriptedStreamClient implements StreamingClient with a canned delta
-// sequence, final response, and optional terminal error — the shape a real
-// adapter has: it wraps a non-nil fn error, never routes through Complete,
-// and can stall its leading calls until their context is done.
+// sequence, final response, and optional terminal error: it wraps a
+// non-nil fn error, never routes through Complete, and can stall its
+// leading calls until their context is done.
 type scriptedStreamClient struct {
 	caps   Capabilities
 	deltas []Delta
@@ -488,9 +488,9 @@ func TestSerializeStream_PassesThroughParallelCapableClient(t *testing.T) {
 }
 
 // TestStream_NilFnThroughDecorators routes a nil fn through every
-// decorator over both inner kinds: the wrappers wrap fn in non-nil
-// closures, so a missing guard would panic on the first fragment instead
-// of returning Complete's response.
+// decorator over both inner kinds: without a guard, the wrappers
+// would panic on the first fragment instead of returning Complete's
+// response.
 func TestStream_NilFnThroughDecorators(t *testing.T) {
 	completeResp := Response{
 		Blocks:     []Block{Text("once"), {Kind: BlockThinking, Text: "hmm"}},
@@ -602,9 +602,8 @@ func TestStream_NilFnThroughDecorators(t *testing.T) {
 }
 
 // TestRetryStream_FnErrorOnFirstDeltaReturnsUnretried pins the delivered
-// flag against fn errors specifically: an fn error reaches the retry loop
-// unclassified, so without the flag it would look retryable and replay the
-// stream the caller already began consuming.
+// flag against fn errors: an unclassified fn error would look retryable
+// and replay the stream the caller already began consuming.
 func TestRetryStream_FnErrorOnFirstDeltaReturnsUnretried(t *testing.T) {
 	sentinel := errors.New("stop after first fragment")
 	inner := &scriptedStreamClient{

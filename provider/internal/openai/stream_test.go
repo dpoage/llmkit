@@ -16,12 +16,13 @@ import (
 	"github.com/openai/openai-go/v3"
 )
 
-// Streaming fixtures use the vendor's real chunk shapes, copied from the
+// Streaming fixtures copy the vendor's real chunk shapes from the
 // openai-go SDK's own streaming test (streamaccumulator_test.go,
-// mockResponseBody in openai-go v3.43.0): chat.completion.chunk objects with
-// a choices[0].delta, a final usage-only chunk with empty choices sent under
-// stream_options.include_usage, and a "data: [DONE]" terminator. Argument
-// fragments are JSON-escaped mechanically so the wire bytes stay exact.
+// mockResponseBody in openai-go v3.43.0): chat.completion.chunk objects
+// with a choices[0].delta, a final usage-only chunk with empty choices
+// sent under stream_options.include_usage, and a "data: [DONE]"
+// terminator. Argument fragments are JSON-escaped mechanically so the wire
+// bytes stay exact.
 
 const (
 	streamID      = "chatcmpl-A3Tguz3LSXTHBTY2NAPBCSyfBltxF"
@@ -103,10 +104,10 @@ func sseTruncated(chunks ...string) http.HandlerFunc {
 	}
 }
 
-// stream collects the deltas fn sees plus the final Response. It goes
-// through the llmkit.StreamingClient interface, the same dispatch
-// llmkit.Stream uses, so the tests prove real streaming rather than the
-// synthesized path.
+// stream collects the deltas fn sees plus the final Response through the
+// llmkit.StreamingClient interface (the same dispatch llmkit.Stream
+// uses), so the tests prove real streaming rather than the synthesized
+// path.
 func stream(t *testing.T, baseURL string, req llmkit.Request, fn func(llmkit.Delta) error) (llmkit.Response, []llmkit.Delta, error) {
 	t.Helper()
 	client := New(streamModel, Options{APIKey: "k", BaseURL: baseURL})
@@ -127,9 +128,9 @@ func stream(t *testing.T, baseURL string, req llmkit.Request, fn func(llmkit.Del
 }
 
 // identityExchange is one wire exchange served two ways: the non-stream
-// chat.completion body for Complete and an equivalent SSE chunk sequence for
-// Stream (text, one tool call with fragmented arguments, finish_reason, and
-// the final usage chunk).
+// chat.completion body for Complete and an equivalent SSE chunk sequence
+// for Stream (text, one tool call with fragmented arguments, finish_reason,
+// and the final usage chunk).
 const identityCompletionBody = `{"id":"` + streamID + `","object":"chat.completion","created":` +
 	`1725392480,"model":"` + streamModel + `","choices":[{"index":0,"message":{"role":"assistant",` +
 	`"content":"Let me check","refusal":null,"tool_calls":[{"id":"call_FXoAjBUMcVv1k40fficJ9cSs",` +
@@ -149,10 +150,10 @@ var identityChunks = []string{
 	usageChunkJSON(streamUsage),
 }
 
-// TestOpenAIStream_ResponseIdentityIsComplete feeds the same exchange to
-// Complete (plain JSON) and Stream (SSE) and requires identical normalized
-// Responses: Stream must normalize through the same toResponse Complete
-// uses, with usage arriving on the final include_usage chunk.
+// TestOpenAIStream_ResponseIdentityIsComplete: the same exchange fed to
+// Complete (plain JSON) and Stream (SSE) yields identical normalized
+// Responses; Stream normalizes through the same toResponse Complete uses,
+// with usage arriving on the final include_usage chunk.
 func TestOpenAIStream_ResponseIdentityIsComplete(t *testing.T) {
 	plain := newServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -206,8 +207,8 @@ func TestOpenAIStream_ResponseIdentityIsComplete(t *testing.T) {
 	}
 }
 
-// TestOpenAIStream_TwoToolCallsFragmented covers two calls whose argument
-// fragments interleave on the wire: each delta repeats its call's ID and
+// TestOpenAIStream_TwoToolCallsFragmented: two calls whose argument
+// fragments interleave on the wire; each delta repeats its call's ID and
 // name (first fragment or remembered), and the final Response concatenates
 // each call's arguments.
 func TestOpenAIStream_TwoToolCallsFragmented(t *testing.T) {
@@ -252,8 +253,8 @@ func TestOpenAIStream_TwoToolCallsFragmented(t *testing.T) {
 }
 
 // TestToolCallTracker_RenumbersByFirstAppearance pins the vendor-index ->
-// Delta.Index mapping: first-appearance order among the distinct calls seen,
-// independent of the wire's numbers (which normally coincide with it).
+// Delta.Index mapping: first-appearance order among the distinct calls
+// seen, independent of the wire's numbers (which normally coincide).
 func TestToolCallTracker_RenumbersByFirstAppearance(t *testing.T) {
 	tr := newToolCallTracker()
 	d1 := tr.delta(openai.ChatCompletionChunkChoiceDeltaToolCall{
@@ -293,11 +294,12 @@ func TestToolCallTracker_RenumbersByFirstAppearance(t *testing.T) {
 	}
 }
 
-// TestOpenAIStream_ReasoningContent covers the MiniMax/DeepSeek-style compat
-// shape: reasoning arrives as a reasoning_content property on the delta, not
-// a typed SDK field. It must stream as DeltaThinking, and JSON null values
-// must not emit; the final Response carries only the content text, exactly
-// as Complete normalizes the same endpoint's non-stream reply.
+// TestOpenAIStream_ReasoningContent: reasoning arrives as a
+// reasoning_content property on the delta, not a typed SDK field
+// (MiniMax/DeepSeek-style compat shape). It must stream as DeltaThinking,
+// JSON null values must not emit, and the final Response carries only the
+// content text — exactly as Complete normalizes the same endpoint's
+// non-stream reply.
 func TestOpenAIStream_ReasoningContent(t *testing.T) {
 	chunks := []string{
 		chunkJSON(`{"role":"assistant","content":null,"reasoning_content":"I should greet the user."}`, "", ""),
@@ -328,9 +330,9 @@ func TestOpenAIStream_ReasoningContent(t *testing.T) {
 	}
 }
 
-// TestOpenAIStream_RefusalStreamsNothing covers refusal deltas: nothing is
-// emitted while streaming, and the final Response normalizes exactly as
-// Complete does (refusal text as Response.Text with StopRefusal).
+// TestOpenAIStream_RefusalStreamsNothing: nothing is emitted while
+// streaming, and the final Response normalizes exactly as Complete does
+// (refusal text as Response.Text with StopRefusal).
 func TestOpenAIStream_RefusalStreamsNothing(t *testing.T) {
 	refusal := "I cannot help with that request."
 	chunks := []string{
@@ -352,8 +354,8 @@ func TestOpenAIStream_RefusalStreamsNothing(t *testing.T) {
 	}
 }
 
-// TestOpenAIStream_NilFnEqualsComplete: a nil fn makes Stream equivalent to
-// Complete for the same exchange.
+// TestOpenAIStream_NilFnEqualsComplete: a nil fn makes Stream equivalent
+// to Complete for the same exchange.
 func TestOpenAIStream_NilFnEqualsComplete(t *testing.T) {
 	plain := newServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -378,8 +380,8 @@ func TestOpenAIStream_NilFnEqualsComplete(t *testing.T) {
 	}
 }
 
-// TestOpenAIStream_FnErrorCancels: a non-nil fn error cancels the stream and
-// is returned wrapped as "llmkit: stream fn: ..." with a zero Response.
+// TestOpenAIStream_FnErrorCancels: a non-nil fn error cancels the stream
+// and is returned wrapped as "llmkit: stream fn: ..." with a zero Response.
 func TestOpenAIStream_FnErrorCancels(t *testing.T) {
 	chunks := []string{
 		chunkJSON(`{"content":"one"}`, "", ""),
@@ -406,9 +408,8 @@ func TestOpenAIStream_FnErrorCancels(t *testing.T) {
 	}
 }
 
-// TestOpenAIStream_RateLimitOnOpen covers a 429 when the stream opens: the
-// error goes through the same normalization as Complete and surfaces as
-// ErrRateLimited.
+// TestOpenAIStream_RateLimitOnOpen: a 429 when the stream opens goes
+// through the same normalization as Complete and surfaces as ErrRateLimited.
 func TestOpenAIStream_RateLimitOnOpen(t *testing.T) {
 	sse := newServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -428,11 +429,11 @@ func TestOpenAIStream_RateLimitOnOpen(t *testing.T) {
 	}
 }
 
-// TestOpenAIStream_GhostToolCallCompacted covers non-contiguous vendor
-// indices (2 after 0): the accumulator places fragments by the raw wire
-// index and would leave an empty ghost call between the two real ones. The
-// ghost must be compacted away, so the deltas' Delta.Index numbers equal the
-// calls' positions in Response.ToolCalls.
+// TestOpenAIStream_GhostToolCallCompacted: non-contiguous vendor indices
+// (2 after 0) — the accumulator places fragments by the raw wire index
+// and would leave an empty ghost call between the two real ones; the
+// ghost must be compacted away so the deltas' Delta.Index numbers equal
+// the calls' positions in Response.ToolCalls.
 func TestOpenAIStream_GhostToolCallCompacted(t *testing.T) {
 	startChunk := func(index int64, id, name string) string {
 		return chunkJSON(
@@ -472,9 +473,9 @@ func TestOpenAIStream_GhostToolCallCompacted(t *testing.T) {
 	}
 }
 
-// TestOpenAIStream_TruncatedMidText covers a stream that ends cleanly before
-// any finish_reason: the partial text must be an ErrServer-class error with
-// a zero Response, not a success — Complete over the same wire fails.
+// TestOpenAIStream_TruncatedMidText: a stream that ends cleanly before
+// any finish_reason produces an ErrServer-class error with a zero
+// Response, not a success — Complete over the same wire fails.
 func TestOpenAIStream_TruncatedMidText(t *testing.T) {
 	sse := newServer(t, sseTruncated(
 		chunkJSON(`{"role":"assistant","content":""}`, "", ""),
@@ -495,8 +496,8 @@ func TestOpenAIStream_TruncatedMidText(t *testing.T) {
 	}
 }
 
-// TestOpenAIStream_TruncatedMidToolArgs covers the same truncation while a
-// tool call's arguments are still fragmenting: the partial call must error,
+// TestOpenAIStream_TruncatedMidToolArgs: same truncation while a tool
+// call's arguments are still fragmenting; the partial call must error,
 // not surface an unparseable half-call as success.
 func TestOpenAIStream_TruncatedMidToolArgs(t *testing.T) {
 	sse := newServer(t, sseTruncated(

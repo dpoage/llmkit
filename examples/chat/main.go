@@ -1,20 +1,17 @@
-// Command chat demonstrates multi-turn conversation through the llmkit/agent
-// harness: a stdin REPL where each line becomes the next task via
-// agent.Runner.Run with agent.Continue(prev), so the model keeps every
-// earlier turn of the session. One trivial tool (now) keeps the tool-calling
-// path exercised. While a run is in flight the prompt changes to "steered>"
-// and a typed line becomes mid-run steering (agent.NewSteering +
-// agent.WithSteering): the turn joins the running conversation before the
-// next model call, or when the run would otherwise end. A line typed as
-// the run finishes becomes the next task; lines that queue after a run's
-// final drain are sent as the next task instead of being dropped. When
-// the model stops
-// for a refusal/safety reason (agent.StopReasonError) a canned reply is
-// printed and the refusal turn stays in the history: the attached
-// err.Outcome is threaded into the next run's agent.Continue so the
-// conversation continues from it. A /think command toggles extended thinking
-// via an agent.RequestPolicy when the model reports thinking support.
-// Assistant text prints incrementally through agent.Hooks.Delta.
+// Command chat runs a stdin REPL on the llmkit/agent harness. Each line
+// becomes the next task via agent.Runner.Run with agent.Continue(prev), so
+// the model keeps every earlier turn. One trivial tool (now) exercises the
+// tool-calling path. While a run is in flight the prompt is "steered>" and
+// each typed line becomes mid-run steering through agent.NewSteering +
+// agent.WithSteering: it joins the conversation before the next model call,
+// or when the run would otherwise end. A line typed as the run finishes
+// becomes the next task; steers queued after the run's final drain are
+// replayed as the next task instead of being dropped. On
+// agent.StopReasonError a canned reply is printed and the refusal stays in
+// the history: err.Outcome feeds agent.Continue on the next run. /think
+// toggles extended thinking via an agent.RequestPolicy when the model
+// reports thinking support. Assistant text prints incrementally through
+// agent.Hooks.Delta.
 //
 // Usage:
 //

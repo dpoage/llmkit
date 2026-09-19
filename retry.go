@@ -103,9 +103,9 @@ func (r *retryClient) Complete(ctx context.Context, req Request) (Response, erro
 
 // Stream streams from the wrapped client under the same retry policy as
 // Complete, the per-attempt RequestTimeout bounding the whole attempt. An
-// error that follows an already-delivered delta is terminal and is returned
-// as-is, the way Complete returns a non-retryable error: the caller holds
-// partial output, and a retry would replay or diverge from it.
+// error that follows an already-delivered delta is terminal and returned
+// as-is: the caller holds partial output, and a retry would replay or
+// diverge from it.
 func (r *retryClient) Stream(ctx context.Context, req Request, fn func(Delta) error) (Response, error) {
 	return r.retryLoop(ctx, func() (Response, error, bool) {
 		return r.streamAttempt(ctx, req, fn)

@@ -101,18 +101,15 @@ func (a *anthropicAdapter) Complete(ctx context.Context, req llmkit.Request) (ll
 	if err != nil {
 		return llmkit.Response{}, a.normalizeErr(err)
 	}
-	// toResponse + finalize is the normalizer tail Stream shares: Complete
-	// and Stream must return identical Responses for the same wire exchange.
 	return a.finalize(req, a.toResponse(msg)), nil
 }
 
-// finalize applies the post-normalization step shared by Complete and
-// Stream: when the request forced the synthetic structured-output tool and
-// the model answered with exactly that one call, the call becomes
-// Response.Text — downstream layers see JSON text instead of a tool call
-// they have no handler for — and the stop reason is coerced to StopEndTurn,
-// because Anthropic reports "tool_use" for the forced call and that would
-// mis-classify a normal completion.
+// finalize coerces the synthetic structured-output tool's lone call into
+// Response.Text and StopEndTurn: the call's Arguments become Text
+// (downstream layers have no handler for the synthetic tool), and
+// Anthropic's "tool_use" stop reason for the forced call would otherwise
+// mis-classify the completion. Complete and Stream both go through this
+// step so the same wire exchange returns identical Responses.
 func (a *anthropicAdapter) finalize(req llmkit.Request, resp llmkit.Response) llmkit.Response {
 	if toolName, ok := structuredOutputToolName(req, a.caps); ok &&
 		len(resp.ToolCalls) == 1 && resp.ToolCalls[0].Name == toolName {

@@ -32,42 +32,38 @@ type queuedTurn struct {
 	message llmkit.Message
 }
 
-// Steering queues user turns for injection into a running [Runner] loop —
-// mid-run steering, instead of cancelling the run and re-seeding it with
-// [Continue].
+// Steering queues user turns for injection into a running [Runner] loop.
 //
-// [Steering.Steer] delivers a turn before the run's next model call, after
-// the current turn's tool results; [Steering.FollowUp] delivers a turn when
-// the run would otherwise finish, turning that would-be final turn into
-// another turn. Each call queues ONE user turn built exactly like the seeded
+// [Steering.Steer] delivers before the next model call, after the current
+// turn's tool results; [Steering.FollowUp] delivers when the run would
+// otherwise finish. Each call queues ONE user turn built like the seeded
 // task turn of [Attach] with an empty task: the blocks in the order given,
-// with no text block added; a call with no blocks queues a single empty text
-// turn. Both methods are safe for concurrent use from any goroutine; the run
-// drains the queue on its own goroutine. Each drain preserves enqueue
-// order: the would-be finish drains every queued turn, steers and
-// follow-ups together; the pre-completion boundary drains only steers, so
-// a follow-up queued before a later steer delivers at the finish, after
-// that steer. Any drain that delivers at least one turn continues the
-// loop instead of ending it.
+// no text block added; a call with no blocks queues a single empty text
+// turn. Both methods are safe for concurrent use; the run drains the queue
+// on its own goroutine. The would-be-finish drain delivers steers and
+// follow-ups together in enqueue order; the pre-completion boundary drains
+// only steers, so a follow-up queued before a later steer delivers at the
+// finish, after that steer. Any drain that delivers at least one turn
+// continues the loop instead of ending it.
 //
 // Queued turns are ordinary user messages: the transcript records them as
 // request messages and [Outcome.Messages] includes them. Limits apply
-// unchanged, so a run stopped by [Limits.MaxIterations], [Limits.TokenBudget],
-// or a [BudgetPool] leaves undelivered turns queued — [Steering.Pending]
-// reports them, and [Continue] with the SAME Steering delivers pending
-// steers before the continued run's first completion and pending follow-ups
-// at its first would-be finish. A refusal stop ([StopReasonError]) returns
-// before any drain: queued turns stay pending and the refusal is never
-// papered over. At an empty turn the queued content replaces the synthetic
-// nudge and does not consume a nudge attempt (see [maxEmptyTurnNudges]).
+// unchanged, so a run stopped by [Limits.MaxIterations],
+// [Limits.TokenBudget], or a [BudgetPool] leaves undelivered turns queued
+// — [Steering.Pending] reports them, and [Continue] with the SAME Steering
+// delivers pending steers before the continued run's first completion and
+// pending follow-ups at its first would-be finish. A refusal stop
+// ([StopReasonError]) returns before any drain: queued turns stay pending
+// and the refusal is never papered over. At an empty turn the queued
+// content replaces the synthetic nudge and does not consume a nudge
+// attempt (see [maxEmptyTurnNudges]).
 //
 // A Steering serves one run at a time. Passing it to a second concurrent
-// run fails that run with [ErrSteeringInUse]; sequential runs — including
-// [Continue] chains — rebind cleanly. Steer and FollowUp queue even while
-// no run is bound: those turns deliver on the next run bound to the
-// handle, and [Steering.Pending] reports them in the meantime.
-// [Runner.RunJSON] honors both drain points with no special case: the
-// JSON parse applies to the last completion, so a turn queued after a
+// run fails that run with [ErrSteeringInUse]; sequential runs —
+// including [Continue] chains — rebind cleanly. Steer and FollowUp queue
+// while no run is bound; those turns deliver on the next run bound to the
+// handle. [Runner.RunJSON] honors both drain points with no special case:
+// the JSON parse applies to the last completion, so a turn queued after a
 // parseable answer simply continues the run.
 type Steering struct {
 	mu    sync.Mutex
@@ -78,7 +74,7 @@ type Steering struct {
 // NewSteering returns an empty steering handle.
 func NewSteering() *Steering { return &Steering{} }
 
-// Steer queues blocks as one user turn delivered before the run's next model
+// Steer queues blocks as one user turn delivered before the next model
 // call, after the current turn's tool results. See [Steering].
 func (s *Steering) Steer(blocks ...llmkit.Block) { s.enqueue(kindSteer, blocks) }
 
@@ -95,14 +91,14 @@ func (s *Steering) Pending() int {
 }
 
 // WithSteering binds s to a run so [Runner.Run], [Runner.RunJSON], and
-// [Runner.RunJSONAs] drain it at the turn boundaries described in
-// [Steering]. A nil s runs without steering.
+// [Runner.RunJSONAs] drain it at the turn boundaries in [Steering]. A nil
+// s runs without steering.
 func WithSteering(s *Steering) RunOption {
 	return func(c *runConfig) { c.steering = s }
 }
 
-// enqueue appends one turn of the given kind, built with the [Attach] task
-// turn's shape rules so the empty-text rule stays in [taskTurn].
+// enqueue appends one turn of the given kind, built with the [Attach]
+// task turn's shape rules so the empty-text rule stays in [taskTurn].
 func (s *Steering) enqueue(kind steerKind, blocks []llmkit.Block) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

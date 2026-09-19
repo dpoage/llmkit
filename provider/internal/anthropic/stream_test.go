@@ -15,7 +15,7 @@ import (
 	llmkit "github.com/dpoage/llmkit"
 )
 
-// The SSE event shapes below mirror the vendor SDK's own streaming fixtures
+// SSE event shapes mirror the vendor SDK's streaming fixtures
 // (anthropic-sdk-go v1.58.0 message_test.go TestAccumulate: message_start,
 // content_block_start with an empty typed block, text/thinking/signature/
 // input_json deltas, content_block_stop, message_delta with usage,
@@ -24,13 +24,11 @@ import (
 // fields (thinking signatures, tool-call argument JSON) match the
 // concatenation of the streamed fragments exactly.
 
-// sseEvent is one server-sent event.
 type sseEvent struct {
 	name string // the SSE event: name
 	data string // the JSON payload
 }
 
-// sseHandler writes the events as a text/event-stream response.
 func sseHandler(events []sseEvent) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -44,7 +42,6 @@ func sseHandler(events []sseEvent) http.HandlerFunc {
 	}
 }
 
-// jsonHandler serves a non-streaming /v1/messages body.
 func jsonHandler(body string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -52,7 +49,6 @@ func jsonHandler(body string) http.HandlerFunc {
 	}
 }
 
-// newStreamAdapter builds an adapter pointed at base.
 func newStreamAdapter(t *testing.T, base string) *anthropicAdapter {
 	t.Helper()
 	cl := New("claude-test", Options{APIKey: "test-key", BaseURL: base})
@@ -81,7 +77,6 @@ func streamReasoningEvents() []sseEvent {
 	}
 }
 
-// reasoningBody is the non-streaming equivalent of streamReasoningEvents.
 const reasoningBody = `{"id":"msg_1","type":"message","role":"assistant","model":"claude-test",` +
 	`"content":[{"type":"thinking","thinking":"Adding 2+2, so 4.","signature":"sig-abc"},` +
 	`{"type":"text","text":"The answer is 4."}],` +
@@ -149,9 +144,9 @@ func schemaRequest() llmkit.Request {
 	}
 }
 
-// TestAnthropicStreamTextThinking covers text and thinking fragments: the
-// signature delta emits nothing, and usage lands from message_start plus
-// message_delta under the inclusive InputTokens convention.
+// TestAnthropicStreamTextThinking: signature_delta emits nothing; usage
+// merges message_start and message_delta under the inclusive InputTokens
+// convention.
 func TestAnthropicStreamTextThinking(t *testing.T) {
 	base := newServer(t, sseHandler(streamReasoningEvents()))
 	ad := newStreamAdapter(t, base)
@@ -192,10 +187,10 @@ func TestAnthropicStreamTextThinking(t *testing.T) {
 	}
 }
 
-// TestAnthropicStreamTwoToolCalls pins tool-call fragmenting: identity
-// (Index/ID/Name) goes out at content_block_start, argument fragments
-// concatenate to the final Arguments, wire block indices are renumbered to
-// ToolCalls positions, and an empty partial_json emits nothing.
+// TestAnthropicStreamTwoToolCalls: identity (Index/ID/Name) goes out at
+// content_block_start, argument fragments concatenate to the final
+// Arguments, wire block indices are renumbered to ToolCalls positions, and
+// an empty partial_json emits nothing.
 func TestAnthropicStreamTwoToolCalls(t *testing.T) {
 	base := newServer(t, sseHandler(streamToolEvents()))
 	ad := newStreamAdapter(t, base)
@@ -228,15 +223,13 @@ func TestAnthropicStreamTwoToolCalls(t *testing.T) {
 	}
 }
 
-// TestAnthropicStreamMatchesComplete proves the contract's identity clause:
-// the same wire exchange fed to Complete (non-stream JSON) and to Stream
-// (SSE) yields equal Responses — equal everywhere except Block.Raw, which
-// holds the provider's wire block: the stream path's accumulator
-// re-serializes each accumulated block through the SDK's content-block
-// union, compacting JSON and materializing absent variant fields, so Raw
-// bytes legitimately differ while carrying the same data. The payload Raw
-// exists to protect — verbatim thinking text and signature — is asserted
-// by decoding both sides.
+// TestAnthropicStreamMatchesComplete proves the identity clause: the same
+// wire exchange fed to Complete (non-stream JSON) and Stream (SSE) yields
+// equal Responses everywhere except Block.Raw. The stream path's
+// accumulator re-serializes each accumulated block through the SDK's
+// content-block union, so Raw bytes legitimately differ while carrying the
+// same data; assertThinkingRawDecodedEqual pins the thinking Raw payloads
+// the property exists to protect.
 func TestAnthropicStreamMatchesComplete(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -286,9 +279,9 @@ func TestAnthropicStreamMatchesComplete(t *testing.T) {
 			}
 			assertThinkingRawDecodedEqual(t, completeResp, streamResp)
 
-			// For the structured-output case the synthetic tool's fragments
-			// must surface as text, never as tool-call fragments, and must
-			// join to the Response.Text finalize produces.
+			// The synthetic tool's fragments must surface as text, never
+			// as tool-call fragments, and join to the Response.Text
+			// finalize produces.
 			if tt.name == "structured_output" {
 				want := []llmkit.Delta{
 					{Kind: llmkit.DeltaText, Text: `{"answer":`},
@@ -302,9 +295,9 @@ func TestAnthropicStreamMatchesComplete(t *testing.T) {
 	}
 }
 
-// TestAnthropicStreamViaHelper checks the root llmkit.Stream dispatch: the
-// adapter satisfies StreamingClient, so the helper must call it (observed by
-// the fragments reaching fn) rather than synthesize from Complete.
+// TestAnthropicStreamViaHelper: the adapter satisfies StreamingClient, so
+// llmkit.Stream must call it (observed by fragments reaching fn) rather
+// than synthesize from Complete.
 func TestAnthropicStreamViaHelper(t *testing.T) {
 	base := newServer(t, sseHandler(streamReasoningEvents()))
 	cl := New("claude-test", Options{APIKey: "test-key", BaseURL: base})
@@ -328,8 +321,8 @@ func TestAnthropicStreamViaHelper(t *testing.T) {
 	}
 }
 
-// TestAnthropicStreamNilFn pins the nil-fn clause: Stream behaves like
-// Complete and returns its Response untouched.
+// TestAnthropicStreamNilFn: Stream behaves like Complete and returns its
+// Response untouched.
 func TestAnthropicStreamNilFn(t *testing.T) {
 	base := newServer(t, sseHandler(streamReasoningEvents()))
 	ad := newStreamAdapter(t, base)
@@ -349,9 +342,8 @@ func TestAnthropicStreamNilFn(t *testing.T) {
 	assertThinkingRawDecodedEqual(t, completeResp, streamResp)
 }
 
-// stripRaw returns resp with every Block.Raw cleared: the only field the
-// Complete and Stream paths cannot share byte-for-byte (see
-// TestAnthropicStreamMatchesComplete). Blocks is cloned so the caller's
+// stripRaw clears every Block.Raw: the only field Complete and Stream
+// paths cannot share byte-for-byte. Blocks is cloned so the caller's
 // responses keep their Raw for the decoded-payload assertion.
 func stripRaw(resp llmkit.Response) llmkit.Response {
 	resp.Blocks = slices.Clone(resp.Blocks)
@@ -361,11 +353,11 @@ func stripRaw(resp llmkit.Response) llmkit.Response {
 	return resp
 }
 
-// assertThinkingRawDecodedEqual proves the stream path's thinking Raws still
-// decode to the verbatim thinking text and signatures that
-// anthropicThinkingBlock re-emits on the next request — the property Raw
-// exists to guarantee. EVERY thinking block on both sides is compared, so a
-// corrupted streamed signature fails here even though no other field shows it.
+// assertThinkingRawDecodedEqual proves the stream path's thinking Raws
+// still decode to the verbatim thinking text and signatures that
+// anthropicThinkingBlock re-emits on the next request. EVERY thinking
+// block on both sides is compared, so a corrupted streamed signature
+// fails here even when no other field shows it.
 func assertThinkingRawDecodedEqual(t *testing.T, complete, stream llmkit.Response) {
 	t.Helper()
 	type thinkingRaw struct {
@@ -393,9 +385,8 @@ func assertThinkingRawDecodedEqual(t *testing.T, complete, stream llmkit.Respons
 	}
 }
 
-// TestAnthropicStreamFnErrorCancels pins the cancellation clause: a non-nil
-// fn error stops delivery, cancels the underlying stream, and is returned
-// wrapped with no Response.
+// TestAnthropicStreamFnErrorCancels: a non-nil fn error stops delivery,
+// cancels the underlying stream, and is returned wrapped with no Response.
 func TestAnthropicStreamFnErrorCancels(t *testing.T) {
 	handlerDone := make(chan struct{})
 	base := newServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -405,8 +396,8 @@ func TestAnthropicStreamFnErrorCancels(t *testing.T) {
 			{"content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"first"}}`},
 			{"content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"second"}}`},
 		})(w, r)
-		// Hold the response open: only closing the stream (not draining it)
-		// can unblock this handler before the fallback timer fires.
+		// Hold the response open: only closing the stream (not draining
+		// it) can unblock this handler before the fallback timer fires.
 		select {
 		case <-r.Context().Done():
 		case <-time.After(1 * time.Second):
@@ -442,11 +433,11 @@ func TestAnthropicStreamFnErrorCancels(t *testing.T) {
 	}
 }
 
-// TestAnthropicStreamErrorEvent pins mid-stream failure normalization: an
-// error event surfaced by the SDK goes through the same normalizeErr path as
-// Complete. The event rides the already-committed HTTP 200 response, so
-// ClassifyStatus's default branch classifies it ErrInvalidRequest — the same
-// outcome a 200-carrying body would produce on the non-streaming path.
+// TestAnthropicStreamErrorEvent: a mid-stream error event goes through the
+// same normalizeErr path as Complete. The event rides an already-committed
+// HTTP 200 response, so ClassifyStatus's default branch classifies it
+// ErrInvalidRequest — the same outcome a 200-carrying body produces on
+// the non-streaming path.
 func TestAnthropicStreamErrorEvent(t *testing.T) {
 	events := []sseEvent{
 		{"message_start", `{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-test","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}`},
@@ -478,16 +469,14 @@ func TestAnthropicStreamErrorEvent(t *testing.T) {
 	if !reflect.DeepEqual(resp, llmkit.Response{}) {
 		t.Errorf("resp = %#v, want zero Response", resp)
 	}
-	// The text delta that arrived before the error was still delivered.
 	if len(got) != 1 || got[0].Text != "partial" {
 		t.Errorf("deltas = %#v, want the single pre-error fragment", got)
 	}
 }
 
-// TestAnthropicStreamTruncated pins the partial-stream clause: a connection
-// that closes cleanly before message_stop is an error, never a partial
-// success — Complete fails on the equivalent truncated body, and a caller
-// must never receive half-finished tool arguments as a Response.
+// TestAnthropicStreamTruncated: a connection that closes cleanly before
+// message_stop is an error, never a partial success — Complete fails on
+// the equivalent truncated body.
 func TestAnthropicStreamTruncated(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -534,7 +523,7 @@ func TestAnthropicStreamTruncated(t *testing.T) {
 	}
 }
 
-// TestAnthropicStreamProtocolViolation routes wire-sequence violations
+// TestAnthropicStreamProtocolViolation: wire-sequence violations route
 // through the adapter's error normalization — both the out-of-order index
 // the SDK's Accumulate rejects and an input_json_delta aimed at a started
 // non-input block (a text block), which Accumulate tolerates silently.
@@ -579,9 +568,8 @@ func TestAnthropicStreamProtocolViolation(t *testing.T) {
 	}
 }
 
-// TestAnthropicStreamServerToolDropped pins parity with Complete for
-// server-side tools: the vendor streams web_search-style calls as
-// input_json_delta fragments too, but toResponse drops that block, so no
+// TestAnthropicStreamServerToolDropped: server-side tools (e.g. web_search)
+// stream as input_json_delta too, but toResponse drops that block, so no
 // fragment is surfaced and the final Response carries no tool call.
 func TestAnthropicStreamServerToolDropped(t *testing.T) {
 	events := []sseEvent{

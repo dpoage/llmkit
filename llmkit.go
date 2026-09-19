@@ -14,9 +14,9 @@
 //
 // Delivery is incremental where the backend allows it: a client whose type
 // also implements [StreamingClient] exposes Stream, which delivers
-// fragments to a callback while still returning the same normalized
-// Response Complete would. [Stream] accepts any Client — streaming or not —
-// so callers never special-case a non-streaming backend.
+// fragments to a callback and returns the same normalized Response as
+// Complete. [Stream] accepts any Client — streaming or not — so callers
+// never special-case a non-streaming backend.
 //
 // The layer is deliberately thin: each adapter maps these normalized types
 // to/from its vendor SDK and nothing more. Higher-level concerns (agent tool
