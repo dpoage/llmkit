@@ -845,3 +845,40 @@ func tinyPDF() []byte {
 	fmt.Fprintf(&b, "trailer<</Size %d/Root 1 0 R>>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, xref)
 	return b.Bytes()
 }
+
+// TestLiveGoogleStream runs the google lane's streaming path against the
+// live API through the same production construction as the matrix: llmkit.Stream
+// must deliver at least one delta over the SSE endpoint, and the aggregated
+// Response must carry text, accounted usage, and StopEndTurn — the same
+// outcome the lane's text_usage case asserts for Complete. Skips without the
+// google-lane credentials, like every matrix case.
+func TestLiveGoogleStream(t *testing.T) {
+	sess := livetest.Resolve(t, "google")
+	lc := newLiveClient(t, sess)
+	lc.caseName = "stream_text"
+
+	var deltas int
+	resp, err := llmkit.Stream(lc.ctx, lc.cl, llmkit.Request{
+		Messages:  []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "Reply with exactly: OK")},
+		MaxTokens: defaultLiveMaxTokens,
+	}, func(llmkit.Delta) error {
+		deltas++
+		return nil
+	})
+	if err != nil {
+		redFatal(t, sess, "stream: %v", err)
+	}
+	if deltas == 0 {
+		redFatal(t, sess, "stream delivered no deltas")
+	}
+	if strings.TrimSpace(llmkit.StripThinkBlocks(resp.Text)) == "" {
+		redFatal(t, sess, "empty streamed text: %q", resp.Text)
+	}
+	if resp.Usage.InputTokens <= 0 || resp.Usage.OutputTokens <= 0 {
+		redFatal(t, sess, "streamed usage not accounted: %+v", resp.Usage)
+	}
+	if resp.StopReason != llmkit.StopEndTurn {
+		redFatal(t, sess, "stop reason = %q, want %q", resp.StopReason, llmkit.StopEndTurn)
+	}
+	lc.finish(resp, err)
+}
