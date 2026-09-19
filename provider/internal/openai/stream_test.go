@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/dpoage/llmkit"
@@ -86,6 +87,18 @@ func sseHandler(onReq func(body []byte), chunks ...string) http.HandlerFunc {
 		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 		if flusher != nil {
 			flusher.Flush()
+		}
+	}
+}
+
+// sseTruncated serves the chunks and ends the response body without a
+// finish_reason chunk and without [DONE] — the wire a client sees when a
+// connection dies mid-generation: a clean EOF at the decoder.
+func sseTruncated(chunks ...string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, c := range chunks {
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", c)
 		}
 	}
 }
@@ -263,6 +276,21 @@ func TestToolCallTracker_RenumbersByFirstAppearance(t *testing.T) {
 	if !reflect.DeepEqual(want, []llmkit.Delta{d1, d2, d3}) {
 		t.Fatalf("tracker deltas =\n%+v\n%+v\n%+v\nwant\n%+v", d1, d2, d3, want)
 	}
+	ft := newToolCallTracker()
+	n1 := ft.delta(openai.ChatCompletionChunkChoiceDeltaToolCall{
+		Index: 0, ID: "call_n", Function: openai.ChatCompletionChunkChoiceDeltaToolCallFunction{Name: "get_"},
+	})
+	n2 := ft.delta(openai.ChatCompletionChunkChoiceDeltaToolCall{
+		Index: 0, Function: openai.ChatCompletionChunkChoiceDeltaToolCallFunction{Name: "weather"},
+	})
+	// A fragmented name concatenates and every fragment repeats the
+	// accumulated name the final Response will carry.
+	if n1.Name != "get_" || n2.Name != "get_weather" {
+		t.Fatalf("fragmented names = %q, %q; want get_, get_weather", n1.Name, n2.Name)
+	}
+	if n1.ID != "call_n" || n2.ID != "call_n" {
+		t.Fatalf("IDs = %q, %q; want the remembered call_n on both fragments", n1.ID, n2.ID)
+	}
 }
 
 // TestOpenAIStream_ReasoningContent covers the MiniMax/DeepSeek-style compat
@@ -394,6 +422,97 @@ func TestOpenAIStream_RateLimitOnOpen(t *testing.T) {
 	var apiErr *llmkit.APIError
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("err = %v, want an APIError with status 429", err)
+	}
+	if !reflect.DeepEqual(resp, llmkit.Response{}) {
+		t.Fatalf("resp = %+v, want the zero Response", resp)
+	}
+}
+
+// TestOpenAIStream_GhostToolCallCompacted covers non-contiguous vendor
+// indices (2 after 0): the accumulator places fragments by the raw wire
+// index and would leave an empty ghost call between the two real ones. The
+// ghost must be compacted away, so the deltas' Delta.Index numbers equal the
+// calls' positions in Response.ToolCalls.
+func TestOpenAIStream_GhostToolCallCompacted(t *testing.T) {
+	startChunk := func(index int64, id, name string) string {
+		return chunkJSON(
+			fmt.Sprintf(`{"tool_calls":[{"index":%d,"id":%q,"type":"function",`+
+				`"function":{"name":%q,"arguments":""}}]}`, index, id, name), "", "")
+	}
+	chunks := []string{
+		startChunk(0, "call_aaa", "get_time"),
+		startChunk(2, "call_bbb", "get_weather"),
+		argFragChunk(0, `{"now":"12:00"}`),
+		argFragChunk(2, `{"city":"Santorini"}`),
+		chunkJSON(`{}`, "tool_calls", ""),
+		usageChunkJSON(streamUsage),
+	}
+	sse := newServer(t, sseHandler(nil, chunks...))
+	resp, deltas, err := stream(t, sse, simpleRequest(), func(llmkit.Delta) error { return nil })
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	for _, d := range deltas {
+		if d.Kind != llmkit.DeltaToolCall {
+			t.Fatalf("unexpected delta %+v", d)
+		}
+		if d.Index != 0 && d.Index != 1 {
+			t.Fatalf("delta index %d follows the wire's gap; want the compacted position", d.Index)
+		}
+	}
+	wantCalls := []llmkit.ToolCall{
+		{ID: "call_aaa", Name: "get_time", Arguments: []byte(`{"now":"12:00"}`)},
+		{ID: "call_bbb", Name: "get_weather", Arguments: []byte(`{"city":"Santorini"}`)},
+	}
+	if !reflect.DeepEqual(wantCalls, resp.ToolCalls) {
+		t.Fatalf("ToolCalls = %+v, want exactly %+v (no ghost entry)", resp.ToolCalls, wantCalls)
+	}
+	if resp.StopReason != llmkit.StopToolUse {
+		t.Fatalf("StopReason = %q, want %q", resp.StopReason, llmkit.StopToolUse)
+	}
+}
+
+// TestOpenAIStream_TruncatedMidText covers a stream that ends cleanly before
+// any finish_reason: the partial text must be an ErrServer-class error with
+// a zero Response, not a success — Complete over the same wire fails.
+func TestOpenAIStream_TruncatedMidText(t *testing.T) {
+	sse := newServer(t, sseTruncated(
+		chunkJSON(`{"role":"assistant","content":""}`, "", ""),
+		chunkJSON(`{"content":"Hel"}`, "", ""),
+	))
+	resp, deltas, err := stream(t, sse, simpleRequest(), func(llmkit.Delta) error { return nil })
+	if !errors.Is(err, llmkit.ErrServer) {
+		t.Fatalf("err = %v, want an ErrServer-class error", err)
+	}
+	if !strings.Contains(err.Error(), "stream ended before finish_reason") {
+		t.Fatalf("err = %q, want the truncation cause", err.Error())
+	}
+	if len(deltas) == 0 {
+		t.Fatalf("fn saw no deltas; the truncated text should still stream before the error")
+	}
+	if !reflect.DeepEqual(resp, llmkit.Response{}) {
+		t.Fatalf("resp = %+v, want the zero Response", resp)
+	}
+}
+
+// TestOpenAIStream_TruncatedMidToolArgs covers the same truncation while a
+// tool call's arguments are still fragmenting: the partial call must error,
+// not surface an unparseable half-call as success.
+func TestOpenAIStream_TruncatedMidToolArgs(t *testing.T) {
+	sse := newServer(t, sseTruncated(
+		chunkJSON(`{"tool_calls":[{"index":0,"id":"call_aaa","type":"function",`+
+			`"function":{"name":"get_time","arguments":""}}]}`, "", ""),
+		argFragChunk(0, `{"now":`),
+	))
+	resp, deltas, err := stream(t, sse, simpleRequest(), func(llmkit.Delta) error { return nil })
+	if !errors.Is(err, llmkit.ErrServer) {
+		t.Fatalf("err = %v, want an ErrServer-class error", err)
+	}
+	if !strings.Contains(err.Error(), "stream ended before finish_reason") {
+		t.Fatalf("err = %q, want the truncation cause", err.Error())
+	}
+	if len(deltas) == 0 {
+		t.Fatalf("fn saw no deltas; the fragmenting call should still stream before the error")
 	}
 	if !reflect.DeepEqual(resp, llmkit.Response{}) {
 		t.Fatalf("resp = %+v, want the zero Response", resp)

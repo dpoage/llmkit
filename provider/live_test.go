@@ -888,8 +888,9 @@ func streamTextCase(t *testing.T, lane string) {
 }
 
 // TestLiveCompatStreamText runs the streaming acceptance case on the
-// openai-compatible lane (MiniMax-M3 in CI): reasoning_content deltas are
-// ignored here, and the text deltas must arrive incrementally.
+// openai-compatible lane (MiniMax-M3 in CI). The case counts DeltaText
+// fragments only and requires more than one; reasoning_content deltas are
+// not asserted here.
 func TestLiveCompatStreamText(t *testing.T) {
 	streamTextCase(t, "compat")
 }
