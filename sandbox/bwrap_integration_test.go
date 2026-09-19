@@ -21,16 +21,16 @@ import (
 
 // newTestBwrap builds a Bwrap backend, skipping the test when the backend is
 // unusable on this host (bwrap absent, non-Linux, or userns disabled).
-func newTestBwrap(t *testing.T, opts ...BwrapOption) *Bwrap {
+func newTestBwrap(t *testing.T, opts ...Option) *Bwrap {
 	t.Helper()
 	if ok, reason := DetectBwrap(); !ok {
 		t.Skipf("bwrap unavailable: %s", reason)
 	}
-	base := []BwrapOption{
-		WithBwrapCPUs(1),
-		WithBwrapMemoryMB(256),
-		WithBwrapPidsLimit(64),
-		WithBwrapTimeout(30 * time.Second),
+	base := []Option{
+		WithCPUs(1),
+		WithMemoryMB(256),
+		WithPidsLimit(64),
+		WithTimeout(30 * time.Second),
 	}
 	s, err := NewBwrap(append(base, opts...)...)
 	if err != nil {
@@ -178,7 +178,7 @@ func TestBwrapNetworkNoneBlocksEgress(t *testing.T) {
 
 	res, err := s.Exec(context.Background(), Spec{
 		RepoDir:  repo,
-		Network:  "none",
+		Network:  NetworkNone,
 		Timeout:  15 * time.Second,
 		ROMounts: shMounts,
 		// /dev/tcp is a bash-ism; use a portable connect probe instead:
@@ -256,7 +256,7 @@ func TestBwrapGoReproRunsGreen(t *testing.T) {
 	// tuned for the other, single-process integration tests and is too low
 	// even for this trivial one-file module (fork/exec fails with EAGAIN
 	// once the cgroup pids.max cap is hit mid-build).
-	s := newTestBwrap(t, WithBwrapPidsLimit(512))
+	s := newTestBwrap(t, WithPidsLimit(512))
 	t.Cleanup(func() { _ = s.Close() })
 
 	goRoot := goRootForTest(t)
@@ -293,7 +293,7 @@ func TestPasses(t *testing.T) {}
 // non-zero exit surfaces as Result.ExitCode with no error, and a run
 // exceeding IdleTimeout is reported as TimedOut with ExitCode -1.
 func TestBwrapExitCodeAndTimeoutFidelity(t *testing.T) {
-	s := newTestBwrap(t)
+	s := newTestBwrap(t, WithIdleTimeout(500*time.Millisecond))
 	t.Cleanup(func() { _ = s.Close() })
 	repo := t.TempDir()
 	shMounts, sh := shForTest(t)
@@ -321,11 +321,10 @@ func TestBwrapExitCodeAndTimeoutFidelity(t *testing.T) {
 	// the idle-timeout watchdog fire as intended.
 	sleepMounts, sleep := hostToolForTest(t, "sleep")
 	res, err = s.Exec(context.Background(), Spec{
-		RepoDir:     repo,
-		Timeout:     10 * time.Second,
-		IdleTimeout: 500 * time.Millisecond,
-		ROMounts:    mergeROMounts(shMounts, sleepMounts),
-		Cmd:         []string{sh, "-c", sleep("30")},
+		RepoDir:  repo,
+		Timeout:  10 * time.Second,
+		ROMounts: mergeROMounts(shMounts, sleepMounts),
+		Cmd:      []string{sh, "-c", sleep("30")},
 	})
 	if err != nil {
 		t.Fatalf("Exec: %v", err)
@@ -358,9 +357,8 @@ done`
 // returns WorkspaceQuotaExceeded=true, TimedOut=false, ExitCode=-1, err=nil
 // — through the actual Bwrap.Exec code path, not a direct watchIdle call.
 func TestBwrapExec_QuotaKillFidelity(t *testing.T) {
-	s := newTestBwrap(t, WithBwrapIdleTimeout(60*time.Second))
-	s.defaultGrowthCeilingBytes = 20_000 // ~5 filler files; byte-precise, below WithBwrapWorkspaceGrowthCeilingMB's 1 MB granularity
-	t.Cleanup(func() { _ = s.Close() })
+	s := newTestBwrap(t, WithIdleTimeout(60*time.Second))
+	s.defaultGrowthCeilingBytes = 20_000 // ~5 filler files; byte-precise, below WithWorkspaceGrowthCeilingMB's 1 MB granularity
 
 	start := time.Now()
 	res, err := s.Exec(context.Background(), Spec{
@@ -411,6 +409,37 @@ func TestBwrapExec_QuotaKillFidelity_SpawnGateWithIdleTimeoutUnset(t *testing.T)
 	}
 }
 
+// TestBwrapExec_QuotaKillFidelity_PostRunCheckCatchesBurstExit is the
+// bwrap-backend counterpart of cli_exec_quota_test.go's
+// TestCLIExec_QuotaKillFidelity_PostRunCheckCatchesBurstExit: a run that
+// breaches the growth ceiling and EXITS BEFORE any watchdog tick can
+// observe it — here, a real bwrap run whose command writes 4 MiB in one
+// shot and exits 0 — must still be classified through Exec's unconditional
+// post-run checkGrowthCeiling as WorkspaceQuotaExceeded=true, ExitCode=-1,
+// TimedOut=false, err=nil, never as a clean exit-0 success.
+func TestBwrapExec_QuotaKillFidelity_PostRunCheckCatchesBurstExit(t *testing.T) {
+	s := newTestBwrap(t, WithIdleTimeout(60*time.Second))
+	s.defaultGrowthCeilingBytes = 1024 * 1024 // 1 MiB; the burst writes 4 MiB
+	t.Cleanup(func() { _ = s.Close() })
+
+	res, err := s.Exec(context.Background(), Spec{
+		RepoDir: t.TempDir(),
+		Cmd:     []string{"/bin/sh", "-c", "dd if=/dev/zero of=burst bs=1048576 count=4 2>/dev/null; exit 0"},
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if !res.WorkspaceQuotaExceeded {
+		t.Errorf("WorkspaceQuotaExceeded = false, want true — a burst write that exits before any tick must still be caught (res=%+v)", res)
+	}
+	if res.TimedOut {
+		t.Errorf("TimedOut = true, want false — a growth-ceiling kill must never collapse into TimedOut (res=%+v)", res)
+	}
+	if res.ExitCode != -1 {
+		t.Errorf("ExitCode = %d, want -1 (the breach must override the process's own exit 0)", res.ExitCode)
+	}
+}
+
 // TestBwrapExec_CallerCancellationWinsOverQuotaBreach is the bwrap-backend
 // counterpart of cli_exec_quota_test.go's
 // TestCLIExec_CallerCancellationWinsOverQuotaBreach (cancellation
@@ -418,8 +447,7 @@ func TestBwrapExec_QuotaKillFidelity_SpawnGateWithIdleTimeoutUnset(t *testing.T)
 // landing in the same window as a real growth-ceiling breach must surface
 // as "sandbox: execution cancelled", never as WorkspaceQuotaExceeded.
 func TestBwrapExec_CallerCancellationWinsOverQuotaBreach(t *testing.T) {
-	s := newTestBwrap(t, WithBwrapIdleTimeout(60*time.Second))
-	s.defaultGrowthCeilingBytes = 5_000 // ~1-2 filler iterations blow past this
+	s := newTestBwrap(t, WithIdleTimeout(60*time.Second))
 	t.Cleanup(func() { _ = s.Close() })
 
 	ctx, cancel := context.WithCancel(context.Background())

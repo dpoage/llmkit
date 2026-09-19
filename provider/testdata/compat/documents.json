@@ -4,8 +4,8 @@
   "model": "MiniMax-M3",
   "capabilities": {
     "ContextWindow": 0,
-    "ParallelToolCalls": false,
-    "PromptCaching": false,
+    "ParallelToolCalls": true,
+    "PromptCaching": true,
     "StructuredOutput": false,
     "Thinking": false,
     "ToolChoice": true,
@@ -25,24 +25,14 @@
           "Role": "user",
           "Content": [
             {
-              "Kind": "document",
-              "Text": "",
-              "MediaType": "application/pdf",
-              "Data": "JVBERi0xLjQKMSAwIG9iajw8L1R5cGUvQ2F0YWxvZy9QYWdlcyAyIDAgUj4+IGVuZG9iagoyIDAgb2JqPDwvVHlwZS9QYWdlcy9LaWRzWzMgMCBSXS9Db3VudCAxPj4gZW5kb2JqCjMgMCBvYmo8PC9UeXBlL1BhZ2UvUGFyZW50IDIgMCBSL01lZGlhQm94WzAgMCA2MTIgNzkyXS9Db250ZW50cyA0IDAgUi9SZXNvdXJjZXM8PC9Gb250PDwvRjEgNSAwIFI+Pj4+Pj4gZW5kb2JqCjQgMCBvYmo8PC9MZW5ndGggNDQ+PnN0cmVhbQpCVCAvRjEgMjQgVGYgNzIgNzIwIFRkIChoZWxsbyBsbG1raXQpIFRqIEVUCmVuZHN0cmVhbSBlbmRvYmoKNSAwIG9iajw8L1R5cGUvRm9udC9TdWJ0eXBlL1R5cGUxL0Jhc2VGb250L0hlbHZldGljYT4+IGVuZG9iagp4cmVmCjAgNgowMDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDAwMDkgMDAwMDAgbiAKMDAwMDAwMDA1MyAwMDAwMCBuIAowMDAwMDAwMTAzIDAwMDAwIG4gCjAwMDAwMDAyMTQgMDAwMDAgbiAKMDAwMDAwMDMwMyAwMDAwMCBuIAp0cmFpbGVyPDwvU2l6ZSA2L1Jvb3QgMSAwIFI+PgpzdGFydHhyZWYKMzY1CiUlRU9GCg==",
-              "URL": "",
-              "Title": "hello.pdf",
-              "Provider": "",
-              "Raw": null
+              "kind": "document",
+              "media_type": "application/pdf",
+              "data": "JVBERi0xLjQKMSAwIG9iajw8L1R5cGUvQ2F0YWxvZy9QYWdlcyAyIDAgUj4+IGVuZG9iagoyIDAgb2JqPDwvVHlwZS9QYWdlcy9LaWRzWzMgMCBSXS9Db3VudCAxPj4gZW5kb2JqCjMgMCBvYmo8PC9UeXBlL1BhZ2UvUGFyZW50IDIgMCBSL01lZGlhQm94WzAgMCA2MTIgNzkyXS9Db250ZW50cyA0IDAgUi9SZXNvdXJjZXM8PC9Gb250PDwvRjEgNSAwIFI+Pj4+Pj4gZW5kb2JqCjQgMCBvYmo8PC9MZW5ndGggNDQ+PnN0cmVhbQpCVCAvRjEgMjQgVGYgNzIgNzIwIFRkIChoZWxsbyBsbG1raXQpIFRqIEVUCmVuZHN0cmVhbSBlbmRvYmoKNSAwIG9iajw8L1R5cGUvRm9udC9TdWJ0eXBlL1R5cGUxL0Jhc2VGb250L0hlbHZldGljYT4+IGVuZG9iagp4cmVmCjAgNgowMDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDAwMDkgMDAwMDAgbiAKMDAwMDAwMDA1MyAwMDAwMCBuIAowMDAwMDAwMTAzIDAwMDAwIG4gCjAwMDAwMDAyMTQgMDAwMDAgbiAKMDAwMDAwMDMwMyAwMDAwMCBuIAp0cmFpbGVyPDwvU2l6ZSA2L1Jvb3QgMSAwIFI+PgpzdGFydHhyZWYKMzY1CiUlRU9GCg==",
+              "title": "hello.pdf"
             },
             {
-              "Kind": "text",
-              "Text": "Reply with the single word OK if you received a document.",
-              "MediaType": "",
-              "Data": null,
-              "URL": "",
-              "Title": "",
-              "Provider": "",
-              "Raw": null
+              "kind": "text",
+              "text": "Reply with the single word OK if you received a document."
             }
           ],
           "ToolCalls": null,
@@ -88,31 +78,31 @@
       "response": {
         "headers": {
           "access-control-allow-origin": "*",
-          "alb_receive_time": "1789780927.04",
-          "alb_request_id": "4fbcea243f6e0abc7dd759f4f52140f5774d02c6",
+          "alb_receive_time": "1789786182.521",
+          "alb_request_id": "7b34e1e98160b8666a690ef69a4998a9511b776d",
           "cache-control": "max-age=0, no-cache, no-store",
-          "content-length": "876",
+          "content-length": "815",
           "content-type": "application/json; charset=utf-8",
-          "date": "Sat, 19 Sep 2026 01:22:09 GMT",
-          "expires": "Sat, 19 Sep 2026 01:22:09 GMT",
-          "minimax-request-id": "c4a46f70ed07a7ee5dab1b8fe1f71612",
+          "date": "Sat, 19 Sep 2026 02:49:44 GMT",
+          "expires": "Sat, 19 Sep 2026 02:49:44 GMT",
+          "minimax-request-id": "fb17e5d4ceeeb65bed6a32552620844f",
           "pragma": "no-cache",
-          "trace-id": "06fd16bf8ed5190abf62f6506087e9d5",
+          "trace-id": "06fd2b46d59df5b67bb6c7b05b7858f2",
           "x-from": "ak",
-          "x-mm-request-id": "2022431855143301769_1789780929qin472",
+          "x-mm-request-id": "2022431855143301769_17897861844m5ej0",
           "x-session-id": "65749afd81340eb4b01b52e1c5f7749f"
         },
-        "body": "{\"id\":\"06fd16bf8ed5190abf62f6506087e9d5\",\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"\u003cthink\u003e\\nThe user has sent a file called \\\"hello.pdf\\\" containing the text \\\"hello llmkit\\\" and asked me to reply with the single word OK if I received a document.\\n\\nI should reply with just \\\"OK\\\" as requested.\\n\u003c/think\u003e\\n\\nOK\",\"role\":\"assistant\",\"name\":\"MiniMax AI\",\"annotations\":[{}],\"audio_content\":\"\"}}],\"created\":1789780927,\"model\":\"MiniMax-M3\",\"object\":\"chat.completion\",\"usage\":{\"total_tokens\":252,\"total_characters\":0,\"prompt_tokens\":203,\"completion_tokens\":49,\"completion_tokens_details\":{\"reasoning_tokens\":47},\"prompt_tokens_details\":{\"cached_tokens\":128}},\"input_sensitive\":false,\"output_sensitive\":false,\"input_sensitive_type\":0,\"output_sensitive_type\":0,\"output_sensitive_int\":0,\"service_tier\":\"standard\",\"base_resp\":{\"status_code\":0,\"status_msg\":\"\"}}\n",
+        "body": "{\"id\":\"06fd2b46d59df5b67bb6c7b05b7858f2\",\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"\u003cthink\u003e\\nThe user has provided a file and asked me to reply with \\\"OK\\\" if I received a document. This appears to be a simple test of document receipt.\\n\u003c/think\u003e\\n\\nOK\",\"role\":\"assistant\",\"name\":\"MiniMax AI\",\"annotations\":[{}],\"audio_content\":\"\"}}],\"created\":1789786182,\"model\":\"MiniMax-M3\",\"object\":\"chat.completion\",\"usage\":{\"total_tokens\":237,\"total_characters\":0,\"prompt_tokens\":203,\"completion_tokens\":34,\"completion_tokens_details\":{\"reasoning_tokens\":32},\"prompt_tokens_details\":{\"cached_tokens\":128}},\"input_sensitive\":false,\"output_sensitive\":false,\"input_sensitive_type\":0,\"output_sensitive_type\":0,\"output_sensitive_int\":0,\"service_tier\":\"standard\",\"base_resp\":{\"status_code\":0,\"status_msg\":\"\"}}\n",
         "status": 200
       }
     }
   ],
   "normalized": {
-    "text": "\u003cthink\u003e\nThe user has sent a file called \"hello.pdf\" containing the text \"hello llmkit\" and asked me to reply with the single word OK if I received a document.\n\nI should reply with just \"OK\" as requested.\n\u003c/think\u003e\n\nOK",
+    "text": "\u003cthink\u003e\nThe user has provided a file and asked me to reply with \"OK\" if I received a document. This appears to be a simple test of document receipt.\n\u003c/think\u003e\n\nOK",
     "stop_reason": "end_turn",
     "usage": {
       "InputTokens": 203,
-      "OutputTokens": 49,
+      "OutputTokens": 34,
       "CacheReadInputTokens": 128,
       "CacheCreationInputTokens": 0
     }

@@ -1,6 +1,7 @@
 package fsroot
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -71,6 +72,8 @@ func TestFSRoot_Resolve_Traversal(t *testing.T) {
 			if tc.wantErr {
 				if err == nil {
 					t.Errorf("resolve(%q) = %q, want error", tc.path, got)
+				} else if !errors.Is(err, ErrPathEscape) {
+					t.Errorf("resolve(%q) error = %v, want ErrPathEscape", tc.path, err)
 				}
 				return
 			}
@@ -107,9 +110,13 @@ func TestFSRoot_SymlinkEscape(t *testing.T) {
 
 	if _, err := fr.Resolve("escape"); err == nil {
 		t.Error("resolve via file symlink escaping root should fail")
+	} else if !errors.Is(err, ErrPathEscape) {
+		t.Errorf("file symlink escape error = %v, want ErrPathEscape", err)
 	}
 	if _, err := fr.Resolve("outdir/secret.txt"); err == nil {
 		t.Error("resolve through dir symlink escaping root should fail")
+	} else if !errors.Is(err, ErrPathEscape) {
+		t.Errorf("dir symlink escape error = %v, want ErrPathEscape", err)
 	}
 }
 
@@ -119,9 +126,9 @@ func TestEvalExistingPrefixPath_ExistingPrefixMissingTail(t *testing.T) {
 
 	// Only root/a/b exists; the tail (c/d.txt) does not. The longest existing
 	// prefix must resolve and the tail must be re-appended unchanged.
-	got, err := EvalExistingPrefixPath(filepath.Join(root, "a", "b", "c", "d.txt"))
+	got, err := evalExistingPrefixPath(filepath.Join(root, "a", "b", "c", "d.txt"))
 	if err != nil {
-		t.Fatalf("EvalExistingPrefixPath: %v", err)
+		t.Fatalf("evalExistingPrefixPath: %v", err)
 	}
 	resolvedRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
@@ -129,7 +136,7 @@ func TestEvalExistingPrefixPath_ExistingPrefixMissingTail(t *testing.T) {
 	}
 	want := filepath.Join(resolvedRoot, "a", "b", "c", "d.txt")
 	if got != want {
-		t.Errorf("EvalExistingPrefixPath = %q, want %q", got, want)
+		t.Errorf("evalExistingPrefixPath = %q, want %q", got, want)
 	}
 }
 
@@ -138,16 +145,16 @@ func TestEvalExistingPrefixPath_FullyExisting(t *testing.T) {
 	dir := filepath.Join(root, "a")
 	mustMkdir(t, dir)
 
-	got, err := EvalExistingPrefixPath(dir)
+	got, err := evalExistingPrefixPath(dir)
 	if err != nil {
-		t.Fatalf("EvalExistingPrefixPath: %v", err)
+		t.Fatalf("evalExistingPrefixPath: %v", err)
 	}
 	want, err := filepath.EvalSymlinks(dir)
 	if err != nil {
 		t.Fatalf("EvalSymlinks(dir): %v", err)
 	}
 	if got != want {
-		t.Errorf("EvalExistingPrefixPath = %q, want %q", got, want)
+		t.Errorf("evalExistingPrefixPath = %q, want %q", got, want)
 	}
 }
 
@@ -166,9 +173,9 @@ func TestEvalExistingPrefixPath_SymlinkedPrefix(t *testing.T) {
 	// The symlinked directory exists, so it is resolved even though the final
 	// component does not — this is what lets callers catch a symlinked
 	// intermediate directory that escapes a containment root.
-	got, err := EvalExistingPrefixPath(filepath.Join(link, "missing.txt"))
+	got, err := evalExistingPrefixPath(filepath.Join(link, "missing.txt"))
 	if err != nil {
-		t.Fatalf("EvalExistingPrefixPath: %v", err)
+		t.Fatalf("evalExistingPrefixPath: %v", err)
 	}
 	resolvedReal, err := filepath.EvalSymlinks(real)
 	if err != nil {
@@ -176,6 +183,40 @@ func TestEvalExistingPrefixPath_SymlinkedPrefix(t *testing.T) {
 	}
 	want := filepath.Join(resolvedReal, "missing.txt")
 	if got != want {
-		t.Errorf("EvalExistingPrefixPath = %q, want %q", got, want)
+		t.Errorf("evalExistingPrefixPath = %q, want %q", got, want)
+	}
+}
+
+// TestFSRoot_SiblingSymlinkBackIntoRoot pins the lexical ".." check: a
+// symlink in the ROOT'S PARENT directory pointing back into the root makes an
+// escaping literal path resolve back INSIDE the root, so the symlink check
+// alone would pass it. Removing the lexical containment check must fail this
+// test.
+func TestFSRoot_SiblingSymlinkBackIntoRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink semantics differ on windows")
+	}
+	root := fixtureTree(t)
+	// Sibling of the root, pointing back at a directory inside it.
+	sibling := filepath.Join(filepath.Dir(root), "backlink")
+	if err := os.Symlink(filepath.Join(root, "pkg"), sibling); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	fr, err := NewFSRoot(root)
+	if err != nil {
+		t.Fatalf("NewFSRoot: %v", err)
+	}
+
+	// The literal path climbs out of the root even though its
+	// symlink-resolved form lands back inside it. It must be rejected.
+	_, err = fr.Resolve("../backlink/util.go")
+	if !errors.Is(err, ErrPathEscape) {
+		t.Fatalf("resolve(../backlink/util.go) error = %v, want ErrPathEscape", err)
+	}
+
+	// The in-root route to the same target stays allowed.
+	if _, err := fr.Resolve("pkg/util.go"); err != nil {
+		t.Errorf("resolve(pkg/util.go): %v", err)
 	}
 }

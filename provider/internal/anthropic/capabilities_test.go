@@ -44,6 +44,10 @@ func TestAnthropicCapabilities_PerModel(t *testing.T) {
 		{"claude-opus-4-7", anthropicWant(1_000_000, true)},
 		{"claude-opus-4-6", anthropicWant(1_000_000, true)},
 		{"claude-sonnet-4-6", anthropicWant(1_000_000, true)},
+		// First 4.0-generation snapshots (May 2025): 200k windows,
+		// extended thinking (vendor models overview page).
+		{"claude-opus-4-20250514", anthropicWant(200_000, true)},
+		{"claude-sonnet-4-20250514", anthropicWant(200_000, true)},
 		// 200k generations (1M only behind the context-1m beta header this
 		// adapter never sends).
 		{"claude-opus-4-5", anthropicWant(200_000, true)},
@@ -63,8 +67,10 @@ func TestAnthropicCapabilities_PerModel(t *testing.T) {
 		// defaults. claude-opus-4-9 is the oracle-mandated probe — an
 		// unverified future generation must NOT inherit 200k or 1M from any
 		// listed key. claude-3-5-sonnetish extends a key mid-token and is a
-		// different (nonexistent) name, not a snapshot. The retired 4.0
-		// generation is deliberately unlisted (the API rejects those IDs).
+		// different (nonexistent) name, not a snapshot. The retired bare
+		// 4.0 aliases (claude-opus-4 / claude-sonnet-4) are deliberately
+		// unlisted — the API rejects those IDs outright — while their
+		// date-stamped snapshots are listed above.
 		{"claude-opus-4-9", anthropicWant(0, true)},
 		{"claude-sonnet-4-7", anthropicWant(0, true)},
 		{"claude-3-5-sonnetish", anthropicWant(0, true)},

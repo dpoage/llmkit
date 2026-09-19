@@ -6,10 +6,7 @@
 //
 // Usage:
 //
-//	export LLMKIT_PROVIDER=openai   # anthropic | openai | openai-compatible | google
-//	export LLMKIT_MODEL=gpt-4o-mini
-//	export LLMKIT_API_KEY=sk-...
-//	export LLMKIT_BASE_URL=...      # required for openai-compatible, optional otherwise; e.g. a local endpoint
+//	# export the shared LLMKIT_* variables (examples/internal/envcfg), then:
 //	go run ./examples/basic [--image path/to/photo.jpg]
 //
 // With --image, the user message carries a second content block
@@ -44,14 +41,8 @@ func run() error {
 	imagePath := flag.String("image", "", "optional image file to include in the user message")
 	flag.Parse()
 
-	spec, err := envcfg.Load(`missing environment:
-  LLMKIT_PROVIDER  anthropic | openai | openai-compatible | google
-  LLMKIT_MODEL     model name, e.g. claude-sonnet-4-5 or gpt-4o-mini
-  LLMKIT_API_KEY   provider API key (any placeholder for a local endpoint)
-  LLMKIT_BASE_URL  required for openai-compatible, optional otherwise; e.g. a local endpoint
-
-set the variables above, then re-run:
-  go run ./examples/basic [--image path/to/photo.jpg]`)
+	spec, err := envcfg.Load(envcfg.Usage("go run ./examples/basic",
+		"[--image path/to/photo.jpg]"))
 	if err != nil {
 		return err
 	}

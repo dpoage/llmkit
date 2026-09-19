@@ -6,25 +6,28 @@ import (
 	"sync/atomic"
 )
 
-// ErrBudgetExhausted is returned by a [Limits.BudgetCheck] hook when a shared
-// budget pool has no headroom left for another model call. The [Runner] treats
-// it as a clean stop (TruncBudgetPool), not an infrastructure error.
+// ErrBudgetExhausted is returned by BudgetPool.Check once the pool has no
+// headroom left for another model call. The [Runner] treats it as a clean
+// stop (TruncBudgetPool), not an infrastructure error.
 var ErrBudgetExhausted = errors.New("agent: shared budget pool exhausted")
 
-// BudgetPool is a concurrency-safe token budget shared across many concurrent
-// [Runner] runs. Each runner consults it via a [Limits.BudgetCheck] hook BEFORE
-// every model call, so a run already in flight stops at the next turn boundary
-// once the pool is exhausted rather than running to completion under its own
-// per-run allowance. This bounds total CHARGED overshoot to at most one
-// in-flight model-call per concurrent runner. Note the charge happens on
-// successful completions only: provider-side retries of failed attempts and a
-// RunJSON repair pass spend real tokens that are gated pre-turn but not
-// charged, so real-dollar overshoot can modestly exceed the charged bound.
+// BudgetPool is a concurrency-safe token budget shared across many
+// concurrent [Runner] runs. A Runner installed with [WithBudgetPool] both
+// CHECKS the pool before every model call and CHARGES it after every
+// successful completion with that completion's chargeable tokens — so a run
+// already in flight stops at the next turn boundary once the pool is
+// exhausted rather than running to completion under its own per-run
+// allowance. This bounds total CHARGED overshoot to at most one in-flight
+// model-call per concurrent runner. Note a RunJSON repair pass and a run
+// stopped mid-turn still spend real provider tokens that are gated pre-turn
+// but can land after the ceiling is crossed, so real-dollar overshoot can
+// modestly exceed the charged bound.
 //
-// The pool tracks cumulative spend (input+output tokens) against a fixed limit.
-// A nil *BudgetPool is the canonical unlimited representation: Check always
-// returns nil and Remaining returns math.MaxInt64. NewBudgetPool requires a
-// positive limit; callers that want an unlimited pool should hold a nil pointer.
+// The pool tracks cumulative spend (input+output tokens, cache-read
+// discounted) against a fixed limit. A nil *BudgetPool is the canonical
+// unlimited representation: Check always returns nil and Remaining returns
+// math.MaxInt64. NewBudgetPool requires a positive limit; callers that want
+// an unlimited pool should hold a nil pointer.
 //
 // All methods are safe for concurrent use.
 type BudgetPool struct {

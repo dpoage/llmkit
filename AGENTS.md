@@ -235,18 +235,22 @@ in its message.
 ## Architecture Overview
 
 - **`llmkit`** (root) — the normalized vocabulary: `Message`/`Block` content
-  model, `Request`/`Response`/`Usage`/`Capabilities`, sentinel errors +
+  model with block constructors (`Text`, `Image`, `ImageURL`, `Document`,
+  `DocumentURL`) and message constructors (`UserMessage`, `SystemMessage`,
+  `ToolResult`, `ToolError`; `TextMessage` stays),
+  `Request`/`Response`/`Usage`/`Capabilities`, sentinel errors +
   `APIError`, decorator wrappers (`WithRetry`, `WithRecorder`,
   `WithSerializedToolCalls`), `StripThinkBlocks`, `DefaultMaxTokens`.
 - **`llmkit/provider`** — the single construction entry point: `Spec` +
   `Options` → `New` dispatches to an adapter and decorates it
-  serialize → recorder → retry. `Spec.Capabilities`, when set, receives the
-  adapter's model-table profile and returns the effective one — flip a
-  single field or replace it wholesale (e.g. to pin `ContextWindow` for a
-  model the table doesn't know).
-- **`llmkit/provider/anthropic`, `llmkit/provider/openai`,
-  `llmkit/provider/google`** — vendor-SDK adapters. `provider/openai` also
-  serves any OpenAI-compatible endpoint (Ollama, vLLM, Groq, ...).
+  serialize → recorder → retry. Vendor-SDK adapters live under
+  `provider/internal/{anthropic,openai,google}` — internal on purpose,
+  with `provider.New` the sole construction path; `Spec.Type`
+  `openai-compatible` serves any OpenAI-compatible endpoint (Ollama, vLLM,
+  Groq, ...). `Spec.Capabilities`, when set, receives the adapter's
+  model-table profile and returns the effective one — flip a single field
+  or replace it wholesale (e.g. to pin `ContextWindow` for a model the
+  table doesn't know).
 - **`llmkit/internal/adapter`** — helpers shared by the three adapters
   (status classification, error normalization, schema parsing); internal,
   not public API.
@@ -256,27 +260,47 @@ in its message.
   `ReplayClient`, schema derivation from Go types (`SchemaOf`/`Func`,
   feeding `RunJSON`/`RunJSONAs`), multi-turn continuation via the
   `Continue` run option, and the synchronous `Hooks` observer surface.
+  `Outcome.FinalText` holds the final completion's text (empty when that
+  completion produced none). `WithBudgetPool` makes the Runner check a
+  shared `BudgetPool` before every model call and charge it after every
+  successful completion. Tool panics are recovered and rendered as that
+  call's error result in both dispatch modes (sequential and
+  `WithParallelTools`); hook panics propagate to the caller. The `RunJSON`
+  repair turn continues the parent run's transcript step numbering.
   Tool-failure typing: `ToolHealthError` for infra failures,
   `StopReasonError` for model refusal/safety stops.
 - **`llmkit/sandbox`** — isolated execution of untrusted, model-generated
-  commands against repo snapshots: one
-  `Sandbox.Exec(ctx, Spec) (Result, error)` over the Bubblewrap backend
-  (Linux, unprivileged user namespaces), a container CLI backend
-  (podman/docker), and a scriptable `Mock` (plus `HostExec`, the documented
-  no-isolation attended escape hatch that no kit default or example
-  constructs). Workspace materialization with symlink-hardened writes,
-  capped output capture, and a shared idle/growth-ceiling watchdog;
-  standard library plus golang.org/x/sys (the reflink fast path). Path
-  containment for agent tools lives in the
+  commands against repo snapshots: one `Sandbox` interface —
+  `Exec(ctx, Spec) (Result, error)` plus `MaterializeWorkspace(repoDir)` —
+  over the Bubblewrap backend (Linux, unprivileged user namespaces), a
+  container CLI backend (podman/docker), and a scriptable `Mock` (plus
+  `HostExec`, the documented no-isolation attended escape hatch that no
+  kit default or example constructs). Spec fields are honest per backend:
+  `Spec.Network` is a typed `NetworkMode`, and a field a backend cannot
+  honor is refused at `Exec` with an `UnsupportedSpecError` naming the
+  backend, field, and value — never a silent drop or substitution.
+  Backend-only knobs (runtime, default image, CPUs, memory, idle window) are
+  backend options configured through ONE `Option` type shared by `NewCLI`
+  and `NewBwrap` (`WithRuntime`/`WithImage` are CLI-only, `WithCapPolicy`
+  is Bwrap-only); no option takes a bare bool — modes are named types
+  (`NetworkMode`, `CapPolicy`) — and `Spec` carries no
+  CPUs/MemoryMB/IdleTimeout fields (those are backend options). Workspace
+  materialization with symlink-hardened writes, output capped at
+  `DefaultMaxOutputBytes` (1 MiB) per stream, and a shared
+  idle/growth-ceiling watchdog; standard library plus golang.org/x/sys
+  (the reflink fast path). Path containment for agent tools lives in the
   sibling `fsroot` package.
 - **`llmkit/fsroot`** — tool-anchored path containment for agent tools:
-  `NewFSRoot(dir)` + `Resolve(rel)` reject absolute paths, `..` escapes, and
-  symlink escapes (longest-existing-prefix check), returning `ErrPathEscape`;
-  `EvalExistingPrefixPath` is the shared helper. Deliberately separate from
-  `sandbox`'s post-exec workspace write hardening (different threat model).
+  `NewFSRoot(dir)` + `Resolve(rel)` reject absolute paths, `..` escapes,
+  and symlink escapes (longest-existing-prefix check), returning
+  `ErrPathEscape`; path resolution is package-internal. Deliberately
+  separate from `sandbox`'s post-exec workspace write hardening
+  (different threat model).
 - **`llmkit/embed`** — `Embedder` interface with Ollama and
-  OpenAI-compatible HTTP backends (retry, batching, timeouts) plus the
-  content-hash `CachedEmbedder` decorator.
+  OpenAI-compatible HTTP backends (shared `llmkit.RetryConfig` retry whose
+  `Retry.RequestTimeout` is the single per-attempt bound — embed defaults
+  3 attempts / 60s per attempt — plus batching) and the content-hash LRU
+  `CachedEmbedder` decorator.
 - **`examples/`** — one runnable program per major surface: `basic` (single
   completion + blocks/capabilities), `agent` (agent loop + hooks),
   `structured` (`RunJSONAs` schema-constrained output), `chat` (multi-turn
@@ -284,12 +308,13 @@ in its message.
 
 ## Conventions & Patterns
 
-- **Error normalization**: adapters classify provider failures through
-  `llmkit.NewAPIError` into the sentinel kinds `ErrRateLimited`, `ErrAuth`,
+- **Error normalization**: adapters construct `&llmkit.APIError{Kind,
+  StatusCode, RetryAfter, Provider, Message, Err}` literals — `Kind` is
+  one of the sentinel kinds `ErrRateLimited`, `ErrAuth`,
   `ErrContextTooLong`, `ErrInvalidRequest`, `ErrServer`, `ErrOverloaded`;
   match with `errors.Is`. `APIError` preserves the HTTP status and any
   `Retry-After` hint, and unwraps to both the sentinel and the underlying
-  SDK error.
+  vendor-SDK error (`Err`).
 - **Usage convention**: `Usage.InputTokens` is the TOTAL prompt size — it
   INCLUDES cache-read and cache-creation tokens; the cache fields are
   informational subsets of it (the Anthropic adapter sums them in). Budget
@@ -305,21 +330,34 @@ in its message.
   `llmkit.DefaultMaxTokens` (4096) on every adapter; explicit values pass
   through verbatim.
 - **Capabilities**: adapters report `ContextWindow 0` for models outside
-  their per-model table — never a fabricated number. Enforcement is
-  uneven, and callers should know which is which: `Thinking=false` and
-  `StructuredOutput=false` are hard gates (the request's thinking config /
-  response schema is dropped silently), an explicit `Request.ToolChoice`
-  mode against `Capabilities.ToolChoice=false` is refused before the wire
-  call with `ErrInvalidRequest` (silently dropping `none` would let the
-  model call forbidden tools), while `Images`/`Documents` are ADVISORY
-  today — no adapter reads them, the blocks are sent regardless, and the
-  provider may reject the request. Gate your own image/document input on
-  the capability (see `examples/basic`).
+  their per-model table — never a fabricated number. Every field's doc
+  comment in `llmkit.go` names one of four enforcement classes, and the
+  classes cover all fields: DROPPED SILENTLY when the profile reports
+  false (`Thinking`, `StructuredOutput`, `StopSequences`, `TopP`, `TopK`,
+  `Seed` — the adapter omits the feature from the wire, by adapter
+  mapping; for `StopSequences`/`TopP`/`TopK`/`Seed` this reports only the
+  adapter's own mapping, not a gate a caller-pinned profile can use to
+  disable a supported feature), REFUSED PRE-WIRE (`ToolChoice` — an
+  explicit non-auto mode against `ToolChoice=false` returns an error
+  wrapping `ErrInvalidRequest` before any wire call, because silently
+  dropping `none` would let the model call forbidden tools), DECORATOR
+  (`ParallelToolCalls` — `provider.New` installs the tool-call serializer
+  when it is false), ADVISORY (`Images`, `Documents`, `PromptCaching`,
+  `ContextWindow` — no adapter reads them; gate your own image/document
+  input on the capability, see `examples/basic`).
+- **Transcript format**: `Block` fields marshal snake_case with
+  `omitempty` on every zero field (`Kind` is always present), so a text
+  block serializes as exactly `{"kind":"text","text":"…"}` and a nil `Raw`
+  never emits `"raw":null`. The tags landed in this round; transcripts
+  recorded before them are not supported — their image and document blocks
+  decode with an empty MediaType (the pre-tag key was the Go field name)
+  and are refused pre-wire. Re-record them.
 - **Hooks are synchronous**: every `agent.Hooks` callback runs inline on
   the goroutine that reaches the fire point — a slow hook stalls the run.
   `ToolEvent.Step`, `CompactionEvent.Step`, and the transcript's
-  `Event.Step` carry the SAME 1-based number for a turn, so consumers can
-  join on Step.
+  `Event.Step` carry the SAME 1-based number for a turn — the `RunJSON`
+  repair turn continues the parent run's sequence instead of restarting —
+  so consumers can join on Step.
 - **Tool concurrency**: `Tool.Run` may be invoked concurrently — within one
   run under `WithParallelTools`, and across concurrent `Runner.Run` calls
   (a Runner is safe for concurrent use) — so tools and hook functions must

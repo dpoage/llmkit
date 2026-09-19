@@ -15,12 +15,12 @@ import (
 // [SchemaOf].
 //
 //   - DoNotReference inlines every nested struct instead of emitting $defs
-//     with $ref pointers: [validateSchema] is a deliberately closed
+//     with $ref pointers: the bundled validator is a deliberately closed
 //     JSON-Schema subset that ignores $ref, so a referenced nested object's
 //     constraints (required fields, additionalProperties) would be silently
 //     unenforced.
 //   - AllowAdditionalProperties=false stamps "additionalProperties": false
-//     (the bool form) at every object level: provider/openai's
+//     (the bool form) at every object level: provider/internal/openai's
 //     OpenAI-compatible schema downgrade requires the bool form, and the
 //     closed-subset validator uses it to reject unknown keys.
 //   - RequiredFromJSONSchemaTags stays false (the default), so every field
@@ -41,9 +41,10 @@ var schemaReflector = jsonschema.Reflector{
 //
 // The returned document carries no $ref/$defs (nested types are inlined),
 // "additionalProperties": false at every object level, and every field
-// without an `omitempty` json tag listed as required — see [schemaReflector]
-// for why. `json` tags name the properties; `jsonschema:"..."` tags add
-// descriptions and constraints (e.g. `jsonschema:"minLength=1"`).
+// without an `omitempty` json tag listed as required — the package's shared
+// reflector settings encode the rationale. `json` tags name the properties;
+// `jsonschema:"..."` tags add descriptions and constraints (e.g.
+// `jsonschema:"minLength=1"`).
 //
 // Field-type mapping of note: a pointer field (*T) maps to T's schema
 // verbatim — the pointer is NOT nullable ("null"-typed) — and the field is
@@ -175,25 +176,19 @@ func schemaFieldVisited(f reflect.StructField) bool {
 // replaces the two-method Tool implementation (Def + Run) wherever the schema
 // is exactly the shape of a struct the function already wants.
 //
-// Two gotchas follow from validating against the SchemaOf-derived schema
-// rather than decoding directly: an Args field tagged `omitempty` must be
-// OMITTED by the model, not sent as an explicit JSON null — SchemaOf maps a
-// pointer field to its pointee's type verbatim (never "null"-typed, see
-// [SchemaOf]), so `{"age": null}` fails validation even though
-// [UnmarshalArgs] would have accepted it. And an Args field whose custom
-// UnmarshalJSON accepts a wire shape that differs from its Go kind (e.g. an
-// int64-backed duration type decoded from a string like "5s") is refused the
-// same way, because SchemaOf reflects the Go kind ("integer"), not what
-// UnmarshalJSON actually parses ("5s" arrives as a JSON string). The fix in
-// both cases is on the type, not here: implement invopop's
-// `JSONSchema() *jsonschema.Schema` on the custom type so SchemaOf reflects
-// the true wire shape (e.g. return `&jsonschema.Schema{Type: "string"}` for
-// the duration example above) instead of the Go kind.
+// Two constraints follow from validating against the SchemaOf-derived
+// schema rather than decoding directly: an `omitempty` field must be
+// omitted by the model (an explicit JSON null fails validation), and a type
+// whose custom UnmarshalJSON accepts a wire shape unlike its Go kind (an
+// int64-backed duration decoded from "5s") is refused, because SchemaOf
+// reflects the Go kind. The fix in both cases is on the type: implement
+// invopop's `JSONSchema() *jsonschema.Schema` so SchemaOf reflects the true
+// wire shape.
 //
 // An error from fn is model-recoverable: the harness feeds it back as an
 // "ERROR:"-prefixed tool result and lets the model retry (see [Tool.Run]).
-// Wrap genuine harness/infra failures in [ToolHealthError] so they also reach
-// [Hooks.ToolHealth].
+// Wrap genuine harness/infra failures in [ToolHealthError] so they also
+// reach [Hooks.ToolHealth].
 //
 // Args may be struct{} for tools that take no arguments.
 func Func[Args any](name, description string, fn func(context.Context, Args) (string, error)) Tool {

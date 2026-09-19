@@ -47,22 +47,9 @@ type APIError struct {
 	Provider string
 	// Message is a short, key-free description.
 	Message string
-	// err is the underlying SDK error, for Unwrap chaining.
-	err error
-}
-
-// NewAPIError builds a normalized *APIError from a classified failure. The
-// adapters (and internal/adapter helpers) construct errors through this
-// constructor so the underlying error stays unexported.
-func NewAPIError(provider string, status int, retryAfter time.Duration, kind error, message string, underlying error) *APIError {
-	return &APIError{
-		Kind:       kind,
-		StatusCode: status,
-		RetryAfter: retryAfter,
-		Provider:   provider,
-		Message:    message,
-		err:        underlying,
-	}
+	// Err is the underlying vendor-SDK error, for Unwrap chaining. It may
+	// carry provider response detail; it never contains the API key.
+	Err error
 }
 
 func (e *APIError) Error() string {
@@ -76,8 +63,8 @@ func (e *APIError) Error() string {
 // work) and the underlying SDK error (so callers can still reach provider
 // detail). Uses the multi-error Unwrap form (Go 1.20+).
 func (e *APIError) Unwrap() []error {
-	if e.err != nil {
-		return []error{e.Kind, e.err}
+	if e.Err != nil {
+		return []error{e.Kind, e.Err}
 	}
 	return []error{e.Kind}
 }

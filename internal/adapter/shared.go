@@ -117,5 +117,5 @@ func NormalizeSDKError(provider string, status int, msg string, resp *http.Respo
 	if kind == llmkit.ErrRateLimited || kind == llmkit.ErrOverloaded {
 		ra = ParseRetryAfter(resp)
 	}
-	return llmkit.NewAPIError(provider, status, ra, kind, msg, underlying)
+	return &llmkit.APIError{Kind: kind, StatusCode: status, RetryAfter: ra, Provider: provider, Message: msg, Err: underlying}
 }

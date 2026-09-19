@@ -53,6 +53,40 @@ func TestTranscript_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestTranscript_TextBlockJSONExactShape pins the transcript wire shape for
+// the common case: a request event whose message carries one text block
+// serializes that block as exactly {"kind":"text","text":"…"} — no zero
+// fields, no "raw":null noise on every line.
+func TestTranscript_TextBlockJSONExactShape(t *testing.T) {
+	fc := newFakeClient(textResp("answer", 1, 1))
+	r := NewRunner(fc, nil, "sys")
+	out, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var buf bytes.Buffer
+	if err := out.Transcript.SaveJSONL(&buf); err != nil {
+		t.Fatalf("SaveJSONL: %v", err)
+	}
+	sc := bufio.NewScanner(&buf)
+	sawTextBlock := false
+	for sc.Scan() {
+		line := sc.Bytes()
+		if bytes.Contains(line, []byte(`"kind":"text"`)) && !bytes.Contains(line, []byte(`"tool_calls"`)) {
+			// A text block inside this line must carry exactly kind+text.
+			if bytes.Contains(line, []byte(`{"kind":"text","text":"task"}`)) {
+				sawTextBlock = true
+			}
+			if bytes.Contains(line, []byte(`"raw":null`)) {
+				t.Errorf("line emits raw:null: %.200s", line)
+			}
+		}
+	}
+	if !sawTextBlock {
+		t.Error("no line carries the exact text-block shape {\"kind\":\"text\",\"text\":\"task\"}")
+	}
+}
+
 func TestReplayClient_ReplaysRun(t *testing.T) {
 	// Record a run.
 	fc := newFakeClient(

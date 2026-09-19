@@ -29,7 +29,7 @@ type schemaOuter struct {
 // assertNoRefs walks a decoded schema and fails when it carries $ref/$defs
 // anywhere (validateSchema ignores $ref, so a referenced subschema's
 // constraints would be silently unenforced), or when an object node lacks the
-// bool "additionalProperties": false (the form provider/openai's Compatible
+// bool "additionalProperties": false (the form provider/internal/openai's
 // downgrade requires).
 func assertNoRefs(t *testing.T, path string, node any) {
 	t.Helper()
