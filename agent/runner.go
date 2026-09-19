@@ -8,6 +8,7 @@ import (
 	"github.com/dpoage/llmkit"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -48,6 +49,11 @@ type Runner struct {
 	// hooks holds the optional observer callbacks; nil funcs are no-ops with
 	// zero overhead. See [Hooks] for the fire points.
 	hooks Hooks
+	// requestPolicy, when non-nil, shapes every completion request just
+	// before it goes on the wire (see [RequestPolicy] and
+	// [WithRequestPolicy]). A nil policy sends the request exactly as
+	// built, with no clone of the message slice.
+	requestPolicy RequestPolicy
 	// toolTimeout, when positive, is the per-call deadline applied to every
 	// Tool.Run (see WithToolTimeout).
 	toolTimeout time.Duration
@@ -743,21 +749,36 @@ func (r *Runner) complete(ctx context.Context, tr *Transcript, messages []llmkit
 	if len(responseSchema) > 0 && r.client.Capabilities().StructuredOutput {
 		req.ResponseSchema = responseSchema
 	}
-	// This is the single fire point for [Hooks.BeforeCompletion] and
-	// [Hooks.AfterCompletion]: every client.Complete in the loop (main turn,
-	// max-tokens continuation, forced finalization, repair) goes through here.
-	// step is the 1-based transcript step this completion is recorded under
-	// (outcome.Iterations+1 at fire time): the SAME number every other hook
-	// reports for this turn — ToolEvent.Step, CompactionEvent.Step — and the
-	// Event.Step of the request/assistant transcript events below, so
-	// consumers can join all hook families on Step. Captured before Complete
-	// because outcome.Iterations is incremented only after the call returns,
-	// keeping the hook pair's step identical.
+	// This is the single fire point for [RequestPolicy.PrepareRequest],
+	// [Hooks.BeforeCompletion], and [Hooks.AfterCompletion]: every
+	// client.Complete in the loop (main turn, max-tokens continuation,
+	// forced finalization, repair) goes through here. step is the 1-based
+	// transcript step this completion is recorded under
+	// (outcome.Iterations+1 at fire time): the SAME number the policy and
+	// every other hook report for this turn — ToolEvent.Step,
+	// CompactionEvent.Step — and the Event.Step of the request/assistant
+	// transcript events below, so consumers can join all hook families on
+	// Step. Captured before Complete because outcome.Iterations is
+	// incremented only after the call returns, keeping the hook pair's step
+	// identical.
 	step := outcome.Iterations + 1
+	// [RequestPolicy] is the wire-request mutation seam ([Hooks] below is
+	// observe-only): the policy sees the fully built request and may
+	// rewrite any field. The history is handed over as a shallow clone —
+	// only when a policy is registered, keeping the no-policy path
+	// allocation-free — and the clone is what goes on the wire and into the
+	// transcript, while the loop's own slice is never touched. A policy
+	// error aborts before any wire call.
+	if r.requestPolicy != nil {
+		req.Messages = slices.Clone(messages)
+		if err := r.requestPolicy.PrepareRequest(ctx, step, &req); err != nil {
+			return llmkit.Response{}, fmt.Errorf("agent: request policy at iteration %d: %w", step, err)
+		}
+	}
 	if r.hooks.BeforeCompletion != nil {
 		r.hooks.BeforeCompletion(ctx, step, &req)
 	}
-	tr.recordRequest(step, messages)
+	tr.recordRequest(step, req.Messages)
 
 	resp, err := r.client.Complete(ctx, req)
 	if r.hooks.AfterCompletion != nil {
