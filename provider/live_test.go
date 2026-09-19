@@ -900,3 +900,44 @@ func TestLiveCompatStreamText(t *testing.T) {
 func TestLiveOpenAIStreamText(t *testing.T) {
 	streamTextCase(t, "openai")
 }
+
+// TestLiveAnthropicStreaming exercises the anthropic lane's StreamingClient
+// path through the production construction chain (provider.New with its
+// decorator stack): text fragments must arrive incrementally, the joined
+// fragments must equal the final Response.Text, and usage must be populated.
+// It is a standalone lane test — the case registry stays untouched — and
+// skips with the lane when no credentials are configured.
+func TestLiveAnthropicStreaming(t *testing.T) {
+	sess := livetest.Resolve(t, "anthropic")
+	lc := newLiveClient(t, sess)
+
+	req := llmkit.Request{
+		Messages:  []llmkit.Message{llmkit.UserMessage(llmkit.Text("Reply with exactly: streaming works"))},
+		MaxTokens: 64,
+	}
+	sc, ok := lc.cl.(llmkit.StreamingClient)
+	if !ok {
+		redFatal(t, lc.sess, "provider.New client does not implement StreamingClient")
+	}
+	var joined strings.Builder
+	fragments := 0
+	resp, err := sc.Stream(lc.ctx, req, func(d llmkit.Delta) error {
+		if d.Kind == llmkit.DeltaText {
+			fragments++
+			joined.WriteString(d.Text)
+		}
+		return nil
+	})
+	if err != nil {
+		redFatal(t, lc.sess, "Stream: %v", err)
+	}
+	if fragments == 0 {
+		redFatal(t, lc.sess, "no text deltas delivered")
+	}
+	if resp.Text != joined.String() {
+		t.Errorf("final Text %q != joined fragments %q", resp.Text, joined.String())
+	}
+	if resp.Usage.InputTokens == 0 || resp.Usage.OutputTokens == 0 {
+		t.Errorf("usage not populated: %+v", resp.Usage)
+	}
+}
