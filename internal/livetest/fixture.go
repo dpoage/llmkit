@@ -58,6 +58,8 @@ const (
 
 // RequestCheckMode resolves a fixture's effective request-side mode,
 // deriving the pre-request_check legacy default from the exchange count.
+// Unknown declared values are returned unchanged so the caller's error can
+// name them exactly once.
 func (f *Fixture) RequestCheckMode() string {
 	switch f.RequestCheck {
 	case RequestCheckStrict, RequestCheckResponseOnly:
@@ -68,7 +70,7 @@ func (f *Fixture) RequestCheckMode() string {
 		}
 		return RequestCheckResponseOnly
 	default:
-		return "unknown:" + f.RequestCheck
+		return f.RequestCheck
 	}
 }
 
