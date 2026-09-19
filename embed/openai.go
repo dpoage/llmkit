@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/internal/retry"
 	"io"
 	"net/http"
 	"strings"
@@ -77,7 +78,7 @@ type openaiError struct {
 // Embed returns the embedding for a single text.
 func (o *OpenAICompatibleEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
 	var out []float32
-	err := retryDo(ctx, o.retry, func(actx context.Context) error {
+	err := retry.Do(ctx, o.retry, retryable, func(actx context.Context) error {
 		res, err := o.doEmbed(actx, []string{text})
 		if err == nil {
 			out = res[0]
@@ -106,7 +107,7 @@ func (o *OpenAICompatibleEmbedder) EmbedBatch(ctx context.Context, texts []strin
 		n := batchChunkSize(len(texts)-start, o.maxBatch)
 		chunk := texts[start : start+n]
 		var res [][]float32
-		err := retryDo(ctx, o.retry, func(actx context.Context) error {
+		err := retry.Do(ctx, o.retry, retryable, func(actx context.Context) error {
 			r, err := o.doEmbed(actx, chunk)
 			if err == nil {
 				res = r
