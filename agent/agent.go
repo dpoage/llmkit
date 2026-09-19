@@ -1,38 +1,110 @@
-// Package agent is a tool-call execution harness: a reusable loop that
-// drives an [llmkit.Client] through a bounded set of tools until the model
-// produces a final answer, runs out of iterations, or exhausts a token budget.
+// Package agent is a tool-call execution harness: a reusable loop that drives
+// an [llmkit.Client] through a bounded set of tools until the model produces
+// a final answer, runs out of iterations, or exhausts a token budget.
 //
-// Callers with different roles (e.g. a coder, a reviewer, a researcher) all
-// instantiate the same [Runner] with different system prompts and tool
-// sets. The harness itself is provider-agnostic: it speaks only the
-// normalized [llmkit] vocabulary.
+// Callers with different roles (a coder, a reviewer, a researcher) construct
+// the same [Runner] with different system prompts and tool sets. The harness
+// is provider-agnostic: it speaks only the normalized [llmkit] vocabulary.
+// The narrative guide, with a turn diagram and option tables, lives in
+// docs/agent-loop.md.
 //
 // # Tools
 //
-// A [Tool] declares its schema via [Tool.Def] and executes via [Tool.Run].
-// Tool errors are *not* loop failures: they are fed back to the model as
-// tool-result content prefixed with "ERROR:" so the model can recover (retry
-// with different arguments, try another tool, or give up gracefully). Only
-// infrastructure-level failures (a failed [llmkit.Client.Complete], context
-// cancellation) abort the loop.
+// A [Tool] declares its schema with [Tool.Def] and executes with [Tool.Run].
+// A tool error is not a loop failure: the harness feeds it back to the model
+// as a tool result prefixed "ERROR:", and the model retries, tries another
+// tool, or gives up. A panic inside [Tool.Run] is recovered and rendered the
+// same way, in both dispatch modes. Ordinary tool errors are data for the
+// model; a *ToolHealthError marks a failure as infrastructure, so it also
+// reaches [Hooks.ToolHealth]; a *StopReasonError ends the run, because the
+// model itself stopped for a provider error reason. Only infrastructure
+// failures (a failed [llmkit.Client.Complete], context cancellation) and
+// [StopReasonError] abort the loop. [Func] builds a Tool from a plain
+// function; the struct argument is the schema. Tools run one call at a time
+// by default; [WithParallelTools] runs a turn's calls concurrently, and
+// concurrent [Runner.Run] calls on one Runner are always allowed, so a Tool
+// must be safe for concurrent calls.
 //
-// # Limits and partial results
+// # Limits and outcomes
 //
 // The loop enforces two limits: [Limits.MaxIterations] (model turns) and
 // [Limits.TokenBudget] (cumulative input+output tokens from [llmkit.Usage]).
-// Exceeding either stops the loop cleanly, returning an [Outcome] with a
-// non-empty [Outcome.TruncationReason]; Outcome.FinalText holds the text of
-// the LAST completion of the run (empty when that completion produced no
-// text) — partial results are data, not errors. Only context
-// cancellation, infra failures, and [StopReasonError] return a non-nil error
-// from [Runner.Run].
+// Zero selects the package default; [Unlimited] removes the cap;
+// [Limits.CacheReadWeight] discounts cache-read tokens in the check.
+// Exceeding a limit stops the run cleanly: [Runner.Run] returns an [Outcome]
+// with a non-empty [Outcome.TruncationReason], and [Outcome.FinalText] holds
+// the text of the last completion. Partial results are data, not errors.
+// [Limits.HistoryTokenBudget] enables threshold-triggered history
+// compaction, which replaces old tool results with short stubs and re-arms
+// its threshold so the cache cost stays bounded.
 //
-// # Transcripts
+// # Policies
 //
-// Every run can be recorded as an ordered [Transcript] of events
-// (requests, assistant turns, tool calls, tool results, usage). Transcripts
-// serialize to JSONL and can be replayed offline through a [ReplayClient],
-// which is the building block for the eval harness.
+// Two single-method interfaces sit between the model and the world.
+//
+//   - [RequestPolicy] ([WithRequestPolicy]) edits the outgoing request. The
+//     Runner calls it before every completion: the main turn, the
+//     max-tokens continuation turn, the forced-finalization turn, and the
+//     RunJSON repair turn. It runs before [Hooks.BeforeCompletion], and the
+//     transcript records the post-policy request. req.Messages is a shallow
+//     clone of the loop's history, so a policy reshapes this turn without
+//     touching the loop's history.
+//   - [ToolPolicy] ([WithToolPolicy]) authorizes every tool call of a turn,
+//     in model order, on the loop goroutine, before any [Tool.Run] starts —
+//     in both dispatch modes. A denial feeds the model
+//     "ERROR: tool <name> denied: ..." and the run continues. Only
+//     call.Arguments may be rewritten; the history keeps the model's
+//     original arguments.
+//
+// # Hooks
+//
+// [WithHooks] registers the observer struct [Hooks]: one optional callback
+// per loop event, covering completions, deltas, tool calls, compaction,
+// repair, finalization, and transcript-streaming failures. Hooks run
+// synchronously, inline on the goroutine that reaches the fire point. Every
+// hook family reports the same 1-based step for a turn — [ToolEvent.Step],
+// [CompactionEvent.Step], and [Event.Step] — so consumers join on it, and a
+// RunJSON repair turn continues the numbering. When [Hooks.Delta] is set,
+// the Runner streams each completion through [llmkit.Stream]. A panicking
+// hook is a harness bug: it propagates out of [Runner.Run] and is never
+// rendered to the model.
+//
+// # Steering
+//
+// [Steering] ([NewSteering], [WithSteering]) queues user turns into a
+// running loop from any goroutine. [Steering.Steer] delivers before the next
+// model call, after the current turn's tool results. [Steering.FollowUp]
+// delivers when the run would otherwise finish and continues the loop
+// instead. Undelivered turns stay queued when a limit stops the run;
+// [Steering.Pending] reports them, and [Continue] with the same handle
+// delivers them on the continued run. A refusal stop delivers nothing. A
+// second concurrent run on one handle fails with [ErrSteeringInUse].
+//
+// # Structured output
+//
+// [Runner.RunJSON] asks the model for a JSON answer that matches a schema,
+// deep-validates the answer, and unmarshals it into a caller pointer. On a
+// parse or schema violation it makes one repair round-trip before failing
+// with [ErrUnparseableOutput]. RunJSON reserves the last iteration for a
+// forced-finalization turn, so a capped run still emits its answer.
+// [RunJSONAs] derives the schema from a Go type with [SchemaOf] and returns
+// the decoded value, so the type the model must satisfy and the type that
+// decodes its answer cannot drift apart.
+//
+// # Budgets
+//
+// [BudgetPool] ([WithBudgetPool]) shares one token budget across concurrent
+// Runner runs. The Runner checks the pool before every completion and
+// charges it after each success. An exhausted pool stops a run cleanly with
+// [TruncBudgetPool]; [ErrBudgetExhausted] is the check failure. A nil pool
+// is the default and means unlimited.
+//
+// # Transcripts and replay
+//
+// Every run records an ordered [Transcript] of events: requests, assistant
+// turns, tool results, and usage. Transcripts serialize to JSONL with
+// [Transcript.SaveJSONL], load back with [LoadJSONL], and replay offline
+// through [ReplayClient] — the building block for the eval harness.
 package agent
 
 import (
@@ -69,21 +141,21 @@ type Limits struct {
 	// Valid range is (0,1]; a zero or negative value resolves to 1.0 (no
 	// discount).
 	CacheReadWeight float64
-	// HistoryTokenBudget enables threshold-triggered history compaction. When the
-	// estimated size of the growing message history (bytes/4 over message content
-	// and tool-call arguments) exceeds this many tokens, the Runner compacts ONCE:
-	// tool-result content older than the most recent few turns is replaced with
-	// short stubs, preserving the task message, every assistant turn (the
-	// reasoning chain), and tool_call/tool_result ID pairing. The threshold
-	// then re-arms at a higher level so compaction fires at most a few
-	// bounded times per run.
+	// HistoryTokenBudget enables threshold-triggered history compaction. When
+	// the estimated size of the message history (bytes/4 over message content
+	// and tool-call arguments) exceeds this many tokens, the Runner compacts
+	// once: tool-result content older than the most recent few turns is
+	// replaced with short stubs. Compaction preserves the task message, every
+	// assistant turn (the reasoning chain), and tool_call/tool_result ID
+	// pairing. The threshold then re-arms at a higher level, so compaction
+	// fires at most a few bounded times per run.
 	//
-	// Compaction trades cost against the provider's prompt cache: each firing
-	// mutates the message prefix and therefore costs one full-price cache miss
-	// that turn, after which cheaper append-only cache hits resume. It is a net
-	// win only once history is large enough that the bytes reclaimed over the
-	// remaining turns exceed that one-time miss — hence a budget sized well above
-	// a typical short run, and the re-arm that stops it thrashing.
+	// Compaction trades cost against the provider's prompt cache. Each
+	// firing mutates the message prefix and costs one full-price cache miss
+	// that turn; cheaper append-only cache hits resume afterwards. Compaction
+	// pays off only when history is large enough that the bytes reclaimed
+	// over the remaining turns exceed that one-time miss. Size the budget
+	// well above a typical short run; the re-arm stops repeated firings.
 	//
 	// Zero disables compaction (pure append-only history). A negative value also
 	// disables it.
@@ -129,19 +201,17 @@ const (
 // outcome: FinalText holds the last completion's text, and the Transcript
 // captures the full interaction.
 //
-// A truncated outcome is exactly one whose TruncationReason is non-empty (see
-// [Outcome.Truncated]); the type makes any other encoding unrepresentable.
-// finishTruncated is the sole point that sets it.
+// A truncated outcome is exactly one whose TruncationReason is non-empty;
+// see [Outcome.Truncated].
 type Outcome struct {
-	// FinalText is the text of the LAST completion of the run — the
-	// main-loop turn, a stitched max-tokens continuation, the forced
-	// finalization turn, or the RunJSON repair completion, whichever ran
-	// last. Empty when that completion produced no text; never text from an
-	// earlier turn. Callers can present it as the run's answer verbatim.
-	// On a run that ended in [StopReasonError], it holds the refusing
-	// turn's text (refusal prose) — never present it as the answer.
-	// After a RunJSON repair, it is the repair completion's text (see
-	// [Runner.RunJSON]).
+	// FinalText is the text of the last completion of the run. That completion
+	// is the main-loop turn, a stitched max-tokens continuation, the forced
+	// finalization turn, or the RunJSON repair completion, whichever ran last.
+	// It is empty when that completion produced no text, and it never holds
+	// text from an earlier turn. Present it as the run's answer verbatim, with
+	// two exceptions: after a [StopReasonError] it holds the refusing turn's
+	// text, not an answer; after a RunJSON repair it is the repair
+	// completion's text (see [Runner.RunJSON]).
 	FinalText string
 	// TruncationReason is set when the run stopped because it hit a limit
 	// rather than the model finishing its turn: one of the Trunc* constants.
@@ -164,20 +234,19 @@ type Outcome struct {
 	LastStopReason llmkit.StopReason
 	// Transcript is the full ordered record of the run. Never nil.
 	Transcript *Transcript
-	// Messages is the full conversation state (system-less: user/assistant/
-	// tool-result turns only) at the point the run returned, including the
-	// seed task, every tool call/result, and the final assistant turn. It is
-	// opaque plumbing for [Continue]: a caller driving a multi-round revision
-	// loop — or a chat REPL — threads a round's Outcome back in as the next
-	// round's starting history so the model keeps its prior turns instead of
-	// re-orienting from scratch.
-	// Callers that don't continue a conversation (the common case) can ignore
-	// this field entirely.
+	// Messages is the conversation state at the point the run returned: the
+	// seed task, every tool call and result, and the final assistant turn,
+	// with no system message. It is plumbing for [Continue]: a caller
+	// driving a multi-round revision loop, or a chat REPL, passes a round's
+	// Outcome back in as the next round's starting history. The model keeps
+	// its prior turns instead of re-orienting from scratch. Callers that do
+	// not continue a conversation can ignore this field.
 	Messages []llmkit.Message
 }
 
 // Truncated reports whether the run stopped because it hit a limit rather
-// than the model finishing its turn — i.e. whether TruncationReason is set.
+// than the model finishing its turn. It reports whether TruncationReason
+// is set.
 func (o *Outcome) Truncated() bool { return o.TruncationReason != "" }
 
 // StopReasonError is returned by [Runner.Run] when the model's final turn

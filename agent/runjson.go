@@ -26,11 +26,12 @@ var ErrUnparseableOutput = errors.New("agent: model output did not parse as JSON
 
 // RunJSON runs the tool loop for task, instructing the model to return its
 // final answer as a single JSON value matching schema, then unmarshals that
-// answer into out (a pointer). If the model's output fails to parse OR fails
-// deep schema validation — the answer is walked against the schema's
-// required/properties/items/enum/limit keywords, not merely unmarshaled —
-// RunJSON makes one repair round-trip — sending the precise error back and
-// asking for valid JSON only — before failing.
+// answer into out (a pointer). If the model's output fails to parse, or it
+// fails deep schema validation (the answer is walked against the schema's
+// required/properties/items/enum/limit keywords, not merely unmarshaled),
+// RunJSON makes one repair round-trip: it sends the precise error back and
+// asks for valid JSON only. If the repair still fails, RunJSON returns an
+// error wrapping [ErrUnparseableOutput].
 //
 // By default every call reseeds the conversation from scratch (task becomes
 // the sole seed message) — the right default for the single-shot callers that
