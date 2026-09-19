@@ -79,8 +79,8 @@ func WithLimits(l Limits) Option {
 }
 
 // WithTranscriptDir makes each run auto-save its transcript to a JSONL file
-// under dir, named "<RFC3339-timestamp>-<task-slug>.jsonl" (or
-// "<RFC3339-timestamp>-<key>-<task-slug>.jsonl" when WithTranscriptKey is also
+// under dir, named "<UTC timestamp, layout 20060102T150405.000Z>-<task-slug>.jsonl"
+// (or "<timestamp>-<key>-<task-slug>.jsonl" when WithTranscriptKey is also
 // set). The directory is created on demand.
 func WithTranscriptDir(dir string) Option {
 	return func(r *Runner) { r.transcriptDir = dir }
@@ -104,13 +104,14 @@ func WithMaxTokens(n int) Option {
 }
 
 // WithBudgetPool makes the Runner share pool across its runs: the Runner
-// checks the pool BEFORE every completion (ErrBudgetExhausted stops the run
-// cleanly with TruncBudgetPool) and charges it AFTER every successful
+// checks the pool once per main-loop turn (ErrBudgetExhausted stops the run
+// cleanly with TruncBudgetPool) and charges it after every successful
 // completion with that completion's llmkit.Usage.ChargeableTokens
-// (CacheReadWeight-discounted). A nil pool — the zero default — is
-// unlimited: no check, no charge. The pool may be shared by any number of
-// concurrently running Runners; spend external to the loop (other
-// processes, other clients) can still be recorded with BudgetPool.Add.
+// (CacheReadWeight-discounted). Continuation, finalization, and repair
+// completions are charged without a fresh check. A nil pool — the zero
+// default — is unlimited: no check, no charge. The pool may be shared by
+// any number of concurrently running Runners; spend external to the loop
+// (other processes, other clients) can still be recorded with BudgetPool.Add.
 func WithBudgetPool(pool *BudgetPool) Option {
 	return func(r *Runner) { r.budgetPool = pool }
 }
@@ -143,20 +144,25 @@ func NewRunner(client llmkit.Client, tools []Tool, systemPrompt string, opts ...
 // Pass [WithSteering] to inject queued user turns while the run is in
 // flight ([Steering]).
 //
-// Limit exhaustion is not an error: it returns an [Outcome] with a
-// non-empty [Outcome.TruncationReason] and the last completion's text in
-// [Outcome.FinalText]. Only context cancellation, client/IO failures, or
-// [StopReasonError] return a non-nil error. The returned Outcome's
-// Transcript is always non-nil, even on error, capturing whatever happened
-// before the failure.
+// A limit stop is not an error: it returns an [Outcome] with a non-empty
+// [Outcome.TruncationReason] and the last completion's text in
+// [Outcome.FinalText]. Every other failure returns a non-nil error next to
+// the Outcome: a failed completion, a [RequestPolicy] error,
+// [ErrSteeringInUse], context cancellation, or [StopReasonError]. The
+// returned Outcome's Transcript is always non-nil, even on error, capturing
+// whatever happened before the failure.
 //
 // Max-tokens continuation: when a turn stops at the output token cap
 // (StopMaxTokens) with no tool calls, Run makes ONE extra continuation
-// completion that turn — nudging the model to emit the rest — and stitches
-// the two halves into a single assistant message. This applies to plain
-// Run, not only RunJSON: a truncated final answer is completed rather than
-// returned half-written. It costs at most one additional completion per
-// truncated turn and is reflected in the Outcome's Iterations and Usage.
+// completion that turn. It appends a user turn that asks the model to
+// continue from exactly where it stopped, then appends the continuation as
+// its own assistant turn. The stitched text reaches the caller in
+// [Outcome.FinalText] and the returned response; the conversation history
+// keeps both assistant turns, separated by that continuation nudge. This
+// applies to plain Run, not only RunJSON: a truncated final answer is
+// completed rather than returned half-written. It costs at most one
+// additional completion per truncated turn and is reflected in the
+// Outcome's Iterations and Usage.
 func (r *Runner) Run(ctx context.Context, task string, opts ...RunOption) (*Outcome, error) {
 	var cfg runConfig
 	for _, opt := range opts {
@@ -648,10 +654,11 @@ func (r *Runner) repair(ctx context.Context, tr *Transcript, prompt string, resp
 // dropped silently — the prompt-embedded schema instruction is the only
 // enforcement, matching the no-cap passthrough path's contract.
 //
-// If the completion stops at the token cap (StopMaxTokens) it makes ONE
-// continuation completion — appending a short user nudge — so a JSON answer cut
-// off mid-object has a chance to be completed rather than failing to parse. The
-// outcome's LastStopReason reflects the final completion served here.
+// If the completion stops at the token cap (StopMaxTokens) with no tool
+// calls, it makes ONE continuation completion — appending a short user
+// nudge — so a JSON answer cut off mid-object has a chance to be completed
+// rather than failing to parse. The outcome's LastStopReason reflects the
+// final completion served here.
 func (r *Runner) completeOnce(ctx context.Context, tr *Transcript, messages *[]llmkit.Message, outcome *Outcome, responseSchema json.RawMessage, final bool) (llmkit.Response, error) {
 	resp, err := r.complete(ctx, tr, *messages, outcome, responseSchema, final)
 	if err != nil {
