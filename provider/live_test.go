@@ -845,3 +845,58 @@ func tinyPDF() []byte {
 	fmt.Fprintf(&b, "trailer<</Size %d/Root 1 0 R>>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, xref)
 	return b.Bytes()
 }
+
+// --- streaming acceptance -----------------------------------------------------
+
+// streamTextCase is the shared body of the per-lane streaming acceptance
+// tests: a tiny prompt streamed through the production client stack via
+// llmkit.Stream must deliver more than one DeltaText (true incremental
+// delivery, not one synthesized fragment), and the final Response must have
+// the Complete shape — the fragments concatenate to the response text, usage
+// is accounted, and the turn ends with StopEndTurn.
+func streamTextCase(t *testing.T, lane string) {
+	sess := livetest.Resolve(t, lane)
+	lc := newLiveClient(t, sess)
+	req := llmkit.Request{
+		Messages:  []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "Count from one to five in words.")},
+		MaxTokens: defaultLiveMaxTokens,
+	}
+	var texts []string
+	resp, err := llmkit.Stream(lc.ctx, lc.cl, req, func(d llmkit.Delta) error {
+		if d.Kind == llmkit.DeltaText {
+			texts = append(texts, d.Text)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	if len(texts) <= 1 {
+		t.Fatalf("got %d text delta(s), want true incremental delivery", len(texts))
+	}
+	streamed := llmkit.StripThinkBlocks(strings.Join(texts, ""))
+	if strings.TrimSpace(streamed) == "" || streamed != llmkit.StripThinkBlocks(resp.Text) {
+		t.Fatalf("fragments %q do not concatenate to the response text %q", streamed, resp.Text)
+	}
+	if resp.Usage.InputTokens <= 0 || resp.Usage.OutputTokens <= 0 {
+		t.Fatalf("usage not accounted on the streamed response: %+v", resp.Usage)
+	}
+	if resp.StopReason != llmkit.StopEndTurn {
+		t.Fatalf("stop reason = %q, want %q", resp.StopReason, llmkit.StopEndTurn)
+	}
+	t.Logf("lane %s: %d text deltas, %q, usage %+v", lane, len(texts), streamed, resp.Usage)
+}
+
+// TestLiveCompatStreamText runs the streaming acceptance case on the
+// openai-compatible lane (MiniMax-M3 in CI). The case counts DeltaText
+// fragments only and requires more than one; reasoning_content deltas are
+// not asserted here.
+func TestLiveCompatStreamText(t *testing.T) {
+	streamTextCase(t, "compat")
+}
+
+// TestLiveOpenAIStreamText runs the streaming acceptance case on the
+// first-party OpenAI lane; skips without LLMKIT_LIVE_OPENAI_* credentials.
+func TestLiveOpenAIStreamText(t *testing.T) {
+	streamTextCase(t, "openai")
+}
