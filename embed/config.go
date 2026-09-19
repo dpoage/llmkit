@@ -2,16 +2,13 @@ package embed
 
 import (
 	"fmt"
+	"github.com/dpoage/llmkit"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 )
-
-// DefaultEmbedTimeout bounds a single embedding HTTP round-trip when the
-// package constructs the http.Client itself (i.e. Config.HTTPClient is nil).
-const DefaultEmbedTimeout = 60 * time.Second
 
 // Config holds all embedder-related settings.
 type Config struct {
@@ -35,14 +32,9 @@ type Config struct {
 	// CacheEnabled turns on the content-hash embedding cache.
 	CacheEnabled bool
 
-	// Timeout bounds a single embedding HTTP round-trip. Zero or negative
-	// selects DefaultEmbedTimeout. When HTTPClient is non-nil, Timeout is
-	// NOT applied on top of it — the injected client is used as-is and its
-	// own timeout policy wins.
-	Timeout time.Duration
-
 	// HTTPClient optionally injects a custom HTTP client (custom transport,
-	// proxy, test double). When non-nil it is used as-is; Timeout is ignored.
+	// proxy, test double). When non-nil it is used as-is, with its own
+	// transport and timeout policy.
 	HTTPClient *http.Client
 
 	// MaxBatch caps how many texts are sent per HTTP request. Zero disables
@@ -56,11 +48,16 @@ type Config struct {
 	// bound evicts the least recently used entry.
 	CacheSize int
 
-	// Retry tunes transient-failure retries. Unset knobs (<= 0, including
-	// Jitter) are filled from DefaultRetryConfig when a backend is
-	// constructed — Jitter above 1 is clamped — so a partial policy like
-	// RetryConfig{MaxAttempts: 5} is safe to use as written.
-	Retry RetryConfig
+	// Retry tunes transient-failure retries via the shared
+	// llmkit.RetryConfig. Unset knobs (<= 0) are filled from
+	// llmkit.DefaultRetryConfig when a backend is constructed, so a partial
+	// policy like llmkit.RetryConfig{MaxAttempts: 5} is safe to use as
+	// written. Retry.Jitter is the exception and is taken literally: 0 (the
+	// zero value) disables jitter for deterministic backoff, and values
+	// outside [0, 1] are rejected by Validate. LoadConfig seeds the whole
+	// policy from llmkit.DefaultRetryConfig, so environment-driven configs
+	// get the kit default 20% jitter.
+	Retry llmkit.RetryConfig
 }
 
 // defaults returns a Config with sensible local-first defaults.
@@ -69,6 +66,7 @@ func defaults() Config {
 		Embedder:     "ollama",
 		Model:        "nomic-embed-text",
 		CacheEnabled: false,
+		Retry:        llmkit.DefaultRetryConfig(),
 	}
 }
 
@@ -82,7 +80,7 @@ func defaults() Config {
 //	<PREFIX>_EMBED_API_KEY     - API key / bearer token
 //	<PREFIX>_EMBED_DIMENSIONS  - vector dimensions (integer; 0 = auto-detect)
 //	<PREFIX>_EMBED_CACHE       - "true" to enable caching
-//	<PREFIX>_EMBED_TIMEOUT     - per-request timeout (Go duration, e.g. "30s"; default 60s)
+//	<PREFIX>_EMBED_TIMEOUT     - per-attempt timeout (Go duration, e.g. "30s"; default: llmkit's 5m request timeout)
 //	<PREFIX>_EMBED_MAX_BATCH   - max texts per HTTP request (integer; 0 = no chunking)
 //	<PREFIX>_EMBED_CACHE_SIZE  - max cache entries (integer; 0 = unbounded)
 //
@@ -116,7 +114,7 @@ func LoadConfig(prefix string) (Config, error) {
 		if err != nil {
 			return Config{}, fmt.Errorf("%s_EMBED_TIMEOUT: invalid duration %q", p, v)
 		}
-		cfg.Timeout = d
+		cfg.Retry.RequestTimeout = d
 	}
 	if v := os.Getenv(p + "_EMBED_MAX_BATCH"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -163,32 +161,32 @@ func (c Config) Validate() error {
 	if c.CacheSize < 0 {
 		return fmt.Errorf("cache size must be non-negative, got %d", c.CacheSize)
 	}
+	if c.Retry.Jitter < 0 || c.Retry.Jitter > 1 {
+		return fmt.Errorf("retry jitter must be in [0, 1], got %v", c.Retry.Jitter)
+	}
 	return nil
 }
 
-// timeout returns the effective per-request timeout.
-func (c Config) timeout() time.Duration {
-	if c.Timeout > 0 {
-		return c.Timeout
-	}
-	return DefaultEmbedTimeout
-}
-
-// httpClient returns the injected client as-is, or one built with Timeout
-// applied. Callers must treat the returned client as read-only.
+// httpClient returns the injected client as-is, or a plain client. Round
+// trips are bounded by the per-attempt Retry.RequestTimeout deadline (see
+// retryDo), not by an http.Client timeout. Callers must treat the returned
+// client as read-only.
 func (c Config) httpClient() *http.Client {
 	if c.HTTPClient != nil {
 		return c.HTTPClient
 	}
-	return &http.Client{Timeout: c.timeout()}
+	return &http.Client{}
 }
 
 // retryPolicy returns the effective retry policy: c.Retry with unset knobs
-// filled from DefaultRetryConfig and Jitter clamped into [0,1], the same
-// normalization llmkit.WithRetry applies to its policy.
-func (c Config) retryPolicy() RetryConfig {
+// (<= 0) filled from llmkit.DefaultRetryConfig — MaxAttempts, the delays, and
+// the per-attempt RequestTimeout. Jitter is deliberately not normalized here:
+// Validate has already bounded it to [0, 1] and it is taken literally, so 0
+// means no jitter; LoadConfig seeds it from the kit default, keeping the
+// default 20% jitter reachable for environment-driven configs.
+func (c Config) retryPolicy() llmkit.RetryConfig {
 	p := c.Retry
-	def := DefaultRetryConfig()
+	def := llmkit.DefaultRetryConfig()
 	if p.MaxAttempts <= 0 {
 		p.MaxAttempts = def.MaxAttempts
 	}
@@ -198,12 +196,8 @@ func (c Config) retryPolicy() RetryConfig {
 	if p.MaxDelay <= 0 {
 		p.MaxDelay = def.MaxDelay
 	}
-	if p.Jitter <= 0 {
-		// Unset (zero) or nonsensical (negative) jitter falls back to the
-		// default, so the default 20% jitter is reachable without naming it.
-		p.Jitter = def.Jitter
-	} else if p.Jitter > 1 {
-		p.Jitter = 1
+	if p.RequestTimeout <= 0 {
+		p.RequestTimeout = def.RequestTimeout
 	}
 	return p
 }
