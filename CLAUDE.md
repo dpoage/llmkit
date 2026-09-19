@@ -172,7 +172,8 @@ in its message.
   `ToolResult`, `ToolError`; `TextMessage` stays),
   `Request`/`Response`/`Usage`/`Capabilities`, sentinel errors +
   `APIError`, decorator wrappers (`WithRetry`, `WithRecorder`,
-  `WithSerializedToolCalls`), `StripThinkBlocks`, `DefaultMaxTokens`.
+  `WithSerializedToolCalls`), streaming (`Delta`, `StreamingClient`,
+  `Stream` over any `Client`), `StripThinkBlocks`, `DefaultMaxTokens`.
 - **`llmkit/provider`** — the single construction entry point: `Spec` +
   `Options` → `New` dispatches to an adapter and decorates it
   serialize → recorder → retry. Vendor-SDK adapters live under
@@ -269,8 +270,15 @@ in its message.
   informational subsets of it (the Anthropic adapter sums them in). Budget
   math that wants cache reads discounted uses
   `Usage.ChargeableTokens(weight)`.
-- **No streaming**: `Client` is one synchronous
-  `Complete(ctx, Request) (Response, error)` plus `Capabilities()`.
+- **Streaming**: `Client` remains one synchronous `Complete(ctx, Request)
+  (Response, error)` plus `Capabilities()`. A client that can also stream
+  implements `StreamingClient`; `llmkit.Stream(ctx, c, req, fn)` works on
+  any client — delegating to `Stream` when available, otherwise
+  synthesizing deltas (text/thinking in block order, then tool calls) from
+  `Complete` — so callers never special-case a non-streaming backend.
+  Decorators compose over both paths: `WithRetry` stops retrying once a
+  delta is delivered, `WithRecorder` records the final response's usage,
+  and `WithSerializedToolCalls` forwards only Index-0 tool-call deltas.
 - **Per-role block rule**: user messages carry text/image/document blocks;
   assistant messages text/thinking (plus `ToolCalls`); system and
   tool-result messages text only. Every adapter enforces this BEFORE any
