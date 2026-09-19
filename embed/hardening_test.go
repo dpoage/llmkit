@@ -25,7 +25,7 @@ var fastRetry = llmkit.RetryConfig{
 }
 
 // =============================================================================
-// Timeout Enforcement
+// Per-Attempt RequestTimeout Enforcement
 // =============================================================================
 
 func TestOllamaEmbedder_RequestTimeoutEnforced(t *testing.T) {
