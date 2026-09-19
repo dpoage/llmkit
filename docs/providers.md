@@ -50,7 +50,7 @@ spec := provider.Spec{
 client, err := provider.New(context.Background(), spec, provider.Options{})
 ```
 
-`BaseURL` is required: the type has no vendor default, and an empty one would silently target first-party `api.openai.com/v1`. New refuses an empty `BaseURL` with an error wrapping `ErrInvalidRequest`. The endpoint is often credential-less, so pass any non-empty placeholder as `Secret` — for example the string `"ollama"`. New checks only that the secret is present, not that the backend accepts it. This provider uses a conservative capability profile (no parallel tool calls, no caching, no structured output, no thinking) because llmkit cannot know what the endpoint supports; override it with `Spec.Capabilities` — see [capabilities](capabilities.md).
+`BaseURL` is required: the type has no vendor default, and an empty one would silently target first-party `api.openai.com/v1`. New refuses an empty `BaseURL` with an error wrapping `ErrInvalidRequest`. The endpoint is often credential-less, so pass any non-empty placeholder as `Secret` — for example the string `"ollama"`. New checks only that the secret is present, not that the backend accepts it. Because llmkit cannot know what the endpoint supports, this provider uses a conservative capability profile: no parallel tool calls, no caching, no structured output, no thinking. Override the profile with `Spec.Capabilities` — see [capabilities](capabilities.md).
 
 ### Google
 
@@ -75,10 +75,10 @@ No `BaseURL` targets the vendor default, `generativelanguage.googleapis.com`.
 
 | Mode | Wire form | Providers |
 |---|---|---|
-| `provider.AuthAPIKey` (zero value) | Standard API key (the `x-api-key` header) | All |
+| `provider.AuthAPIKey` (zero value) | The provider's standard API-key credential: the `x-api-key` header on Anthropic, an `Authorization: Bearer` token on OpenAI and openai-compatible, the `x-goog-api-key` header on Google | All |
 | `provider.AuthOAuthToken` | OAuth bearer token (the `Authorization` header) | Anthropic only |
 
-New refuses `AuthOAuthToken` on any other type, and refuses any unrecognized `Auth` value, with an error wrapping `ErrInvalidRequest`. There is no silent fallback to API-key mode. `Spec.Secret` must be a non-empty value with no leading or trailing whitespace; New refuses empty, whitespace-only, or whitespace-padded values. New never logs the secret.
+New refuses `AuthOAuthToken` on any other type with an error wrapping `ErrInvalidRequest`. It also refuses any unrecognized `Auth` value. There is no silent fallback to API-key mode. `Spec.Secret` must be a non-empty value with no leading or trailing whitespace; New refuses empty, whitespace-only, or whitespace-padded values. New never logs the secret.
 
 ## Environment conventions in examples/
 
@@ -125,14 +125,18 @@ Adapters map vendor failures onto the sentinel errors in `llmkit`; match them wi
 
 | HTTP status | `llmkit` kind | Retried by `WithRetry` |
 |---|---|---|
-| 429 | `ErrRateLimited` | Yes; a `Retry-After` header is honored |
+| 429 | `ErrRateLimited` | Yes; Anthropic and OpenAI errors carry the `Retry-After` header value, and `WithRetry` honors it |
 | 401, 403 | `ErrAuth` | No |
 | 413 | `ErrContextTooLong` | No |
 | 400 with a context-length message ("prompt is too long", "context length", ...) | `ErrContextTooLong` | No |
 | 400, other | `ErrInvalidRequest` | No |
-| 529 | `ErrOverloaded` | Yes |
+| 529 | `ErrOverloaded` | Yes (same `Retry-After` rules as 429) |
 | Other 5xx | `ErrServer` | Yes |
-| Any other status (including 3xx and 200-carried error payloads) | `ErrInvalidRequest` | No |
+| Any other 4xx (404, 409, 422, ...) | `ErrInvalidRequest` | No |
 | Transport failure (timeout, connection reset) | `ErrServer` | Yes |
 
+Statuses below 400 are not classified. The OpenAI and Anthropic SDKs only error on 4xx and 5xx: a 200 response with an error body parses as an empty success and returns no error, and a 3xx fails body parsing and surfaces as an `ErrServer`-class error with status code 0. The Google SDK treats any non-2xx status as an error, so a 3xx classifies as `ErrInvalidRequest`. One 200 path does produce an error: an Anthropic SSE stream that carries an error event inside a 200 classifies as `ErrInvalidRequest`.
+
 A refused pre-wire request (a `Capabilities` violation, a malformed block, an unknown role) also returns `ErrInvalidRequest` before any network call. See [capabilities](capabilities.md) for which profile fields refuse rather than drop, and the `llmkit` package documentation for the `APIError` fields.
+
+Two `Retry-After` rules apply across the table. First, only Anthropic and OpenAI surface the header: the Google SDK hides response headers, so Google errors carry `RetryAfter` 0 and the retry wrapper falls back to exponential backoff. Second, a `Retry-After` above `RetryConfig.MaxDelay` is truncated to `MaxDelay` (30 s by default).
