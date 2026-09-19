@@ -10,9 +10,9 @@ import (
 	"testing"
 
 	"github.com/dpoage/llmkit"
-	"github.com/dpoage/llmkit/provider/anthropic"
-	"github.com/dpoage/llmkit/provider/google"
-	"github.com/dpoage/llmkit/provider/openai"
+	"github.com/dpoage/llmkit/provider/internal/anthropic"
+	"github.com/dpoage/llmkit/provider/internal/google"
+	"github.com/dpoage/llmkit/provider/internal/openai"
 )
 
 // adapterFactory builds an adapter Client whose underlying SDK is redirected to
@@ -471,4 +471,103 @@ func maxTokensBody(provider string) string {
 		return string(b)
 	}
 	return "{}"
+}
+
+// TestConformance_ToolResultWireShape pins how each adapter correlates a
+// tool result with its call on the wire. Gemini's FunctionResponse.name
+// must be the DECLARED tool name (the API matches responses to
+// declarations by name), so the google assertion doubles as the regression
+// test for the id->name map built from the preceding assistant turn: send
+// a tool result whose only correlation is the call id and require the
+// wire part to read {functionResponse:{id:call_1,name:add}}.
+func TestConformance_ToolResultWireShape(t *testing.T) {
+	const (
+		callID   = "call_1"
+		toolName = "add"
+		argsJSON = `{"a":1,"b":2}`
+	)
+	for _, f := range allAdapters() {
+		t.Run(f.name, func(t *testing.T) {
+			var captured map[string]any
+			base := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewDecoder(r.Body).Decode(&captured)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(mockTextBody(f.name, "3", 5, 2)))
+			})
+			client := f.build(t, base)
+
+			req := llmkit.Request{
+				Messages: []llmkit.Message{
+					llmkit.TextMessage(llmkit.RoleUser, "add 1 and 2"),
+					{Role: llmkit.RoleAssistant, ToolCalls: []llmkit.ToolCall{{
+						ID: callID, Name: toolName, Arguments: json.RawMessage(argsJSON),
+					}}},
+					{Role: llmkit.RoleToolResult, ToolCallID: callID,
+						Content: []llmkit.Block{{Kind: llmkit.BlockText, Text: "3"}}},
+				},
+				Tools: []llmkit.ToolDef{{
+					Name:        toolName,
+					Description: "Add two numbers",
+					Parameters:  json.RawMessage(`{"type":"object","properties":{"a":{"type":"number"},"b":{"type":"number"}},"required":["a","b"]}`),
+				}},
+				MaxTokens: 64,
+			}
+			if _, err := client.Complete(context.Background(), req); err != nil {
+				t.Fatalf("Complete: %v", err)
+			}
+
+			switch f.name {
+			case "anthropic":
+				msgs, _ := captured["messages"].([]any)
+				found := false
+				for _, msg := range msgs {
+					m, _ := msg.(map[string]any)
+					blocks, _ := m["content"].([]any)
+					for _, b := range blocks {
+						bl, _ := b.(map[string]any)
+						if bl["type"] == "tool_result" && bl["tool_use_id"] == callID {
+							found = true
+						}
+					}
+				}
+				if !found {
+					t.Errorf("no tool_result block with tool_use_id %q on the wire: %v", callID, captured["messages"])
+				}
+			case "openai", "openai-compatible":
+				msgs, _ := captured["messages"].([]any)
+				found := false
+				for _, msg := range msgs {
+					m, _ := msg.(map[string]any)
+					if m["role"] == "tool" && m["tool_call_id"] == callID {
+						found = true
+					}
+				}
+				if !found {
+					t.Errorf("no tool message with tool_call_id %q on the wire: %v", callID, captured["messages"])
+				}
+			case "google":
+				contents, _ := captured["contents"].([]any)
+				var fr map[string]any
+				for _, c := range contents {
+					co, _ := c.(map[string]any)
+					parts, _ := co["parts"].([]any)
+					for _, p := range parts {
+						pa, _ := p.(map[string]any)
+						if got, ok := pa["functionResponse"].(map[string]any); ok {
+							fr = got
+						}
+					}
+				}
+				if fr == nil {
+					t.Fatalf("no functionResponse part on the wire: %v", captured["contents"])
+				}
+				if fr["id"] != callID {
+					t.Errorf("functionResponse.id = %v, want %q", fr["id"], callID)
+				}
+				if fr["name"] != toolName {
+					t.Errorf("functionResponse.name = %v, want the declared tool name %q", fr["name"], toolName)
+				}
+			}
+		})
+	}
 }

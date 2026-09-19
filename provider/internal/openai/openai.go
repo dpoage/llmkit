@@ -157,8 +157,7 @@ func (o *openaiAdapter) buildParams(req llmkit.Request) (openai.ChatCompletionNe
 			if len(t.Parameters) > 0 {
 				var schema map[string]any
 				if err := json.Unmarshal(t.Parameters, &schema); err != nil {
-					return openai.ChatCompletionNewParams{}, llmkit.NewAPIError(o.provider, 0, 0,
-						llmkit.ErrInvalidRequest, "tool "+t.Name+": invalid parameters JSON schema", err)
+					return openai.ChatCompletionNewParams{}, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: o.provider, Message: "tool " + t.Name + ": invalid parameters JSON schema", Err: err}
 				}
 				if o.requireBoolAdditionalProps {
 					adapter.CoerceBoolAdditionalProperties(schema)
@@ -197,8 +196,7 @@ func (o *openaiAdapter) buildParams(req llmkit.Request) (openai.ChatCompletionNe
 		}
 		schema, name, err := adapter.ParseResponseSchema(req.ResponseSchema, defaultName)
 		if err != nil {
-			return openai.ChatCompletionNewParams{}, llmkit.NewAPIError(o.provider, 0, 0,
-				llmkit.ErrInvalidRequest, "ResponseSchema: invalid JSON", err)
+			return openai.ChatCompletionNewParams{}, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: o.provider, Message: "ResponseSchema: invalid JSON", Err: err}
 		}
 		if o.requireBoolAdditionalProps {
 			schema = adapter.CoerceBoolAdditionalProperties(schema)
@@ -245,8 +243,7 @@ func (o *openaiAdapter) applyToolChoice(params *openai.ChatCompletionNewParams, 
 		}
 	case llmkit.ToolChoiceTool:
 		if tc.Name == "" {
-			return llmkit.NewAPIError(o.provider, 0, 0, llmkit.ErrInvalidRequest,
-				"ToolChoice.Mode=tool requires ToolChoice.Name", nil)
+			return &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: o.provider, Message: "ToolChoice.Mode=tool requires ToolChoice.Name", Err: nil}
 		}
 		params.ToolChoice = openai.ChatCompletionToolChoiceOptionUnionParam{
 			OfFunctionToolChoice: &openai.ChatCompletionNamedToolChoiceParam{
@@ -254,8 +251,7 @@ func (o *openaiAdapter) applyToolChoice(params *openai.ChatCompletionNewParams, 
 			},
 		}
 	default:
-		return llmkit.NewAPIError(o.provider, 0, 0, llmkit.ErrInvalidRequest,
-			"unknown ToolChoice.Mode "+string(tc.Mode), nil)
+		return &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: o.provider, Message: "unknown ToolChoice.Mode " + string(tc.Mode), Err: nil}
 	}
 	return nil
 }
@@ -320,8 +316,7 @@ func toOpenAIMessages(provider string, msgs []llmkit.Message) ([]openai.ChatComp
 		case llmkit.RoleToolResult:
 			out = append(out, openai.ToolMessage(m.Text(), m.ToolCallID))
 		default:
-			return nil, llmkit.NewAPIError("openai", 0, 0, llmkit.ErrInvalidRequest,
-				"unknown message role "+string(m.Role), nil)
+			return nil, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: "openai", Message: "unknown message role " + string(m.Role), Err: nil}
 		}
 	}
 	return out, nil
@@ -365,8 +360,7 @@ func openAIUserParts(m llmkit.Message) ([]openai.ChatCompletionContentPartUnionP
 				return nil, err
 			}
 			if b.URL != "" {
-				return nil, llmkit.NewAPIError("openai", 0, 0, llmkit.ErrInvalidRequest,
-					"document block: the Chat Completions file part accepts inline data only, not URLs", nil)
+				return nil, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: "openai", Message: "document block: the Chat Completions file part accepts inline data only, not URLs", Err: nil}
 			}
 			filename := b.Title
 			if filename == "" {
@@ -460,7 +454,7 @@ func (o *openaiAdapter) normalizeErr(err error) error {
 	if errors.As(err, &apiErr) {
 		return adapter.NormalizeSDKError(o.provider, apiErr.StatusCode, apiErr.Error(), apiErr.Response, err)
 	}
-	return llmkit.NewAPIError(o.provider, 0, 0, llmkit.ErrServer, err.Error(), err)
+	return &llmkit.APIError{Kind: llmkit.ErrServer, StatusCode: 0, RetryAfter: 0, Provider: o.provider, Message: err.Error(), Err: err}
 }
 
 // Sources (vendor docs consulted for this table):

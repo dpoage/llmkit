@@ -3,6 +3,11 @@
 // endpoint with a Spec and tune the wrapper stack with Options; this package
 // dispatches to the right first-party adapter and decorates it with
 // serialize -> recorder -> retry (outer to inner).
+//
+// The vendor-SDK adapters live under provider/internal/{anthropic,openai,
+// google} and are internal on purpose: provider.New is the only construction
+// path, so Spec validation (auth mode, Secret shape, OpenAI-compatible
+// BaseURL, model presence) cannot be bypassed.
 package provider
 
 import (
@@ -12,9 +17,9 @@ import (
 	"strings"
 
 	"github.com/dpoage/llmkit"
-	"github.com/dpoage/llmkit/provider/anthropic"
-	"github.com/dpoage/llmkit/provider/google"
-	"github.com/dpoage/llmkit/provider/openai"
+	"github.com/dpoage/llmkit/provider/internal/anthropic"
+	"github.com/dpoage/llmkit/provider/internal/google"
+	"github.com/dpoage/llmkit/provider/internal/openai"
 )
 
 // Type enumerates the supported LLM provider backends.
@@ -101,21 +106,13 @@ type Spec struct {
 	// Auth selects the credential mode; the zero value is API-key mode.
 	Auth Auth
 	// Secret is the resolved credential: an API key in AuthAPIKey mode, an
-	// OAuth bearer token in AuthOAuthToken mode. New refuses a Secret
-	// that is empty or differs from its own strings.TrimSpace, with an
-	// error wrapping ErrInvalidRequest that names the field and never
-	// echoes the value. No vendor issues a credential with surrounding
-	// whitespace, and such a value is almost always a copy/paste or
-	// `cat`/`pass` artifact; refusing it at construction turns a
-	// confusing runtime failure into an immediate, actionable one.
-	// Space- or tab-padded secrets could previously reach a vendor and
-	// authenticate, so this is a deliberate breaking refusal. New never
-	// reads the environment for credentials. For a credential-less endpoint — a local
-	// Ollama or vLLM server that ignores whatever credential it
-	// receives — pass any non-empty placeholder; New only checks that
-	// Secret is present, never that the backend accepts it. The caller
-	// obtains the Secret via its own config; New hands it to the SDK
-	// and never logs it.
+	// OAuth bearer token in AuthOAuthToken mode. New refuses a Secret that
+	// is empty or whitespace-padded, with an error wrapping
+	// ErrInvalidRequest; the value is never echoed. New never reads the
+	// environment for credentials and never logs the Secret. For a
+	// credential-less endpoint — a local Ollama or vLLM server — pass any
+	// non-empty placeholder; New only checks that Secret is present, never
+	// that the backend accepts it.
 	Secret string
 
 	// Capabilities tunes the adapter's model-table profile; nil keeps the

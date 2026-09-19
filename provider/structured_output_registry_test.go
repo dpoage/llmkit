@@ -8,9 +8,9 @@ import (
 	"testing"
 
 	"github.com/dpoage/llmkit"
-	"github.com/dpoage/llmkit/provider/anthropic"
-	"github.com/dpoage/llmkit/provider/google"
-	"github.com/dpoage/llmkit/provider/openai"
+	"github.com/dpoage/llmkit/provider/internal/anthropic"
+	"github.com/dpoage/llmkit/provider/internal/google"
+	"github.com/dpoage/llmkit/provider/internal/openai"
 )
 
 // structuredOutputOverride returns a Capabilities override that flips
