@@ -43,12 +43,12 @@ type queuedTurn struct {
 // task turn of [Attach] with an empty task: the blocks in the order given,
 // with no text block added; a call with no blocks queues a single empty text
 // turn. Both methods are safe for concurrent use from any goroutine; the run
-// drains the queue on its own goroutine. Delivery keeps enqueue order: at a
-// would-be finish every queued turn delivers, steers and follow-ups
-// together, so a follow-up queued before a later steer still delivers after
-// it at that boundary; at the pre-completion boundary only steers deliver
-// and older follow-ups stay queued. Any drain that delivers at least one
-// turn continues the loop instead of ending it.
+// drains the queue on its own goroutine. Each drain preserves enqueue
+// order: the would-be finish drains every queued turn, steers and
+// follow-ups together; the pre-completion boundary drains only steers, so
+// a follow-up queued before a later steer delivers at the finish, after
+// that steer. Any drain that delivers at least one turn continues the
+// loop instead of ending it.
 //
 // Queued turns are ordinary user messages: the transcript records them as
 // request messages and [Outcome.Messages] includes them. Limits apply
@@ -61,12 +61,14 @@ type queuedTurn struct {
 // papered over. At an empty turn the queued content replaces the synthetic
 // nudge and does not consume a nudge attempt (see [maxEmptyTurnNudges]).
 //
-// A Steering serves one run at a time. Passing it to a second concurrent run
-// fails that run with [ErrSteeringInUse]; sequential runs — including
-// [Continue] chains — rebind cleanly. [Runner.RunJSON] honors both drain
-// points with no special case: the JSON parse applies to the last
-// completion, so a turn queued after a parseable answer simply continues the
-// run.
+// A Steering serves one run at a time. Passing it to a second concurrent
+// run fails that run with [ErrSteeringInUse]; sequential runs — including
+// [Continue] chains — rebind cleanly. Steer and FollowUp queue even while
+// no run is bound: those turns deliver on the next run bound to the
+// handle, and [Steering.Pending] reports them in the meantime.
+// [Runner.RunJSON] honors both drain points with no special case: the
+// JSON parse applies to the last completion, so a turn queued after a
+// parseable answer simply continues the run.
 type Steering struct {
 	mu    sync.Mutex
 	queue []queuedTurn
