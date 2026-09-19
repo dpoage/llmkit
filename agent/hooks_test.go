@@ -376,7 +376,7 @@ func TestHook_Finalize_FiresWithStopReason(t *testing.T) {
 	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys",
 		WithHooks(rec.hooks()),
 		WithLimits(Limits{MaxIterations: 1}))
-	out, err := r.run(context.Background(), nil, "task", finalizationPrompt(nil), nil)
+	out, err := r.run(context.Background(), nil, "task", nil, finalizationPrompt(nil), nil)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
