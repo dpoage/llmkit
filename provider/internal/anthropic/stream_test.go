@@ -36,7 +36,7 @@ func sseHandler(events []sseEvent) http.HandlerFunc {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		for _, ev := range events {
-			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.name, ev.data)
+			_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.name, ev.data)
 		}
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
