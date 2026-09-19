@@ -139,6 +139,9 @@ func NewRunner(client llmkit.Client, tools []Tool, systemPrompt string, opts ...
 // fresh one.
 //
 // Pass [Attach] to carry image or document blocks on the task turn.
+
+// Pass [WithSteering] to inject queued user turns while the run is in
+// flight ([Steering]).
 //
 // Limit exhaustion is not an error: it returns an [Outcome] with a
 // non-empty [Outcome.TruncationReason] and the last completion's text in
@@ -159,7 +162,7 @@ func (r *Runner) Run(ctx context.Context, task string, opts ...RunOption) (*Outc
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	return r.run(ctx, cfg.seed, task, cfg.attach, "", nil)
+	return r.run(ctx, cfg.seed, task, cfg.attach, "", nil, cfg.steering)
 }
 
 // RunOption is a per-call option for [Runner.Run], [Runner.RunJSON], and
@@ -176,6 +179,9 @@ type runConfig struct {
 	// attach, when non-empty, rides on the seeded task turn; see [Attach]
 	// and [taskTurn] for the shape rules.
 	attach []llmkit.Block
+	// steering, when non-nil, drains queued user turns at the loop's turn
+	// boundaries; see [WithSteering] and [Steering].
+	steering *Steering
 }
 
 // Continue makes the run CONTINUE a prior conversation instead of reseeding
@@ -240,6 +246,14 @@ func Continue(prev *Outcome) RunOption {
 // so adapters that support structured output can apply grammar-constrained
 // decoding. The public Run passes nil; RunJSON passes its schema.
 //
+// steering, when non-nil, delivers queued user turns at two drain points
+// ([Steering]): steers before every completion — at the top of the loop
+// body, below the limit and context checks, so a run stopped by a limit
+// leaves them queued; steers and follow-ups together, in enqueue order,
+// whenever a completion returns no tool calls, continuing the loop instead
+// of breaking (or nudging an empty turn). The bind at entry refuses a
+// second concurrent run on the same handle with [ErrSteeringInUse].
+//
 // maxEmptyTurnNudges bounds how many times run() will nudge a model that
 // produced neither a tool call nor visible text (after stripping reasoning
 // <think> blocks) back into the loop before giving up. Some reasoning models
@@ -255,10 +269,21 @@ const maxEmptyTurnNudges = 2
 // call a tool or emit its final answer. See [maxEmptyTurnNudges].
 const emptyTurnNudge = "You made no tool call and produced no final answer. Continue: call a tool or emit your final answer now."
 
-func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task string, attach []llmkit.Block, finalizePrompt string, responseSchema json.RawMessage) (*Outcome, error) {
+func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task string, attach []llmkit.Block, finalizePrompt string, responseSchema json.RawMessage, steering *Steering) (*Outcome, error) {
 	tr := NewTranscript()
 	if r.transcriptDir != "" {
 		tr.enableStreaming(r.transcriptPath(tr, task), r.hooks.TranscriptError)
+	}
+
+	outcome := &Outcome{Transcript: tr}
+	// Binding before any work keeps a second concurrent run on the same
+	// Steering handle from interleaving its turns into this run's queue.
+	if steering != nil {
+		if err := steering.bind(); err != nil {
+			tr.closeStream()
+			return outcome, err
+		}
+		defer steering.unbind()
 	}
 
 	var messages []llmkit.Message
@@ -272,7 +297,6 @@ func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task string, at
 		messages = []llmkit.Message{taskMsg}
 	}
 
-	outcome := &Outcome{Transcript: tr}
 	// Snapshot the conversation into the Outcome on every return path so a caller
 	// that wants to continue this conversation ([Continue]) always has the latest
 	// history available, even from a truncated or erroring run. messages is
@@ -345,6 +369,17 @@ func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task string, at
 			return outcome, err
 		}
 
+		// Mid-run steering, pre-completion drain: deliver queued steer
+		// turns before this completion, after the previous turn's tool
+		// results. Living below the limit and context checks keeps a run
+		// stopped by a limit from consuming its queue (see [Steering]);
+		// follow-ups are never delivered here.
+		if steering != nil {
+			if steered := steering.drainSteers(); len(steered) > 0 {
+				messages = append(messages, steered...)
+			}
+		}
+
 		// Threshold-triggered, one-shot-per-crossing history compaction. Done at
 		// the turn boundary BEFORE the completion so the smaller history is what
 		// gets billed this turn. Re-arming the threshold upward after a firing
@@ -370,6 +405,20 @@ func (r *Runner) run(ctx context.Context, seed []llmkit.Message, task string, at
 				resp.StopReason == llmkit.StopContentFilter {
 				tr.closeStream()
 				return outcome, &StopReasonError{StopReason: resp.StopReason, Text: resp.Text, Outcome: outcome}
+			}
+
+			// Mid-run steering, would-be-finish drain: any queued turn —
+			// steer or follow-up, in enqueue order — continues the run
+			// instead of ending it. This covers the empty-turn case below
+			// too: fresh user content replaces the synthetic nudge and does
+			// not consume a nudge attempt. The refusal check above returns
+			// before this drain, so a queued turn never papers over a
+			// refusal stop (see [Steering]).
+			if steering != nil {
+				if drained := steering.drainAll(); len(drained) > 0 {
+					messages = append(messages, drained...)
+					continue
+				}
 			}
 			// A turn with no tool call and no visible text (after stripping
 			// reasoning <think> blocks) is an empty/think-only turn, not a real

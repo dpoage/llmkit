@@ -56,12 +56,16 @@ var ErrUnparseableOutput = errors.New("agent: model output did not parse as JSON
 // still returned for inspection. When a repair ran, the returned Outcome's
 // [Outcome.FinalText] is the REPAIR completion's text — the last completion
 // of the run — not the unparseable pre-repair answer.
+
+// Pass [WithSteering] to inject queued user turns mid-run ([Steering]):
+// both drain points apply unchanged, and the JSON parse applies to the last
+// completion.
 func (r *Runner) RunJSON(ctx context.Context, task string, schema json.RawMessage, out any, opts ...RunOption) (*Outcome, error) {
 	var cfg runConfig
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	return r.runJSON(ctx, cfg.seed, task, cfg.attach, schema, out)
+	return r.runJSON(ctx, cfg.seed, task, cfg.attach, schema, out, cfg.steering)
 }
 
 // RunJSONAs is [Runner.RunJSON] with the schema derived from T via [SchemaOf]
@@ -77,8 +81,9 @@ func RunJSONAs[T any](ctx context.Context, r *Runner, task string, opts ...RunOp
 
 // runJSON is the shared implementation behind RunJSON. seed is nil (reseed
 // every call) or a prior Outcome's Messages ([Continue]).
-// attach rides on the seeded task turn (see [Attach]).
-func (r *Runner) runJSON(ctx context.Context, seed []llmkit.Message, task string, attach []llmkit.Block, schema json.RawMessage, out any) (*Outcome, error) {
+// attach rides on the seeded task turn (see [Attach]). steering drains at
+// the loop's turn boundaries ([Steering]).
+func (r *Runner) runJSON(ctx context.Context, seed []llmkit.Message, task string, attach []llmkit.Block, schema json.RawMessage, out any, steering *Steering) (*Outcome, error) {
 	prompt := task + "\n\n" + jsonInstruction(schema)
 
 	// Reserve the last iteration for a forced finalization turn: if the model is
@@ -87,7 +92,7 @@ func (r *Runner) runJSON(ctx context.Context, seed []llmkit.Message, task string
 	// dangling exploration prose that can never parse. The schema is threaded
 	// natively so the finalization turn also benefits from grammar-constrained
 	// output on capable adapters.
-	outcome, err := r.run(ctx, seed, prompt, attach, finalizationPrompt(schema), schema)
+	outcome, err := r.run(ctx, seed, prompt, attach, finalizationPrompt(schema), schema, steering)
 	if err != nil {
 		return outcome, err
 	}
