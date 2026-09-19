@@ -123,6 +123,7 @@ set -a; . ~/.config/bugbot/env; set +a
 export LLMKIT_LIVE_COMPAT_API_KEY="$MINIMAX_API_KEY"
 export LLMKIT_LIVE_COMPAT_BASE_URL=https://api.minimax.io/v1
 export LLMKIT_LIVE_COMPAT_MODEL=MiniMax-M3
+export LLMKIT_LIVE_COMPAT_CAPS=parallel_tool_calls,prompt_caching
 go test -tags live -count=1 ./provider/ ./agent/ ./examples/... -v
 ```
 
@@ -144,15 +145,12 @@ The `LIVE_TOKENS` summary line covers each test binary's own calls; the
 examples package's line prints `note=child-process spend not tallied`
 because the example binaries it launches spend separately.
 
-`LLMKIT_LIVE_COMPAT_CAPS` is an optional comma list of `Capabilities` field
-names (snake_case) the operator asserts the compat endpoint supports; listed
-caps are forced true via `Spec.Capabilities`, so the gated cases run and
-MUST pass. The set below is **MiniMax-M3-verified, not universal** — a cap
-you assert must pass, so leave out any that fail:
-
-```bash
-export LLMKIT_LIVE_COMPAT_CAPS=parallel_tool_calls,prompt_caching
-```
+`LLMKIT_LIVE_COMPAT_CAPS` is a comma list of `Capabilities` field names
+(snake_case) the operator asserts the compat endpoint supports; listed caps
+are forced true via `Spec.Capabilities`, so the gated cases run and MUST
+pass instead of skipping. The set exported above — and by the nightly `Live`
+workflow's job env — is **MiniMax-M3-verified, not universal**; a cap you
+assert must pass, so leave out any that fail on your endpoint.
 
 Probed 2026-09-18 against MiniMax-M3: `parallel_tool_calls` (two tool calls
 in one response) and `prompt_caching` (`CacheReadInputTokens > 0` on a

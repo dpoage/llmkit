@@ -49,6 +49,10 @@ jobs:
       LLMKIT_LIVE_COMPAT_API_KEY: ${{ secrets.LLMKIT_LIVE_COMPAT_API_KEY }}
       LLMKIT_LIVE_COMPAT_BASE_URL: ${{ secrets.LLMKIT_LIVE_COMPAT_BASE_URL }}
       LLMKIT_LIVE_COMPAT_MODEL: ${{ secrets.LLMKIT_LIVE_COMPAT_MODEL }}
+      # MiniMax-M3-verified capability set (see AGENTS.md Build & Test): the
+      # parallel_tool_calls and prompt_caching cases run and must pass rather
+      # than skip on the conservative compat profile.
+      LLMKIT_LIVE_COMPAT_CAPS: parallel_tool_calls,prompt_caching
     steps:
       - uses: actions/checkout@v5
 
