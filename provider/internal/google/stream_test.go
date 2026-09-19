@@ -539,7 +539,7 @@ func TestStream_ConnectionResetMidStream(t *testing.T) {
 func TestStream_RetryTimeoutStalledStream(t *testing.T) {
 	base := newServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, "data: "+mustJSON(t, textChunk("Hello"))+"\n\n")
+		_, _ = fmt.Fprint(w, "data: "+mustJSON(t, textChunk("Hello"))+"\n\n")
 		w.(http.Flusher).Flush()
 		<-r.Context().Done() // stall until the attempt deadline reaps us
 	})
