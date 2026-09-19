@@ -210,7 +210,7 @@ in its message.
   `Spec.Network` is a typed `NetworkMode`, and a field a backend cannot
   honor is refused at `Exec` with an `UnsupportedSpecError` naming the
   backend, field, and value — never a silent drop or substitution.
-  Backend-only knobs (runtime, image, CPUs, memory, idle window) are
+  Backend-only knobs (runtime, default image, CPUs, memory, idle window) are
   backend options configured through ONE `Option` type shared by `NewCLI`
   and `NewBwrap` (`WithRuntime`/`WithImage` are CLI-only, `WithCapPolicy`
   is Bwrap-only); no option takes a bare bool — modes are named types
@@ -266,19 +266,23 @@ in its message.
   classes cover all fields: DROPPED SILENTLY when the profile reports
   false (`Thinking`, `StructuredOutput`, `StopSequences`, `TopP`, `TopK`,
   `Seed` — the adapter omits the feature from the wire, by adapter
-  mapping), REFUSED PRE-WIRE (`ToolChoice` — an explicit non-auto mode
-  against `ToolChoice=false` returns an error wrapping
-  `ErrInvalidRequest` before any wire call, because silently dropping
-  `none` would let the model call forbidden tools), DECORATOR
+  mapping; for `StopSequences`/`TopP`/`TopK`/`Seed` this reports only the
+  adapter's own mapping, not a gate a caller-pinned profile can use to
+  disable a supported feature), REFUSED PRE-WIRE (`ToolChoice` — an
+  explicit non-auto mode against `ToolChoice=false` returns an error
+  wrapping `ErrInvalidRequest` before any wire call, because silently
+  dropping `none` would let the model call forbidden tools), DECORATOR
   (`ParallelToolCalls` — `provider.New` installs the tool-call serializer
   when it is false), ADVISORY (`Images`, `Documents`, `PromptCaching`,
   `ContextWindow` — no adapter reads them; gate your own image/document
   input on the capability, see `examples/basic`).
 - **Transcript format**: `Block` fields marshal snake_case with
   `omitempty` on every zero field (`Kind` is always present), so a text
-  block serializes as exactly `{"kind":"text","text":"…"}` and a nil
-  `Raw` never emits `"raw":null`. JSONL lines written before these tags
-  existed still load.
+  block serializes as exactly `{"kind":"text","text":"…"}` and a nil `Raw`
+  never emits `"raw":null`. The tags landed in this round; transcripts
+  recorded before them are not supported — their image and document blocks
+  decode with an empty MediaType (the pre-tag key was the Go field name)
+  and are refused pre-wire. Re-record them.
 - **Hooks are synchronous**: every `agent.Hooks` callback runs inline on
   the goroutine that reaches the fire point — a slow hook stalls the run.
   `ToolEvent.Step`, `CompactionEvent.Step`, and the transcript's

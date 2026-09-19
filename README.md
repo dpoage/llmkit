@@ -30,7 +30,8 @@ Shared LLM tooling extracted from `bugbot`, `known`, and `go-research`.
 - **`llmkit/agent`** — tool-calling harness over `llmkit.Client`: `Runner`
   with iteration/token budgets, history compaction, forced finalization,
   max-tokens continuation stitching, JSONL transcripts (blocks marshal
-  snake_case with omitempty; older lines still load) with offline
+  snake_case with omitempty; transcripts recorded before this encoding are
+  not supported) with offline
   `ReplayClient`, schema derivation from Go types (`SchemaOf`/`Func`,
   feeding `RunJSON`/`RunJSONAs`), multi-turn continuation via the
   `Continue` run option, synchronous lifecycle `Hooks`, per-tool timeouts,
@@ -54,7 +55,7 @@ Shared LLM tooling extracted from `bugbot`, `known`, and `go-research`.
   `Spec.Network` is a typed `NetworkMode`, and a field a backend cannot
   honor is refused at `Exec` with an `UnsupportedSpecError` naming the
   backend, field, and value — never a silent drop or substitution.
-  Backend-only knobs (runtime, image, CPUs, memory, idle window) are
+  Backend-only knobs (runtime, default image, CPUs, memory, idle window) are
   backend options configured through ONE `Option` type shared by `NewCLI`
   and `NewBwrap` (`WithRuntime`/`WithImage` are CLI-only, `WithCapPolicy`
   is Bwrap-only); no option takes a bare bool — modes are named types
@@ -94,7 +95,7 @@ openai-compatible, optional otherwise) and print a usage message instead of touc
 network when the environment is unset:
 
 ```bash
-go run ./examples/basic --image photo.jpg
+go run ./examples/basic --image path/to/photo.jpg
 go run ./examples/agent --parallel
 go run ./examples/structured
 go run ./examples/chat
@@ -118,8 +119,10 @@ compat lane.
   signatures round-trip verbatim; foreign-provider thinking is dropped).
   Block/message constructors (`Text`, `Image`, `ImageURL`, `Document`,
   `DocumentURL`, `UserMessage`, `SystemMessage`, `ToolResult`, `ToolError`,
-  `TextMessage`) keep the common cases one line and panic on argument
-  violations; `Message.Text()` concatenates a message's text blocks.
+  `TextMessage`) keep the common cases one line; constructors with
+  required arguments (media type, data, URL, tool-call ID, at least one
+  block) panic when they are missing. `Message.Text()` concatenates a
+  message's text blocks.
   `Block.Data` is base64 in JSONL transcripts, and `Block` fields marshal
   snake_case with `omitempty`. See the root package docs.
 - No streaming: none of the three donor projects used it; the interface stays
