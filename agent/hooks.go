@@ -64,7 +64,7 @@ import (
 //   - TranscriptError on transcript streaming write/encode/open failures.
 //     Streaming stays best-effort — the failure never fails the run.
 //
-// Invocation is SYNCHRONOUS: each hook runs inline on the goroutine that
+// Invocation is synchronous: each hook runs inline on the goroutine that
 // reaches the fire point (the loop goroutine, or the per-call goroutine for
 // ToolStart/ToolEnd under WithParallelTools). A slow hook stalls the run —
 // and, under WithParallelTools, the tool call it wraps.
