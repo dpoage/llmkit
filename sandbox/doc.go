@@ -32,13 +32,13 @@
 //     binds a narrow read-only allowlist back into view. The command
 //     runs against host toolchains directly; there is no image.
 //     DetectBwrap reports whether the host can run bwrap, with an
-//     actionable reason when it cannot. NewBwrap fails fast for the
-//     same reasons, including "no resource-limit mechanism". The host
-//     enforces memory/CPU/pids limits through a systemd-run user scope
-//     or a delegated cgroup v2 subtree. WithCapPolicy(CapBestEffort)
-//     deliberately opts out of that requirement.
-//     DescribeBwrapCapMethod reports which mechanism (if any) enforces
-//     the limits.
+//     actionable reason when it cannot. NewBwrap fails fast with the
+//     same reasons. Bwrap.Exec returns ErrBwrapNoCapMethod when no
+//     resource-limit mechanism exists: enforcing memory/CPU/pids
+//     limits needs a systemd-run user scope or a delegated cgroup v2
+//     subtree. WithCapPolicy(CapBestEffort) deliberately opts out of
+//     that requirement. DescribeBwrapCapMethod reports which mechanism
+//     (if any) enforces the limits.
 //   - NewCLI (*CLI): a container-runtime backend, podman first and
 //     docker second. It drives the runtime CLI only, so it needs no
 //     daemon API and only the standard library. Detect reports the
@@ -66,8 +66,9 @@
 // Fields that only some backends honor as knobs (runtime, image,
 // resource caps, scratch size, growth ceiling, idle window) are backend
 // options. One shared Option type serves both NewCLI and NewBwrap. A
-// constructor refuses an option — or a default network mode — its
-// backend cannot honor, and the error names it.
+// constructor refuses a misdirected option with a plain error naming
+// the option and the backend. A default network mode the backend can
+// never honor comes back as an UnsupportedSpecError.
 //
 // # Capability probes
 //
@@ -94,7 +95,8 @@
 // untrusted code, so the package builds defense in depth:
 //
 //   - The original repository is never mounted read-write.
-//   - The fresh workspace copy is the only writable surface.
+//   - The fresh workspace copy is the only writable surface by
+//     default; Spec.RWMounts are explicit exceptions.
 //   - The container drops all capabilities and gains no new
 //     privileges.
 //   - The CLI backend runs on a read-only root filesystem; the Bwrap
@@ -107,22 +109,23 @@
 // of public package source) and NEVER secrets, credentials, or private
 // trees.
 //
-// Exec materializes every workspace from the repository snapshot into a
-// fresh temporary directory, never the live checkout. Everything
-// written into a workspace is symlink-hardened: Exec resolves paths and
-// refuses them if they escape the workspace root. Content planted by an
-// earlier untrusted run therefore cannot redirect a later write or read
-// onto the host.
+// Exec materializes every workspace from the repository snapshot into
+// a fresh temporary directory, never the live checkout. A caller can
+// instead pass its own directory as Spec.Workspace. Everything
+// written into a workspace is symlink-hardened: Exec resolves paths
+// and refuses them if they escape the workspace root. Content planted
+// by an earlier untrusted run therefore cannot redirect a later write
+// or read onto the host.
 //
-// A shared idle watchdog supervises every run with two independent kill
-// conditions: an idle window (no observable progress) and a
-// workspace-growth ceiling (a disk-filler bound). Either kill surfaces
-// in Result.TimedOut or Result.WorkspaceQuotaExceeded. Callers MUST
-// consult Result.InfraKilled before classifying a Result, so a run the
-// sandbox killed is never read as "the command completed and said X".
-// Captured stdout and stderr are capped at DefaultMaxOutputBytes per
-// stream, with head and tail retained, so a chatty run cannot exhaust
-// memory.
+// A shared idle watchdog supervises every CLI and Bwrap run — HostExec
+// has no watchdog — with two independent kill conditions: an idle
+// window (no observable progress) and a workspace-growth ceiling (a
+// disk-filler bound). Either kill surfaces in Result.TimedOut or
+// Result.WorkspaceQuotaExceeded. Callers MUST consult
+// Result.InfraKilled before classifying a Result, so a run the sandbox
+// killed is never read as "the command completed and said X". Captured
+// stdout and stderr are capped at DefaultMaxOutputBytes per stream,
+// with head and tail retained, so a chatty run cannot exhaust memory.
 //
 // # Error contract
 //

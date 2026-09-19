@@ -81,9 +81,8 @@ const toolchainVersionProbeTimeout = 3 * time.Second
 
 // ToolchainFingerprint records provenance for one resolved host toolchain
 // mount: the host path actually mounted and the toolchain's reported version
-// string. Recorded in run metadata (see repro artifact READMEs) so a
-// demonstrated bug — or its absence — can be attributed to the exact host
-// toolchain build that produced it.
+// string. Recorded in run metadata so a demonstrated bug — or its absence —
+// can be attributed to the exact host toolchain build that produced it.
 type ToolchainFingerprint struct {
 	// Name is the requested toolchain entry (e.g. "node") or, for an
 	// explicit directory entry, the directory's base name.

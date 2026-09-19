@@ -129,3 +129,31 @@ func ExampleUnsupportedSpecError() {
 	// field: Network
 	// value: bridge
 }
+
+// ExampleMock_materializeWorkspace shows the optional third step of a
+// run: creating one caller-owned workspace for repeated Execs. The Mock
+// implements the step trivially — it returns repoDir unchanged and
+// records nothing — which is enough to exercise the caller-side flow.
+func ExampleMock_materializeWorkspace() {
+	sb := sandbox.NewMock(sandbox.MockResponse{
+		Result: sandbox.Result{ExitCode: 0, Stdout: "ok\n"},
+	})
+	ws, err := sb.MaterializeWorkspace("/tmp/repo")
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	fmt.Println(ws)
+	if _, err := sb.Exec(context.Background(), sandbox.Spec{
+		Workspace: ws,
+		Cmd:       []string{"make", "test"},
+	}); err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	fmt.Println("calls recorded:", sb.CallCount())
+
+	// Output:
+	// /tmp/repo
+	// calls recorded: 1
+}
