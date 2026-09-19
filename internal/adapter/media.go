@@ -31,8 +31,7 @@ func ValidateMessageBlocks(provider string, m llmkit.Message) error {
 	allowed := roleBlockKinds[m.Role]
 	for _, b := range m.Content {
 		if !allowed[b.Kind] {
-			return llmkit.NewAPIError(provider, 0, 0, llmkit.ErrInvalidRequest,
-				fmt.Sprintf("%s block not allowed in a %s message", b.Kind, m.Role), nil)
+			return &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: provider, Message: fmt.Sprintf("%s block not allowed in a %s message", b.Kind, m.Role), Err: nil}
 		}
 		if b.Kind == llmkit.BlockImage || b.Kind == llmkit.BlockDocument {
 			if err := ValidateMediaBlock(provider, b); err != nil {
@@ -56,14 +55,11 @@ func ValidateMessageBlocks(provider string, m llmkit.Message) error {
 func ValidateMediaBlock(provider string, b llmkit.Block) error {
 	switch {
 	case len(b.Data) > 0 && b.URL != "":
-		return llmkit.NewAPIError(provider, 0, 0, llmkit.ErrInvalidRequest,
-			fmt.Sprintf("%s block: Data and URL are mutually exclusive; set exactly one", b.Kind), nil)
+		return &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: provider, Message: fmt.Sprintf("%s block: Data and URL are mutually exclusive; set exactly one", b.Kind), Err: nil}
 	case len(b.Data) == 0 && b.URL == "":
-		return llmkit.NewAPIError(provider, 0, 0, llmkit.ErrInvalidRequest,
-			fmt.Sprintf("%s block: exactly one of Data and URL must be set", b.Kind), nil)
+		return &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: provider, Message: fmt.Sprintf("%s block: exactly one of Data and URL must be set", b.Kind), Err: nil}
 	case len(b.Data) > 0 && b.MediaType == "":
-		return llmkit.NewAPIError(provider, 0, 0, llmkit.ErrInvalidRequest,
-			fmt.Sprintf("%s block: MediaType must be set when Data is inline", b.Kind), nil)
+		return &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: provider, Message: fmt.Sprintf("%s block: MediaType must be set when Data is inline", b.Kind), Err: nil}
 	}
 	return nil
 }

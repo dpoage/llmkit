@@ -48,9 +48,8 @@ func GateToolChoice(provider string, tc llmkit.ToolChoice, supported bool) error
 	case "", llmkit.ToolChoiceAuto:
 		return nil
 	case llmkit.ToolChoiceNone, llmkit.ToolChoiceRequired, llmkit.ToolChoiceTool:
-		return llmkit.NewAPIError(provider, 0, 0, llmkit.ErrInvalidRequest,
-			"ToolChoice.Mode "+string(tc.Mode)+" requires a model with tool-choice support "+
-				"(Capabilities.ToolChoice=false)", nil)
+		return &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: provider, Message: "ToolChoice.Mode " + string(tc.Mode) + " requires a model with tool-choice support " +
+			"(Capabilities.ToolChoice=false)", Err: nil}
 	}
 	return nil
 }

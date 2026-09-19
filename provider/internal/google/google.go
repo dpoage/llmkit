@@ -38,7 +38,9 @@ type Options struct {
 
 // New builds a Gemini-backed Client. genai's only built-in retry path is for
 // file uploads, so the shared retry wrapper is the sole retry layer for
-// completions.
+// completions. The installed HTTP client wraps the caller's transport with
+// a status recorder so error classification can fall back to the transport
+// status when genai drops it (see normalizeErr).
 func New(ctx context.Context, model string, opts Options) (llmkit.Client, error) {
 	cc := &genai.ClientConfig{
 		APIKey:  opts.APIKey,
@@ -47,13 +49,22 @@ func New(ctx context.Context, model string, opts Options) (llmkit.Client, error)
 	if opts.BaseURL != "" {
 		cc.HTTPOptions.BaseURL = opts.BaseURL
 	}
-	if opts.HTTPClient != nil {
-		cc.HTTPClient = opts.HTTPClient
+	// Always install the recording client (see recordStatusTransport):
+	// genai substitutes its own default client when HTTPClient is nil, so
+	// without this the transport status would be invisible to normalizeErr.
+	base := opts.HTTPClient
+	if base == nil {
+		base = &http.Client{}
 	}
+	wrapped := *base
+	if wrapped.Transport == nil {
+		wrapped.Transport = http.DefaultTransport
+	}
+	wrapped.Transport = &recordStatusTransport{rt: wrapped.Transport}
+	cc.HTTPClient = &wrapped
 	client, err := genai.NewClient(ctx, cc)
 	if err != nil {
-		return nil, llmkit.NewAPIError("google", 0, 0, llmkit.ErrInvalidRequest,
-			"failed to construct genai client: "+err.Error(), err)
+		return nil, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: "google", Message: "failed to construct genai client: " + err.Error(), Err: err}
 	}
 	caps := adapter.ApplyOverride(googleCapabilities(model), opts.Capabilities)
 	return &googleAdapter{
@@ -63,9 +74,43 @@ func New(ctx context.Context, model string, opts Options) (llmkit.Client, error)
 	}, nil
 }
 
+// transportStatusKey keys the per-request status recorder in the request
+// context.
+type transportStatusKey struct{}
+
+// transportStatus records the HTTP status of the most recent response for
+// one Complete call. genai drops the transport *http.Response when an error
+// body parses as a Google error object without a "code" field (its only
+// error type, genai.APIError, has no Unwrap), so the status captured at the
+// transport is the only available fallback in that branch.
+type transportStatus struct {
+	code int
+}
+
+// recordStatusTransport wraps the SDK's transport, recording each response's
+// status code into the per-request recorder carried on the request context.
+// Last write wins: redirect hops overwrite earlier ones, leaving the final
+// status the SDK itself saw. The recorder lives in the context, so
+// concurrent Complete calls on a shared adapter never contend.
+type recordStatusTransport struct {
+	rt http.RoundTripper
+}
+
+func (t *recordStatusTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.rt.RoundTrip(req)
+	if resp != nil {
+		if s, ok := req.Context().Value(transportStatusKey{}).(*transportStatus); ok && s != nil {
+			s.code = resp.StatusCode
+		}
+	}
+	return resp, err
+}
+
 func (g *googleAdapter) Capabilities() llmkit.Capabilities { return g.caps }
 
 func (g *googleAdapter) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
+	// Per-request transport-status recorder for normalizeErr's fallback.
+	ctx = context.WithValue(ctx, transportStatusKey{}, &transportStatus{})
 	contents, err := toGoogleContents(req.Messages)
 	if err != nil {
 		return llmkit.Response{}, err
@@ -102,8 +147,7 @@ func (g *googleAdapter) Complete(ctx context.Context, req llmkit.Request) (llmki
 		// genai carries seed as int32; reject out-of-range values instead of
 		// silently truncating to a different deterministic seed.
 		if *req.Seed < int64(math.MinInt32) || *req.Seed > int64(math.MaxInt32) {
-			return llmkit.Response{}, llmkit.NewAPIError("google", 0, 0, llmkit.ErrInvalidRequest,
-				"Seed out of range for int32", nil)
+			return llmkit.Response{}, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: "google", Message: "Seed out of range for int32", Err: nil}
 		}
 		s := int32(*req.Seed)
 		cfg.Seed = &s
@@ -113,8 +157,7 @@ func (g *googleAdapter) Complete(ctx context.Context, req llmkit.Request) (llmki
 	// false feature is a silent drop rather than a server 400.
 	if req.Thinking != nil && g.caps.Thinking {
 		if req.Thinking.BudgetTokens <= 0 {
-			return llmkit.Response{}, llmkit.NewAPIError("google", 0, 0,
-				llmkit.ErrInvalidRequest, "Thinking.BudgetTokens must be positive", nil)
+			return llmkit.Response{}, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: "google", Message: "Thinking.BudgetTokens must be positive", Err: nil}
 		}
 		// IncludeThoughts makes the model return thought-summary parts so
 		// reasoning is visible (and round-trippable) in Response.Blocks.
@@ -149,8 +192,7 @@ func (g *googleAdapter) Complete(ctx context.Context, req llmkit.Request) (llmki
 			if len(t.Parameters) > 0 {
 				var schema any
 				if err := json.Unmarshal(t.Parameters, &schema); err != nil {
-					return llmkit.Response{}, llmkit.NewAPIError("google", 0, 0, llmkit.ErrInvalidRequest,
-						"tool "+t.Name+": invalid parameters JSON schema", err)
+					return llmkit.Response{}, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: "google", Message: "tool " + t.Name + ": invalid parameters JSON schema", Err: err}
 				}
 				// ParametersJsonSchema accepts a raw JSON-schema object, avoiding a
 				// lossy conversion into genai's typed *Schema.
@@ -178,8 +220,7 @@ func (g *googleAdapter) Complete(ctx context.Context, req llmkit.Request) (llmki
 		}
 		schema, _, err := adapter.ParseResponseSchema(req.ResponseSchema, defaultName)
 		if err != nil {
-			return llmkit.Response{}, llmkit.NewAPIError("google", 0, 0, llmkit.ErrInvalidRequest,
-				"ResponseSchema: invalid JSON", err)
+			return llmkit.Response{}, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: "google", Message: "ResponseSchema: invalid JSON", Err: err}
 		}
 		// ResponseJsonSchema accepts a raw JSON Schema object, mirroring
 		// ParametersJsonSchema — no lossy conversion to genai's typed *Schema.
@@ -189,7 +230,7 @@ func (g *googleAdapter) Complete(ctx context.Context, req llmkit.Request) (llmki
 
 	resp, err := g.client.Models.GenerateContent(ctx, g.model, contents, cfg)
 	if err != nil {
-		return llmkit.Response{}, g.normalizeErr(err)
+		return llmkit.Response{}, g.normalizeErr(ctx, err)
 	}
 	return g.toResponse(resp), nil
 }
@@ -208,14 +249,12 @@ func applyGoogleToolChoice(cfg *genai.GenerateContentConfig, tc llmkit.ToolChoic
 		fcc.Mode = genai.FunctionCallingConfigModeAny
 	case llmkit.ToolChoiceTool:
 		if tc.Name == "" {
-			return llmkit.NewAPIError("google", 0, 0, llmkit.ErrInvalidRequest,
-				"ToolChoice.Mode=tool requires ToolChoice.Name", nil)
+			return &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: "google", Message: "ToolChoice.Mode=tool requires ToolChoice.Name", Err: nil}
 		}
 		fcc.Mode = genai.FunctionCallingConfigModeAny
 		fcc.AllowedFunctionNames = []string{tc.Name}
 	default:
-		return llmkit.NewAPIError("google", 0, 0, llmkit.ErrInvalidRequest,
-			"unknown ToolChoice.Mode "+string(tc.Mode), nil)
+		return &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: "google", Message: "unknown ToolChoice.Mode " + string(tc.Mode), Err: nil}
 	}
 	cfg.ToolConfig = &genai.ToolConfig{FunctionCallingConfig: fcc}
 	return nil
@@ -224,6 +263,13 @@ func applyGoogleToolChoice(cfg *genai.GenerateContentConfig, tc llmkit.ToolChoic
 // toGoogleContents converts normalized messages into genai Contents. Gemini
 // uses "user"/"model" roles; tool results are sent as user-turn
 // functionResponse parts.
+//
+// A tool result's FunctionResponse.name must be the DECLARED tool name
+// (Gemini correlates responses to declarations by name; the id is
+// best-effort), so the conversion records each assistant turn's tool-call
+// ids and names as it goes and resolves the name from the map. An id no
+// assistant turn declares (e.g. a truncated history) falls back to the id
+// itself.
 //
 // Per-role block rule (ValidateMessageBlocks, before any mapping):
 // user text/image/document; assistant text/thinking (Provider-matched only);
@@ -237,6 +283,9 @@ func applyGoogleToolChoice(cfg *genai.GenerateContentConfig, tc llmkit.ToolChoic
 // call.
 func toGoogleContents(msgs []llmkit.Message) ([]*genai.Content, error) {
 	out := make([]*genai.Content, 0, len(msgs))
+	// toolNames maps a tool-call id to its declared function name, filled in
+	// from each assistant turn as it is converted.
+	toolNames := make(map[string]string)
 	for _, m := range msgs {
 		// Per-role block-kind rule + media source rule, before any mapping.
 		if err := adapter.ValidateMessageBlocks("google", m); err != nil {
@@ -257,6 +306,11 @@ func toGoogleContents(msgs []llmkit.Message) ([]*genai.Content, error) {
 			}
 			out = append(out, &genai.Content{Role: "user", Parts: parts})
 		case llmkit.RoleAssistant:
+			for _, tc := range m.ToolCalls {
+				if tc.ID != "" {
+					toolNames[tc.ID] = tc.Name
+				}
+			}
 			parts, err := googleAssistantParts(m)
 			if err != nil {
 				return nil, err
@@ -268,19 +322,25 @@ func toGoogleContents(msgs []llmkit.Message) ([]*genai.Content, error) {
 			if m.IsError {
 				resultObj = map[string]any{"error": m.Text()}
 			}
+			// FunctionResponse.name must be the declared tool name; fall
+			// back to the id when no assistant call in this history carries
+			// it (better an unknown-but-present name than an empty one).
+			name, ok := toolNames[m.ToolCallID]
+			if !ok {
+				name = m.ToolCallID
+			}
 			out = append(out, &genai.Content{
 				Role: "user",
 				Parts: []*genai.Part{{
 					FunctionResponse: &genai.FunctionResponse{
 						ID:       m.ToolCallID,
-						Name:     m.ToolCallID, // genai matches on name; ID is best-effort
+						Name:     name,
 						Response: resultObj,
 					},
 				}},
 			})
 		default:
-			return nil, llmkit.NewAPIError("google", 0, 0, llmkit.ErrInvalidRequest,
-				"unknown message role "+string(m.Role), nil)
+			return nil, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: "google", Message: "unknown message role " + string(m.Role), Err: nil}
 		}
 	}
 	return out, nil
@@ -340,10 +400,18 @@ func googleAssistantParts(m llmkit.Message) ([]*genai.Part, error) {
 			if b.Provider != "google" {
 				continue
 			}
+			// A thinking block whose Raw was lost (nil) or decodes to
+			// nothing ("null", "{}") contributes no wire content: skip it
+			// instead of forwarding an empty part. Unlike anthropic — whose
+			// signed thinking replay is mandatory, making a missing Raw a
+			// hard error — a decoded-to-empty genai Part carries nothing
+			// Gemini requires on later turns.
+			if len(b.Raw) == 0 || string(b.Raw) == "null" || string(b.Raw) == "{}" {
+				continue
+			}
 			var p genai.Part
 			if err := json.Unmarshal(b.Raw, &p); err != nil {
-				return nil, llmkit.NewAPIError("google", 0, 0, llmkit.ErrInvalidRequest,
-					"thinking block: malformed Raw JSON", err)
+				return nil, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: "google", Message: "thinking block: malformed Raw JSON", Err: err}
 			}
 			if p.FunctionCall != nil {
 				// Signature carrier, not a thought part.
@@ -359,8 +427,7 @@ func googleAssistantParts(m llmkit.Message) ([]*genai.Part, error) {
 		var args map[string]any
 		if len(tc.Arguments) > 0 {
 			if err := json.Unmarshal(tc.Arguments, &args); err != nil {
-				return nil, llmkit.NewAPIError("google", 0, 0, llmkit.ErrInvalidRequest,
-					"assistant tool call "+tc.Name+": invalid arguments JSON", err)
+				return nil, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, RetryAfter: 0, Provider: "google", Message: "assistant tool call " + tc.Name + ": invalid arguments JSON", Err: err}
 			}
 		}
 		part := &genai.Part{
@@ -486,16 +553,31 @@ func mapGoogleStop(reason genai.FinishReason, hasToolCalls bool) llmkit.StopReas
 	}
 }
 
-func (g *googleAdapter) normalizeErr(err error) error {
+func (g *googleAdapter) normalizeErr(ctx context.Context, err error) error {
 	// genai returns APIError by value (not a pointer). It carries no
 	// *http.Response, so Retry-After is unavailable; the retry wrapper
 	// falls back to exponential backoff. We pass nil for resp, which the
 	// shared helper recognizes and skips Retry-After parsing for.
 	var apiErr genai.APIError
 	if errors.As(err, &apiErr) {
-		return adapter.NormalizeSDKError("google", apiErr.Code, apiErr.Message, nil, err)
+		status := apiErr.Code
+		if status == 0 {
+			// The error body parsed as a Google error object without a code
+			// field, so the SDK discarded the transport response. Classify
+			// from the status the wrapping transport recorded for this
+			// request instead of mislabeling every such failure a 400.
+			if s, ok := ctx.Value(transportStatusKey{}).(*transportStatus); ok && s != nil {
+				status = s.code
+			}
+		}
+		return adapter.NormalizeSDKError("google", status, apiErr.Message, nil, err)
 	}
-	return llmkit.NewAPIError("google", 0, 0, llmkit.ErrServer, err.Error(), err)
+	return &llmkit.APIError{
+		Kind:     llmkit.ErrServer,
+		Provider: "google",
+		Message:  err.Error(),
+		Err:      err,
+	}
 }
 
 // Sources (vendor docs consulted for this table; every number comes from
