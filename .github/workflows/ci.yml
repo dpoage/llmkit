@@ -27,7 +27,7 @@ jobs:
 
       - name: vet (tag-gated packages)
         run: |
-          go vet -tags live ./provider/ ./agent/ ./examples/...
+          go vet -tags live ./provider/ ./agent/ ./examples/... ./decide/
           go vet -tags integration ./embed/
           go vet -tags integration ./sandbox/
       - name: gofmt
