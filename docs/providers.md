@@ -126,7 +126,7 @@ All three decorators compose over streaming: retry stops once a delta is deliver
 `Options.Observer` puts an `llmkit.Observer` inside the retry stage: it receives one `Attempt` event per wire call — failures included — numbered from 1, so a sink can watch flakiness without counting spend twice. `New` never emits `Completion` events: the outermost layer owns that one. For a bare client, wrap the constructed client with `llmkit.Observe`, which emits exactly one `Completion` event per logical call — the request as received, the final response (on the stream path assembled from the same synthesis `llmkit.Stream` performs) or the error text:
 
 ```go
-spec := provider.Spec{Type: provider.TypeAnthropic, Model: "claude-sonnet-4-5", Secret: key}
+spec := provider.Spec{Type: provider.TypeAnthropic, Model: "claude-sonnet-4-5", Secret: os.Getenv("ANTHROPIC_API_KEY")}
 var events []llmkit.Event
 obs := llmkit.ObserverFunc(func(ctx context.Context, ev llmkit.Event) {
     events = append(events, ev)

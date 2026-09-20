@@ -95,7 +95,7 @@ func goldEvents() []struct {
 		{
 			name: "start",
 			ev: Event{
-				Kind: KindStart, RunID: goldRun, ParentRunID: goldParent, Step: 1,
+				Kind: KindStart, RunID: goldRun, ParentRunID: goldParent,
 				Time: goldTime, SchemaVersion: EventSchemaVersion,
 				Start: &StartEvent{Task: "summarize the ledger", Tools: []string{"search", "calc"}},
 			},
@@ -175,7 +175,7 @@ func goldEvents() []struct {
 		{
 			name: "finalize",
 			ev: Event{
-				Kind: KindFinalize, RunID: goldRun, ParentRunID: goldParent,
+				Kind: KindFinalize, RunID: goldRun, ParentRunID: goldParent, Step: 2,
 				Time: goldTime, Duration: time.Minute, SchemaVersion: EventSchemaVersion,
 				Finalize: &FinalizeEvent{
 					TruncationReason: "max_steps",
@@ -266,7 +266,6 @@ func TestEventGoldenJSON(t *testing.T) {
   "kind": "start",
   "run_id": "1758366600000-deadbeef00112233",
   "parent_run_id": "1758366500000-cafebabefeedface",
-  "step": 1,
   "time": "2026-09-20T12:30:00Z",
   "schema_version": 1,
   "start": {
@@ -460,6 +459,7 @@ func TestEventGoldenJSON(t *testing.T) {
   "kind": "finalize",
   "run_id": "1758366600000-deadbeef00112233",
   "parent_run_id": "1758366500000-cafebabefeedface",
+  "step": 2,
   "time": "2026-09-20T12:30:00Z",
   "duration": 60000000000,
   "schema_version": 1,
