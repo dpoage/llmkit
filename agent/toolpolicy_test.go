@@ -624,7 +624,7 @@ func TestRun_ToolPolicy_CancelInsideAuthorizeDeniesRemainderInBothModes(t *testi
 				t.Errorf("c1 result = %+v, want %q isError=true", byID["c1"], want)
 			}
 			for id, name := range map[string]string{"c2": "t2", "c3": "t3"} {
-				if want := "ERROR: tool " + name + " denied: context canceled"; byID[id].text != want || !byID[id].isError {
+				if want := "ERROR: tool " + name + " not run: context canceled"; byID[id].text != want || !byID[id].isError {
 					t.Errorf("%s result = %+v, want %q isError=true", id, byID[id], want)
 				}
 			}

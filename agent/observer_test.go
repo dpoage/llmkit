@@ -355,7 +355,7 @@ func TestObserver_WithObserverLastWins(t *testing.T) {
 }
 
 // TestObserver_ReplayIsFullyHermetic records a two-tool run, then replays it
-// through NewReplayClient + ReplayTools with ZERO live tool executions: same
+// through NewReplayClient + its bound Tools with ZERO live tool executions: same
 // FinalText, and a DeepEqual event stream modulo Time, Duration, SpanID, and
 // RunID.
 func TestObserver_ReplayIsFullyHermetic(t *testing.T) {
@@ -382,12 +382,9 @@ func TestObserver_ReplayIsFullyHermetic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewReplayClient: %v", err)
 	}
-	replayTools, err := ReplayTools(src, src.RunID)
-	if err != nil {
-		t.Fatalf("ReplayTools: %v", err)
-	}
+	replayTools := replayClient.Tools()
 	if len(replayTools) != 2 {
-		t.Fatalf("ReplayTools returned %d tools, want 2", len(replayTools))
+		t.Fatalf("ReplayClient.Tools returned %d tools, want 2", len(replayTools))
 	}
 
 	liveCalls = 0
@@ -395,6 +392,9 @@ func TestObserver_ReplayIsFullyHermetic(t *testing.T) {
 	replayed, err := replayer.Run(context.Background(), "task")
 	if err != nil {
 		t.Fatalf("replay run: %v", err)
+	}
+	if replayClient.Err() != nil {
+		t.Errorf("replay diverged: %v", replayClient.Err())
 	}
 	if liveCalls != 0 {
 		t.Errorf("replay executed %d live tools, want 0", liveCalls)
@@ -412,7 +412,7 @@ func TestObserver_ReplayIsFullyHermetic(t *testing.T) {
 			evs[i].RunID = ""
 			if evs[i].Completion != nil {
 				// Replay tool schemas are RECONSTRUCTED from the record
-				// (ReplayTools has names only), so the offered tool set
+				// (replay tools are reconstructed, names only), so the offered tool set
 				// differs by construction; the model-visible conversation
 				// is what replay preserves.
 				evs[i].Completion.Request.Tools = nil
@@ -426,8 +426,9 @@ func TestObserver_ReplayIsFullyHermetic(t *testing.T) {
 	}
 }
 
-// TestObserver_ReplayDivergenceNamesStep pins that a diverging tool call
-// fails replay with an error naming the recorded step.
+// TestObserver_ReplayDivergenceNamesStep pins the divergence contract: a
+// call that matches nothing records ErrReplayDiverged naming the recorded
+// step on the client, and the harness renders it as the call's error result.
 func TestObserver_ReplayDivergenceNamesStep(t *testing.T) {
 	tool := echoTool{name: "echo"}
 	fc := newFakeClient(
@@ -439,39 +440,117 @@ func TestObserver_ReplayDivergenceNamesStep(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record run: %v", err)
 	}
-	src := out.Transcript
-
-	// A replay whose model asks for the SAME tool with DIFFERENT arguments:
-	// the recorded cursor has {"text":"hi"} at step 1.
-	diverging := NewReplayClientFromResponses([]llmkit.Response{
-		{
-			ToolCalls:  []llmkit.ToolCall{{ID: "c1", Name: "echo", Arguments: json.RawMessage(`{"text":"something else"}`)}},
-			StopReason: llmkit.StopToolUse,
-		},
-		{Text: "final", StopReason: llmkit.StopEndTurn},
-	}, llmkit.Capabilities{})
-
-	replayTools, err := ReplayTools(src, src.RunID)
+	rc, err := NewReplayClient(out.Transcript, out.RunID, llmkit.Capabilities{})
 	if err != nil {
-		t.Fatalf("ReplayTools: %v", err)
+		t.Fatalf("NewReplayClient: %v", err)
 	}
-	replayed, err := NewRunner(diverging, replayTools, "sys").Run(context.Background(), "task")
+	tools := rc.Tools()
 
-	// The divergence surfaces as model-visible tool data naming the step AND
-	// fails the run: the next completion converts it into an error wrapping
-	// ErrReplayDiverged.
-	if !errors.Is(err, ErrReplayDiverged) {
-		t.Fatalf("replay err = %v, want ErrReplayDiverged", err)
+	// A call matching nothing (the recorded step-1 call had {"text":"hi"}).
+	_, err = tools[0].Run(context.Background(), json.RawMessage(`{"text":"something else"}`))
+	if !errors.Is(err, ErrReplayDiverged) || !strings.Contains(err.Error(), "replay diverged at step 1") {
+		t.Fatalf("tool err = %v, want ErrReplayDiverged naming step 1", err)
 	}
-	diverged := false
-	for _, m := range replayed.Messages {
-		if m.Role == llmkit.RoleToolResult && strings.Contains(m.Text(), errReplayDivergedMarker) {
-			diverged = true
+	if !errors.Is(rc.Err(), ErrReplayDiverged) {
+		t.Fatalf("rc.Err() = %v, want the recorded divergence", rc.Err())
+	}
+}
+
+// TestObserver_ReplayDivergenceMaskingShapes pins the two shapes where a
+// divergence in the run's FINAL tool turn ends the run before another
+// Complete: a clean finish and a cap-truncated recording both return Run
+// nil, so the caller's rc.Err() assertion is the only thing that catches
+// them. The mid-run shape (divergence with completions still to serve)
+// fails Run with ErrReplayDiverged. The rewriter policy forces the tool
+// mismatch deterministically.
+func TestObserver_ReplayDivergenceMaskingShapes(t *testing.T) {
+	rewrite := ToolPolicyFunc(func(_ context.Context, call *llmkit.ToolCall) error {
+		call.Arguments = json.RawMessage(`{"rewritten":true}`)
+		return nil
+	})
+
+	record := func(steps ...scriptStep) (*ReplayClient, *Outcome) {
+		t.Helper()
+		rec := NewRunner(newFakeClient(steps...), []Tool{echoTool{name: "echo"}}, "sys")
+		out, err := rec.Run(context.Background(), "task")
+		if err != nil {
+			t.Fatalf("record run: %v", err)
 		}
+		rc, err := NewReplayClient(out.Transcript, out.RunID, llmkit.Capabilities{})
+		if err != nil {
+			t.Fatalf("NewReplayClient: %v", err)
+		}
+		return rc, out
 	}
-	if !diverged {
-		t.Errorf("no divergence marker naming the step in the replay history: %+v", replayed.Messages)
-	}
+
+	t.Run("cap-truncated recording", func(t *testing.T) {
+		rc, _ := record(
+			toolResp("c1", "echo", `{"text":"hi"}`, 1, 1),
+			textResp("never reached", 1, 1),
+		)
+		replayed, err := NewRunner(rc, rc.Tools(), "sys",
+			WithToolPolicy(rewrite), WithLimits(Limits{MaxIterations: 1})).Run(context.Background(), "task")
+		if err != nil {
+			t.Fatalf("Run = %v, want the truncation nil", err)
+		}
+		if !replayed.Truncated() {
+			t.Error("expected the truncated recording shape")
+		}
+		if !errors.Is(rc.Err(), ErrReplayDiverged) {
+			t.Fatal("truncated run masked the divergence: rc.Err() unset")
+		}
+	})
+
+	t.Run("mid-run divergence fails Run", func(t *testing.T) {
+		rc, _ := record(
+			toolResp("c1", "echo", `{"text":"hi"}`, 1, 1),
+			toolResp("c2", "echo", `{"text":"again"}`, 1, 1),
+			textResp("final", 1, 1),
+		)
+		_, err := NewRunner(rc, rc.Tools(), "sys", WithToolPolicy(rewrite)).Run(context.Background(), "task")
+		if !errors.Is(err, ErrReplayDiverged) {
+			t.Fatalf("Run err = %v, want ErrReplayDiverged", err)
+		}
+		if !strings.Contains(err.Error(), "replay diverged at step 1") {
+			t.Errorf("err = %v, want it naming step 1", err)
+		}
+		if !errors.Is(rc.Err(), ErrReplayDiverged) {
+			t.Error("rc.Err() unset despite the Run failure")
+		}
+	})
+
+	t.Run("no false positive from divergence-shaped output", func(t *testing.T) {
+		// A recorded tool result that happens to LOOK like a divergence
+		// message must replay cleanly: divergence is client state, never
+		// conversation text.
+		decoy := "ERROR: agent: replay diverged at step 9: nothing really"
+		rec := NewRunner(newFakeClient(
+			toolResp("c1", "echo", `{"text":"hi"}`, 1, 1),
+			textResp("final", 1, 1),
+		), []Tool{Func("echo", "echo", func(_ context.Context, a struct {
+			Text string `json:"text"`
+		}) (string, error) {
+			return decoy, nil
+		})}, "sys")
+		out, err := rec.Run(context.Background(), "task")
+		if err != nil {
+			t.Fatalf("record run: %v", err)
+		}
+		rc, err := NewReplayClient(out.Transcript, out.RunID, llmkit.Capabilities{})
+		if err != nil {
+			t.Fatalf("NewReplayClient: %v", err)
+		}
+		replayed, err := NewRunner(rc, rc.Tools(), "sys").Run(context.Background(), "task")
+		if err != nil {
+			t.Fatalf("replay run: %v", err)
+		}
+		if rc.Err() != nil {
+			t.Fatalf("false-positive divergence from output text: %v", rc.Err())
+		}
+		if replayed.FinalText != out.FinalText {
+			t.Errorf("FinalText = %q, want %q", replayed.FinalText, out.FinalText)
+		}
+	})
 }
 
 // TestObserver_ContinueLineage pins the Continue chain: distinct minted
@@ -840,10 +919,7 @@ func TestReplay_ParallelToolsDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewReplayClient: %v", err)
 	}
-	tools, err := ReplayTools(out.Transcript, out.RunID)
-	if err != nil {
-		t.Fatalf("ReplayTools: %v", err)
-	}
+	tools := rp.Tools()
 	live = 0
 	replayed, err := NewRunner(rp, tools, "sys", WithParallelTools()).Run(context.Background(), "task")
 	if err != nil {
@@ -852,13 +928,11 @@ func TestReplay_ParallelToolsDeterministic(t *testing.T) {
 	if live != 0 {
 		t.Errorf("replay executed %d live tools, want 0", live)
 	}
+	if rp.Err() != nil {
+		t.Fatalf("parallel replay diverged: %v", rp.Err())
+	}
 	if replayed.FinalText != out.FinalText || replayed.Iterations != out.Iterations {
 		t.Errorf("replay outcome = %q/%d turns, want %q/%d", replayed.FinalText, replayed.Iterations, out.FinalText, out.Iterations)
-	}
-	for _, m := range replayed.Messages {
-		if m.Role == llmkit.RoleToolResult && strings.Contains(m.Text(), errReplayDivergedMarker) {
-			t.Fatalf("replay history carries a divergence: %q", m.Text())
-		}
 	}
 }
 
@@ -882,7 +956,7 @@ func TestObserver_SinkRefusesDuplicateAndUnsafeRunIDs(t *testing.T) {
 		dir := t.TempDir()
 		staleLine := `{"kind":"start","run_id":"older","schema_version":1}`
 		stale := staleLine + "\n"
-		if err := os.WriteFile(filepath.Join(dir, "rid-1-t.jsonl"), []byte(stale), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "rid-1.jsonl"), []byte(stale), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		var mu sync.Mutex
@@ -894,7 +968,7 @@ func TestObserver_SinkRefusesDuplicateAndUnsafeRunIDs(t *testing.T) {
 		})
 		sink.Observe(ctx, mkStart("rid-1"))
 		sink.Observe(ctx, mkFin("rid-1"))
-		got, err := os.ReadFile(filepath.Join(dir, "rid-1-t.jsonl"))
+		got, err := os.ReadFile(filepath.Join(dir, "rid-1.jsonl"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -970,5 +1044,225 @@ func TestLoadJSONL_RecoversRunIdentity(t *testing.T) {
 	mixed.WriteString(`{"kind":"start","run_id":"sneaky","schema_version":1}` + "\n")
 	if _, err := LoadJSONL(&mixed); err == nil || !strings.Contains(err.Error(), "run id") {
 		t.Errorf("mixed-id file loaded: %v", err)
+	}
+}
+
+// gateTool lets a test hold N concurrent tool calls open until released.
+type gateTool struct {
+	wg      *sync.WaitGroup
+	release chan struct{}
+}
+
+func (t gateTool) Def() llmkit.ToolDef {
+	return llmkit.ToolDef{Name: "gate", Parameters: json.RawMessage(`{"type":"object"}`)}
+}
+
+func (t gateTool) Run(_ context.Context, _ json.RawMessage) (string, error) {
+	t.wg.Done()
+	<-t.release
+	return "opened", nil
+}
+
+// endlessToolClient answers every completion with a fresh two-call turn for
+// the gate tool, so concurrent runs never exhaust a script.
+type endlessToolClient struct{}
+
+func (endlessToolClient) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
+
+func (endlessToolClient) Complete(_ context.Context, _ llmkit.Request) (llmkit.Response, error) {
+	return llmkit.Response{
+		ToolCalls: []llmkit.ToolCall{
+			{ID: "c1", Name: "gate", Arguments: json.RawMessage(`{}`)},
+			{ID: "c2", Name: "gate", Arguments: json.RawMessage(`{}`)},
+		},
+		StopReason: llmkit.StopToolUse,
+	}, nil
+}
+
+// TestObserver_SinkDuplicateConcurrentRunID pins the duplicate-Start row of
+// the admission table with two deterministic concurrent runs pinned to the
+// same WithRunID: one file, the refusal reported, and the surviving record a
+// clean single-run prefix — nothing merged.
+func TestObserver_SinkDuplicateConcurrentRunID(t *testing.T) {
+	dir := t.TempDir()
+	var mu sync.Mutex
+	var errs []error
+	sink := JSONL(dir, func(err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		errs = append(errs, err)
+	})
+
+	// Sequential dispatch: only each run's FIRST gate call blocks, so two
+	// Dones unblock the wait.
+	var started sync.WaitGroup
+	started.Add(2)
+	release := make(chan struct{})
+	gate := gateTool{wg: &started, release: release}
+
+	r := NewRunner(endlessToolClient{}, []Tool{gate}, "sys",
+		WithLimits(Limits{MaxIterations: 2}), WithObserver(sink))
+
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = r.Run(context.Background(), "task", WithRunID("dup-1"))
+		}()
+	}
+	started.Wait()
+	close(release)
+	wg.Wait()
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "dup-1.jsonl" {
+		t.Fatalf("sink files = %v, want exactly [dup-1.jsonl]", entries)
+	}
+	mu.Lock()
+	fired := len(errs)
+	mu.Unlock()
+	if fired == 0 {
+		t.Error("duplicate Start was not reported through onErr")
+	}
+	// The surviving record reads back as one clean run — nothing merged.
+	if _, err := sink.Events(context.Background(), "dup-1"); err != nil {
+		t.Errorf("surviving record does not read back cleanly: %v", err)
+	}
+}
+
+// TestObserver_SinkRefusedRunsLeaveNoEntries pins the cleanup rule: N runs
+// refused at Start (leftover files) still Finalize, and every entry is
+// deleted — the sink holds nothing for refused runs.
+func TestObserver_SinkRefusedRunsLeaveNoEntries(t *testing.T) {
+	dir := t.TempDir()
+	sink := JSONL(dir, nil)
+	ctx := context.Background()
+	for i := range 50 {
+		id := llmkit.RunID(fmt.Sprintf("refused-%d", i))
+		// Leftover file: the Start will hit ErrExist.
+		if err := os.WriteFile(filepath.Join(dir, string(id)+".jsonl"), []byte("{}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		ev := llmkit.NewEvent(llmkit.WithRun(ctx, id), llmkit.KindStart)
+		ev.Start = &llmkit.StartEvent{Task: "t"}
+		sink.Observe(ctx, ev)
+		fin := llmkit.NewEvent(llmkit.WithRun(ctx, id), llmkit.KindFinalize)
+		fin.Finalize = &llmkit.FinalizeEvent{}
+		sink.Observe(ctx, fin)
+	}
+	sink.mu.Lock()
+	live := len(sink.runs)
+	sink.mu.Unlock()
+	if live != 0 {
+		t.Errorf("sink holds %d entries after 50 refused runs finalized; want 0", live)
+	}
+}
+
+// TestObserver_HookPanicLeavesSinkClean pins that the hook-panic path —
+// which finalizes with zero counters — still retires the sink's entry: no
+// leaked file handles, no ghost entries.
+func TestObserver_HookPanicLeavesSinkClean(t *testing.T) {
+	dir := t.TempDir()
+	sink := JSONL(dir, nil)
+	hooks := Hooks{
+		AfterCompletion: func(context.Context, int, *llmkit.Request, *llmkit.Response, error) {
+			panic("hook exploded")
+		},
+	}
+	r := NewRunner(newFakeClient(textResp("done", 1, 1)), nil, "sys",
+		WithHooks(hooks), WithObserver(sink))
+	func() {
+		defer func() {
+			if v := recover(); v == nil {
+				t.Error("hook panic did not propagate")
+			}
+		}()
+		_, _ = r.Run(context.Background(), "task")
+	}()
+	sink.mu.Lock()
+	live := len(sink.runs)
+	sink.mu.Unlock()
+	if live != 0 {
+		t.Errorf("sink holds %d entries after a hook-panic run; want 0", live)
+	}
+}
+
+// completedSignalClient signals once after its first Complete returns.
+type completedSignalClient struct {
+	inner *fakeClient
+	once  sync.Once
+	hit   chan struct{}
+}
+
+func (c *completedSignalClient) Capabilities() llmkit.Capabilities { return c.inner.Capabilities() }
+
+func (c *completedSignalClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
+	resp, err := c.inner.Complete(ctx, req)
+	c.once.Do(func() { close(c.hit) })
+	return resp, err
+}
+
+// TestObserver_CancelledCallsRecordNotRun pins M18/M19: a run cancelled
+// while calls await authorization records them as IsError with the
+// "not run" rendering — under WithParallelTools and a policy — and never
+// with the Denied mark.
+func TestObserver_CancelledCallsRecordNotRun(t *testing.T) {
+	dir := t.TempDir()
+	recorder := JSONL(dir, nil)
+
+	// The policy blocks until the test releases it, so the calls sit in the
+	// authorize pre-pass when the cancellation lands.
+	policyGate := make(chan struct{})
+	policy := ToolPolicyFunc(func(_ context.Context, _ *llmkit.ToolCall) error {
+		<-policyGate
+		return nil
+	})
+	calls := []llmkit.ToolCall{
+		{ID: "t1", Name: "t1", Arguments: json.RawMessage(`{}`)},
+		{ID: "t2", Name: "t2", Arguments: json.RawMessage(`{}`)},
+	}
+	hit := make(chan struct{})
+	cl := &completedSignalClient{
+		inner: newFakeClient(toolCallsResp(calls...)),
+		hit:   hit,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r := NewRunner(cl, []Tool{echoTool{name: "t1"}, echoTool{name: "t2"}}, "sys",
+		WithToolPolicy(policy), WithParallelTools(), WithObserver(recorder))
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = r.Run(ctx, "task", WithRunID("cancelled-1"))
+	}()
+	<-hit             // the turn-1 completion is in; calls await authorization
+	cancel()          // cancel while the policy blocks
+	close(policyGate) // let the pre-pass observe the cancellation
+	<-done
+
+	evs, err := recorder.Events(context.Background(), "cancelled-1")
+	if err != nil {
+		t.Fatalf("Events: %v", err)
+	}
+	saw := 0
+	for _, ev := range evs {
+		if ev.Kind != llmkit.KindToolRun || ev.ToolRun == nil {
+			continue
+		}
+		saw++
+		if ev.ToolRun.Denied {
+			t.Errorf("cancelled call %s recorded as Denied; a cancelled run is not a policy decision", ev.ToolRun.Call.Name)
+		}
+		if !ev.ToolRun.IsError || !strings.Contains(ev.ToolRun.Result, "not run: context canceled") {
+			t.Errorf("cancelled call %s = %+v, want IsError with the not-run rendering", ev.ToolRun.Call.Name, ev.ToolRun)
+		}
+	}
+	if saw == 0 {
+		t.Fatal("no tool_run events for the cancelled calls")
 	}
 }

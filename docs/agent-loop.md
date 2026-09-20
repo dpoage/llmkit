@@ -215,7 +215,7 @@ A real recorded run (weather tool, two turns) looks like this — timestamps and
 {"kind":"finalize","run_id":"1789933747392-c107dc1d30048f48","step":2,"time":"2026-09-20T19:49:07.393034362Z","schema_version":1,"finalize":{"iterations":2,"usage":{"input_tokens":647,"output_tokens":36}}}
 ```
 
-The omitted `completion` lines each carry the full request–response round-trip under `completion.request` / `completion.response`, which is what replay reads. The JSONL sink names each file `<RunID>-<task-slug>.jsonl` — pin the id with `WithRunID` when a caller generates stable identifiers up front and must recover the exact file later (the id must be a safe filename component: no path separators, never `..`; the slug lowercases the task, maps non-alphanumerics to `-`, and caps at 48 characters). One RunID is one file, created exactly once and closed at `finalize`: a duplicate or leftover file is refused through `onErr` and that run's events are dropped. The sink is best-effort: it never fails a run, and every failure flows to the `onErr` callback given at construction. Calling `WithObserver` twice is last-wins: a Runner has exactly one durable sink.
+The omitted `completion` lines each carry the full request–response round-trip under `completion.request` / `completion.response`, which is what replay reads. The JSONL sink names each file `<RunID>-<task-slug>.jsonl` — pin the id with `WithRunID` when a caller generates stable identifiers up front and must recover the exact file later (the id must be a safe filename component: no path separators, never `..`; the slug lowercases the task, maps non-alphanumerics to `-`, and caps at 48 characters). The file name is exactly `<RunID>.jsonl` — one RunID is one file, created exclusively at the run's `start` event and closed at its `finalize`. A leftover file, a duplicate Start for a live run, or an id that is not a safe filename component is refused through `onErr` and that run's events are dropped; a single record holding two runs does not read back. The sink is best-effort: it never fails a run, and every failure flows to the `onErr` callback given at construction. Calling `WithObserver` twice is last-wins: a Runner has exactly one durable sink.
 
 `Transcript.SaveJSONL` and `LoadJSONL` serialize the in-memory view; `LoadJSONL` errors on a line without `schema_version` — pre-schema recordings are unsupported. Both read sides meet at one interface:
 
@@ -225,7 +225,15 @@ type Source interface {
 }
 ```
 
-`Transcript` and the `JSONL` sink both implement it; `store/sqlite` joins them in a later round. Both return a slice the caller owns, and both fail with `ErrUnknownRun` for a run they have no record of. Replay consumes `completion` events only (never attempts): `NewReplayClient(src, run, caps)` serves the recorded responses with tool-call structure validation, and `ReplayTools(src, run)` returns one `Tool` per recorded name that serves the recorded results instead of executing — a fully offline replay with zero live tool executions, deterministic under `WithParallelTools`. A diverging tool call wraps `ErrReplayDiverged` naming the recorded step, and `ReplayClient` turns it into a `Run` failure — a diverged replay fails, it never finishes with a wrong answer.
+`Transcript` and the `JSONL` sink both implement it; `store/sqlite` joins them in a later round. Both return a slice the caller owns, and both fail with `ErrUnknownRun` for a run they have no record of. Replay consumes `completion` events only (never attempts): `NewReplayClient(src, run, caps)` serves the recorded responses with tool-call structure validation, and its `Tools()` method returns one `Tool` per recorded name, bound to the client, serving the recorded results instead of executing — a fully offline replay with zero live tool executions, deterministic under `WithParallelTools`. Divergence is state owned by the client, never guessed from message text: a call that matches nothing, a structure mismatch, or an exhausted record wraps `ErrReplayDiverged` naming the recorded step, and `Complete` refuses to serve past it. A divergence in the run's final tool turn can end the run before another `Complete`, so assert `Err() == nil` after every replayed run:
+
+```go
+rc, err := agent.NewReplayClient(src, runID, llmkit.Capabilities{})
+replayed, err := agent.NewRunner(rc, rc.Tools(), "sys").Run(ctx, "task")
+if err2 := rc.Err(); err2 != nil {
+	// the replay diverged from its record — the evaluation failed
+}
+```
 
 When to use: record a run once, then replay it deterministically against modified harness code — the building block for offline evaluation. `EstimateHistoryTokens` and `SimulateCompaction` export the compaction decision so replay tooling reproduces it exactly.
 

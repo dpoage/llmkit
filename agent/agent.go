@@ -117,11 +117,12 @@
 // the run's identity ([WithRunID], [llmkit.RunID]; [Continue] chains record
 // ParentRunID) and the 1-based turn as Step. Transcripts serialize to JSONL
 // with [Transcript.SaveJSONL], load back with [LoadJSONL], and replay
-// offline through [NewReplayClient] and [ReplayTools] — both consume the
-// read-side [Source] interface, so replay works from any sink. Do not wrap
-// a Runner's client with [llmkit.Observe]: the Runner already emits the
-// Completion event for every completion it makes, and a decorator would
-// double it.
+// offline through [NewReplayClient] — the read-side [Source] interface, so
+// replay works from any sink; the client's [ReplayClient.Tools] serve the
+// recorded tool results and [ReplayClient.Err] reports a diverged replay
+// (assert it after every replayed run). Do not wrap a Runner's client with
+// [llmkit.Observe]: the Runner already emits the Completion event for every
+// completion it makes, and a decorator would double it.
 package agent
 
 import (
