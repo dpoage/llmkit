@@ -43,6 +43,16 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+// probSumTol is the tolerance for the assertion that an n-way probability
+// distribution sums to 1. The vendor (System One) reports probabilities
+// rounded to 2 decimals — e.g. an observed [0 0.01 0.93 0.05] scores 0.99 —
+// so each term contributes up to 0.005 of error and the sum can land within
+// n*0.005 of 1; 1e-9 covers float accumulation. A 4-way score therefore
+// admits |sum-1| <= 0.02, while sums of 0.9 or 1.1 still fail.
+func probSumTol(n int) float64 {
+	return 0.005*float64(n) + 1e-9
+}
+
 // badKey is the intentionally wrong credential for the ErrAuth case; no
 // sk- prefix so it cannot collide with the fixture writer's secret refusals.
 const badKey = "llmkit-live-intentionally-invalid-key"
@@ -212,8 +222,8 @@ func caseMixedQuestions(t *testing.T, sess *livetest.Session) {
 	if ch.Choice != best {
 		t.Fatalf("choice %q, want argmax %q (probabilities %v)", ch.Choice, best, ch.Probabilities)
 	}
-	if math.Abs(sum-1) > 1e-3 {
-		t.Fatalf("choice probabilities sum %f, want within 1e-3 of 1 (%v)", sum, ch.Probabilities)
+	if math.Abs(sum-1) > probSumTol(len(ch.Probabilities)) {
+		t.Fatalf("choice probabilities sum %f, want within %g of 1 (%v)", sum, probSumTol(len(ch.Probabilities)), ch.Probabilities)
 	}
 	if ch.Confidence < 0 || ch.Confidence > 1 {
 		t.Fatalf("choice confidence %f outside [0, 1]", ch.Confidence)
@@ -234,8 +244,8 @@ func caseMixedQuestions(t *testing.T, sess *livetest.Session) {
 	for _, p := range sc.Probabilities {
 		sum += p
 	}
-	if math.Abs(sum-1) > 1e-3 {
-		t.Fatalf("score probabilities sum %f, want within 1e-3 of 1 (%v)", sum, sc.Probabilities)
+	if math.Abs(sum-1) > probSumTol(len(sc.Probabilities)) {
+		t.Fatalf("score probabilities sum %f, want within %g of 1 (%v)", sum, probSumTol(len(sc.Probabilities)), sc.Probabilities)
 	}
 	if sc.Confidence < 0 || sc.Confidence > 1 {
 		t.Fatalf("score confidence %f outside [0, 1]", sc.Confidence)
