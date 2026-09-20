@@ -131,30 +131,41 @@ func LoadJSONL(r io.Reader) (*Transcript, error) {
 // arrives — one RunID is one file, created exactly once. The admission state
 // machine, per RunID:
 //
-//	Start, no entry:    create O_EXCL. Success → live entry, event written.
-//	                    File exists (leftover from a prior process) → onErr
-//	                    ("leftover file …; run refused") and a disabled
-//	                    entry: the rest of this run's events drop silently,
-//	                    reported once. Any other open error → same.
-//	Start, entry live:  onErr ("duplicate Start for live run"), the entry is
-//	                    poisoned (disabled, fd closed). Further events for
-//	                    the id drop silently — the file keeps the first
-//	                    run's prefix; nothing is ever merged.
+//	Start, no entry:    create the directory, create the file O_EXCL and
+//	                    write the Start line, all under the sink lock: the
+//	                    live entry is published only once its file exists
+//	                    and holds that line. A failed create instead
+//	                    installs a retired entry — onErr once ("leftover
+//	                    file …; run refused" when the file already exists,
+//	                    the open error otherwise) and the rest of this
+//	                    run's events drop silently.
+//	Start, entry live:  onErr ("duplicate Start for live run") and the entry
+//	                    is poisoned: its fd closes, and from there BOTH
+//	                    runs' events drop silently. The file keeps the first
+//	                    run's prefix — and because that file now exists,
+//	                    every later Start for the id is refused as a
+//	                    leftover, so no second run can write into it.
 //	Non-Start, no entry: onErr ("event for unknown or closed run") and drop.
 //	                    Every occurrence reports — a harness bug is loud.
 //	Non-Start, live:    written.
-//	Finalize:           written if live; the fd closes and the entry is
-//	                    deleted unconditionally (live, disabled, poisoned).
-//	                    A later event for the id takes the unknown-run path.
+//	Finalize:           the entry leaves the table and its fd closes,
+//	                    unconditionally (live, refused, poisoned); the
+//	                    Finalize line is written first when the run was
+//	                    live. A later event for the id takes the unknown-run
+//	                    path.
 //
 // Everything is best-effort and never fails a run: refusals and write
 // failures flow to the onErr callback given at construction, path-qualified
 // so an operator can tell WHICH file stopped being written. onErr may be
-// nil. An encode failure drops the single line and keeps the run live.
+// nil, and never runs under a sink lock. An encode failure drops the single
+// line and keeps the run live — the one way a created file can end up
+// without its Start line.
 //
 // A JSONLSink is safe for concurrent use: events from concurrent runs on one
 // [Runner] multiplex by [llmkit.RunID], each run writing under its own lock.
-// It satisfies [llmkit.Observer] and [Source].
+// Start admission — create and first line included — is serialized on the
+// sink lock, so a duplicate RunID can never interleave into a half-open
+// entry. It satisfies [llmkit.Observer] and [Source].
 type JSONLSink struct {
 	dir   string
 	onErr func(error)
@@ -163,13 +174,57 @@ type JSONLSink struct {
 	runs map[llmkit.RunID]*jsonlRun
 }
 
-// jsonlRun is one run's admission state inside a [JSONLSink].
+// jsonlRun is one run's admission state inside a [JSONLSink]. An entry is
+// published fully formed and only ever holds one of two states: live (file
+// and enc non-nil, the run's Start line already on disk) or retired (both
+// nil — refused at Start, poisoned by a duplicate, or finalized). A nil enc
+// is exactly "this run's events drop silently".
 type jsonlRun struct {
-	mu       sync.Mutex
-	path     string
-	file     *os.File
-	enc      *json.Encoder
-	disabled bool // refused (leftover/duplicate) or poisoned: events drop silently
+	mu   sync.Mutex
+	path string
+	file *os.File
+	enc  *json.Encoder
+}
+
+// write encodes ev into the run's file. A retired run has no encoder and
+// drops its events silently.
+func (r *jsonlRun) write(ev *llmkit.Event) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.enc == nil {
+		return nil
+	}
+	return r.enc.Encode(ev)
+}
+
+// writeAndRetire writes a live run's last line and retires it in one step,
+// so nothing can be appended between the two.
+func (r *jsonlRun) writeAndRetire(ev *llmkit.Event) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var err error
+	if r.enc != nil {
+		err = r.enc.Encode(ev)
+	}
+	r.retireLocked()
+	return err
+}
+
+// retire closes the run's fd, if it still has one, and drops the entry out
+// of the live state: every later event for it is discarded silently.
+func (r *jsonlRun) retire() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.retireLocked()
+}
+
+// retireLocked is [jsonlRun.retire] with r.mu already held.
+func (r *jsonlRun) retireLocked() {
+	if r.file != nil {
+		_ = r.file.Close()
+		r.file = nil
+	}
+	r.enc = nil
 }
 
 // JSONL returns a durable event sink that appends one JSON line per event to
@@ -198,63 +253,56 @@ func (s *JSONLSink) Observe(_ context.Context, ev llmkit.Event) {
 }
 
 // startRun admits a run's Start event (see the table on [JSONLSink]).
+//
+// Admission, the exclusive create and the Start line are one step under the
+// sink lock: nothing can observe an entry before its file exists and carries
+// that line, so a concurrent duplicate can neither poison a half-open entry
+// — which would strand an empty file — nor win the id's path for a second
+// run. The refusal, if any, is reported after the lock is dropped; onErr
+// never runs under a sink lock.
 func (s *JSONLSink) startRun(ev llmkit.Event) {
 	path := s.pathFor(ev)
 	if !safeRunID(ev.RunID) {
 		s.fail(ev.RunID, path, errors.New(`run id is not a safe filename component (empty, "." or "..", a path separator, or a NUL)`))
 		return
 	}
-	s.mu.Lock()
-	if live, exists := s.runs[ev.RunID]; exists {
-		s.mu.Unlock()
-		// Duplicate Start: report, poison the existing entry — both runs
-		// drop from here; the file keeps the first run's prefix.
-		s.fail(ev.RunID, path, errors.New("duplicate Start for live run"))
-		live.mu.Lock()
-		live.disabled = true
-		if live.file != nil {
-			_ = live.file.Close()
-			live.file = nil
-			live.enc = nil
-		}
-		live.mu.Unlock()
-		return
+	if err := s.admit(ev, path); err != nil {
+		s.fail(ev.RunID, path, err)
 	}
-	run := &jsonlRun{path: path}
-	s.runs[ev.RunID] = run
-	s.mu.Unlock()
+}
 
-	if err := os.MkdirAll(s.dir, 0o755); err != nil {
-		s.disable(ev.RunID, run, fmt.Errorf("mkdir %s: %w", s.dir, err))
-		return
-	}
-	f, err := os.OpenFile(run.path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-	if err != nil {
-		if errors.Is(err, os.ErrExist) {
-			s.disable(ev.RunID, run, fmt.Errorf("leftover file for run at %s; run refused: %w", run.path, err))
-		} else {
-			s.disable(ev.RunID, run, fmt.Errorf("open %s: %w", run.path, err))
-		}
-		return
-	}
-	// Re-verify admission: a concurrent duplicate Start may have poisoned or
-	// replaced this entry while the open was in flight. Close the orphan.
+// admit is startRun's critical section: it runs the whole admission under
+// the sink lock and returns the refusal or write failure to report once the
+// lock is dropped.
+func (s *JSONLSink) admit(ev llmkit.Event, path string) error {
 	s.mu.Lock()
-	admitted := s.runs[ev.RunID] == run
-	s.mu.Unlock()
-	if !admitted {
-		_ = f.Close()
-		return
+	defer s.mu.Unlock()
+	if live, exists := s.runs[ev.RunID]; exists {
+		// Duplicate Start: poison the entry. Both runs drop from here and
+		// the file keeps the first run's prefix.
+		live.retire()
+		return errors.New("duplicate Start for live run")
 	}
-	run.mu.Lock()
-	run.file = f
-	run.enc = json.NewEncoder(f)
-	err = run.enc.Encode(&ev)
-	run.mu.Unlock()
+	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+		s.runs[ev.RunID] = &jsonlRun{path: path} // retired: reported once, then silent
+		return fmt.Errorf("mkdir %s: %w", s.dir, err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
-		// Drop the line, keep the run live (a later event might encode).
-		s.fail(ev.RunID, run.path, fmt.Errorf("encode: %w", err))
+		s.runs[ev.RunID] = &jsonlRun{path: path}
+		if errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("leftover file for run at %s; run refused: %w", path, err)
+		}
+		return fmt.Errorf("open %s: %w", path, err)
 	}
+	run := &jsonlRun{path: path, file: f, enc: json.NewEncoder(f)}
+	encErr := run.enc.Encode(&ev)
+	s.runs[ev.RunID] = run
+	if encErr != nil {
+		// Drop the line, keep the run live (a later event might encode).
+		return fmt.Errorf("encode: %w", encErr)
+	}
+	return nil
 }
 
 // appendRun writes a non-Start, non-Finalize event (see the table on
@@ -267,56 +315,29 @@ func (s *JSONLSink) appendRun(ev llmkit.Event) {
 		s.fail(ev.RunID, s.pathFor(ev), errors.New("event for unknown or closed run dropped"))
 		return
 	}
-	run.mu.Lock()
-	defer run.mu.Unlock()
-	if run.disabled || run.enc == nil {
-		return // refused or poisoned runs drop silently
-	}
-	if err := run.enc.Encode(&ev); err != nil {
+	if err := run.write(&ev); err != nil {
 		// Drop the line, keep the run live.
 		s.fail(ev.RunID, run.path, fmt.Errorf("encode: %w", err))
 	}
 }
 
-// finalizeRun writes the Finalize if the run is live, closes the fd, and
-// deletes the entry unconditionally (see the table on [JSONLSink]).
+// finalizeRun writes the Finalize if the run is live, then retires it: the
+// entry leaves the table and its fd closes unconditionally (see the table on
+// [JSONLSink]). Taking the entry out under the same lock that found it means
+// no second Finalize — and no duplicate Start — can reach a run that is
+// already finalizing.
 func (s *JSONLSink) finalizeRun(ev llmkit.Event) {
 	s.mu.Lock()
 	run := s.runs[ev.RunID]
+	delete(s.runs, ev.RunID)
 	s.mu.Unlock()
 	if run == nil {
 		s.fail(ev.RunID, s.pathFor(ev), errors.New("event for unknown or closed run dropped"))
 		return
 	}
-	run.mu.Lock()
-	if !run.disabled && run.enc != nil {
-		if err := run.enc.Encode(&ev); err != nil {
-			s.fail(ev.RunID, run.path, fmt.Errorf("encode: %w", err))
-		}
+	if err := run.writeAndRetire(&ev); err != nil {
+		s.fail(ev.RunID, run.path, fmt.Errorf("encode: %w", err))
 	}
-	if run.file != nil {
-		_ = run.file.Close()
-		run.file = nil
-		run.enc = nil
-	}
-	run.mu.Unlock()
-	s.mu.Lock()
-	delete(s.runs, ev.RunID)
-	s.mu.Unlock()
-}
-
-// disable retires a refused run's entry: onErr fires once here, and every
-// later event of the run drops silently.
-func (s *JSONLSink) disable(run llmkit.RunID, r *jsonlRun, err error) {
-	r.mu.Lock()
-	r.disabled = true
-	if r.file != nil {
-		_ = r.file.Close()
-		r.file = nil
-		r.enc = nil
-	}
-	r.mu.Unlock()
-	s.fail(run, r.path, err)
 }
 
 // safeRunID reports whether id can be a JSONL filename component: non-empty,
