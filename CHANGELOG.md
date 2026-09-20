@@ -25,13 +25,17 @@ entry below is marked.
   deterministically.
 - `llmkit`: the observability seam. `Observer` receives a typed `Event` per
   nondeterministic boundary — one `Observe(ctx, Event)` method, with
-  `ObserverFunc` as the closure adapter and `Observers` as an order-preserving
-  fan-out that skips nils. `Event` is one Kind-discriminated struct with
-  snake_case tags and a `schema_version` on every encoding; the kinds are
-  `Start`, `Completion`, `Attempt`, `ToolRun` (policy denials ride its
-  `Denied` field), `Compaction`, `Steer`, `Finalize`, `Decision`, `Embed`,
-  and `Exec`. Run identity travels the context: `RunID`, `WithRun`,
-  `RunFromContext`, and `NewRunID`, whose ids sort lexically in mint order.
+  `ObserverFunc` as the closure adapter and `Observers` as an
+  order-preserving fan-out that skips nil Observer interface values. `Event`
+  is one Kind-discriminated struct with snake_case tags and a
+  `schema_version` on every encoding; the kinds are start, completion,
+  attempt, tool_run (policy denials ride its `Denied` field), compaction,
+  steer, finalize, decision, embed, and exec, each carried by a payload
+  type: `StartEvent`, `CompletionEvent`, `AttemptEvent`, `ToolRunEvent`,
+  `CompactionEvent`, `SteerEvent`, `FinalizeEvent`, `DecisionEvent`,
+  `EmbedEvent`, and `ExecEvent`. Run identity travels the context: `RunID`,
+  `WithRun`, `RunFromContext`, and `NewRunID`, whose ids sort lexically in
+  mint order.
   Spans join attempts to their completion: the Completion emitter mints a
   `SpanID` per logical completion (`WithSpan`, `SpanFromContext`,
   `NewSpanID`) and the retry stage's Attempt events inherit it.
