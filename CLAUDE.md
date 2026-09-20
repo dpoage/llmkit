@@ -91,6 +91,7 @@ Read [docs/design.md](docs/design.md) for the layering and the decision records.
 | sandbox | `go doc github.com/dpoage/llmkit/sandbox` |
 | path containment | `go doc github.com/dpoage/llmkit/fsroot` |
 | embeddings | `go doc github.com/dpoage/llmkit/embed` |
+| decision models | `go doc github.com/dpoage/llmkit/decide` |
 
 ## Conventions
 

@@ -1,0 +1,101 @@
+{
+  "case": "mixed_questions",
+  "lane": "typesafe",
+  "model": "jev-latest",
+  "state": "Customer reports a paper jam error on a networked office printer. They removed the jammed sheet and restarted the device, but the error returns within minutes and the duplex unit sounds like it is grinding.",
+  "questions": {
+    "hardware_fault": {
+      "kind": "noul",
+      "instructions": "True if the evidence points at a physical defect rather than consumables, configuration, or software.",
+      "true": "a physical or firmware defect is the likely cause",
+      "false": "consumables, configuration, or software explain the symptom"
+    },
+    "next_action": {
+      "kind": "choice",
+      "instructions": "Which single next step best serves the customer?",
+      "options": {
+        "dispatch_technician": "Send a field technician; likely hardware replacement.",
+        "guided_reclean": "Walk the customer through a duplex-roller cleaning session.",
+        "replace_device": "The unit is under warranty; ship a replacement directly."
+      }
+    },
+    "severity": {
+      "kind": "score",
+      "instructions": "Rate the operational severity of this ticket.",
+      "levels": [
+        "Cosmetic or minor inconvenience; no user impact.",
+        "Annoying but a workaround exists.",
+        "Blocking work for the reporting user.",
+        "Blocking a team, with data loss or a security angle."
+      ]
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/systemone",
+        "headers": {
+          "accept": "application/json",
+          "content-type": "application/json"
+        },
+        "body": "{\"state\":\"Customer reports a paper jam error on a networked office printer. They removed the jammed sheet and restarted the device, but the error returns within minutes and the duplex unit sounds like it is grinding.\",\"model\":\"jev-latest\",\"questions\":{\"hardware_fault\":{\"type\":\"noul\",\"instructions\":\"True if the evidence points at a physical defect rather than consumables, configuration, or software.\",\"criteria\":{\"true\":\"a physical or firmware defect is the likely cause\",\"false\":\"consumables, configuration, or software explain the symptom\"}},\"next_action\":{\"type\":\"choice\",\"instructions\":\"Which single next step best serves the customer?\",\"criteria\":{\"dispatch_technician\":\"Send a field technician; likely hardware replacement.\",\"guided_reclean\":\"Walk the customer through a duplex-roller cleaning session.\",\"replace_device\":\"The unit is under warranty; ship a replacement directly.\"}},\"severity\":{\"type\":\"score\",\"instructions\":\"Rate the operational severity of this ticket.\",\"criteria\":[\"Cosmetic or minor inconvenience; no user impact.\",\"Annoying but a workaround exists.\",\"Blocking work for the reporting user.\",\"Blocking a team, with data loss or a security angle.\"]}}}"
+      },
+      "response": {
+        "headers": {
+          "content-length": "616",
+          "content-type": "application/json",
+          "date": "Sun, 20 Sep 2026 00:51:10 GMT",
+          "server": "istio-envoy",
+          "x-envoy-upstream-service-time": "123",
+          "x-typesafe-request-id": "req_01a0bc4bad697742a716148f4b53797d"
+        },
+        "body": "{\"model\":\"jev-1.13.0\",\"answers\":{\"hardware_fault\":{\"type\":\"noul\",\"noul\":0.86},\"next_action\":{\"type\":\"choice\",\"choice\":\"dispatch_technician\",\"confidence\":0.43,\"probabilities\":{\"replace_device\":0.0,\"dispatch_technician\":0.62,\"guided_reclean\":0.38}},\"severity\":{\"type\":\"score\",\"score\":2.07,\"confidence\":0.9,\"legend\":{\"0\":\"Cosmetic or minor inconvenience; no user impact.\",\"1\":\"Annoying but a workaround exists.\",\"2\":\"Blocking work for the reporting user.\",\"3\":\"Blocking a team, with data loss or a security angle.\"},\"probabilities\":{\"0\":0.0,\"1\":0.01,\"2\":0.91,\"3\":0.08}}},\"usage\":{\"input_tokens\":540,\"output_tokens\":80}}",
+        "status": 200
+      }
+    }
+  ],
+  "normalized": {
+    "response": {
+      "Model": "jev-1.13.0",
+      "Usage": {
+        "InputTokens": 540,
+        "OutputTokens": 80,
+        "CacheReadInputTokens": 0,
+        "CacheCreationInputTokens": 0
+      },
+      "Nouls": {
+        "hardware_fault": 0.86
+      },
+      "Choices": {
+        "next_action": {
+          "Choice": "dispatch_technician",
+          "Probabilities": {
+            "dispatch_technician": 0.62,
+            "guided_reclean": 0.38,
+            "replace_device": 0
+          },
+          "Confidence": 0.43
+        }
+      },
+      "Scores": {
+        "severity": {
+          "Score": 2.07,
+          "Levels": [
+            "Cosmetic or minor inconvenience; no user impact.",
+            "Annoying but a workaround exists.",
+            "Blocking work for the reporting user.",
+            "Blocking a team, with data loss or a security angle."
+          ],
+          "Probabilities": [
+            0,
+            0.01,
+            0.91,
+            0.08
+          ],
+          "Confidence": 0.9
+        }
+      }
+    }
+  }
+}

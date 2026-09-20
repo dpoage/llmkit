@@ -1,0 +1,61 @@
+{
+  "case": "error_bad_key",
+  "lane": "typesafe",
+  "model": "jev-latest",
+  "state": "Customer reports a paper jam error on a networked office printer. They removed the jammed sheet and restarted the device, but the error returns within minutes and the duplex unit sounds like it is grinding.",
+  "questions": {
+    "hardware_fault": {
+      "kind": "noul",
+      "instructions": "True if the evidence points at a physical defect rather than consumables, configuration, or software.",
+      "true": "a physical or firmware defect is the likely cause",
+      "false": "consumables, configuration, or software explain the symptom"
+    },
+    "next_action": {
+      "kind": "choice",
+      "instructions": "Which single next step best serves the customer?",
+      "options": {
+        "dispatch_technician": "Send a field technician; likely hardware replacement.",
+        "guided_reclean": "Walk the customer through a duplex-roller cleaning session.",
+        "replace_device": "The unit is under warranty; ship a replacement directly."
+      }
+    },
+    "severity": {
+      "kind": "score",
+      "instructions": "Rate the operational severity of this ticket.",
+      "levels": [
+        "Cosmetic or minor inconvenience; no user impact.",
+        "Annoying but a workaround exists.",
+        "Blocking work for the reporting user.",
+        "Blocking a team, with data loss or a security angle."
+      ]
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/systemone",
+        "headers": {
+          "accept": "application/json",
+          "content-type": "application/json"
+        },
+        "body": "{\"state\":\"Customer reports a paper jam error on a networked office printer. They removed the jammed sheet and restarted the device, but the error returns within minutes and the duplex unit sounds like it is grinding.\",\"model\":\"jev-latest\",\"questions\":{\"hardware_fault\":{\"type\":\"noul\",\"instructions\":\"True if the evidence points at a physical defect rather than consumables, configuration, or software.\",\"criteria\":{\"true\":\"a physical or firmware defect is the likely cause\",\"false\":\"consumables, configuration, or software explain the symptom\"}},\"next_action\":{\"type\":\"choice\",\"instructions\":\"Which single next step best serves the customer?\",\"criteria\":{\"dispatch_technician\":\"Send a field technician; likely hardware replacement.\",\"guided_reclean\":\"Walk the customer through a duplex-roller cleaning session.\",\"replace_device\":\"The unit is under warranty; ship a replacement directly.\"}},\"severity\":{\"type\":\"score\",\"instructions\":\"Rate the operational severity of this ticket.\",\"criteria\":[\"Cosmetic or minor inconvenience; no user impact.\",\"Annoying but a workaround exists.\",\"Blocking work for the reporting user.\",\"Blocking a team, with data loss or a security angle.\"]}}}"
+      },
+      "response": {
+        "headers": {
+          "content-length": "138",
+          "content-type": "application/json",
+          "date": "Sun, 20 Sep 2026 00:52:46 GMT",
+          "server": "istio-envoy",
+          "x-envoy-upstream-service-time": "4",
+          "x-typesafe-request-id": "req_01a0bc4d24db7e1ba2b4472bfa963b11"
+        },
+        "body": "{\"detail\":{\"error_type\":\"authentication_error\",\"message\":\"Cannot authenticate with the server. Please check your API key and try again.\"}}",
+        "status": 401
+      }
+    }
+  ],
+  "normalized": {
+    "err_kind": "ErrAuth"
+  }
+}
