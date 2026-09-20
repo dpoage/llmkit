@@ -13,9 +13,12 @@
 //     adapter honors) so callers can adapt without provider sniffing;
 //   - errors (rate limiting, auth, context-too-long, ...) into a small typed set.
 //
-// The layer is deliberately thin: each adapter maps these normalized types
-// to/from its vendor SDK and nothing more. Higher-level concerns (agent tool
-// loops, budgets, transcripts) live in the caller's code.
+// The layer is deliberately thin at the vendor edge: each adapter maps the
+// normalized types to/from its SDK and nothing more. This package owns the
+// normalized wire vocabulary AND the observation vocabulary ([Observer],
+// [Event]) that higher layers emit at their nondeterministic boundaries;
+// the implementations — the tool loop, budgets, transcript sinks — live in
+// the agent package and in caller code.
 //
 // # Messages and blocks
 //
@@ -114,7 +117,9 @@
 // a harness bug that propagates. Emission rule: a Completion event is
 // emitted exactly once per logical completion by the outermost harness
 // layer — the agent Runner (with Step) for agent runs, or the
-// llmkit.Observe decorator for bare clients — never by both. Attempt events
+// llmkit.Observe decorator for bare clients — never by both. The emitter
+// mints a fresh [SpanID] per logical completion ([WithSpan]) so the retry
+// stage's Attempt events join it. Attempt events
 // come only from the provider retry stage, and deterministic replay
 // consumes Completion events only. [Recorder] remains the usage-ledger
 // hook; folding it into the Observer stream is deferred.

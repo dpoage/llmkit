@@ -32,6 +32,9 @@ entry below is marked.
   `Denied` field), `Compaction`, `Steer`, `Finalize`, `Decision`, `Embed`,
   and `Exec`. Run identity travels the context: `RunID`, `WithRun`,
   `RunFromContext`, and `NewRunID`, whose ids sort lexically in mint order.
+  Spans join attempts to their completion: the Completion emitter mints a
+  `SpanID` per logical completion (`WithSpan`, `SpanFromContext`,
+  `NewSpanID`) and the retry stage's Attempt events inherit it.
   A Completion event is emitted once per logical completion by the outermost
   layer; Attempt events come only from the provider retry stage, and replay
   consumes Completion only. `Recorder` is unchanged; folding it into the
