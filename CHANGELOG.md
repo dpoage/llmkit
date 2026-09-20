@@ -52,9 +52,9 @@ entry below is marked.
   fails locally with `ErrInvalidRequest` before any wire call — whether the
   force comes from the synthetic structured-output tool (`ResponseSchema`) or
   from an explicit `ToolChoice` of `required` or a named `tool`; previously
-  such requests were sent with extended thinking plus a forced `tool_choice`,
-  a combination Anthropic rejects with a 400 (tool use with thinking only
-  supports `tool_choice` auto or none).
+  such requests were sent with manual extended thinking plus a forced
+  `tool_choice`, a combination Anthropic rejects with a 400 (forced tool use
+  only supports `tool_choice` auto or none under manual extended thinking).
 - Anthropic adapter: a replayed thinking block whose `Raw` decodes to
   thinking text without a `signature` now fails locally with
   `ErrInvalidRequest`; previously the unsigned block was forwarded even

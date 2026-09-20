@@ -440,8 +440,9 @@ type Request struct {
 	// before the wire call for any explicit mode (auto stays allowed —
 	// dropping an explicit "none" would let the model call tools the caller
 	// tried to forbid, so it is refused, not ignored); and on Anthropic,
-	// Mode required or tool combined with Request.Thinking, because forced
-	// tool use is incompatible with manual extended thinking.
+	// Mode required or tool combined with Request.Thinking while
+	// Capabilities.Thinking is true, because forced tool use is incompatible
+	// with manual extended thinking.
 	ToolChoice ToolChoice
 	// StopSequences makes the model stop when it generates any of these
 	// strings (a matching provider reports StopEndTurn).
@@ -461,9 +462,10 @@ type Request struct {
 	// Capabilities().StructuredOutput is true; otherwise the schema is
 	// silently dropped (callers should check the capability before relying
 	// on structured output). On Anthropic the schema rides a synthetic
-	// forced-output tool, so combining it with Request.Thinking is refused
-	// pre-wire (see [Request.ToolChoice]). Zero value (nil) means no schema
-	// request.
+	// forced-output tool unless the request also carries Tools (then the
+	// synthetic path is skipped), so combining it with Request.Thinking is
+	// refused pre-wire on the synthetic path (see [Request.ToolChoice]). Zero
+	// value (nil) means no schema request.
 	ResponseSchema json.RawMessage
 	// ResponseSchemaName names the schema on the wire. It is used as the
 	// response_format name on OpenAI-style backends and as the synthetic
