@@ -2,9 +2,8 @@
 
 llmkit ships a provider-agnostic completion client, a tool-calling agent
 loop, sandboxed command execution, embeddings, and TypeSafe Jev decisions.
-Start with the
-[README quick start](../README.md#quick-start), then read the pages in this
-order:
+Start with the [README quick start](../README.md#quick-start), then read
+the pages in this order:
 
 1. [providers](providers.md) — build a client for your endpoint.
 2. [capabilities](capabilities.md) — what a client reports and what it enforces.

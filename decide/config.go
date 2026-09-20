@@ -127,13 +127,8 @@ func (c Config) httpClient() *http.Client {
 	return &http.Client{}
 }
 
-// retryPolicy returns the effective retry policy: c.Retry with unset knobs
-// (<= 0) resolved to the decide bounds — MaxAttempts 3 and a 30s per-attempt
-// RequestTimeout (Jev answers in under a second, so both the attempt bound
-// and the retry budget stay tight; worst case before giving up is roughly
-// 3 * (30s + backoff)). BaseDelay and MaxDelay fall back to
-// llmkit.DefaultRetryConfig. Jitter is left literal so explicit 0 means no
-// jitter.
+// retryPolicy resolves the decide defaults for unset knobs. Jitter is left
+// literal so an explicit 0 means no jitter.
 func (c Config) retryPolicy() llmkit.RetryConfig {
 	p := c.Retry
 	def := llmkit.DefaultRetryConfig()

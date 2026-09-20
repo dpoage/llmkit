@@ -87,7 +87,6 @@ func buildRequest(state any, model string, questions Questions) ([]byte, error) 
 	return body, nil
 }
 
-// buildQuestion validates one question and returns its wire form.
 func buildQuestion(id string, q Question) (json.RawMessage, error) {
 	path := "questions[" + strconv.Quote(id) + "]"
 	switch t := q.(type) {

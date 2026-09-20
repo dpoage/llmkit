@@ -18,15 +18,15 @@ func retryAny(err error) (time.Duration, bool, bool) {
 	return 0, false, true
 }
 
-// TestBackoffDelay_RetryAfterCappedAtMaxDelay pins the delay policy: a server
-// Retry-After wins over the exponential schedule but is capped at MaxDelay,
-// exponential backoff stays in (0, MaxDelay], and zero BaseDelay stays zero
-// (immediate retry), never mistaken for int64 overflow. Assertions moved
-// verbatim from embed/hardening_test.go when backoffDelay moved here.
+// TestBackoffDelay_RetryAfterCappedAtMaxDelay pins the delay policy: a
+// server Retry-After wins over the exponential schedule but is capped
+// at MaxDelay; exponential backoff stays in (0, MaxDelay]; zero
+// BaseDelay stays zero (immediate retry), never mistaken for int64
+// overflow.
 func TestBackoffDelay_RetryAfterCappedAtMaxDelay(t *testing.T) {
 	def := llmkit.DefaultRetryConfig()
-	// The embed/decide normalized shape: explicit MaxAttempts, unset delays
-	// filled from the kit defaults, embed's 60s per-attempt timeout.
+	// Normalized retry policy: explicit MaxAttempts, kit-default delays,
+	// embed's 60s per-attempt timeout.
 	p := llmkit.RetryConfig{MaxAttempts: 5, BaseDelay: def.BaseDelay, MaxDelay: def.MaxDelay, RequestTimeout: 60 * time.Second}
 
 	after := backoffDelay(p, 1, time.Hour, true)
@@ -43,9 +43,8 @@ func TestBackoffDelay_RetryAfterCappedAtMaxDelay(t *testing.T) {
 	}
 }
 
-// TestBackoffDelay_JitterZeroDeterministic pins that explicit Jitter 0 means
-// no jitter: attempt 2 doubles BaseDelay exactly. Assertion moved verbatim
-// from embed/hardening_test.go.
+// TestBackoffDelay_JitterZeroDeterministic pins that explicit Jitter 0
+// means no jitter: attempt 2 doubles BaseDelay exactly.
 func TestBackoffDelay_JitterZeroDeterministic(t *testing.T) {
 	if d := backoffDelay(llmkit.RetryConfig{BaseDelay: 100 * time.Millisecond, Jitter: 0}, 2, 0, false); d != 200*time.Millisecond {
 		t.Errorf("backoffDelay with Jitter 0 = %v, want exact 200ms (deterministic)", d)

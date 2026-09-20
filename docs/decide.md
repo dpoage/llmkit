@@ -55,8 +55,8 @@ never echoes the key.
 `Question` is a sealed interface with three implementations. The wire `type`
 discriminator comes from the Go type; callers never write it. The state,
 instructions, and descriptions accept a Go string, anything that marshals to a
-JSON object or array, and — for descriptions and criteria — JSON null. A JSON
-number or boolean is rejected before the request is sent.
+JSON object or array, and — for descriptions and criteria — JSON null. The
+client rejects a JSON number or boolean before it sends the request.
 
 ### Noul
 
@@ -285,11 +285,11 @@ nothing and recomputes no argmax.
 ### Confidence and probabilities
 
 Every `Choice` and `Score` answer carries both. `Probabilities` is the full
-distribution; its shape — concentrated on one outcome or spread out — is the
+distribution. Its shape — concentrated on one outcome or spread out — is the
 model's uncertainty. `Confidence` is a vendor-computed statistic that collapses
-that shape into one number in [0, 1], so callers can threshold on it without
-computing a spread themselves. Noul answers carry no confidence; the belief is
-the number. See the vendor page
+that shape into one number in [0, 1]. Threshold on `Confidence` when you do
+not want to compute a spread yourself. A `Noul` answer carries no confidence;
+the belief is the number. See the vendor page
 [Confidence](https://docs.typesafe.ai/confidence.md) (no vendor review date on
 the page; verified 2026-09-19).
 
@@ -328,12 +328,12 @@ An unknown model arrives as a 400 in the live lane (observed 2026-09-20);
 the vendor's API doc reserves 422 for validation failures. Both map to
 `ErrInvalidRequest`.
 
-The `Retry-After` header is parsed on every status. On a retried status (429
-and every 5xx, 529 included) a server-supplied delay replaces the exponential
-backoff for the sleep and is capped at `RetryConfig.MaxDelay` (30 s by
-default); `APIError.RetryAfter` carries the raw server value. A present
-header whose delay clamps to zero — a zero value or a past HTTP-date — means
-an immediate retry. Every other status is terminal.
+The client parses the `Retry-After` header on every status. On a retried
+status (429 and every 5xx, 529 included), a server-supplied delay replaces the
+exponential backoff for the sleep. The sleep is capped at
+`RetryConfig.MaxDelay` (30 s by default); `APIError.RetryAfter` carries the
+raw server value. If a present header clamps to zero — a zero value or a past
+HTTP-date — the client retries immediately. Every other status is terminal.
 
 Error messages carry the vendor body text, truncated to 200 characters plus
 an appended `...`. llmkit never places the API key into an error.

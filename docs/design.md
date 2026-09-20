@@ -28,12 +28,12 @@ flowchart TD
     FSROOT["fsroot"]
 ```
 
-`sandbox` and `fsroot` import no other kit package. `embed` imports the root,
-for `RetryConfig`, and `internal/retry`, the shared backoff loop it once
+`sandbox` and `fsroot` import no other kit package. `embed` imports the root
+for `RetryConfig` and `internal/retry`, the shared backoff loop it once
 owned. `decide` imports the root, `internal/adapter` for status
 classification, and `internal/retry`; like `embed`, it bypasses `provider`
-entirely. `internal/retry` itself imports the root, for `RetryConfig`.
-`agent` drives any `llmkit.Client`, so a `Runner`
+entirely. `internal/retry` imports the root for `RetryConfig`. `agent`
+drives any `llmkit.Client`, so a `Runner`
 runs against a provider client, a replay client, or your own implementation.
 The diagram omits test-only packages: `internal/livetest` backs the `live`
 acceptance suite.
@@ -151,8 +151,8 @@ relative path stays inside a root. The packages share no code on purpose.
 
 ## embed stays dependency-light
 
-`embed` offers two HTTP backends, Ollama and OpenAI-compatible, with the
-shared retry loop from `internal/retry` and a content-hash
+`embed` offers two HTTP backends, Ollama and OpenAI-compatible. It uses
+the shared retry loop from `internal/retry` and a content-hash
 least-recently-used (LRU) cache. Local Open Neural
 Network Exchange (ONNX) inference is deliberately excluded; it would drag
 the ONNX and GoMLX dependency trees.
@@ -164,21 +164,21 @@ the ONNX and GoMLX dependency trees.
 
 ## Decision models are not Clients
 
-TypeSafe's Jev is a decision model: one request carries a state plus typed
-questions (noul, choice, score), and the answer is a belief or a probability
-distribution. It has no messages, no tools, no streaming, and no text output,
-so `decide` does not implement `llmkit.Client` and does not go through
-`provider.New`; `decide.New` is its own validated construction path. `embed`
-is the precedent for a non-chat sibling package.
+TypeSafe's Jev is a decision model. One request carries a state plus typed
+questions (`Noul`, `Choice`, `Score`), and the answer is a belief or a
+probability distribution. Because Jev has no messages, no tools, no streaming,
+and no text output, `decide` does not implement `llmkit.Client` and does not
+go through `provider.New`. `decide.New` is its own validated construction
+path. `embed` is the precedent for a non-chat sibling package.
 
 - **What it buys:** an honest surface. A decision answer cannot masquerade as
   chat text, and no `Capabilities` field lies about streaming or tools.
-  Callers still get the shared vocabulary where it fits: the sentinel errors,
-  `RetryConfig`, `Usage`, and the recorder. The retry loop itself stays in
-  one place, `internal/retry`.
+  Callers share the common vocabulary where it fits: the sentinel errors,
+  `RetryConfig`, `Usage`, and the recorder. The retry loop lives in one
+  place, `internal/retry`.
 - **What it costs:** a second construction path outside the `provider.New`
-  gate, and code written against `llmkit.Client` cannot take a `decide`
-  client. The two surfaces share errors and usage, not a request type.
+  gate. Code that targets `llmkit.Client` cannot take a `decide` client. The
+  two surfaces share errors and usage, not a request type.
 
 ## How it is tested
 

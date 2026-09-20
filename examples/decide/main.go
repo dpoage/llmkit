@@ -1,7 +1,7 @@
 // Command decide demonstrates a minimal TypeSafe Jev (System One) decision:
-// build a client from the environment, evaluate one mixed question set — a
-// Noul, a Choice, and a Score — against a support-ticket state, and print
-// the normalized answer kinds as indented JSON.
+// build a client from the environment, evaluate one mixed question set —
+// a Noul, a Choice, and a Score — against a support-ticket state, and
+// print the normalized answer kinds as indented JSON.
 //
 // Usage:
 //
