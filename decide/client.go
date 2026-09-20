@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/internal/adapter"
+	"github.com/dpoage/llmkit/retry"
 	"io"
 	"net/http"
 	"strconv"
@@ -114,7 +115,7 @@ func (c *Client) Ask(ctx context.Context, state any, questions Questions) (Respo
 		return Response{}, err
 	}
 	var resp Response
-	err = llmkit.Retry(ctx, c.retry, classifyRetryable, func(actx context.Context) error {
+	err = retry.Do(ctx, c.retry, classifyRetryable, func(actx context.Context) error {
 		r, err := c.attempt(actx, body, questions)
 		if err != nil {
 			return err
@@ -186,7 +187,7 @@ func newAPIStatusError(resp *http.Response, body []byte) error {
 		Provider:   providerName,
 		Message:    truncate(msg, 200),
 	}
-	after, hasAfter := llmkit.ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+	after, hasAfter := retry.ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
 	apiErr.RetryAfter = after
 	return &statusAttempt{APIError: apiErr, hasRetryAfter: hasAfter}
 }

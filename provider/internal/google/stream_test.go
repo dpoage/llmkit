@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/retry"
 )
 
 // SSE event shapes follow the Gemini API's streamGenerateContent?alt=sse
@@ -546,7 +547,7 @@ func TestStream_RetryTimeoutStalledStream(t *testing.T) {
 		w.(http.Flusher).Flush()
 		<-r.Context().Done() // stall until the attempt deadline reaps us
 	})
-	cl := llmkit.WithRetry(newStreamClient(t, base), llmkit.RetryConfig{
+	cl := llmkit.WithRetry(newStreamClient(t, base), retry.Config{
 		MaxAttempts:    1,
 		RequestTimeout: 150 * time.Millisecond,
 		BaseDelay:      time.Millisecond,

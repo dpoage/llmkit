@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/retry"
 )
 
 // TestNew_RejectsUnknownAuth pins the typed-Auth contract: New must refuse
@@ -352,7 +353,7 @@ func TestNew_VendorHosts(t *testing.T) {
 		t.Run(string(tc.typ), func(t *testing.T) {
 			rt := &hostCapturingTransport{}
 			spec := Spec{Type: tc.typ, Model: "test-model", Secret: "k"}
-			opts := Options{HTTPClient: &http.Client{Transport: rt}, Retry: llmkit.RetryConfig{MaxAttempts: 1}}
+			opts := Options{HTTPClient: &http.Client{Transport: rt}, Retry: retry.Config{MaxAttempts: 1}}
 			client, err := New(context.Background(), spec, opts)
 			if err != nil {
 				t.Fatalf("New: %v", err)

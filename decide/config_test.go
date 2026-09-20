@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/retry"
 )
 
 func TestNew_ConfigValidation(t *testing.T) {
@@ -20,8 +21,8 @@ func TestNew_ConfigValidation(t *testing.T) {
 		{"whitespace-only APIKey", Config{APIKey: "   ", Model: "jev-latest"}},
 		{"padded APIKey", Config{APIKey: " key ", Model: "jev-latest"}},
 		{"empty Model", Config{APIKey: "key"}},
-		{"negative jitter", Config{APIKey: "key", Model: "jev-latest", Retry: llmkit.RetryConfig{Jitter: -0.1}}},
-		{"jitter above 1", Config{APIKey: "key", Model: "jev-latest", Retry: llmkit.RetryConfig{Jitter: 1.5}}},
+		{"negative jitter", Config{APIKey: "key", Model: "jev-latest", Retry: retry.Config{Jitter: -0.1}}},
+		{"jitter above 1", Config{APIKey: "key", Model: "jev-latest", Retry: retry.Config{Jitter: 1.5}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -58,7 +59,7 @@ func TestNew_Defaults(t *testing.T) {
 		t.Errorf("endpoint = %q, want the vendor default with the System One path", c.endpoint)
 	}
 
-	def := llmkit.DefaultRetryConfig()
+	def := retry.Default()
 	if c.retry.MaxAttempts != 3 {
 		t.Errorf("MaxAttempts = %d, want 3 (decide default)", c.retry.MaxAttempts)
 	}
@@ -82,7 +83,7 @@ func TestNew_Defaults(t *testing.T) {
 }
 
 func TestNew_ExplicitRetryAndBaseURLKept(t *testing.T) {
-	policy := llmkit.RetryConfig{MaxAttempts: 5, RequestTimeout: 10 * time.Second, BaseDelay: time.Second, MaxDelay: time.Minute, Jitter: 0.2}
+	policy := retry.Config{MaxAttempts: 5, RequestTimeout: 10 * time.Second, BaseDelay: time.Second, MaxDelay: time.Minute, Jitter: 0.2}
 	c, err := New(Config{APIKey: "key", Model: "jev-1.13.0", BaseURL: "http://localhost:9000/", Retry: policy})
 	if err != nil {
 		t.Fatalf("New: %v", err)
