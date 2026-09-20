@@ -25,8 +25,9 @@ import (
 //
 // ReplayClient implements only Complete. A Runner with [Hooks.Delta] set
 // still delivers deltas: [llmkit.Stream] falls back to Complete and
-// synthesizes one delta per content block of the recorded Response, so
-// the hook fires — just not at wire granularity.
+// synthesizes deltas from the recorded Response's content blocks; a
+// recorded response with no text block yields one DeltaText from
+// Response.Text, so the hook fires — just not at wire granularity.
 type ReplayClient struct {
 	mu        sync.Mutex
 	responses []replayStep

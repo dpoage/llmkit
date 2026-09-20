@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -109,6 +110,145 @@ func TestStream_SynthesizesFromCompleteOnlyClient(t *testing.T) {
 	// The response is the one Complete returned, not a rebuild.
 	if &out.ToolCalls[0] != &inner.responses[0].ToolCalls[0] {
 		t.Fatal("Response.ToolCalls was copied; Stream must return Complete's response unchanged")
+	}
+}
+
+// TestStream_TextOnlyResponseEmitsOneDelta pins the synthesizer fallback: a
+// Complete-only client may return Text set with Blocks empty (the Response
+// contract permits it; shipped adapters always populate Blocks, but custom
+// Clients need not). Stream must emit exactly one DeltaText with the full
+// Text.
+func TestStream_TextOnlyResponseEmitsOneDelta(t *testing.T) {
+	inner := &fakeClient{responses: []Response{{
+		Text:       "just text, no blocks",
+		Usage:      Usage{InputTokens: 4, OutputTokens: 6},
+		StopReason: StopEndTurn,
+	}}}
+	var got []Delta
+	out, err := Stream(context.Background(), inner, simpleRequest(), func(d Delta) error {
+		got = append(got, d)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	want := []Delta{{Kind: DeltaText, Text: "just text, no blocks"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("deltas = %+v, want %+v", got, want)
+	}
+	if !reflect.DeepEqual(out, inner.responses[0]) {
+		t.Fatalf("Response = %+v, want the Complete response %+v", out, inner.responses[0])
+	}
+}
+
+// TestStream_TextFallbackNotFiredWhenBlocksCarryText pins the other half of
+// the fallback: when Blocks already contain a text block, Text must NOT be
+// emitted a second time (no double emission).
+func TestStream_TextFallbackNotFiredWhenBlocksCarryText(t *testing.T) {
+	inner := &fakeClient{responses: []Response{{
+		Text: "hello world",
+		Blocks: []Block{
+			Text("hello "),
+			Text("world"),
+			{Kind: BlockThinking, Text: "hmm"},
+		},
+	}}}
+	var got []Delta
+	if _, err := Stream(context.Background(), inner, simpleRequest(), func(d Delta) error {
+		got = append(got, d)
+		return nil
+	}); err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	want := []Delta{
+		{Kind: DeltaText, Text: "hello "},
+		{Kind: DeltaText, Text: "world"},
+		{Kind: DeltaThinking, Text: "hmm"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("deltas = %+v, want %+v", got, want)
+	}
+}
+
+// TestStream_TextFallbackOrderingAndEmpty pins the fallback's edges: a
+// thinking-only Blocks list with Text set emits the text delta after the
+// thinking delta; ToolCalls without Blocks put the text delta first; and a
+// response with no Text and no Blocks emits zero deltas (never an empty
+// DeltaText).
+func TestStream_TextFallbackOrderingAndEmpty(t *testing.T) {
+	tests := []struct {
+		name string
+		resp Response
+		want []Delta
+	}{
+		{
+			name: "thinking blocks then text fallback",
+			resp: Response{
+				Text: "afterthought",
+				Blocks: []Block{
+					{Kind: BlockThinking, Text: "hmm"},
+					{Kind: BlockThinking, Text: "hah"},
+				},
+			},
+			want: []Delta{
+				{Kind: DeltaThinking, Text: "hmm"},
+				{Kind: DeltaThinking, Text: "hah"},
+				{Kind: DeltaText, Text: "afterthought"},
+			},
+		},
+		{
+			name: "text fallback precedes tool calls",
+			resp: Response{
+				Text: "look this up",
+				ToolCalls: []ToolCall{
+					{ID: "call_1", Name: "lookup", Arguments: json.RawMessage(`{"q":"a"}`)},
+				},
+			},
+			want: []Delta{
+				{Kind: DeltaText, Text: "look this up"},
+				{Kind: DeltaToolCall, Index: 0, ID: "call_1", Name: "lookup", Arguments: `{"q":"a"}`},
+			},
+		},
+		{
+			name: "empty text and blocks emit nothing",
+			resp: Response{Usage: Usage{InputTokens: 1}},
+			want: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inner := &fakeClient{responses: []Response{tt.resp}}
+			var got []Delta
+			if _, err := Stream(context.Background(), inner, simpleRequest(), func(d Delta) error {
+				got = append(got, d)
+				return nil
+			}); err != nil {
+				t.Fatalf("Stream: %v", err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("deltas = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestStream_TextFallbackFnError pins fn-error propagation on the fallback
+// delta: the error wraps as "llmkit: stream fn: ..." and Stream returns a
+// zero Response (the Complete result is dropped).
+func TestStream_TextFallbackFnError(t *testing.T) {
+	inner := &fakeClient{responses: []Response{{
+		Text:       "doomed",
+		StopReason: StopEndTurn,
+	}}}
+	sentinel := errors.New("stop")
+	out, err := Stream(context.Background(), inner, simpleRequest(), func(d Delta) error {
+		return sentinel
+	})
+	if !errors.Is(err, sentinel) || !strings.Contains(err.Error(), "llmkit: stream fn: ") {
+		t.Fatalf("err = %v, want wrapped llmkit: stream fn error", err)
+	}
+	if !reflect.DeepEqual(out, Response{}) {
+		t.Fatalf("Response = %+v, want zero Response on fn error", out)
 	}
 }
 
