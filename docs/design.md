@@ -19,20 +19,16 @@ flowchart TD
     PROV --> ROOT
     AGENT --> ROOT
     EMBED["embed"] --> ROOT
-    EMBED --> RETRY["internal/retry"]
     DECIDE["decide"] --> ROOT
     DECIDE --> IA
-    DECIDE --> RETRY
-    RETRY --> ROOT
     SANDBOX["sandbox"]
     FSROOT["fsroot"]
 ```
 
-`sandbox` and `fsroot` import no other kit package. `embed` imports the root
-for `RetryConfig` and `internal/retry`, the shared backoff loop it once
-owned. `decide` imports the root, `internal/adapter` for status
-classification, and `internal/retry`; like `embed`, it bypasses `provider`
-entirely. `internal/retry` imports the root for `RetryConfig`. `agent`
+`sandbox` and `fsroot` import no other kit package. `embed` and `decide`
+import the root for `RetryConfig`, `Retry` — the shared backoff loop — and
+`ParseRetryAfter`; `decide` also imports `internal/adapter` for status
+classification. Like `embed`, `decide` bypasses `provider` entirely. `agent`
 drives any `llmkit.Client`, so a `Runner`
 runs against a provider client, a replay client, or your own implementation.
 The diagram omits test-only packages: `internal/livetest` backs the `live`
@@ -152,7 +148,7 @@ relative path stays inside a root. The packages share no code on purpose.
 ## embed stays dependency-light
 
 `embed` offers two HTTP backends, Ollama and OpenAI-compatible. It uses
-the shared retry loop from `internal/retry` and a content-hash
+the shared retry loop, root `llmkit.Retry`, and a content-hash
 least-recently-used (LRU) cache. Local Open Neural
 Network Exchange (ONNX) inference is deliberately excluded; it would drag
 the ONNX and GoMLX dependency trees.
@@ -175,7 +171,7 @@ path. `embed` is the precedent for a non-chat sibling package.
   chat text, and no `Capabilities` field lies about streaming or tools.
   Callers share the common vocabulary where it fits: the sentinel errors,
   `RetryConfig`, `Usage`, and the recorder. The retry loop lives in one
-  place, `internal/retry`.
+  place, root `llmkit.Retry`.
 - **What it costs:** a second construction path outside the `provider.New`
   gate. Code that targets `llmkit.Client` cannot take a `decide` client. The
   two surfaces share errors and usage, not a request type.

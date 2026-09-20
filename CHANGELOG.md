@@ -8,6 +8,30 @@ entry below is marked.
 
 ## [Unreleased]
 
+### Added
+
+- `llmkit.Retry`: the shared retry loop, exported so a caller can retry any
+  error source under the same policy as `WithRetry` — exponential backoff
+  with jitter, server `Retry-After` precedence capped at `MaxDelay`, and a
+  per-attempt `RequestTimeout` deadline. A caller-supplied classifier decides
+  which errors are transient and carries the header's delay and presence;
+  presence with a zero delay means an immediate retry, absence means the
+  exponential schedule. Like `WithRetry`, `Retry` clamps `MaxAttempts`,
+  `RequestTimeout`, and `Jitter` to usable values.
+- `llmkit.ParseRetryAfter`: parses a `Retry-After` header value (delay
+  seconds or HTTP-date) into a duration plus a presence bit. A past date or
+  negative delay clamps to 0 with the bit set; empty or malformed values
+  return the bit unset.
+
+### Changed
+
+- `internal/retry` is deleted. Its loop and header parser moved into the
+  root package as `llmkit.Retry` and `llmkit.ParseRetryAfter`; `embed`,
+  `decide`, and `internal/adapter` now call them. Internal package; no
+  caller-facing change; retry behavior is unchanged except that every
+  in-tree loop now applies `internal/retry`'s stricter negative-`Retry-After`
+  and overflow clamps, which no in-tree config could reach.
+
 ## [0.5.0] - 2026-09-20
 
 ### Added

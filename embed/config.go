@@ -192,7 +192,7 @@ func (c Config) Validate() error {
 }
 
 // httpClient returns the injected client as-is, or a plain client with no
-// Timeout. With the plain client, internal/retry bounds each round trip
+// Timeout. With the plain client, llmkit.Retry bounds each round trip
 // with the per-attempt Retry.RequestTimeout deadline. An injected client
 // keeps its own Timeout, which can end an attempt earlier. Callers must
 // treat the returned client as read-only.
