@@ -281,6 +281,8 @@ func TestDelta_StreamingTranscriptMatchesComplete(t *testing.T) {
 	if !reflect.DeepEqual(outPlain.Messages, outStream.Messages) {
 		t.Errorf("Messages differ:\nplain=%+v\nstream=%+v", outPlain.Messages, outStream.Messages)
 	}
+	spanInvariant(t, outPlain.Transcript)
+	spanInvariant(t, outStream.Transcript)
 	if !reflect.DeepEqual(eventsWithoutTimes(outPlain.Transcript), eventsWithoutTimes(outStream.Transcript)) {
 		t.Errorf("transcripts differ:\nplain=%+v\nstream=%+v",
 			eventsWithoutTimes(outPlain.Transcript), eventsWithoutTimes(outStream.Transcript))
@@ -300,8 +302,9 @@ func TestDelta_StreamingTranscriptMatchesComplete(t *testing.T) {
 }
 
 // eventsWithoutTimes returns the transcript's events with the varying fields
-// zeroed — Time, Duration, and SpanID (minted per completion) — so two runs
-// pinned to the same RunID compare DeepEqual.
+// zeroed — Time and Duration — so two runs pinned to the same RunID compare
+// DeepEqual. SpanIDs are checked separately (see spanInvariant): each is
+// minted per logical completion, so the two runs' values differ by design.
 func eventsWithoutTimes(tr *Transcript) []llmkit.Event {
 	evs := slices.Clone(tr.Record)
 	for i := range evs {
@@ -310,6 +313,31 @@ func eventsWithoutTimes(tr *Transcript) []llmkit.Event {
 		evs[i].SpanID = ""
 	}
 	return evs
+}
+
+// spanInvariant pins C2's mint on a recorded stream: every completion event
+// carries a fresh, pairwise-distinct SpanID — present (never inherited from
+// an enclosing span) — and the count matches the completions.
+func spanInvariant(t *testing.T, tr *Transcript) {
+	t.Helper()
+	seen := map[llmkit.SpanID]bool{}
+	completions := 0
+	for _, ev := range tr.Record {
+		if ev.Kind != llmkit.KindCompletion {
+			continue
+		}
+		completions++
+		if ev.SpanID == "" {
+			t.Fatalf("completion at step %d carries no SpanID", ev.Step)
+		}
+		if seen[ev.SpanID] {
+			t.Fatalf("completion at step %d reuses span %q; each logical completion mints a fresh one", ev.Step, ev.SpanID)
+		}
+		seen[ev.SpanID] = true
+	}
+	if len(seen) != completions {
+		t.Fatalf("distinct spans = %d, completions = %d", len(seen), completions)
+	}
 }
 
 // TestDelta_SynthesizedFromCompleteOnlyClient pins the fallback: a client

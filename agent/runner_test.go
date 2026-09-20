@@ -669,6 +669,36 @@ func TestRun_TextAfterToolsReplacesFinalText(t *testing.T) {
 	}
 }
 
+// TestAssistantMessage_ToolOnlyTurnHasNoEmptyTextBlock pins llmkit-ly5's
+// second half: a tool-call-only turn's assistant history message carries NO
+// content blocks — no {"kind":"text"} with empty content is invented.
+func TestAssistantMessage_ToolOnlyTurnHasNoEmptyTextBlock(t *testing.T) {
+	fc := newFakeClient(
+		toolResp("c1", "echo", `{}`, 1, 1),
+		textResp("done", 1, 1),
+	)
+	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys")
+	out, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	sawToolOnlyTurn := false
+	for _, m := range out.Messages {
+		if m.Role != llmkit.RoleAssistant {
+			continue
+		}
+		if len(m.ToolCalls) > 0 {
+			sawToolOnlyTurn = true
+			if len(m.Content) != 0 {
+				t.Errorf("tool-call-only assistant turn carries content %v; want none (no empty text block)", m.Content)
+			}
+		}
+	}
+	if !sawToolOnlyTurn {
+		t.Fatal("no tool-call-only assistant turn in the history")
+	}
+}
+
 // TestAssistantMessageTextGuard pins how a completion becomes the assistant
 // history turn: blocks are recorded verbatim, and when a Response carries
 // text but its Blocks omit any text block — violating the llmkit.Response

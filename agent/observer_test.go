@@ -1,10 +1,13 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -453,19 +456,21 @@ func TestObserver_ReplayDivergenceNamesStep(t *testing.T) {
 		t.Fatalf("ReplayTools: %v", err)
 	}
 	replayed, err := NewRunner(diverging, replayTools, "sys").Run(context.Background(), "task")
-	if err != nil {
-		t.Fatalf("replay run: %v", err)
-	}
 
-	// The divergence surfaces as model-visible tool data naming the step.
+	// The divergence surfaces as model-visible tool data naming the step AND
+	// fails the run: the next completion converts it into an error wrapping
+	// ErrReplayDiverged.
+	if !errors.Is(err, ErrReplayDiverged) {
+		t.Fatalf("replay err = %v, want ErrReplayDiverged", err)
+	}
 	diverged := false
 	for _, m := range replayed.Messages {
-		if m.Role == llmkit.RoleToolResult && strings.Contains(m.Text(), `replay diverged at step 1`) {
+		if m.Role == llmkit.RoleToolResult && strings.Contains(m.Text(), errReplayDivergedMarker) {
 			diverged = true
 		}
 	}
 	if !diverged {
-		t.Errorf("no divergence error naming step 1 in the replay history: %+v", replayed.Messages)
+		t.Errorf("no divergence marker naming the step in the replay history: %+v", replayed.Messages)
 	}
 }
 
@@ -574,4 +579,396 @@ func (t *countingTool) Run(_ context.Context, _ json.RawMessage) (string, error)
 	defer t.mu.Unlock()
 	*t.count++
 	return t.result(), nil
+}
+
+// errClient fails every Complete with a partial response still in hand.
+type errClient struct{ partial llmkit.Response }
+
+func (c errClient) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
+
+func (c errClient) Complete(context.Context, llmkit.Request) (llmkit.Response, error) {
+	return c.partial, errors.New("connection reset")
+}
+
+// blockingTool blocks until its context is done.
+type blockingTool struct{ started chan struct{} }
+
+func (b blockingTool) Def() llmkit.ToolDef {
+	return llmkit.ToolDef{Name: "block", Parameters: json.RawMessage(`{"type":"object"}`)}
+}
+
+func (b blockingTool) Run(ctx context.Context, _ json.RawMessage) (string, error) {
+	close(b.started)
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+// TestObserver_FinalizeOnErrorReturns pins that Finalize is emitted on every
+// ERROR return — client failure, context cancellation mid-tool, and a
+// RequestPolicy abort — with the step of the COMPLETED turns (a failed
+// completion does not advance it).
+func TestObserver_FinalizeOnErrorReturns(t *testing.T) {
+	t.Run("client error on the first completion", func(t *testing.T) {
+		r := NewRunner(errClient{}, nil, "sys")
+		out, err := r.Run(context.Background(), "task")
+		if err == nil {
+			t.Fatal("Run succeeded; wanted the client error")
+		}
+		final := out.Transcript.Record[len(out.Transcript.Record)-1]
+		if final.Kind != llmkit.KindFinalize {
+			t.Fatalf("last event = %s, want finalize", final.Kind)
+		}
+		if final.Step != 0 || final.Finalize.Iterations != 0 {
+			t.Errorf("finalize step %d iterations %d, want 0/0 (failed completion does not advance)", final.Step, final.Finalize.Iterations)
+		}
+	})
+
+	t.Run("failed completion carries the zero response", func(t *testing.T) {
+		r := NewRunner(errClient{partial: llmkit.Response{Text: "half written"}}, nil, "sys")
+		out, err := r.Run(context.Background(), "task")
+		if err == nil {
+			t.Fatal("Run succeeded; wanted the client error")
+		}
+		var comp *llmkit.Event
+		for i := range out.Transcript.Record {
+			if out.Transcript.Record[i].Kind == llmkit.KindCompletion {
+				comp = &out.Transcript.Record[i]
+			}
+		}
+		if comp == nil {
+			t.Fatal("no completion event on the failing run")
+		}
+		if comp.Completion.Err == "" {
+			t.Error("failed completion carries no Err")
+		}
+		if !reflect.DeepEqual(comp.Completion.Response, llmkit.Response{}) {
+			t.Errorf("failed completion response = %+v, want the zero Response even though the client returned a partial one", comp.Completion.Response)
+		}
+	})
+
+	t.Run("context cancelled mid-tool", func(t *testing.T) {
+		bt := blockingTool{started: make(chan struct{})}
+		r := NewRunner(newFakeClient(toolResp("c1", "block", `{}`, 1, 1)), []Tool{bt}, "sys")
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			<-bt.started
+			cancel()
+		}()
+		out, err := r.Run(ctx, "task")
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context.Canceled", err)
+		}
+		final := out.Transcript.Record[len(out.Transcript.Record)-1]
+		if final.Kind != llmkit.KindFinalize {
+			t.Fatalf("last event = %s, want finalize", final.Kind)
+		}
+		if final.Step != 1 || final.Finalize.Iterations != 1 {
+			t.Errorf("finalize step %d iterations %d, want 1/1 (the completion before the tool did complete)", final.Step, final.Finalize.Iterations)
+		}
+	})
+
+	t.Run("request policy aborts before the wire", func(t *testing.T) {
+		r := NewRunner(newFakeClient(textResp("done", 1, 1)), nil, "sys",
+			WithRequestPolicy(RequestPolicyFunc(func(context.Context, int, *llmkit.Request) error {
+				return errors.New("nope")
+			})))
+		out, err := r.Run(context.Background(), "task")
+		if err == nil {
+			t.Fatal("Run succeeded; wanted the policy error")
+		}
+		final := out.Transcript.Record[len(out.Transcript.Record)-1]
+		if final.Kind != llmkit.KindFinalize || final.Step != 0 {
+			t.Fatalf("last event = %s step %d, want finalize at step 0", final.Kind, final.Step)
+		}
+	})
+}
+
+// TestObserver_SpanMintedPerCompletion pins C2's mint: every completion
+// event carries its OWN fresh SpanID — present, pairwise distinct, and NOT
+// inherited from any span already in the caller's context.
+func TestObserver_SpanMintedPerCompletion(t *testing.T) {
+	inherited := llmkit.NewSpanID()
+	fc := newFakeClient(
+		maxTokensResp("half an", 10, 5),
+		textResp("answer", 10, 5),
+	)
+	r := NewRunner(fc, nil, "sys")
+	out, err := r.Run(llmkit.WithSpan(context.Background(), inherited), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// The max-tokens continuation is exactly TWO completions.
+	var comps []*llmkit.Event
+	for i := range out.Transcript.Record {
+		if out.Transcript.Record[i].Kind == llmkit.KindCompletion {
+			comps = append(comps, &out.Transcript.Record[i])
+		}
+	}
+	if len(comps) != 2 {
+		t.Fatalf("completion events = %d, want exactly 2 (turn + continuation)", len(comps))
+	}
+	seen := map[llmkit.SpanID]bool{inherited: true}
+	for i, ev := range comps {
+		if ev.SpanID == "" {
+			t.Fatalf("completion %d carries no SpanID", i)
+		}
+		if ev.SpanID == inherited {
+			t.Errorf("completion %d inherited the caller's span %q; each logical completion mints a fresh one", i, inherited)
+		}
+		if seen[ev.SpanID] {
+			t.Errorf("completion %d reuses span %q", i, ev.SpanID)
+		}
+		seen[ev.SpanID] = true
+	}
+}
+
+// TestObserver_SinkClosesOnFinalize pins the fd lifecycle: after a run's
+// Finalize the sink retires the run's entry, so nothing stays open and a
+// post-finalize event is refused through onErr.
+func TestObserver_SinkClosesOnFinalize(t *testing.T) {
+	dir := t.TempDir()
+	sink := JSONL(dir, nil)
+	r := NewRunner(newFakeClient(textResp("done", 1, 1)), nil, "sys", WithObserver(sink))
+	if _, err := r.Run(context.Background(), "task"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	sink.mu.Lock()
+	live := len(sink.runs)
+	sink.mu.Unlock()
+	if live != 0 {
+		t.Errorf("sink still holds %d run entries after Finalize; want 0 (closed, not leaked)", live)
+	}
+}
+
+// TestReplay_StructureValidationEnforced pins that ReplayClient still
+// validates the recorded tool-id structure: a replay whose conversation
+// diverges (different seed task) fails at the recorded step.
+func TestReplay_StructureValidationEnforced(t *testing.T) {
+	fc := newFakeClient(
+		toolResp("c1", "echo", `{"text":"hi"}`, 10, 4),
+		textResp("final", 8, 3),
+	)
+	rec := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys")
+	if _, err := rec.Run(context.Background(), "original task"); err != nil {
+		t.Fatalf("record run: %v", err)
+	}
+	// A structural divergence: the record's first completion is expected only
+	// after tool result c1; a replay whose first request carries no tool
+	// result diverges at step 1.
+	tr := NewTranscript()
+	tr.RunID = "struct"
+	tr.Record = append(tr.Record,
+		llmkit.Event{Kind: llmkit.KindToolRun, RunID: "struct", Step: 1, SchemaVersion: 1,
+			ToolRun: &llmkit.ToolRunEvent{Call: llmkit.ToolCall{ID: "c1", Name: "echo"}, Result: "x"}},
+		llmkit.Event{Kind: llmkit.KindCompletion, RunID: "struct", Step: 2, SchemaVersion: 1,
+			Completion: &llmkit.CompletionEvent{Response: llmkit.Response{Text: "final"}}},
+	)
+	rp2, err := NewReplayClient(tr, "struct", llmkit.Capabilities{})
+	if err != nil {
+		t.Fatalf("NewReplayClient: %v", err)
+	}
+	_, err = rp2.Complete(context.Background(), llmkit.Request{
+		Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "seed")},
+	})
+	if err == nil || !strings.Contains(err.Error(), "replay diverged at step 1") {
+		t.Errorf("err = %v, want a structure divergence naming step 1", err)
+	}
+}
+
+// TestReplay_SkipsFailedCompletions pins that NewReplayClient serves only
+// successful Completion events.
+func TestReplay_SkipsFailedCompletions(t *testing.T) {
+	tr := NewTranscript()
+	tr.RunID = "r-1"
+	mk := func(kind llmkit.EventKind, errText string) llmkit.Event {
+		ev := llmkit.NewEvent(llmkit.WithRun(context.Background(), "r-1"), kind)
+		ev.SchemaVersion = llmkit.EventSchemaVersion
+		if kind == llmkit.KindCompletion {
+			ev.Completion = &llmkit.CompletionEvent{Response: llmkit.Response{Text: "ok"}, Err: errText}
+		}
+		return ev
+	}
+	tr.Record = append(tr.Record,
+		mk(llmkit.KindCompletion, ""),
+		mk(llmkit.KindCompletion, "connection reset"),
+		mk(llmkit.KindCompletion, ""),
+	)
+	rc, err := NewReplayClient(tr, "r-1", llmkit.Capabilities{})
+	if err != nil {
+		t.Fatalf("NewReplayClient: %v", err)
+	}
+	rc.mu.Lock()
+	n := len(rc.responses)
+	rc.mu.Unlock()
+	if n != 2 {
+		t.Errorf("replay built %d steps, want 2 (failed completion skipped)", n)
+	}
+}
+
+// TestReplay_ParallelToolsDeterministic is the order-independence probe: a
+// 40-turn recorded run whose turns each request 4 same-tool calls with
+// distinct arguments replays under WithParallelTools — completion order
+// cannot desync the (name, arguments) matching — with zero divergences.
+func TestReplay_ParallelToolsDeterministic(t *testing.T) {
+	const turns, callsPerTurn = 40, 4
+	steps := make([]scriptStep, 0, turns+1)
+	for i := range turns {
+		calls := make([]llmkit.ToolCall, callsPerTurn)
+		for j := range callsPerTurn {
+			calls[j] = llmkit.ToolCall{
+				ID:        fmt.Sprintf("c%d-%d", i, j),
+				Name:      "echo",
+				Arguments: json.RawMessage(fmt.Sprintf(`{"v":%d}`, i*callsPerTurn+j)),
+			}
+		}
+		steps = append(steps, toolCallsResp(calls...))
+	}
+	steps = append(steps, textResp("done", 1, 1))
+
+	live := 0
+	rec := NewRunner(newFakeClient(steps...), []Tool{&countingTool{name: "echo", count: &live}}, "sys")
+	out, err := rec.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("record run: %v", err)
+	}
+	if live == 0 {
+		t.Fatal("record run executed no tools")
+	}
+
+	rp, err := NewReplayClient(out.Transcript, out.RunID, llmkit.Capabilities{})
+	if err != nil {
+		t.Fatalf("NewReplayClient: %v", err)
+	}
+	tools, err := ReplayTools(out.Transcript, out.RunID)
+	if err != nil {
+		t.Fatalf("ReplayTools: %v", err)
+	}
+	live = 0
+	replayed, err := NewRunner(rp, tools, "sys", WithParallelTools()).Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("parallel replay diverged: %v", err)
+	}
+	if live != 0 {
+		t.Errorf("replay executed %d live tools, want 0", live)
+	}
+	if replayed.FinalText != out.FinalText || replayed.Iterations != out.Iterations {
+		t.Errorf("replay outcome = %q/%d turns, want %q/%d", replayed.FinalText, replayed.Iterations, out.FinalText, out.Iterations)
+	}
+	for _, m := range replayed.Messages {
+		if m.Role == llmkit.RoleToolResult && strings.Contains(m.Text(), errReplayDivergedMarker) {
+			t.Fatalf("replay history carries a divergence: %q", m.Text())
+		}
+	}
+}
+
+// TestObserver_SinkRefusesDuplicateAndUnsafeRunIDs pins the write-side
+// refusals: a leftover file, a duplicate live RunID, and an unsafe RunID are
+// each reported through onErr and that run's events dropped.
+func TestObserver_SinkRefusesDuplicateAndUnsafeRunIDs(t *testing.T) {
+	ctx := context.Background()
+	mkStart := func(id llmkit.RunID) llmkit.Event {
+		ev := llmkit.NewEvent(llmkit.WithRun(ctx, id), llmkit.KindStart)
+		ev.Start = &llmkit.StartEvent{Task: "t"}
+		return ev
+	}
+	mkFin := func(id llmkit.RunID) llmkit.Event {
+		ev := llmkit.NewEvent(llmkit.WithRun(ctx, id), llmkit.KindFinalize)
+		ev.Finalize = &llmkit.FinalizeEvent{}
+		return ev
+	}
+
+	t.Run("leftover file on disk", func(t *testing.T) {
+		dir := t.TempDir()
+		staleLine := `{"kind":"start","run_id":"older","schema_version":1}`
+		stale := staleLine + "\n"
+		if err := os.WriteFile(filepath.Join(dir, "rid-1-t.jsonl"), []byte(stale), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var mu sync.Mutex
+		var errs []error
+		sink := JSONL(dir, func(err error) {
+			mu.Lock()
+			defer mu.Unlock()
+			errs = append(errs, err)
+		})
+		sink.Observe(ctx, mkStart("rid-1"))
+		sink.Observe(ctx, mkFin("rid-1"))
+		got, err := os.ReadFile(filepath.Join(dir, "rid-1-t.jsonl"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != stale {
+			t.Errorf("leftover file was modified: %q", got)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if len(errs) == 0 {
+			t.Error("leftover file was not reported through onErr")
+		}
+	})
+
+	t.Run("duplicate live RunID", func(t *testing.T) {
+		dir := t.TempDir()
+		sink := JSONL(dir, nil)
+		sink.Observe(ctx, mkStart("rid-2"))
+		sink.Observe(ctx, mkStart("rid-2")) // refused
+		sink.Observe(ctx, mkFin("rid-2"))
+		if _, err := sink.Events(ctx, "rid-2"); err != nil {
+			t.Errorf("first run's record lost: %v", err)
+		}
+	})
+
+	t.Run("unsafe RunID", func(t *testing.T) {
+		dir := t.TempDir()
+		sink := JSONL(dir, nil)
+		sink.Observe(ctx, mkStart("../escape"))
+		if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+			t.Errorf("unsafe run id escaped the dir: %v", entries)
+		}
+	})
+}
+
+// TestObserver_UnknownRunSentinels pins the read-side contract: both Source
+// implementations fail with ErrUnknownRun for runs they have no record of.
+func TestObserver_UnknownRunSentinels(t *testing.T) {
+	tr := NewTranscript()
+	tr.RunID = "known"
+	if _, err := tr.Events(context.Background(), "other"); !errors.Is(err, ErrUnknownRun) {
+		t.Errorf("Transcript.Events mismatch err = %v, want ErrUnknownRun", err)
+	}
+	dir := t.TempDir()
+	if _, err := JSONL(dir, nil).Events(context.Background(), "missing"); !errors.Is(err, ErrUnknownRun) {
+		t.Errorf("JSONLSink.Events missing err = %v, want ErrUnknownRun", err)
+	}
+}
+
+// TestLoadJSONL_RecoversRunIdentity pins that a loaded transcript recovers
+// RunID/ParentRunID from the decoded events and refuses mixed ids.
+func TestLoadJSONL_RecoversRunIdentity(t *testing.T) {
+	src := NewTranscript()
+	src.RunID, src.ParentRunID = "child", "parent"
+	src.Record = append(src.Record, llmkit.Event{
+		Kind: llmkit.KindStart, RunID: "child", ParentRunID: "parent",
+		SchemaVersion: llmkit.EventSchemaVersion,
+		Start:         &llmkit.StartEvent{Task: "t"},
+	})
+	var buf bytes.Buffer
+	if err := src.SaveJSONL(&buf); err != nil {
+		t.Fatal(err)
+	}
+	orig := buf.Bytes()
+	loaded, err := LoadJSONL(&buf)
+	if err != nil {
+		t.Fatalf("LoadJSONL: %v", err)
+	}
+	if loaded.RunID != "child" || loaded.ParentRunID != "parent" {
+		t.Errorf("identity = %q/%q, want child/parent", loaded.RunID, loaded.ParentRunID)
+	}
+	var mixed bytes.Buffer
+	mixed.Write(orig)
+	mixed.WriteString(`{"kind":"start","run_id":"sneaky","schema_version":1}` + "\n")
+	if _, err := LoadJSONL(&mixed); err == nil || !strings.Contains(err.Error(), "run id") {
+		t.Errorf("mixed-id file loaded: %v", err)
+	}
 }

@@ -10,11 +10,30 @@ import (
 	"sync"
 )
 
+// ErrUnknownRun reports that a [Source] has no record of the requested run.
+// Match it with errors.Is.
+var ErrUnknownRun = errors.New("agent: unknown run")
+
+// ErrReplayDiverged reports that a replayed run's tool calls or wire
+// requests no longer match the recorded sequence. A diverged replay FAILS
+// [Runner.Run] with an error wrapping this sentinel instead of finishing
+// with a wrong answer. Match it with errors.Is.
+var ErrReplayDiverged = errors.New("agent: replay diverged")
+
+// errReplayDivergedMarker is the text a [ReplayTools] tool returns through
+// the harness's renderer, so a ReplayClient can recognize a diverged replay
+// from the conversation it is handed (see [ReplayClient.Complete]).
+const errReplayDivergedMarker = "agent: replay diverged at step "
+
 // Source is the read side of recording: the ordered events of one run.
 // [Transcript] and the JSONL sink ([JSONL]) implement it; store/sqlite does
 // in a later round. [NewReplayClient] and [ReplayTools] rebuild a run's
 // completions and tool results from any Source, so replay never depends on a
 // JSONL file existing.
+//
+// Events returns the run's events in emission order; the caller owns the
+// returned slice. A Source with no record of run returns an error wrapping
+// [ErrUnknownRun] — never an empty success.
 type Source interface {
 	// Events returns the run's events in emission order. run is the id the
 	// events carry ([llmkit.RunID]).
@@ -114,6 +133,11 @@ func NewReplayClientFromResponses(resps []llmkit.Response, caps llmkit.Capabilit
 func (rc *ReplayClient) Capabilities() llmkit.Capabilities { return rc.caps }
 
 // Complete serves the next recorded response, validating tool-call structure.
+// It also fails the replay loudly: if the request's trailing tool results
+// carry a replay-divergence rendering (a [ReplayTools] call that matched
+// nothing), Complete returns an error wrapping [ErrReplayDiverged] instead of
+// serving the next response — a diverged replay fails Run, it does not finish
+// with a wrong answer.
 func (rc *ReplayClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	if err := ctx.Err(); err != nil {
 		return llmkit.Response{}, err
@@ -135,9 +159,26 @@ func (rc *ReplayClient) Complete(ctx context.Context, req llmkit.Request) (llmki
 			return llmkit.Response{}, err
 		}
 	}
+	if n := trailingDivergence(req.Messages); n >= 0 {
+		return llmkit.Response{}, fmt.Errorf("%w: tool call %d of this turn did not match the record", ErrReplayDiverged, n)
+	}
 
 	rc.idx++
 	return step.resp, nil
+}
+
+// trailingDivergence returns the 1-based position (counting back from the
+// last message) of the first trailing tool-result carrying a replay
+// divergence rendering, or -1 when none do. Trailing means: scanning back
+// over consecutive RoleToolResult messages, the ones answering this turn's
+// calls.
+func trailingDivergence(msgs []llmkit.Message) int {
+	for i := len(msgs) - 1; i >= 0 && msgs[i].Role == llmkit.RoleToolResult; i-- {
+		if strings.HasPrefix(msgs[i].Text(), "ERROR: "+errReplayDivergedMarker) {
+			return len(msgs) - i
+		}
+	}
+	return -1
 }
 
 // trailingToolResultIDs returns the ToolCallIDs of the last n tool-result
@@ -182,14 +223,16 @@ type replayedToolCall struct {
 	denied     bool
 	denyReason string
 	step       int
+	used       bool
 }
 
-// replayToolSet is the shared cursor over a run's recorded tool calls. The
-// tools [ReplayTools] returns consume it in recorded order, one call per Run.
+// replayToolSet is the shared record of a run's tool calls. The tools
+// [ReplayTools] returns match each incoming call by (name, arguments) over
+// the UNCONSUMED set — not a strict cursor — so replay is deterministic under
+// [WithParallelTools] however the calls interleave.
 type replayToolSet struct {
 	mu    sync.Mutex
 	calls []replayedToolCall
-	idx   int
 }
 
 // ReplayTools rebuilds a recorded run's tool set from src: one [Tool] per
@@ -198,14 +241,20 @@ type replayToolSet struct {
 // [Runner] driven by a [NewReplayClient] replays a run fully offline — zero
 // live tool executions, to the same final answer.
 //
-// The tools consume the run's ToolRun events in recorded order, one call per
-// Run. A call that diverges from the record — a different name, different
-// arguments — fails with an error naming the recorded step. A recorded error
-// or policy denial is returned as a Tool error, so the Runner renders exactly
-// the text the original run fed to the model.
+// Each call is matched by (name, arguments) against the UNCONSUMED recorded
+// calls — not a strict cursor — so a replay under [WithParallelTools] is
+// deterministic however the calls interleave. A call with no unconsumed match
+// fails with an error wrapping [ErrReplayDiverged] naming the recorded step;
+// the harness renders it as that call's ERROR result, and [ReplayClient]
+// turns it into a Run failure on the next completion. A recorded error or
+// policy denial is served as a Tool error re-rendered to the recorded text;
+// the denial FACT itself is not replayable (a replayed run runs no policy),
+// so the re-recorded ToolRun event carries IsError with the rendered denial
+// text rather than Denied.
 //
-// A run that recorded no tool calls yields a nil tool set and no error: the
-// natural tool set for replaying it is the empty one.
+// A run that exists and recorded no tool calls yields a nil tool set and no
+// error: the natural tool set for replaying it is the empty one. An unknown
+// run fails with an error wrapping [ErrUnknownRun].
 func ReplayTools(src Source, run llmkit.RunID) ([]Tool, error) {
 	if src == nil {
 		return nil, errors.New("agent: nil event source")
@@ -254,24 +303,44 @@ func (t replayTool) Def() llmkit.ToolDef {
 	return llmkit.ToolDef{Name: t.name}
 }
 
-// Run serves the next recorded call for this tool's name. A name, argument,
-// or sequence divergence fails with an error naming the recorded step, which
-// the Runner feeds back as data — the divergence is the test failure to read.
+// Run serves one recorded call for this tool's name: the earliest unconsumed
+// recorded call matching BOTH the name and the arguments. No match means the
+// replay diverged — the returned error wraps [ErrReplayDiverged] naming the
+// recorded step, and the Runner renders it as that call's ERROR result (the
+// divergence is the test failure to read; [ReplayClient] converts it into a
+// Run failure on the next completion).
 func (t replayTool) Run(_ context.Context, args json.RawMessage) (string, error) {
 	s := t.set
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.idx >= len(s.calls) {
-		return "", fmt.Errorf("agent: replay exhausted after %d recorded tool call(s); request sequence diverged (extra call to %q)", len(s.calls), t.name)
+	match := -1
+	for i := range s.calls {
+		if s.calls[i].used || s.calls[i].call.Name != t.name {
+			continue
+		}
+		if argsEqual(s.calls[i].call.Arguments, args) {
+			match = i
+			break
+		}
 	}
-	rec := s.calls[s.idx]
-	s.idx++
-	if rec.call.Name != t.name {
-		return "", fmt.Errorf("agent: replay diverged at step %d: recorded tool call %q (%s), requested %q", rec.step, rec.call.Name, rec.call.ID, t.name)
+	if match < 0 {
+		// Name the earliest unconsumed recorded call for this tool (the one
+		// the replay "should have" made); none left means extra calls.
+		step := -1
+		want := ""
+		for i := range s.calls {
+			if !s.calls[i].used && s.calls[i].call.Name == t.name {
+				step, want = s.calls[i].step, argsString(s.calls[i].call.Arguments)
+				break
+			}
+		}
+		if step < 0 {
+			return "", fmt.Errorf("%w at step ?: tool %q called with arguments %s, but every recorded call for it is already served (%d recorded)", ErrReplayDiverged, t.name, argsString(args), len(s.calls))
+		}
+		return "", fmt.Errorf("%w at step %d: tool %q called with arguments %s, recorded %s", ErrReplayDiverged, step, t.name, argsString(args), want)
 	}
-	if !argsEqual(rec.call.Arguments, args) {
-		return "", fmt.Errorf("agent: replay diverged at step %d: tool %q called with arguments %s, recorded %s", rec.step, t.name, args, rec.call.Arguments)
-	}
+	rec := &s.calls[match]
+	rec.used = true
 	switch {
 	case rec.denied:
 		// Re-render through the harness so the model-visible text matches the
@@ -285,4 +354,12 @@ func (t replayTool) Run(_ context.Context, args json.RawMessage) (string, error)
 	default:
 		return rec.result, nil
 	}
+}
+
+// argsString renders raw JSON arguments for a divergence message.
+func argsString(args json.RawMessage) string {
+	if len(args) == 0 {
+		return "(none)"
+	}
+	return string(args)
 }
