@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/dpoage/llmkit"
 )
@@ -15,23 +16,26 @@ import (
 // The event inherits llmkit.Event.RunID and llmkit.Event.SpanID from the
 // call's context (llmkit.NewEvent); Observe never mints a span — only
 // Completion emitters do. Populated fields:
-//
-//   - Backend: the concrete backend — "cli", "bwrap", "host", or "mock"
-//     for this package's own types (the same names
-//     UnsupportedSpecError.Backend uses); any other implementation is
-//     named by its Go type.
-//   - Command: Spec.Cmd.
+//   - Backend: the concrete backend — "cli", "bwrap", and "host" match
+//     UnsupportedSpecError.Backend; "mock" is this package's own name for
+//     the backend that refuses nothing; any other implementation is named
+//     by its Go type.
+//   - Command: Spec.Cmd, copied — the event outlives the call, and the
+//     caller owns the Spec's backing arrays.
 //   - ExitCode: the command's own exit code; -1 when the process never ran
 //     to an exit — an infrastructure failure (Err non-empty) or a watchdog
 //     kill. Check Result.InfraKilled on the returned Result before
 //     classifying a verdict; the event records the summary, not the kill
 //     reason.
-//   - StdoutBytes / StderrBytes: the captured Result.Stdout /
-//     Result.Stderr lengths (the post-truncation capture size).
+//   - StdoutBytes / StderrBytes: the lengths of the captured
+//     Result.Stdout / Result.Stderr text — including the truncation
+//     marker the backend appends, so a truncated stream can exceed the
+//     capture cap.
 //   - Truncated: Result.StdoutTruncated or Result.StderrTruncated — either
 //     stream was cut off at the capture cap.
-//   - Duration: Result.Duration, the execution's measured wall time; 0 when
-//     an infrastructure failure produced no Result.
+//   - Duration: Result.Duration, the execution's measured wall time; 0
+//     whenever the backend measured none — an infrastructure failure
+//     produced no Result, and a scripted Mock may report none.
 //   - Err: the infrastructure error's text, non-empty exactly when Exec
 //     returned an error. A non-zero exit code is the command's own verdict
 //     and is never an error (see the Sandbox contract).
@@ -65,8 +69,10 @@ func (w *observedSandbox) Exec(ctx context.Context, spec Spec) (Result, error) {
 	ev := llmkit.NewEvent(ctx, llmkit.KindExec)
 	ev.Duration = res.Duration
 	ev.Exec = &llmkit.ExecEvent{
-		Backend:     backendName(w.inner),
-		Command:     spec.Cmd,
+		Backend: backendName(w.inner),
+		// The event outlives the call: a sink may retain it, and the
+		// caller owns (and may reuse) spec.Cmd's backing array.
+		Command:     slices.Clone(spec.Cmd),
 		ExitCode:    execExitCode(res, err),
 		StdoutBytes: int64(len(res.Stdout)),
 		StderrBytes: int64(len(res.Stderr)),
@@ -81,11 +87,13 @@ func (w *observedSandbox) MaterializeWorkspace(repoDir string) (string, error) {
 	return w.inner.MaterializeWorkspace(repoDir)
 }
 
-// backendName names the backend for llmkit.ExecEvent.Backend: the same
-// strings UnsupportedSpecError.Backend uses for this package's own
-// backends, and the Go type for any other implementation.
+// backendName names the backend for llmkit.ExecEvent.Backend: "cli",
+// "bwrap", and "host" match UnsupportedSpecError.Backend; "mock" is this
+// package's own name for the backend that refuses nothing; a wrapped
+// backend reports its inner backend; any other implementation is named by
+// its Go type.
 func backendName(s Sandbox) string {
-	switch s.(type) {
+	switch t := s.(type) {
 	case *CLI:
 		return "cli"
 	case *Bwrap:
@@ -94,6 +102,8 @@ func backendName(s Sandbox) string {
 		return "host"
 	case *Mock:
 		return "mock"
+	case *observedSandbox:
+		return backendName(t.inner)
 	default:
 		return fmt.Sprintf("%T", s)
 	}

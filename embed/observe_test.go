@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"unsafe"
 
 	"github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/embed"
@@ -126,8 +127,8 @@ func TestObserveEmbedErrorStillEmitsAndPassesThrough(t *testing.T) {
 	ctx := llmkit.WithRun(context.Background(), llmkit.NewRunID())
 
 	vec, err := emb.Embed(ctx, "hello")
-	if !errors.Is(err, boom) {
-		t.Fatalf("Embed err = %v, want the scripted error", err)
+	if err != boom || !errors.Is(err, boom) {
+		t.Fatalf("Embed err = %v, want the identical scripted error", err)
 	}
 	if vec != nil {
 		t.Fatalf("vec = %v, want nil on error", vec)
@@ -273,4 +274,75 @@ func ExampleObserve() {
 	}
 	// Output:
 	// embed model=fake-model inputs=1 dims=3 err=""
+}
+
+func TestObserveEmbedBatchErrorStillEmits(t *testing.T) {
+	boom := errors.New("boom")
+	log := &eventLog{}
+	emb := embed.Observe(&scriptedEmbedder{err: boom, dims: 11}, log)
+
+	vecs, err := emb.EmbedBatch(context.Background(), []string{"a", "b", "c"})
+	if err != boom || !errors.Is(err, boom) {
+		t.Fatalf("EmbedBatch err = %v, want the identical scripted error", err)
+	}
+	if vecs != nil {
+		t.Fatalf("vecs = %v, want nil on error", vecs)
+	}
+
+	evs := log.events()
+	if len(evs) != 1 {
+		t.Fatalf("got %d events, want exactly 1 (a failed batch still emits)", len(evs))
+	}
+	e := evs[0].Embed
+	if e.Err != boom.Error() {
+		t.Errorf("Err = %q, want %q", e.Err, boom.Error())
+	}
+	if e.Inputs != 3 {
+		t.Errorf("Inputs = %d, want 3 (the requested input count)", e.Inputs)
+	}
+	if e.Dimensions != 11 {
+		t.Errorf("Dimensions = %d, want 11 (the embedder's own report on error)", e.Dimensions)
+	}
+	if evs[0].Duration <= 0 {
+		t.Errorf("Duration = %v, want > 0", evs[0].Duration)
+	}
+}
+
+func TestObservePassThroughFidelity(t *testing.T) {
+	log := &eventLog{}
+	inner := &scriptedEmbedder{vec: []float32{0.1, 0.2, 0.3}}
+	emb := embed.Observe(inner, log)
+
+	vec, err := emb.Embed(context.Background(), "hello")
+	if err != nil || len(vec) != 3 {
+		t.Fatalf("Embed = %v, %v", vec, err)
+	}
+	if unsafe.SliceData(vec) != unsafe.SliceData(inner.vec) {
+		t.Errorf("Embed returned a copied vector; want the inner embedder's slice itself")
+	}
+
+	vecs, err := emb.EmbedBatch(context.Background(), []string{"a", "b"})
+	if err != nil || len(vecs) != 2 {
+		t.Fatalf("EmbedBatch = %v, %v", vecs, err)
+	}
+	for i, v := range vecs {
+		if unsafe.SliceData(v) != unsafe.SliceData(inner.vec) {
+			t.Errorf("batch row %d is a copy; want the inner embedder's vector", i)
+		}
+	}
+}
+
+func TestObservePassesCallerCtxToObserver(t *testing.T) {
+	type marker struct{}
+	var got any
+	obs := llmkit.ObserverFunc(func(ctx context.Context, _ llmkit.Event) {
+		got = ctx.Value(marker{})
+	})
+	emb := embed.Observe(&scriptedEmbedder{vec: []float32{0.1}}, obs)
+
+	ctx := context.WithValue(context.Background(), marker{}, "present")
+	_, _ = emb.Embed(ctx, "hello")
+	if got != "present" {
+		t.Errorf("observer saw ctx value %v, want \"present\" — the observer must receive the caller's context", got)
+	}
 }
