@@ -218,6 +218,24 @@ func (a *anthropicAdapter) buildParams(req llmkit.Request) (anthropic.MessageNew
 	// JSON, which Complete surfaces as Response.Text. Only valid when the
 	// caller didn't supply user tools (structuredOutputToolName gates this).
 	if toolName, ok := structuredOutputToolName(req, a.caps); ok {
+		// Anthropic rejects forced tool use under extended thinking:
+		// "tool use with manual extended thinking ... only supports
+		// tool_choice auto or none ... Using tool_choice: {"type": "any"}
+		// or tool_choice: {"type": "tool", "name": "..."} results in an
+		// error" (https://platform.claude.com/docs/en/build-with-claude/
+		// thinking, "Thinking with tool use"). The synthetic tool is
+		// exactly a forced tool_choice, so a request that also enables
+		// thinking is a guaranteed remote 400 — refuse it locally, in the
+		// same ErrInvalidRequest class as the other pre-wire refusals.
+		// When caps.Thinking is false the thinking config is dropped below
+		// and the combination stays legal.
+		if req.Thinking != nil && a.caps.Thinking {
+			return anthropic.MessageNewParams{}, &llmkit.APIError{
+				Kind:     llmkit.ErrInvalidRequest,
+				Provider: "anthropic",
+				Message:  "Thinking and ResponseSchema cannot be combined: tool use with thinking only supports tool_choice auto or none, and ResponseSchema forces tool_choice to the " + toolName + " tool",
+			}
+		}
 		// Mirror toAnthropicTool's schema unwrapping via the shared helper
 		// so the synthetic tool gets the same ToolInputSchemaParam shape
 		// the SDK would receive for a user tool.
@@ -545,6 +563,10 @@ func anthropicAssistantBlocks(m llmkit.Message) ([]anthropic.ContentBlockParamUn
 // verbatim: the thinking text and signature (or the redacted payload) are
 // decoded from Raw — the provider's wire block — and sent back through the
 // SDK's typed params, so the next request carries the same signed reasoning.
+// Raw that decodes to a thinking block without a signature is refused
+// pre-wire: the API verifies the signature when a thinking block is passed
+// back (https://platform.claude.com/docs/en/build-with-claude/thinking,
+// "Thinking encryption"), so an unsigned block can only fail remotely.
 func anthropicThinkingBlock(b llmkit.Block) (anthropic.ContentBlockParamUnion, error) {
 	var probe struct {
 		Type      string `json:"type"`
@@ -595,6 +617,21 @@ func anthropicThinkingBlock(b llmkit.Block) (anthropic.ContentBlockParamUnion, e
 			Kind:     llmkit.ErrInvalidRequest,
 			Provider: "anthropic",
 			Message:  "thinking block: Raw decodes to an empty payload; the verbatim provider payload is required",
+		}
+	}
+	// Every thinking block the API emits carries a signature, and the API
+	// verifies it on replay (URL in the anthropicThinkingBlock doc
+	// comment). After the empty-payload guard above, an empty signature
+	// means thinking text without one — e.g. a hand-built
+	// {"type":"thinking","thinking":"why"} — which would go out unsigned
+	// and fail remotely. Fail locally instead, in the same
+	// ErrInvalidRequest class. A block with an empty thinking field and a
+	// live signature (the display "omitted" wire shape) still replays.
+	if probe.Signature == "" {
+		return anthropic.ContentBlockParamUnion{}, &llmkit.APIError{
+			Kind:     llmkit.ErrInvalidRequest,
+			Provider: "anthropic",
+			Message:  "thinking block: Raw decodes to an unsigned thinking payload; the signature is verified on replay, so the signed provider payload is required",
 		}
 	}
 	return anthropic.ContentBlockParamUnion{

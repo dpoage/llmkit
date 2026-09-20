@@ -48,6 +48,15 @@ entry below is marked.
   assistant history. The agent additionally appends surfaced text to
   history when a client's `Blocks` omit any text block, so history can no
   longer diverge from what `llmkit.Stream` delivered.
+- Anthropic adapter: a request combining `Thinking` and `ResponseSchema` now
+  fails locally with `ErrInvalidRequest` before any wire call; previously it
+  was sent with extended thinking plus the synthetic structured-output tool's
+  forced `tool_choice`, a combination Anthropic rejects with a 400 (tool use
+  with thinking only supports `tool_choice` auto or none).
+- Anthropic adapter: a replayed thinking block whose `Raw` decodes to
+  thinking text without a `signature` now fails locally with
+  `ErrInvalidRequest`; previously the unsigned block was forwarded and the
+  API, which verifies thinking signatures on replay, rejected it remotely.
 
 ## [0.4.0] - 2026-09-19
 
