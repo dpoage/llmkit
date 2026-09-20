@@ -21,6 +21,45 @@ entry below is marked.
   extracted from `embed`, so `embed` and `decide` share one implementation.
   Internal package; no caller-facing change; `embed` behavior is unchanged.
 
+### Fixed
+
+- `llmkit.Stream` now emits one `DeltaText` from `Response.Text` when
+  `Response.Blocks` carries no text block; previously a Complete-only client
+  returning a text-only response — including `agent.ReplayClient` replaying a
+  recorded run — fired `Hooks.Delta` zero times for the reply text.
+- `agent.RunJSON`: errors wrapping `ErrUnparseableOutput` no longer carry a
+  doubled `agent: agent:` prefix.
+- Google adapter: an assistant thinking block whose `Raw` is `null` or `{}`
+  padded with JSON whitespace is skipped on replay instead of being sent as
+  an empty part.
+- Anthropic adapter: a thinking block whose `Raw` carries nothing replayable —
+  missing, `null` or whitespace-only (with or without JSON-whitespace
+  padding), or a JSON payload that decodes to an empty thinking/redacted
+  block (`{}`, `{"type":"thinking"}`) — now fails locally with
+  `ErrInvalidRequest` before any wire call; previously such a block slipped
+  past the guard and emitted an empty unsigned thinking block the API
+  rejects remotely.
+- Anthropic adapter: structured-output finalize appends the surfaced
+  tool-call arguments as a `BlockText`; previously such completions returned
+  `Response.Text` with no text block (`Blocks` empty, or only a thinking
+  block), violating the Response
+  invariant (Text equals the concatenation of `BlockText` blocks) for every
+  consumer that reads `Blocks` — transcripts, replay, and the agent's
+  assistant history. The agent additionally appends surfaced text to
+  history when a client's `Blocks` omit any text block, so history can no
+  longer diverge from what `llmkit.Stream` delivered.
+- Anthropic adapter: a request combining `Thinking` with forced tool use now
+  fails locally with `ErrInvalidRequest` before any wire call — whether the
+  force comes from the synthetic structured-output tool (`ResponseSchema`) or
+  from an explicit `ToolChoice` of `required` or a named `tool`; previously
+  such requests were sent with manual extended thinking plus a forced
+  `tool_choice`, a combination Anthropic rejects with a 400 (forced tool use
+  only supports `tool_choice` auto or none under manual extended thinking).
+- Anthropic adapter: a replayed thinking block whose `Raw` decodes to
+  thinking text without a `signature` now fails locally with
+  `ErrInvalidRequest`; previously the unsigned block was forwarded even
+  though the API verifies thinking signatures on replay.
+
 ## [0.4.0] - 2026-09-19
 
 ### Added

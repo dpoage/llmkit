@@ -733,10 +733,21 @@ func stitchContinuation(head, cont string) string {
 // exact bytes they issued (signed on Anthropic): rebuilding the message from
 // resp.Text alone would drop them and break every later turn of a
 // thinking+tools loop. A response with no blocks degrades to the single-text
-// form.
+// form. A response whose blocks omit any text block while resp.Text is
+// non-empty violates the llmkit.Response invariant (Text equals the
+// concatenation of BlockText blocks); the surfaced text is appended so the
+// history this Runner records always carries what llmkit.Stream delivered.
+// Think-only responses (Text == "") stay verbatim — no empty text block is
+// invented.
 func assistantMessage(resp llmkit.Response) llmkit.Message {
 	if len(resp.Blocks) > 0 {
-		return llmkit.Message{Role: llmkit.RoleAssistant, Content: resp.Blocks}
+		blocks := resp.Blocks
+		if resp.Text != "" && !slices.ContainsFunc(blocks, func(b llmkit.Block) bool {
+			return b.Kind == llmkit.BlockText
+		}) {
+			blocks = append(slices.Clone(blocks), llmkit.Block{Kind: llmkit.BlockText, Text: resp.Text})
+		}
+		return llmkit.Message{Role: llmkit.RoleAssistant, Content: blocks}
 	}
 	return llmkit.TextMessage(llmkit.RoleAssistant, resp.Text)
 }

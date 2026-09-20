@@ -370,3 +370,34 @@ func TestDelta_HookPanicPropagates(t *testing.T) {
 		t.Errorf("calls after panic: Stream=%d Complete=%d, want 1 and 0 (the panic must abort the run mid-stream)", streams, completes)
 	}
 }
+
+// TestDelta_MaxTokensContinuationStitchesAcrossSteps pins the delta shape of
+// a max-tokens continuation: the truncated completion and its continuation
+// each consume their OWN hook step, while FinalText is the stitched text
+// across both. This is why a consumer concatenating one step's deltas cannot
+// expect equality with FinalText on multi-step runs — FinalText ends with
+// the continuation's streamed text, and only the overlap the continuation
+// re-emitted is trimmed from the stitch.
+func TestDelta_MaxTokensContinuationStitchesAcrossSteps(t *testing.T) {
+	fc := &streamFakeClient{fakeClient: newFakeClient(
+		maxTokensResp("AAA", 5, 5),
+		textResp("BBB", 5, 5),
+	)}
+	rec := &deltaRecorder{}
+	r := NewRunner(fc, nil, "sys", WithHooks(rec.hooks()))
+
+	out, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out.FinalText != "AAABBB" {
+		t.Errorf("FinalText = %q, want the stitched %q", out.FinalText, "AAABBB")
+	}
+	want := []deltaHit{
+		{1, llmkit.Delta{Kind: llmkit.DeltaText, Text: "AAA"}},
+		{2, llmkit.Delta{Kind: llmkit.DeltaText, Text: "BBB"}},
+	}
+	if !reflect.DeepEqual(rec.hits, want) {
+		t.Errorf("deltas = %+v, want one text fragment per step under distinct steps", rec.hits)
+	}
+}
