@@ -19,7 +19,8 @@
 //	{"model": "<versioned id>", "answers": {<id>: ...}, "usage": {"input_tokens", "output_tokens"}}
 //
 // There is no batching endpoint, no streaming, and no GET /v1/models in this
-// round: one Ask is one HTTP request.
+// round: one Ask is one logical request, though retries may put several HTTP
+// requests on the wire (see Retries).
 //
 // # Questions
 //
@@ -45,7 +46,8 @@
 // Levels and Probabilities are index-aligned slices ordered by the server's
 // legend index ("0".."n-1"), with n equal to the number of levels asked for.
 // Probabilities are passed through exactly as reported — no renormalization,
-// no argmax recomputation.
+// no argmax recomputation. Response maps stay nil for question kinds the Ask
+// did not include.
 //
 // # Errors
 //
@@ -64,26 +66,34 @@
 //	other 4xx            -> ErrInvalidRequest
 //	transport failure    -> ErrServer (StatusCode 0)
 //
-// A response that violates the answer contract — a missing or extra answer,
-// a type that does not match its question, a sparse legend — is a server
-// contract violation: Kind ErrServer with StatusCode 200. Pre-wire
-// validation failures (nil state, empty question id, nil instructions, a
-// Choice without options, a Score with fewer than two levels, a JSON number
-// or boolean where only text kinds are accepted) never touch the network
-// and wrap llmkit.ErrInvalidRequest. Error messages carry the vendor body
-// text truncated to 200 characters; llmkit never places the API key into an
-// error.
+// A response that violates the answer contract — a missing model or usage
+// block, a missing or extra answer, a type that does not match its
+// question, a sparse legend — is a server contract violation: Kind ErrServer
+// with StatusCode 200, returned after the first attempt without retrying.
+// Pre-wire validation failures (nil state, empty question id, nil
+// instructions, a Choice without options, a Score with fewer than two
+// levels, a JSON number or boolean where only text kinds are accepted)
+// never touch the network and wrap llmkit.ErrInvalidRequest. Error messages
+// carry the vendor body text truncated to 200 characters; llmkit never
+// places the API key into an error.
 //
 // # Retries
 //
-// Ask retries 429, 529, other 5xx, and timeout-classified transport errors
-// through the shared internal loop: each attempt runs under a per-attempt
-// RequestTimeout deadline, a server Retry-After replaces the exponential
-// backoff and is capped at MaxDelay, and parent cancellation is always
-// terminal. Unset knobs resolve at construction to the decide defaults — 3
-// attempts and a 30s per-attempt timeout (Jev answers in under a second) —
-// with BaseDelay and MaxDelay from [llmkit.DefaultRetryConfig] and Jitter
-// taken literally (explicit 0 means no jitter).
+// Ask retries HTTP 429, every 5xx (529 included), and timeout-classified
+// transport errors through the shared internal loop: each attempt runs
+// under a per-attempt RequestTimeout deadline, and parent cancellation is
+// always terminal. The Retry-After header is parsed for every status; when
+// a status is retried, a server-supplied delay replaces the exponential
+// backoff and is capped at MaxDelay, and a present header whose delay
+// clamps to zero (a zero value or a past HTTP-date) means an immediate
+// retry. One Ask may therefore issue several HTTP requests. Every other
+// status — and a 200 response that violates the answer contract — is
+// terminal and returned after the first attempt.
+//
+// Unset knobs resolve at construction to the decide defaults — 3 attempts
+// and a 30s per-attempt timeout (Jev answers in under a second) — with
+// BaseDelay and MaxDelay from [llmkit.DefaultRetryConfig] and Jitter taken
+// literally (explicit 0 means no jitter).
 //
 // # Vendor limits and jaggedness
 //
