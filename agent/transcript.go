@@ -134,17 +134,21 @@ func LoadJSONL(r io.Reader) (*Transcript, error) {
 //	Start, no entry:    create the directory, create the file O_EXCL and
 //	                    write the Start line, all under the sink lock: the
 //	                    live entry is published only once its file exists
-//	                    and holds that line. A failed create instead
-//	                    installs a retired entry — onErr once ("leftover
-//	                    file …; run refused" when the file already exists,
-//	                    the open error otherwise) and the rest of this
-//	                    run's events drop silently.
-//	Start, entry live:  onErr ("duplicate Start for live run") and the entry
-//	                    is poisoned: its fd closes, and from there BOTH
-//	                    runs' events drop silently. The file keeps the first
-//	                    run's prefix — and because that file now exists,
-//	                    every later Start for the id is refused as a
-//	                    leftover, so no second run can write into it.
+//	                    and holds that line — unless the encode itself
+//	                    failed, the one way a created file can end up
+//	                    without it. A failed create instead installs a
+//	                    retired entry — onErr once ("leftover file …; run
+//	                    refused" when the file already exists, "mkdir …" or
+//	                    "open …" otherwise) and the rest of this run's
+//	                    events drop silently.
+//	Start, entry exists: onErr ("duplicate Start for run …; already
+//	                    recorded or refused") and the entry is poisoned: a
+//	                    live run's fd closes, an already-retired one stays
+//	                    retired, and from there BOTH runs' events drop
+//	                    silently. The file keeps the first run's prefix —
+//	                    and because that file now exists, every later Start
+//	                    for the id is refused as a leftover, so no second
+//	                    run can write into it.
 //	Non-Start, no entry: onErr ("event for unknown or closed run") and drop.
 //	                    Every occurrence reports — a harness bug is loud.
 //	Non-Start, live:    written.
@@ -156,10 +160,9 @@ func LoadJSONL(r io.Reader) (*Transcript, error) {
 //
 // Everything is best-effort and never fails a run: refusals and write
 // failures flow to the onErr callback given at construction, path-qualified
-// so an operator can tell WHICH file stopped being written. onErr may be
-// nil, and never runs under a sink lock. An encode failure drops the single
-// line and keeps the run live — the one way a created file can end up
-// without its Start line.
+// so an operator can tell WHICH file stopped being written. An encode
+// failure drops the single line and keeps the run live. onErr may be nil,
+// and never runs under a sink lock — it may even call back into the sink.
 //
 // A JSONLSink is safe for concurrent use: events from concurrent runs on one
 // [Runner] multiplex by [llmkit.RunID], each run writing under its own lock.
@@ -277,11 +280,13 @@ func (s *JSONLSink) startRun(ev llmkit.Event) {
 func (s *JSONLSink) admit(ev llmkit.Event, path string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if live, exists := s.runs[ev.RunID]; exists {
+	if prior, exists := s.runs[ev.RunID]; exists {
 		// Duplicate Start: poison the entry. Both runs drop from here and
-		// the file keeps the first run's prefix.
-		live.retire()
-		return errors.New("duplicate Start for live run")
+		// the file keeps the first run's prefix. The entry need not be
+		// live — a refused or already-poisoned run holds one too, until
+		// its Finalize — so the refusal does not claim it is.
+		prior.retire()
+		return fmt.Errorf("duplicate Start for run %s; already recorded or refused", ev.RunID)
 	}
 	if err := os.MkdirAll(s.dir, 0o755); err != nil {
 		s.runs[ev.RunID] = &jsonlRun{path: path} // retired: reported once, then silent
@@ -364,6 +369,11 @@ func safeRunID(id llmkit.RunID) bool {
 // file mixing run ids is an error naming file and line, an empty record
 // wraps [ErrUnknownRun], and a record holding more than one Start is an
 // error naming the run — one RunID is one run.
+//
+// Read a run once it has finalized. The sink streams a line per event, and
+// nothing synchronizes this read against a write in flight, so a read that
+// races an append can decode a torn last line and fail. A finalized run's
+// file is complete and closed.
 func (s *JSONLSink) Events(_ context.Context, run llmkit.RunID) ([]llmkit.Event, error) {
 	if !safeRunID(run) {
 		return nil, fmt.Errorf("agent: run id %q is not a safe filename component: %w", run, ErrUnknownRun)
