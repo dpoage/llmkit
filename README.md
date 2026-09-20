@@ -1,8 +1,9 @@
 # llmkit
 
 llmkit is a Go toolkit for LLM applications. It ships a provider-agnostic
-completion client, a tool-calling agent loop, sandboxed command execution, and
-embeddings. One normalized vocabulary covers Anthropic, OpenAI, Google Gemini,
+completion client, a tool-calling agent loop, sandboxed command execution,
+embeddings, and TypeSafe Jev decisions. One normalized vocabulary covers
+Anthropic, OpenAI, Google Gemini,
 and any OpenAI-compatible endpoint.
 
 ## Install
@@ -28,6 +29,9 @@ export LLMKIT_API_KEY=ollama                       # any non-empty placeholder
 
 The programs under `examples/` are the runnable counterparts of the first
 two snippets; run them once the variables are set.
+
+Decisions are a separate, non-chat surface: the `decide` package asks TypeSafe
+Jev questions about a state. See [decide](docs/decide.md).
 
 ### Complete a request
 
@@ -107,26 +111,30 @@ resp, err = llmkit.Stream(context.Background(), client, req,
 | [`sandbox`](https://pkg.go.dev/github.com/dpoage/llmkit/sandbox) | Isolated execution of untrusted commands: Bubblewrap, container CLIs, `HostExec`, `Mock`. | [sandbox](docs/sandbox.md) |
 | [`fsroot`](https://pkg.go.dev/github.com/dpoage/llmkit/fsroot) | Path containment for agent file tools. | [sandbox](docs/sandbox.md) |
 | [`embed`](https://pkg.go.dev/github.com/dpoage/llmkit/embed) | Embeddings: Ollama and OpenAI-compatible backends, batching, retry, least-recently-used (LRU) cache. | [reference](https://pkg.go.dev/github.com/dpoage/llmkit/embed) |
+| [`decide`](https://pkg.go.dev/github.com/dpoage/llmkit/decide) | Decisions with TypeSafe's Jev model: `noul`, `choice`, and `score` questions over a state; calibrated probabilities and confidence. | [decide](docs/decide.md) |
 
 ## Examples
 
-Four runnable programs live under `examples/`:
+Five runnable programs live under `examples/`:
 
 - `examples/basic` — one completion with content blocks and capability gating.
 - `examples/agent` — the agent loop with hooks, a tool policy, and optional parallel dispatch.
 - `examples/structured` — schema-constrained output with `RunJSONAs`.
 - `examples/chat` — a multi-turn read–eval–print loop (REPL) with mid-run steering.
+- `examples/decide` — one mixed `Ask` (noul, choice, score) against TypeSafe Jev.
 
-All four read `LLMKIT_PROVIDER`, `LLMKIT_MODEL`, and `LLMKIT_API_KEY`
-(`LLMKIT_BASE_URL` is required for `openai-compatible`, optional otherwise).
-With the variables unset, an example prints its usage and exits 1 without
-touching the network.
+The first four read `LLMKIT_PROVIDER`, `LLMKIT_MODEL`, and `LLMKIT_API_KEY`
+(`LLMKIT_BASE_URL` is required for `openai-compatible`, optional otherwise);
+`examples/decide` reads `LLMKIT_TYPESAFE_API_KEY` and `LLMKIT_TYPESAFE_MODEL`,
+with `LLMKIT_TYPESAFE_BASE_URL` optional. With a required variable unset, an
+example prints its usage and exits 1 without touching the network.
 
 ```bash
 go run ./examples/basic --image path/to/photo.jpg
 go run ./examples/agent --parallel
 go run ./examples/structured
 go run ./examples/chat
+go run ./examples/decide
 ```
 
 ## Documentation
@@ -137,6 +145,7 @@ go run ./examples/chat
 - [docs/capabilities.md](docs/capabilities.md) — what `Capabilities` reports and enforces.
 - [docs/agent-loop.md](docs/agent-loop.md) — the `agent.Runner` loop, policies, hooks, steering.
 - [docs/sandbox.md](docs/sandbox.md) — sandbox backends, threat model, and `fsroot`.
+- [docs/decide.md](docs/decide.md) — the `decide` package: TypeSafe Jev decisions, vendor limits, and the live lane.
 - [docs/testing.md](docs/testing.md) — the test suites and how to run them.
 
 ## Testing
