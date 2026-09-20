@@ -99,13 +99,14 @@ With the variables unset, an example prints its usage and exits without touching
 
 ```mermaid
 flowchart LR
-    C[Caller] --> S[serialize<br/>WithSerializedToolCalls] --> R[recorder<br/>WithRecorder] --> T[retry<br/>WithRetry] --> A[adapter<br/>vendor SDK]
+    C[Caller] --> S[serialize<br/>WithSerializedToolCalls] --> R[recorder<br/>WithRecorder] --> T[retry<br/>WithRetryObserver<br/>Attempt events] --> A[adapter<br/>vendor SDK]
 ```
 
 The order decides who sees what:
 
 - Usage is recorded only for the final successful attempt (the recorder sits outside the retry wrapper).
 - The retry wrapper sees raw adapter errors, so its classification and `Retry-After` handling stay accurate.
+- With `Options.Observer` set, the retry stage emits one `Attempt` event per wire call, failures included — it is the only layer that sees attempt boundaries.
 - Models without parallel tool calls have their multi-call responses truncated to one call before your loop sees them (`WithSerializedToolCalls` is a no-op on parallel-capable providers, so wrapping unconditionally is safe).
 
 All three decorators compose over streaming: retry stops once a delta is delivered, the recorder reports the final streamed response, and serialization drops tool-call deltas for any index beyond the first.
@@ -114,10 +115,28 @@ All three decorators compose over streaming: retry stops once a delta is deliver
 
 | Field | Effect | Default |
 |---|---|---|
-| `Retry` | Retry policy for `WithRetry`. A zero `MaxAttempts` selects the default policy. | 4 attempts, 500 ms base delay, 30 s cap, 20% jitter, 5 m per-attempt timeout (`retry.Default`) |
+| `Retry` | Retry policy for the retry wrapper. A zero `MaxAttempts` selects the default policy. | 4 attempts, 500 ms base delay, 30 s cap, 20% jitter, 5 m per-attempt timeout (`retry.Default`) |
 | `Recorder` | Receives a `llmkit.UsageEvent` after each successful completion. | nil (no recording) |
-| `Provider` | Overrides the provider tag on usage events; set it when your ledger keys on a config name. | `string(spec.Type)` |
+| `Observer` | Receives one `llmkit.AttemptEvent` per provider attempt (failures included) from the retry stage, tagged with the resolved provider name and model. `New` emits no `Completion` events — see the next section. | nil (no attempt events) |
+| `Provider` | Overrides the provider tag on usage and attempt events; set it when your ledger keys on a config name. | `string(spec.Type)` |
 | `HTTPClient` | Overrides the transport the SDKs use; for `httptest` and proxies. | SDK default |
+
+## Observing completions and attempts
+
+`Options.Observer` puts an `llmkit.Observer` inside the retry stage: it receives one `Attempt` event per wire call — failures included — numbered from 1, so a sink can watch flakiness without counting spend twice. `New` never emits `Completion` events: the outermost layer owns that one. For a bare client, wrap the constructed client with `llmkit.Observe`, which emits exactly one `Completion` event per logical call — the request as received, the final response (on the stream path assembled from the same synthesis `llmkit.Stream` performs) or the error text:
+
+```go
+var events []llmkit.Event
+obs := llmkit.ObserverFunc(func(ctx context.Context, ev llmkit.Event) {
+    events = append(events, ev)
+})
+client, err := provider.New(ctx, spec, provider.Options{Observer: obs})
+observed := llmkit.Observe(client, obs, "anthropic", spec.Model)
+```
+
+`llmkit.Observe` mints a fresh span per logical completion and stamps it into the context it hands the client, so every `Attempt` event joins its `Completion` event on `ev.SpanID`; a nested completion (a tool calling the model) gets its own span. Because the observer sits below the serializer, an `Attempt` event shows the raw adapter response while the `Completion` event shows the truncated response your loop sees.
+
+If the same client runs inside an `agent.Runner`, do not wrap it with `llmkit.Observe`: the Runner emits `Completion` events itself (with `Step` set), and double-wrapping records every completion twice. Pass the durable sink to the Runner instead.
 
 ## Error normalization
 
