@@ -146,7 +146,14 @@ func writeFixture(path string, f *Fixture, secret string) error {
 			f.RequestCheck = RequestCheckResponseOnly
 		}
 	}
-	b, err := json.MarshalIndent(f, "", "  ")
+	return writeSecretFree(path, f, secret)
+}
+
+// writeSecretFree serializes v as pretty-printed JSON and writes it to
+// path, refusing first any recording that contains the lane credential,
+// an sk- key or bearer token, or an apikey_ key prefix.
+func writeSecretFree(path string, v any, secret string) error {
+	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal fixture: %w", err)
 	}
@@ -156,6 +163,9 @@ func writeFixture(path string, f *Fixture, secret string) error {
 	}
 	if strings.Contains(string(b), "sk-") {
 		return fmt.Errorf("refusing to write %s: the recording contains an sk- substring", path)
+	}
+	if strings.Contains(string(b), "apikey_") {
+		return fmt.Errorf("refusing to write %s: the recording contains an apikey_ substring", path)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create fixture dir: %w", err)
