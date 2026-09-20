@@ -16,11 +16,13 @@ flowchart TD
     ADAPTERS --> IA["internal/adapter"]
     IA --> ROOT["llmkit (root vocabulary)"]
     ADAPTERS --> ROOT
+    PROV --> ROOT
     AGENT --> ROOT
     EMBED["embed"] --> ROOT
+    EMBED --> RETRY["internal/retry"]
     DECIDE["decide"] --> ROOT
     DECIDE --> IA
-    DECIDE --> RETRY["internal/retry"]
+    DECIDE --> RETRY
     SANDBOX["sandbox"]
     FSROOT["fsroot"]
 ```
