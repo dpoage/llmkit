@@ -122,7 +122,7 @@ runner := agent.NewRunner(client, []agent.Tool{deleteFile}, "You manage files.",
 	agent.WithToolPolicy(policy))
 ```
 
-A denial feeds the model `ERROR: tool <name> denied: <err>` with `IsError` set, and the run continues. The model can react; the caller can audit. Only `call.Arguments` may be rewritten, and the conversation history keeps the model's original arguments, so the wire stays consistent with what the model asked for. `ToolStart`, `ToolEnd`, and `ToolHealth` do not fire for a denied call; the transcript still records the result.
+A denial feeds the model `ERROR: tool <name> denied: <err>` with `IsError` set, and the run continues. The model can react; the caller can audit. Only `call.Arguments` may be rewritten, and the conversation history keeps the model's original arguments, so the wire stays consistent with what the model asked for. `ToolStart`, `ToolEnd`, and `ToolHealth` do not fire for a denied call; the run's `tool_run` event records the denial as `denied: true` with `deny_reason` and an empty result — the rendered denial text rides the conversation, not the event.
 
 When to use: guardrails. Allowlists and denylists, argument rewrites (constrain paths to a workspace), or a human approval step. To rewrite tool results, wrap the `Tool` instead.
 
@@ -205,7 +205,7 @@ Each event carries `run_id` (minted per run, or pinned with the `WithRunID` run 
 | `tool_run` | turn | the model's call, the result verbatim as fed to the model; `Denied` + `deny_reason` for policy denials, `is_error` for failures |
 | `compaction` | next turn | token totals before/after and the prune count; only when something was actually pruned |
 | `steer` | next turn | a delivered steering message; `follow_up` marks follow-up turns |
-| `finalize` | last turn | why the run stopped (`truncation_reason`), iterations, total usage, whether forced finalization fired; emitted on every run end, including error returns |
+| `finalize` | completed turns | why the run stopped (`truncation_reason`), iterations, total usage, whether forced finalization fired; emitted on every run end, including error returns; a failed completion does not advance the step, so a run whose only completion failed reports step 0 |
 
 A real recorded run (weather tool, two turns) looks like this — timestamps and ids are the only things that change between runs:
 
@@ -215,7 +215,7 @@ A real recorded run (weather tool, two turns) looks like this — timestamps and
 {"kind":"finalize","run_id":"1789933747392-c107dc1d30048f48","step":2,"time":"2026-09-20T19:49:07.393034362Z","schema_version":1,"finalize":{"iterations":2,"usage":{"input_tokens":647,"output_tokens":36}}}
 ```
 
-The omitted `completion` lines each carry the full request–response round-trip under `completion.request` / `completion.response`, which is what replay reads. The JSONL sink names each file `<RunID>-<task-slug>.jsonl` — pin the id with `WithRunID` when a caller generates stable identifiers up front and must recover the exact file later. The sink is best-effort: it never fails a run, and every write failure flows to the `onErr` callback given at construction. Calling `WithObserver` twice is last-wins: a Runner has exactly one durable sink.
+The omitted `completion` lines each carry the full request–response round-trip under `completion.request` / `completion.response`, which is what replay reads. The JSONL sink names each file `<RunID>-<task-slug>.jsonl` — pin the id with `WithRunID` when a caller generates stable identifiers up front and must recover the exact file later (the id must be a safe filename component: no path separators, never `..`; the slug lowercases the task, maps non-alphanumerics to `-`, and caps at 48 characters). One RunID is one file, created exactly once and closed at `finalize`: a duplicate or leftover file is refused through `onErr` and that run's events are dropped. The sink is best-effort: it never fails a run, and every failure flows to the `onErr` callback given at construction. Calling `WithObserver` twice is last-wins: a Runner has exactly one durable sink.
 
 `Transcript.SaveJSONL` and `LoadJSONL` serialize the in-memory view; `LoadJSONL` errors on a line without `schema_version` — pre-schema recordings are unsupported. Both read sides meet at one interface:
 
@@ -225,7 +225,7 @@ type Source interface {
 }
 ```
 
-`Transcript` and the `JSONL` sink both implement it; `store/sqlite` joins them in a later round. Replay consumes `completion` events only (never attempts): `NewReplayClient(src, run, caps)` serves the recorded responses with tool-call structure validation, and `ReplayTools(src, run)` returns one `Tool` per recorded name that serves the recorded results instead of executing — a fully offline replay with zero live tool executions. A diverging tool call fails with an error naming the recorded step.
+`Transcript` and the `JSONL` sink both implement it; `store/sqlite` joins them in a later round. Both return a slice the caller owns, and both fail with `ErrUnknownRun` for a run they have no record of. Replay consumes `completion` events only (never attempts): `NewReplayClient(src, run, caps)` serves the recorded responses with tool-call structure validation, and `ReplayTools(src, run)` returns one `Tool` per recorded name that serves the recorded results instead of executing — a fully offline replay with zero live tool executions, deterministic under `WithParallelTools`. A diverging tool call wraps `ErrReplayDiverged` naming the recorded step, and `ReplayClient` turns it into a `Run` failure — a diverged replay fails, it never finishes with a wrong answer.
 
 When to use: record a run once, then replay it deterministically against modified harness code — the building block for offline evaluation. `EstimateHistoryTokens` and `SimulateCompaction` export the compaction decision so replay tooling reproduces it exactly.
 

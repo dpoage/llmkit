@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/dpoage/llmkit"
@@ -58,12 +59,19 @@ func TestWithRunID_PinnedFilename(t *testing.T) {
 	}
 }
 
-// TestJSONL_ReopenAfterFinalize pins the O_APPEND contract: after a run's
-// Finalize closed its file, a late event for the same run REOPENS and
-// appends to the same file instead of failing or truncating.
-func TestJSONL_ReopenAfterFinalize(t *testing.T) {
+// TestJSONL_RefusesPostFinalizeEvents pins the one-file-one-run rule: after
+// a run's Finalize closed its file, a late event for the same RunID re-runs
+// the exclusive open, fails against the existing file, and is reported
+// through onErr — never appended, never swallowed.
+func TestJSONL_RefusesPostFinalizeEvents(t *testing.T) {
 	dir := t.TempDir()
-	sink := JSONL(dir, nil)
+	var mu sync.Mutex
+	var errs []error
+	sink := JSONL(dir, func(err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		errs = append(errs, err)
+	})
 	ctx := context.Background()
 
 	mk := func(kind llmkit.EventKind, task string) llmkit.Event {
@@ -76,15 +84,20 @@ func TestJSONL_ReopenAfterFinalize(t *testing.T) {
 		}
 		return ev
 	}
-	sink.Observe(ctx, mk(llmkit.KindStart, "reopened"))
-	sink.Observe(ctx, mk(llmkit.KindFinalize, "reopened"))
-	sink.Observe(ctx, mk(llmkit.KindFinalize, "reopened")) // post-close append
+	sink.Observe(ctx, mk(llmkit.KindStart, "closed"))
+	sink.Observe(ctx, mk(llmkit.KindFinalize, "closed"))
+	sink.Observe(ctx, mk(llmkit.KindFinalize, "closed")) // post-close: refused
 
 	evs, err := sink.Events(ctx, "rid-1")
 	if err != nil {
 		t.Fatalf("Events: %v", err)
 	}
-	if len(evs) != 3 {
-		t.Fatalf("sink file holds %d events, want 3 (append, never truncate)", len(evs))
+	if len(evs) != 2 {
+		t.Fatalf("sink file holds %d events, want 2 (post-close event dropped, file untouched)", len(evs))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(errs) == 0 {
+		t.Fatal("post-close event was dropped silently; want an onErr report")
 	}
 }

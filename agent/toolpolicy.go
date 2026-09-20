@@ -89,13 +89,14 @@ func (r *Runner) authorizeCalls(ctx context.Context, calls []llmkit.ToolCall, re
 		}
 		if ctx.Err() != nil {
 			// Deny with the context error so the slice stays full-length and
-			// no call past this point can be authorized or dispatched.
+			// no call past this point can be authorized or dispatched. This
+			// is a never-authorized call, not a policy denial: the event
+			// carries IsError with the context error text, without the
+			// Denied mark (that mark is for Authorize refusals only).
 			denied[i] = true
 			results[i] = toolResult{
-				result:     toolError(fmt.Errorf("tool %s denied: %w", calls[i].Name, ctx.Err())),
-				isErr:      true,
-				denied:     true,
-				denyReason: ctx.Err().Error(),
+				result: toolError(fmt.Errorf("tool %s denied: %w", calls[i].Name, ctx.Err())),
+				isErr:  true,
 			}
 			continue
 		}

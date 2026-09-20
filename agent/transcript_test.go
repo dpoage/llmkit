@@ -287,6 +287,10 @@ func TestSaveJSONL_FlushesPrefixOnEncodeError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadJSONL on the persisted prefix: %v", err)
 	}
+	if len(loaded.Record) < 1 {
+		t.Fatalf("LoadJSONL recovered %d events from a %d-byte prefix; expected at least 1",
+			len(loaded.Record), fw.written.Len())
+	}
 	// Every recovered event must match the originals (same kind, step,
 	// tool name, payload).
 	for i, ev := range loaded.Record {

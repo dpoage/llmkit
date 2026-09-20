@@ -79,10 +79,14 @@ func WithLimits(l Limits) Option {
 // last (see [llmkit.Observers]). The transcript always backs
 // [Outcome.Transcript]; obs is the durable record.
 //
-// The sink reports its own failures through the callback it was constructed
-// with ([JSONL]) and never fails the run. Calling WithObserver twice is
-// last-wins: a Runner has exactly ONE durable sink, so a second installation
-// replaces the first rather than stacking a second history.
+// obs is called from every concurrent run's goroutine — under
+// [WithParallelTools] and across concurrent Run calls — so it must be safe
+// for concurrent use ([JSONL] is). The sink reports its own failures through
+// the callback it was constructed with ([JSONL]) and never fails the run.
+// Calling WithObserver twice is last-wins: a Runner has exactly ONE durable
+// sink, so a second installation replaces the first rather than stacking a
+// second history — compose side observers (metrics, traces) ahead of it with
+// [llmkit.Observers] instead, and install at most one durable sink.
 func WithObserver(obs llmkit.Observer) Option {
 	return func(r *Runner) { r.observer = obs }
 }
@@ -210,13 +214,15 @@ func (r *Runner) begin(ctx context.Context, cfg runConfig, task string) (context
 // emitFinalize closes the run with the Finalize event — emitted on EVERY run
 // end, including error returns: why the run stopped (the truncation reason,
 // when a limit ended it), how many model iterations it took, the run's total
-// usage, and whether a forced-finalization turn fired. Step is the last turn;
-// a run that ended before any completion reports 0.
+// usage, and whether a forced-finalization turn fired. Step is the number of
+// completed turns (Outcome.Iterations); a failed completion does not advance
+// it, so a run whose only completion failed reports Step 0.
 func (r *Runner) emitFinalize(ctx context.Context, em runEmitter, o *Outcome) {
 	if o == nil {
-		// The run panicked before its outcome existed (a hook bug mid-turn).
-		// Emit nothing: the panic, not a Finalize event, is what propagates.
-		return
+		// The run panicked mid-turn (a hook bug): no outcome exists. Still
+		// emit the Finalize — with zero counters — so a sink closes its
+		// record; the panic, not the event, is what propagates to the caller.
+		o = &Outcome{}
 	}
 	ev := llmkit.NewEvent(ctx, llmkit.KindFinalize)
 	ev.Step = o.Iterations
@@ -300,6 +306,13 @@ type runConfig struct {
 // stable identifiers up front (a store row's key) and must recover the run's
 // records by that identifier later. An empty id is a no-op: the Runner mints
 // one with [llmkit.NewRunID].
+//
+// The id must be a safe filename component — non-empty, no path separators,
+// never ".." — because the durable sink names the run's file
+// "<RunID>-<task-slug>.jsonl". To compute the name yourself: slug(task)
+// lowercases the task text, maps every non-[a-z0-9] run to a single dash,
+// trims leading/trailing dashes, and caps at 48 characters ("run" when
+// nothing survives).
 func WithRunID(id llmkit.RunID) RunOption {
 	return func(c *runConfig) { c.runID = id }
 }
