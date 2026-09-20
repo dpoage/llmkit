@@ -55,10 +55,10 @@ func TestWithRunID_PinnedFilename(t *testing.T) {
 	}
 }
 
-// TestJSONL_RefusesPostFinalizeEvents pins the one-file-one-run rule: after
-// a run's Finalize closed its file, a late event for the same RunID re-runs
-// the exclusive open, fails against the existing file, and is reported
-// through onErr — never appended, never swallowed.
+// TestJSONL_RefusesPostFinalizeEvents pins the one-file-one-run rule: once a
+// run's Finalize closed its file and dropped its admission entry, a late
+// event for the same RunID finds no live run — it is reported through onErr
+// and never appended, never swallowed.
 func TestJSONL_RefusesPostFinalizeEvents(t *testing.T) {
 	dir := t.TempDir()
 	var mu sync.Mutex

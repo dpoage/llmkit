@@ -1082,7 +1082,11 @@ func (endlessToolClient) Complete(_ context.Context, _ llmkit.Request) (llmkit.R
 // TestObserver_SinkDuplicateConcurrentRunID pins the duplicate-Start row of
 // the admission table with two deterministic concurrent runs pinned to the
 // same WithRunID: one file, the refusal reported, and the surviving record a
-// clean single-run prefix — nothing merged.
+// clean single-run prefix — nothing merged. Both runs are gated inside a
+// tool call, so this is the ORDERED case; the unordered ones, where the
+// loser finalizes inside the winner's create window, are
+// TestObserver_SinkDuplicateRaceKeepsRecordReadable and
+// TestObserver_SinkTripleDuplicateRaceNeverSplices.
 func TestObserver_SinkDuplicateConcurrentRunID(t *testing.T) {
 	dir := t.TempDir()
 	var mu sync.Mutex
@@ -1265,8 +1269,11 @@ func TestObserver_CancelledCallsRecordNotRun(t *testing.T) {
 // --- round-3 discriminating tests: each named mutant dies ------------------
 
 // TestObserver_DuplicateStartRefusalDetails pins M15/M6/M7/M32/M39: the
-// duplicate-Start refusal names the run, and the poisoned entry's fd is
-// closed (nil) — no orphan handle survives the poisoning.
+// duplicate-Start refusal names the run; the poisoned entry is retired —
+// fd closed AND encoder dropped, so neither an orphan handle nor a further
+// write survives the poisoning; the run's later events then drop SILENTLY;
+// and the record still holds the first run's Start line, because admission
+// wrote it before the entry was ever visible.
 func TestObserver_DuplicateStartRefusalDetails(t *testing.T) {
 	dir := t.TempDir()
 	var mu sync.Mutex
@@ -1286,8 +1293,9 @@ func TestObserver_DuplicateStartRefusalDetails(t *testing.T) {
 	sink.Observe(ctx, start()) // duplicate
 
 	mu.Lock()
-	defer mu.Unlock()
 	joined := strings.Join(msgs, "\n")
+	reported := len(msgs)
+	mu.Unlock()
 	if !strings.Contains(joined, "duplicate Start") || !strings.Contains(joined, "dup-x") {
 		t.Errorf("refusal messages = %v, want a duplicate-Start report naming the run", msgs)
 	}
@@ -1298,11 +1306,29 @@ func TestObserver_DuplicateStartRefusalDetails(t *testing.T) {
 		t.Fatal("duplicate-Start entry vanished; want a poisoned entry")
 	}
 	entry.mu.Lock()
-	fdNil := entry.file == nil
-	disabled := entry.disabled
+	fdNil, encNil := entry.file == nil, entry.enc == nil
 	entry.mu.Unlock()
-	if !fdNil || !disabled {
-		t.Errorf("poisoned entry file=%v disabled=%v, want nil/true", fdNil, disabled)
+	if !fdNil || !encNil {
+		t.Errorf("poisoned entry file-nil=%v enc-nil=%v, want true/true (fd closed, encoder dropped)", fdNil, encNil)
+	}
+
+	// From here both runs drop silently: the entry is still there, so no
+	// second report fires and nothing more reaches the file.
+	late := llmkit.NewEvent(llmkit.WithRun(ctx, "dup-x"), llmkit.KindToolRun)
+	late.ToolRun = &llmkit.ToolRunEvent{Call: llmkit.ToolCall{ID: "late", Name: "gate"}}
+	sink.Observe(ctx, late)
+	mu.Lock()
+	after := len(msgs)
+	mu.Unlock()
+	if after != reported {
+		t.Errorf("a poisoned run's event reported (%d -> %d reports); want a silent drop", reported, after)
+	}
+	evs, err := sink.Events(ctx, "dup-x")
+	if err != nil {
+		t.Fatalf("poisoned run's record does not read back: %v", err)
+	}
+	if len(evs) != 1 || evs[0].Kind != llmkit.KindStart {
+		t.Errorf("record holds %d events %v, want exactly the first run's Start line", len(evs), evs)
 	}
 }
 
@@ -1642,5 +1668,350 @@ func TestObserver_ToolsReturnsCopy(t *testing.T) {
 	scripted := NewReplayClientFromResponses([]llmkit.Response{{Text: "x"}}, llmkit.Capabilities{})
 	if got := scripted.Tools(); got == nil || len(got) != 0 {
 		t.Errorf("scripted Tools = %v, want a non-nil empty slice", got)
+	}
+}
+
+// --- round-5 discriminating tests: the duplicate-RunID race ---------------
+
+// sinkStart, sinkTool and sinkFin build the event shapes the duplicate-race
+// tests feed straight to a sink, with no Runner in the way.
+func sinkStart(ctx context.Context, id llmkit.RunID, task string) llmkit.Event {
+	ev := llmkit.NewEvent(llmkit.WithRun(ctx, id), llmkit.KindStart)
+	ev.Start = &llmkit.StartEvent{Task: task}
+	return ev
+}
+
+func sinkTool(ctx context.Context, id llmkit.RunID, call string) llmkit.Event {
+	ev := llmkit.NewEvent(llmkit.WithRun(ctx, id), llmkit.KindToolRun)
+	ev.ToolRun = &llmkit.ToolRunEvent{Call: llmkit.ToolCall{ID: call, Name: "race"}}
+	return ev
+}
+
+func sinkFin(ctx context.Context, id llmkit.RunID) llmkit.Event {
+	ev := llmkit.NewEvent(llmkit.WithRun(ctx, id), llmkit.KindFinalize)
+	ev.Finalize = &llmkit.FinalizeEvent{}
+	return ev
+}
+
+// openFDs counts the process's open descriptors, or -1 where /proc is not
+// available.
+func openFDs() int {
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		return -1
+	}
+	return len(entries)
+}
+
+// TestObserver_SinkDuplicateRaceKeepsRecordReadable races two UNGATED
+// duplicate Starts for one RunID, each goroutine finalizing immediately so
+// the loser's Finalize lands inside the winner's create window — the
+// interleaving that used to create a record and abandon it empty, leaving a
+// permanently unreadable tombstone that also refused every later run on the
+// id. Admission, the create and the Start line are one step under the sink
+// lock, so every surviving record exists, is non-empty and reads back as
+// exactly one run; no fd and no admission entry survives.
+func TestObserver_SinkDuplicateRaceKeepsRecordReadable(t *testing.T) {
+	const races = 400
+	ctx := context.Background()
+	dir := t.TempDir()
+	sink := JSONL(dir, func(error) {})
+	before := openFDs()
+	var missing, empty, unreadable, notOneStart int
+	var firstErr error
+	for i := range races {
+		id := llmkit.RunID(fmt.Sprintf("race-%d", i))
+		var ready, wg sync.WaitGroup
+		ready.Add(2)
+		gun := make(chan struct{})
+		for g := range 2 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				ready.Done()
+				<-gun
+				sink.Observe(ctx, sinkStart(ctx, id, fmt.Sprintf("g%d", g)))
+				sink.Observe(ctx, sinkFin(ctx, id))
+			}()
+		}
+		ready.Wait()
+		close(gun)
+		wg.Wait()
+
+		switch st, err := os.Stat(filepath.Join(dir, string(id)+".jsonl")); {
+		case err != nil:
+			missing++
+		case st.Size() == 0:
+			empty++
+		}
+		evs, err := sink.Events(ctx, id)
+		if err != nil {
+			unreadable++
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		starts := 0
+		for _, ev := range evs {
+			if ev.Kind == llmkit.KindStart {
+				starts++
+			}
+		}
+		if starts != 1 {
+			notOneStart++
+		}
+	}
+	if missing+empty+unreadable+notOneStart != 0 {
+		t.Errorf("over %d duplicate-Start races: %d records missing, %d 0-byte, %d unreadable, %d not a single run; want 0/0/0/0 (first read error: %v)",
+			races, missing, empty, unreadable, notOneStart, firstErr)
+	}
+	sink.mu.Lock()
+	live := len(sink.runs)
+	sink.mu.Unlock()
+	if live != 0 {
+		t.Errorf("sink holds %d entries after %d finalized races; want 0", live, races)
+	}
+	if after := openFDs(); before >= 0 && after >= 0 && after > before+4 {
+		t.Errorf("fd count grew from %d to %d across %d duplicate races; an fd leaked", before, after, races)
+	}
+}
+
+// TestObserver_SinkTripleDuplicateRaceNeverSplices races THREE duplicate
+// Starts for one RunID, each goroutine tagging its tool calls with its own
+// prefix. Three-way was the shape that could splice: one run's entry was
+// deleted by a second run's Finalize, a third run's exclusive create then
+// succeeded on the same id, and the first run's events were written into
+// the third's record — which read back clean, so a replay source served a
+// run that never happened. A created file is now never removed, so every
+// successor Start hits ErrExist and is refused: no record may hold a call
+// id belonging to another goroutine's run, and no record may be empty.
+func TestObserver_SinkTripleDuplicateRaceNeverSplices(t *testing.T) {
+	const races = 600
+	ctx := context.Background()
+	dir := t.TempDir()
+	sink := JSONL(dir, func(error) {})
+	before := openFDs()
+	var empty, unreadable, spliced int
+	var sample string
+	for i := range races {
+		id := llmkit.RunID(fmt.Sprintf("splice-%d", i))
+		var ready, wg sync.WaitGroup
+		ready.Add(3)
+		gun := make(chan struct{})
+		for g := range 3 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				tag := fmt.Sprintf("g%d", g)
+				ready.Done()
+				<-gun
+				sink.Observe(ctx, sinkStart(ctx, id, tag))
+				for c := range 3 {
+					sink.Observe(ctx, sinkTool(ctx, id, fmt.Sprintf("%s-c%d", tag, c)))
+				}
+				sink.Observe(ctx, sinkFin(ctx, id))
+			}()
+		}
+		ready.Wait()
+		close(gun)
+		wg.Wait()
+
+		path := filepath.Join(dir, string(id)+".jsonl")
+		if st, err := os.Stat(path); err == nil && st.Size() == 0 {
+			empty++
+		}
+		evs, err := sink.Events(ctx, id)
+		if err != nil {
+			// An error is an acceptable outcome for a refused race; a
+			// SPLICED success is not.
+			unreadable++
+			continue
+		}
+		owner := ""
+		for _, ev := range evs {
+			if ev.Kind == llmkit.KindStart && ev.Start != nil {
+				owner = ev.Start.Task
+			}
+		}
+		foreign := false
+		for _, ev := range evs {
+			if ev.Kind == llmkit.KindToolRun && ev.ToolRun != nil &&
+				(owner == "" || !strings.HasPrefix(ev.ToolRun.Call.ID, owner+"-")) {
+				foreign = true
+			}
+		}
+		if foreign {
+			spliced++
+			if sample == "" {
+				b, _ := os.ReadFile(path)
+				sample = string(b)
+			}
+		}
+	}
+	if spliced != 0 {
+		t.Errorf("%d of %d three-way races produced a record holding another run's events; want 0\nfirst spliced record:\n%s", spliced, races, sample)
+	}
+	if empty != 0 {
+		t.Errorf("%d of %d three-way races left a 0-byte record; want 0", empty, races)
+	}
+	if unreadable != 0 {
+		t.Errorf("%d of %d three-way races left an unreadable record; want 0", unreadable, races)
+	}
+	sink.mu.Lock()
+	live := len(sink.runs)
+	sink.mu.Unlock()
+	if live != 0 {
+		t.Errorf("sink holds %d entries after %d finalized races; want 0", live, races)
+	}
+	if after := openFDs(); before >= 0 && after >= 0 && after > before+4 {
+		t.Errorf("fd count grew from %d to %d across %d three-way races; an fd leaked", before, after, races)
+	}
+}
+
+// TestObserver_RunnerDuplicateRunIDRaceKeepsRecords is the same race through
+// the full public surface: two concurrent Run calls pinned to one RunID
+// against a client that answers immediately.
+func TestObserver_RunnerDuplicateRunIDRaceKeepsRecords(t *testing.T) {
+	const races = 300
+	ctx := context.Background()
+	dir := t.TempDir()
+	sink := JSONL(dir, func(error) {})
+	r := NewRunner(immediateClient{}, nil, "sys", WithObserver(sink))
+	var missing, empty, unreadable int
+	var firstErr error
+	for i := range races {
+		id := llmkit.RunID(fmt.Sprintf("dual-%d", i))
+		var ready, wg sync.WaitGroup
+		ready.Add(2)
+		gun := make(chan struct{})
+		for range 2 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				ready.Done()
+				<-gun
+				_, _ = r.Run(ctx, "task", WithRunID(id))
+			}()
+		}
+		ready.Wait()
+		close(gun)
+		wg.Wait()
+
+		switch st, err := os.Stat(filepath.Join(dir, string(id)+".jsonl")); {
+		case err != nil:
+			missing++
+		case st.Size() == 0:
+			empty++
+		}
+		if _, err := sink.Events(ctx, id); err != nil {
+			unreadable++
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	if missing+empty+unreadable != 0 {
+		t.Errorf("over %d concurrent same-RunID Run pairs: %d records missing, %d 0-byte, %d unreadable; want 0/0/0 (first read error: %v)",
+			races, missing, empty, unreadable, firstErr)
+	}
+}
+
+// immediateClient answers every completion with an end turn, so a Run's
+// events reach the sink as fast as the loop can emit them.
+type immediateClient struct{}
+
+func (immediateClient) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
+func (immediateClient) Complete(context.Context, llmkit.Request) (llmkit.Response, error) {
+	return llmkit.Response{Text: "done", StopReason: llmkit.StopEndTurn}, nil
+}
+
+// TestObserver_StartPublishesOnlyAfterWritingItsLine pins the atomicity by
+// construction — admission, create and first line are one step, so there is
+// no seam to block: the moment Observe returns for a Start, the file exists
+// with the Start line in it and the live entry is installed. That created
+// file is what refuses every successor Start for the id (the reason no
+// second run can splice into a record), including after the first run
+// finalized and its entry went away.
+func TestObserver_StartPublishesOnlyAfterWritingItsLine(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	var mu sync.Mutex
+	var errs []string
+	sink := JSONL(dir, func(err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		errs = append(errs, err.Error())
+	})
+	path := filepath.Join(dir, "atomic-1.jsonl")
+
+	sink.Observe(ctx, sinkStart(ctx, "atomic-1", "first"))
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Start returned without creating %s: %v", path, err)
+	}
+	if st.Size() == 0 {
+		t.Fatalf("Start published an entry over an empty %s; the Start line must be on disk first", path)
+	}
+	sink.mu.Lock()
+	entry := sink.runs["atomic-1"]
+	sink.mu.Unlock()
+	if entry == nil {
+		t.Fatal("no entry after Start")
+	}
+	entry.mu.Lock()
+	live := entry.file != nil && entry.enc != nil
+	entry.mu.Unlock()
+	if !live {
+		t.Error("Start published an entry with no open file or encoder")
+	}
+
+	// Finalize retires the entry; the file stays, so the id is spent.
+	sink.Observe(ctx, sinkFin(ctx, "atomic-1"))
+	sink.Observe(ctx, sinkStart(ctx, "atomic-1", "successor"))
+	sink.Observe(ctx, sinkTool(ctx, "atomic-1", "successor-c0"))
+	mu.Lock()
+	joined := strings.Join(errs, "\n")
+	mu.Unlock()
+	if !strings.Contains(joined, "leftover file") || !strings.Contains(joined, "run refused") {
+		t.Errorf("reports = %q, want the successor Start refused as a leftover", joined)
+	}
+	evs, err := sink.Events(ctx, "atomic-1")
+	if err != nil {
+		t.Fatalf("Events: %v", err)
+	}
+	if len(evs) != 2 || evs[0].Kind != llmkit.KindStart || evs[1].Kind != llmkit.KindFinalize {
+		t.Fatalf("record = %d events %v, want the first run's Start+Finalize and nothing of the successor's", len(evs), evs)
+	}
+}
+
+// TestObserver_EventsRefusesUnsafeIDsBeforeOpen pins M47: the read side
+// applies safeRunID too, so a traversing id cannot reach a file outside the
+// sink directory — here a planted record that a bare filepath.Join would
+// happily serve.
+func TestObserver_EventsRefusesUnsafeIDsBeforeOpen(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	dir := filepath.Join(root, "sink")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ev := llmkit.NewEvent(llmkit.WithRun(ctx, "../leak"), llmkit.KindStart)
+	ev.SchemaVersion = llmkit.EventSchemaVersion
+	ev.Start = &llmkit.StartEvent{Task: "planted"}
+	line, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "leak.jsonl"), append(line, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sink := JSONL(dir, nil)
+	for _, id := range []llmkit.RunID{"../leak", "sub/../../leak", "..", ".", "", "a\x00b"} {
+		got, err := sink.Events(ctx, id)
+		if !errors.Is(err, ErrUnknownRun) || !strings.Contains(err.Error(), "not a safe filename component") {
+			t.Errorf("Events(%q) err = %v (%d events), want ErrUnknownRun naming the unsafe component", id, err, len(got))
+		}
 	}
 }
