@@ -314,10 +314,9 @@ func (t *hostCapturingTransport) observed() *url.URL {
 // to with an empty spec.BaseURL — the claim the package godoc makes. All
 // three SDKs also honor a base-URL environment variable (ANTHROPIC_BASE_URL,
 // OPENAI_BASE_URL, GOOGLE_GEMINI_BASE_URL) when BaseURL is empty, so the
-// test unsets all three first (restoring them on cleanup): it pins the
-// SDKs' compiled-in defaults regardless of the operator's own environment,
-// not whatever an ambient override happens to say. Setting a var to the
-// empty string instead of unsetting it is not equivalent here — the
+// test unsets all three first (restoring them on cleanup) to pin the
+// SDKs' compiled-in defaults regardless of the operator's own environment.
+// Setting a var to the empty string instead of unsetting it is not equivalent here — the
 // Anthropic and OpenAI SDKs key off os.LookupEnv's ok result, not the
 // value, so an empty-but-present var still overrides the default with an
 // empty base URL — which is why this uses os.Unsetenv rather than

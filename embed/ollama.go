@@ -45,13 +45,11 @@ func NewOllamaEmbedder(cfg Config) (*OllamaEmbedder, error) {
 	}, nil
 }
 
-// ollamaRequest is the JSON body sent to Ollama /api/embed.
 type ollamaRequest struct {
 	Model string `json:"model"`
 	Input any    `json:"input"` // string or []string
 }
 
-// ollamaResponse is the JSON body returned by Ollama /api/embed.
 type ollamaResponse struct {
 	Model      string      `json:"model"`
 	Embeddings [][]float64 `json:"embeddings"`
@@ -114,12 +112,10 @@ func (o *OllamaEmbedder) Dimensions() int {
 	return o.dimensions
 }
 
-// ModelName returns the Ollama model identifier.
 func (o *OllamaEmbedder) ModelName() string {
 	return o.model
 }
 
-// doEmbed performs the HTTP call. input can be string or []string.
 func (o *OllamaEmbedder) doEmbed(ctx context.Context, input any) ([][]float32, error) {
 	body, err := json.Marshal(ollamaRequest{
 		Model: o.model,
@@ -179,7 +175,6 @@ func (o *OllamaEmbedder) doEmbed(ctx context.Context, input any) ([][]float32, e
 	return out, nil
 }
 
-// truncate shortens s to at most n characters for error messages.
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s

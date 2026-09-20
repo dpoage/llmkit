@@ -3,38 +3,38 @@
 // replaces the schedule and is capped at MaxDelay, and a per-attempt
 // RequestTimeout deadline.
 //
-// The package imports only the standard library. It knows nothing about
-// llmkit's Client or APIError: a caller supplies classify, which decides for
-// each error whether the loop should retry and which delay applies. llmkit's
-// WithRetry is the chat-side adapter that wires this loop to the APIError
-// classifier; call Do directly to retry any other error source under the
-// same policy.
+// The package imports only the standard library and knows nothing about
+// llmkit. A caller supplies a classify function that decides, for each
+// error, whether the loop retries and which delay applies. llmkit's
+// WithRetry wraps [Do] around the APIError classifier; call Do directly to
+// retry any other error source under the same policy.
 //
-// The loop, in order:
+// The loop runs in this order:
 //
 //  1. Each attempt runs fn under a RequestTimeout child context derived
-//     from ctx (see the RequestTimeout field). A stalled attempt aborts as
-//     context.DeadlineExceeded and is classified like any other failure.
-//  2. After a failed attempt, Do checks the PARENT ctx: once it is done,
-//     the loop returns fn's last error immediately. Cancellation is never
-//     retried and never swallowed.
-//  3. classify decides whether the error is worth retrying. Its hasRetryAfter
-//     bit is a presence bit, not a nonzero check: retryAfter is used only
-//     when hasRetryAfter is true, and a present zero delay means an
-//     immediate retry. An absent delay falls back to the exponential
+//     from ctx. A stalled attempt aborts as context.DeadlineExceeded and
+//     is classified like any other failure.
+//  2. After a failed attempt, Do checks the parent ctx. When it is done,
+//     the loop returns fn's last error immediately. Do never retries and
+//     never swallows a cancellation.
+//  3. classify decides whether the error is retryable. Its hasRetryAfter
+//     value is a presence bit, not a nonzero check: the loop applies
+//     retryAfter only when hasRetryAfter is true. A present zero delay
+//     retries immediately; an absent delay falls back to the exponential
 //     schedule.
-//  4. The chosen delay is capped at MaxDelay (MaxDelay 0 or less means
-//     uncapped), and a negative Retry-After is treated as zero.
+//  4. The chosen delay is capped at MaxDelay (MaxDelay 0 or less is
+//     uncapped); a negative Retry-After is treated as zero.
 //  5. The loop stops when fn succeeds, when classify marks the error
-//     terminal, or after MaxAttempts attempts, returning fn's last error.
+//     terminal, or after MaxAttempts attempts, and it returns fn's last
+//     error.
 //
-// Do normalizes cfg itself: MaxAttempts below 1 becomes 1, RequestTimeout at
-// or below 0 becomes DefaultRequestTimeout, and Jitter is clamped to [0,1],
-// so every entry point accepts the same configs.
+// Do normalizes cfg itself: MaxAttempts below 1 becomes 1; RequestTimeout
+// at or below 0 becomes [DefaultRequestTimeout]; Jitter is clamped to
+// [0, 1]. Every entry point accepts the same configs as a result.
 //
-// The Sleep and Rand fields exist for deterministic tests: Sleep observes
-// every wait (including zero ones) and Rand pins the jitter draw. nil means
-// a real timer and the package-level random source.
+// [Config.Sleep] and [Config.Rand] exist for deterministic tests. nil
+// means a real timer and the package-level random source; Sleep observes
+// every wait including zero ones, and Rand pins the jitter draw.
 package retry
 
 import (
@@ -85,13 +85,13 @@ type Config struct {
 
 // DefaultRequestTimeout bounds a single request attempt. It is the
 // backstop against a server that accepts a request and then never responds:
-// the in-flight round-trip is aborted via context, the attempt fails with
-// context.DeadlineExceeded, and the retry loop tries again rather than
+// the round-trip is aborted via context, the attempt fails with
+// context.DeadlineExceeded, and the retry loop retries rather than
 // blocking indefinitely.
 //
-// 5 minutes is chosen to comfortably exceed a legitimate slow completion
-// (large reasoning-model responses with big output budgets can take a
-// couple of minutes) while staying well below multi-minute, no-progress
+// 5 minutes comfortably exceeds a legitimate slow completion
+// (reasoning models with large output budgets take a couple of
+// minutes) while staying well below multi-minute, no-progress
 // stalls. It is per-attempt, so the worst case before giving up is
 // roughly MaxAttempts * (RequestTimeout + backoff).
 const DefaultRequestTimeout = 5 * time.Minute

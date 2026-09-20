@@ -23,8 +23,7 @@ func retryAny(err error) (time.Duration, bool, bool) {
 // overflow.
 func TestBackoffDelay_RetryAfterCappedAtMaxDelay(t *testing.T) {
 	def := Default()
-	// Normalized retry policy: explicit MaxAttempts, kit-default delays,
-	// embed's 60s per-attempt timeout.
+	// Explicit MaxAttempts and 60s RequestTimeout; default delays.
 	p := Config{MaxAttempts: 5, BaseDelay: def.BaseDelay, MaxDelay: def.MaxDelay, RequestTimeout: 60 * time.Second}
 
 	after := backoffDelay(p, 1, time.Hour, true)

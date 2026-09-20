@@ -51,13 +51,11 @@ func NewOpenAICompatibleEmbedder(cfg Config) (*OpenAICompatibleEmbedder, error) 
 	}, nil
 }
 
-// openaiRequest is the JSON body sent to the embeddings endpoint.
 type openaiRequest struct {
 	Model string   `json:"model"`
 	Input []string `json:"input"`
 }
 
-// openaiResponse is the JSON body returned by the embeddings endpoint.
 type openaiResponse struct {
 	Data  []openaiEmbedding `json:"data"`
 	Model string            `json:"model"`
@@ -130,12 +128,10 @@ func (o *OpenAICompatibleEmbedder) Dimensions() int {
 	return o.dimensions
 }
 
-// ModelName returns the configured model identifier.
 func (o *OpenAICompatibleEmbedder) ModelName() string {
 	return o.model
 }
 
-// doEmbed performs the HTTP call to the /v1/embeddings endpoint.
 func (o *OpenAICompatibleEmbedder) doEmbed(ctx context.Context, texts []string) ([][]float32, error) {
 	body, err := json.Marshal(openaiRequest{
 		Model: o.model,

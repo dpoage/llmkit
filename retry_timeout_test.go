@@ -284,6 +284,7 @@ func TestWithRetry_PreservesExplicitRequestTimeout(t *testing.T) {
 	inner := &probingClient{probeAttempts: 3} // fails 3 times, succeeds on the 4th
 	cfg := retry.Default()
 	cfg.RequestTimeout = want
+	cfg.Sleep = func(context.Context, time.Duration) error { return nil }
 	client := WithRetry(inner, cfg)
 	resp, err := client.Complete(context.Background(), simpleRequest())
 	if err != nil {

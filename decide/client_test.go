@@ -29,9 +29,9 @@ var fastRetry = retry.Config{
 }
 
 // newTestClient points a client at srv with a jitter-free retry policy.
-func newTestClient(t *testing.T, srvURL string, retry retry.Config) *Client {
+func newTestClient(t *testing.T, srvURL string, policy retry.Config) *Client {
 	t.Helper()
-	c, err := New(Config{APIKey: testAPIKey, Model: "jev-latest", BaseURL: srvURL, Retry: retry})
+	c, err := New(Config{APIKey: testAPIKey, Model: "jev-latest", BaseURL: srvURL, Retry: policy})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -70,7 +70,6 @@ func mixedQuestions() Questions {
 	}
 }
 
-// mixedAnswers returns a valid 200 body for mixedQuestions.
 func mixedAnswers(model string) string {
 	return fmt.Sprintf(`{"model":%q,"answers":{`+
 		`"belief":{"type":"noul","noul":0.9},`+

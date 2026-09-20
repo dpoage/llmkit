@@ -56,9 +56,9 @@ func (s *scriptedStreamClient) Stream(ctx context.Context, req Request, fn func(
 	return s.resp, nil
 }
 
-// countedRetryConfig returns a fast retry.Config whose backoff sleeps are
+// countedPolicy returns a fast retry.Config whose backoff sleeps are
 // counted, so tests observe retry behavior without real waiting.
-func countedRetryConfig(maxAttempts int, timeout time.Duration, sleeps *int) retry.Config {
+func countedPolicy(maxAttempts int, timeout time.Duration, sleeps *int) retry.Config {
 	return retry.Config{
 		MaxAttempts:    maxAttempts,
 		BaseDelay:      time.Millisecond,
@@ -378,7 +378,7 @@ func TestRetryStream_SucceedsAfterServerErrorBeforeFirstDelta(t *testing.T) {
 		responses: []Response{{}, ok},
 	}
 	sleeps := 0
-	c := WithRetry(inner, countedRetryConfig(3, time.Second, &sleeps))
+	c := WithRetry(inner, countedPolicy(3, time.Second, &sleeps))
 	var got []Delta
 	out, err := Stream(context.Background(), c, simpleRequest(), func(d Delta) error {
 		got = append(got, d)
@@ -409,7 +409,7 @@ func TestRetryStream_ErrorAfterDeliveredDeltaReturnsUnretried(t *testing.T) {
 		err:    mid,
 	}
 	sleeps := 0
-	c := WithRetry(inner, countedRetryConfig(4, time.Second, &sleeps))
+	c := WithRetry(inner, countedPolicy(4, time.Second, &sleeps))
 	var got []Delta
 	out, err := Stream(context.Background(), c, simpleRequest(), func(d Delta) error {
 		got = append(got, d)
@@ -440,7 +440,7 @@ func TestRetryStream_RequestTimeoutBoundsStalledStreamAfterDelta(t *testing.T) {
 		blockAttempts: 99,
 	}
 	sleeps := 0
-	c := WithRetry(inner, countedRetryConfig(3, 50*time.Millisecond, &sleeps))
+	c := WithRetry(inner, countedPolicy(3, 50*time.Millisecond, &sleeps))
 	var got []Delta
 	out, err := Stream(context.Background(), c, simpleRequest(), func(d Delta) error {
 		got = append(got, d)
@@ -468,7 +468,7 @@ func TestRetryStream_TimeoutBeforeFirstDeltaIsRetried(t *testing.T) {
 	ok := Response{Text: "recovered", StopReason: StopEndTurn}
 	inner := &scriptedStreamClient{blockAttempts: 1, resp: ok}
 	sleeps := 0
-	c := WithRetry(inner, countedRetryConfig(3, 50*time.Millisecond, &sleeps))
+	c := WithRetry(inner, countedPolicy(3, 50*time.Millisecond, &sleeps))
 	var got []Delta
 	out, err := Stream(context.Background(), c, simpleRequest(), func(d Delta) error {
 		got = append(got, d)
@@ -646,7 +646,7 @@ func TestStream_NilFnThroughDecorators(t *testing.T) {
 		t.Run("complete only", func(t *testing.T) {
 			inner := &fakeClient{responses: []Response{completeResp}}
 			sleeps := 0
-			c := WithRetry(inner, countedRetryConfig(3, time.Second, &sleeps))
+			c := WithRetry(inner, countedPolicy(3, time.Second, &sleeps))
 			out, err := Stream(context.Background(), c, simpleRequest(), nil)
 			if err != nil {
 				t.Fatalf("Stream: %v", err)
@@ -661,7 +661,7 @@ func TestStream_NilFnThroughDecorators(t *testing.T) {
 				resp:   nativeResp,
 			}
 			sleeps := 0
-			c := WithRetry(inner, countedRetryConfig(3, time.Second, &sleeps))
+			c := WithRetry(inner, countedPolicy(3, time.Second, &sleeps))
 			out, err := Stream(context.Background(), c, simpleRequest(), nil)
 			if err != nil {
 				t.Fatalf("Stream: %v", err)
@@ -753,7 +753,7 @@ func TestRetryStream_FnErrorOnFirstDeltaReturnsUnretried(t *testing.T) {
 		err:    &APIError{Kind: ErrServer, StatusCode: 500, Provider: "fake", Message: "drop"},
 	}
 	sleeps := 0
-	c := WithRetry(inner, countedRetryConfig(4, time.Second, &sleeps))
+	c := WithRetry(inner, countedPolicy(4, time.Second, &sleeps))
 	var got []Delta
 	out, err := Stream(context.Background(), c, simpleRequest(), func(d Delta) error {
 		got = append(got, d)

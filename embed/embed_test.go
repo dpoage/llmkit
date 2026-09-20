@@ -809,7 +809,6 @@ func TestLoadConfig_PrefixIsCaseInsensitive(t *testing.T) {
 	}
 }
 
-// fakeEmbedder is a test double that records calls and returns configured results.
 type fakeEmbedder struct {
 	dims         int
 	model        string
