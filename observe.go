@@ -217,9 +217,10 @@ type CompletionEvent struct {
 
 // AttemptEvent records one provider attempt ([KindAttempt]) from inside the
 // retry stage: the same request, the attempt's own response or error, and
-// its 1-based position. Attempt 1 is the first wire call; the successful
-// attempt's Response matches the CompletionEvent's. Event.SpanID joins it
-// to its logical completion.
+// its 1-based position. Attempt 1 is the first wire call. The response is
+// the raw adapter response — attempts are observed below the tool-call
+// serializer — so the CompletionEvent's Response may differ from it where
+// the serializer truncated. Event.SpanID joins it to its logical completion.
 type AttemptEvent struct {
 	// Attempt is the 1-based attempt number within the logical completion.
 	Attempt  int      `json:"attempt"`
