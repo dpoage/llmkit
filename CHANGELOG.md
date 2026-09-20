@@ -32,6 +32,11 @@ entry below is marked.
 - Google adapter: an assistant thinking block whose `Raw` is `null` or `{}`
   padded with JSON whitespace is skipped on replay instead of being sent as
   an empty part.
+- Anthropic adapter: a thinking block whose `Raw` decodes to nothing — `null`
+  or whitespace-only, with or without JSON-whitespace padding — now fails
+  locally with `ErrInvalidRequest` before any wire call; previously a padded
+  form slipped past the guard and emitted an empty unsigned thinking block
+  the API rejects remotely.
 
 ## [0.4.0] - 2026-09-19
 

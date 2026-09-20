@@ -602,3 +602,86 @@ func TestAnthropicStreamServerToolDropped(t *testing.T) {
 		t.Errorf("ToolCalls = %#v, want none", resp.ToolCalls)
 	}
 }
+
+// TestAnthropicThinkingRawPadding pins the thinking replay guard's Raw
+// handling. Raw that decodes to nothing — nil, plain "null", or "null" /
+// whitespace-only padded with the bytes JSON permits as space — must fail
+// with a local ErrInvalidRequest BEFORE anything reaches the wire: a padded
+// form would otherwise bypass the guard, no-op through json.Unmarshal, and
+// emit an empty unsigned thinking block the API rejects remotely. Padding
+// JSON does not permit (U+00A0) stays malformed, and valid thinking JSON
+// padded with JSON whitespace still replays verbatim.
+func TestAnthropicThinkingRawPadding(t *testing.T) {
+	valid := `{"type":"thinking","thinking":"why","signature":"sig-1"}`
+	// wsOnly is a payload of exactly the bytes JSON permits as space:
+	// space, tab, LF, CR (written via runes so the source carries no
+	// escape sequences).
+	wsOnly := " " + string(rune(0x09)) + string(rune(0x0A)) + string(rune(0x0D))
+	tests := []struct {
+		name    string
+		raw     string // the Raw payload; empty means leave Raw nil
+		wantErr bool
+		errMsg  string // "empty": missing-Raw message; "malformed": malformed-JSON message
+	}{
+		{name: "nil_raw", wantErr: true, errMsg: "empty"},
+		{name: "plain_null", raw: `null`, wantErr: true, errMsg: "empty"},
+		{name: "padded_null", raw: " null", wantErr: true, errMsg: "empty"},
+		{name: "padded_whitespace_only", raw: wsOnly, wantErr: true, errMsg: "empty"},
+		{name: "nbsp_null", raw: "\u00a0null", wantErr: true, errMsg: "malformed"},
+		{name: "valid_padded_json", raw: " " + valid + "\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hits := 0
+			base := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+				hits++
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, mockTextBody("ok", 1, 1))
+			})
+			ad := newStreamAdapter(t, base)
+
+			thinking := llmkit.Block{Kind: llmkit.BlockThinking, Provider: "anthropic"}
+			if tt.raw != "" {
+				thinking.Raw = json.RawMessage(tt.raw)
+			}
+			req := llmkit.Request{
+				Messages: []llmkit.Message{
+					llmkit.TextMessage(llmkit.RoleUser, "hi"),
+					{Role: llmkit.RoleAssistant, Content: []llmkit.Block{thinking}},
+				},
+				MaxTokens: 64,
+			}
+			_, err := ad.Complete(t.Context(), req)
+
+			if !tt.wantErr {
+				if err != nil {
+					t.Fatalf("Complete: %v", err)
+				}
+				if hits != 1 {
+					t.Fatalf("wire hits = %d, want 1 (valid padded thinking must replay)", hits)
+				}
+				return
+			}
+			var apiErr *llmkit.APIError
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("err = %v, want *llmkit.APIError", err)
+			}
+			if apiErr.Kind != llmkit.ErrInvalidRequest {
+				t.Errorf("Kind = %v, want ErrInvalidRequest", apiErr.Kind)
+			}
+			switch tt.errMsg {
+			case "empty":
+				if !strings.Contains(apiErr.Message, "Raw is empty") {
+					t.Errorf("Message = %q, want the missing-Raw message", apiErr.Message)
+				}
+			case "malformed":
+				if !strings.Contains(apiErr.Message, "malformed Raw JSON") {
+					t.Errorf("Message = %q, want the malformed-Raw message", apiErr.Message)
+				}
+			}
+			if hits != 0 {
+				t.Errorf("wire hits = %d, want 0 — the guard must fire before any wire call", hits)
+			}
+		})
+	}
+}

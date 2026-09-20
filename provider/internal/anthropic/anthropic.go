@@ -3,6 +3,7 @@
 package anthropic
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -544,8 +545,11 @@ func anthropicThinkingBlock(b llmkit.Block) (anthropic.ContentBlockParamUnion, e
 	}
 	// A Block that passed through encoding/json with a nil Raw re-decodes as
 	// the literal bytes "null" — treat both as missing, not as an empty
-	// payload to forward.
-	if len(b.Raw) == 0 || string(b.Raw) == "null" {
+	// payload to forward. Trim only the bytes JSON permits as space, so
+	// padded forms (" null", whitespace-only) are caught too; padding JSON
+	// does not permit (e.g. U+00A0) stays malformed below.
+	trimmed := bytes.Trim(b.Raw, " \t\n\r")
+	if len(trimmed) == 0 || string(trimmed) == "null" {
 		return anthropic.ContentBlockParamUnion{}, &llmkit.APIError{
 			Kind:     llmkit.ErrInvalidRequest,
 			Provider: "anthropic",
