@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/decide"
 	"github.com/dpoage/llmkit/provider"
 )
 
@@ -45,17 +46,27 @@ var update = flag.Bool("update", false, "re-record live fixtures into provider/t
 // Update reports whether the run was invoked with -update.
 func Update() bool { return *update }
 
-// Lane describes one vendor lane: which provider type it builds, which
-// environment variables it reads (EnvPrefix + _API_KEY / _MODEL / _BASE_URL),
-// and which model to assume when the operator set none.
+// Lane describes one vendor lane: which environment variables it reads
+// (EnvPrefix + _API_KEY / _MODEL / _BASE_URL), which model to assume when
+// the operator set none, and — for the chat lanes — which provider.Type its
+// clients build through provider.New.
 type Lane struct {
 	Name      string
 	EnvPrefix string
-	Type      provider.Type
+	// Type is the provider.Type the lane's clients build through
+	// provider.New. It is empty for lanes that construct a different client
+	// kind: the typesafe decision lane (DecideLane) has no provider.Type
+	// because Jev is not an llmkit.Client, so it is resolved by
+	// ResolveDecide and its clients built by Session.DecideClient.
+	Type provider.Type
 	// DefaultModel fills Model when <prefix>_MODEL is unset. Empty means the
 	// model is required (the compat lane: an arbitrary endpoint has no
 	// sensible default).
 	DefaultModel string
+	// OptionalBaseURL marks lanes whose <prefix>_BASE_URL is an optional
+	// override (the typesafe lane can target a gateway) rather than a
+	// requirement (the compat lane).
+	OptionalBaseURL bool
 }
 
 var lanes = []Lane{
@@ -63,6 +74,17 @@ var lanes = []Lane{
 	{Name: "anthropic", EnvPrefix: "LLMKIT_LIVE_ANTHROPIC", Type: provider.TypeAnthropic, DefaultModel: "claude-haiku-4-5"},
 	{Name: "openai", EnvPrefix: "LLMKIT_LIVE_OPENAI", Type: provider.TypeOpenAI, DefaultModel: "gpt-4o-mini"},
 	{Name: "google", EnvPrefix: "LLMKIT_LIVE_GOOGLE", Type: provider.TypeGoogle, DefaultModel: "gemini-2.5-flash-lite"},
+}
+
+// DecideLane is the TypeSafe Jev (System One) decision lane. It deliberately
+// stays out of lanes: every lane there is dispatched by provider's live
+// matrix through provider.New(Lane.Type), and Jev has no provider.Type — its
+// live tests go through ResolveDecide and Session.DecideClient instead.
+var DecideLane = Lane{
+	Name:            "typesafe",
+	EnvPrefix:       "LLMKIT_LIVE_TYPESAFE",
+	DefaultModel:    "jev-latest",
+	OptionalBaseURL: true,
 }
 
 // All returns every lane in stable declaration order.
@@ -83,8 +105,9 @@ type Session struct {
 	Lane  Lane
 	Model string
 	Key   string
-	// BaseURL is non-empty only for lanes that require an explicit endpoint
-	// (the compat lane).
+	// BaseURL is an explicit endpoint override: required for the compat lane
+	// (an arbitrary endpoint has no default), optional for lanes with
+	// OptionalBaseURL (the typesafe lane), empty for the rest.
 	BaseURL string
 }
 
@@ -110,6 +133,8 @@ func (l Lane) resolve() (Session, []string) {
 		if s.BaseURL == "" {
 			missing = append(missing, l.EnvPrefix+"_BASE_URL")
 		}
+	} else if l.OptionalBaseURL {
+		s.BaseURL = os.Getenv(l.EnvPrefix + "_BASE_URL")
 	}
 	return s, missing
 }
@@ -126,6 +151,20 @@ func Resolve(t testing.TB, name string) *Session {
 	s, missing := lane.resolve()
 	if len(missing) > 0 {
 		t.Skipf("live lane %s: skipping — missing %s", lane.Name, strings.Join(missing, ", "))
+		return nil
+	}
+	return &s
+}
+
+// ResolveDecide resolves the typesafe decide lane (DecideLane) from the
+// environment, skipping the test with a message that names every missing
+// variable — with the lane's default model and optional base URL, only
+// LLMKIT_LIVE_TYPESAFE_API_KEY can be missing. Use it at the lane level so
+// a keyless lane skips once, not per case.
+func ResolveDecide(t testing.TB) *Session {
+	s, missing := DecideLane.resolve()
+	if len(missing) > 0 {
+		t.Skipf("live lane %s: skipping — missing %s", DecideLane.Name, strings.Join(missing, ", "))
 		return nil
 	}
 	return &s
@@ -245,6 +284,30 @@ func (s *Session) Client(ctx context.Context, t testing.TB, tr *Transport, mutat
 	})
 	if err != nil {
 		t.Fatalf("livetest: provider.New for lane %s: %v", s.Lane.Name, err)
+		return nil
+	}
+	return cl
+}
+
+// DecideClient builds the typesafe lane's decide client through decide.New —
+// the production construction path — with the recording transport injected
+// via Config.HTTPClient and the run-wide token tally as Config.Recorder.
+// mutate, when non-nil, adjusts the Config last (e.g. an intentionally bad
+// key or model for the error-normalization cases).
+func (s *Session) DecideClient(ctx context.Context, t testing.TB, tr *Transport, mutate func(*decide.Config)) *decide.Client {
+	cfg := decide.Config{
+		APIKey:     s.Key,
+		Model:      s.Model,
+		BaseURL:    s.BaseURL,
+		HTTPClient: &http.Client{Transport: tr},
+		Recorder:   DefaultTally(),
+	}
+	if mutate != nil {
+		mutate(&cfg)
+	}
+	cl, err := decide.New(cfg)
+	if err != nil {
+		t.Fatalf("livetest: decide.New for lane %s: %v", s.Lane.Name, err)
 		return nil
 	}
 	return cl

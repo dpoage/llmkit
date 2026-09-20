@@ -1,7 +1,8 @@
 # Live acceptance suite: runs the `live`-tagged test binaries (provider
-# matrix, agent harness, example execution) against the REAL vendor through
-# the compat lane. Credentials come from one repo secret and two repo
-# variables — set exactly these names:
+# matrix, agent harness, example execution, decide acceptance) against the
+# REAL vendors: the chat providers through their lanes, and the TypeSafe
+# Jev (System One) decide cases through the decide lane. Credentials come
+# from repo secrets and repo variables — set exactly these names:
 #
 #   secret   LLMKIT_LIVE_COMPAT_API_KEY   MiniMax API key (from
 #                                         ~/.config/bugbot/env: $MINIMAX_API_KEY)
@@ -13,16 +14,18 @@
 # and pairing that with a secret hands the key to anyone who can open one.
 # Push requires write access, which is the same trust the secret already
 # assumes. Without the API key the job prints "no live credentials —
-# skipped" and exits 0, so secret-less clones stay green. Local
-# instructions and the verified capability set live in AGENTS.md
-# (Build & Test).
+# skipped" and exits 0, so secret-less clones stay green (the decide lane
+# additionally skips on its own variable, naming it). Local instructions
+# and the verified capability set live in AGENTS.md (Build & Test).
 #
 # The job runs the suite WITHOUT -update: the live matrix's assertions
 # against real responses ARE the vendor-drift gate, and -v logs the
 # LIVE_TOKENS spend line per package. Re-recording fixtures (-update) is a
 # deliberate LOCAL operation; the committed fixtures under
 # provider/testdata are the always-on hermetic adapter-regression guard via
-# provider/fixture_replay_test.go, which runs in CI without credentials.
+# provider/fixture_replay_test.go, as the decide fixtures under
+# decide/testdata are via decide/fixture_replay_test.go — both run in CI
+# without credentials.
 
 name: Live
 
@@ -41,6 +44,7 @@ on:
       - "examples/**"
       - "internal/**"
       - "*.go"
+      - "decide/**"
       - go.mod
       - go.sum
       - .github/workflows/live.yml
@@ -60,6 +64,12 @@ jobs:
       # parallel_tool_calls and prompt_caching cases run and must pass rather
       # than skip on the conservative compat profile.
       LLMKIT_LIVE_COMPAT_CAPS: parallel_tool_calls,prompt_caching
+      # TypeSafe Jev (System One) decide lane: the key comes from a repo
+      # secret of the same name (the operator adds it). The lane's model
+      # defaults to jev-latest and its base URL to the vendor endpoint, so
+      # no repo variables are read for it. Without the secret the decide
+      # lane skips, like every keyless lane.
+      LLMKIT_LIVE_TYPESAFE_API_KEY: ${{ secrets.LLMKIT_LIVE_TYPESAFE_API_KEY }}
     steps:
       - uses: actions/checkout@v5
 
@@ -80,4 +90,4 @@ jobs:
 
       - name: run live suite
         if: steps.creds.outputs.available == 'true'
-        run: go test -tags live -count=1 -v ./provider/ ./agent/ ./examples/...
+        run: go test -tags live -count=1 -v ./provider/ ./agent/ ./examples/... ./decide/
