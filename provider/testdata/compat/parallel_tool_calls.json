@@ -19,33 +19,33 @@
   "request_check": "strict",
   "inputs": [
     {
-      "System": "",
-      "Messages": [
+      "system": "",
+      "messages": [
         {
-          "Role": "user",
-          "Content": [
+          "role": "user",
+          "content": [
             {
               "kind": "text",
               "text": "Call BOTH the now tool and the add tool (a=41, b=58) in the SAME response, in parallel. Do not answer in words."
             }
           ],
-          "ToolCalls": null,
-          "ToolCallID": "",
-          "IsError": false
+          "tool_calls": null,
+          "tool_call_id": "",
+          "is_error": false
         }
       ],
-      "Tools": [
+      "tools": [
         {
-          "Name": "now",
-          "Description": "Returns the current local date and time.",
+          "name": "now",
+          "description": "Returns the current local date and time.",
           "Parameters": {
             "type": "object",
             "properties": {}
           }
         },
         {
-          "Name": "add",
-          "Description": "Adds two numbers.",
+          "name": "add",
+          "description": "Adds two numbers.",
           "Parameters": {
             "type": "object",
             "properties": {
@@ -63,19 +63,19 @@
           }
         }
       ],
-      "MaxTokens": 768,
-      "Temperature": null,
-      "Thinking": null,
-      "ToolChoice": {
-        "Mode": "",
-        "Name": ""
+      "max_tokens": 768,
+      "temperature": null,
+      "thinking": null,
+      "tool_choice": {
+        "mode": "",
+        "name": ""
       },
-      "StopSequences": null,
-      "TopP": null,
-      "TopK": null,
-      "Seed": null,
-      "ResponseSchema": null,
-      "ResponseSchemaName": ""
+      "stop_sequences": null,
+      "top_p": null,
+      "top_k": null,
+      "seed": null,
+      "response_schema": null,
+      "response_schema_name": ""
     }
   ],
   "exchanges": [
@@ -123,14 +123,14 @@
     "text": "\u003cthink\u003e\nThe user wants me to call both tools in parallel in the same response. I should not add any words, just\n\u003c/think\u003e\n\nmake the tool calls.\u003c/think\u003e",
     "tool_calls": [
       {
-        "ID": "call_a4ae9057c8831043",
-        "Name": "now",
-        "Arguments": {}
+        "id": "call_a4ae9057c8831043",
+        "name": "now",
+        "arguments": {}
       },
       {
-        "ID": "call_8f1563963e0a0e51",
-        "Name": "add",
-        "Arguments": {
+        "id": "call_8f1563963e0a0e51",
+        "name": "add",
+        "arguments": {
           "a": 41,
           "b": 58
         }
@@ -138,10 +138,10 @@
     ],
     "stop_reason": "tool_use",
     "usage": {
-      "InputTokens": 480,
-      "OutputTokens": 74,
-      "CacheReadInputTokens": 384,
-      "CacheCreationInputTokens": 0
+      "input_tokens": 480,
+      "output_tokens": 74,
+      "cache_read_input_tokens": 384,
+      "cache_creation_input_tokens": 0
     }
   }
 }
