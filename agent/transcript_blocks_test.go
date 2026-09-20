@@ -10,10 +10,10 @@ import (
 )
 
 // TestTranscriptBlocksSurviveJSONLReplay pins the Blocks propagation chain:
-// a runner records Response.Blocks into the transcript (EventAssistant),
+// a Runner records Response.Blocks into the run's Completion event,
 // SaveJSONL/LoadJSONL round-trips them (Block.Data/.Raw through
-// encoding/json), and NewReplayClient serves them back on Complete. If
-// recordAssistant drops Blocks, or the Event field stops round-tripping, or
+// encoding/json), and NewReplayClient serves them back on Complete. If the
+// Completion event drops Blocks, or the Event shape stops round-tripping, or
 // ReplayClient stops serving them, this test fails.
 func TestTranscriptBlocksSurviveJSONLReplay(t *testing.T) {
 	const thinkRaw = `{"type":"thinking","thinking":"why","signature":"sig-1"}`
@@ -44,7 +44,7 @@ func TestTranscriptBlocksSurviveJSONLReplay(t *testing.T) {
 	}
 
 	// Replay serves the recorded blocks.
-	replay, err := NewReplayClient(loaded, llmkit.Capabilities{})
+	replay, err := NewReplayClient(loaded, loaded.RunID, llmkit.Capabilities{})
 	if err != nil {
 		t.Fatalf("NewReplayClient: %v", err)
 	}

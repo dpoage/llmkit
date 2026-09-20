@@ -204,7 +204,7 @@ func TestRunJSON_RepairAppendsToStreamedTranscript(t *testing.T) {
 		textResp("here is the answer: not json at all", 5, 5),
 		textResp(`{"path":"c.go","note":"fixed"}`, 5, 5),
 	)
-	r := NewRunner(fc, nil, "sys", WithTranscriptDir(dir))
+	r := NewRunner(fc, nil, "sys", WithObserver(JSONL(dir, nil)))
 
 	var got item
 	out, err := r.RunJSON(context.Background(), "task", json.RawMessage(`{"type":"object"}`), &got)
@@ -236,32 +236,35 @@ func TestRunJSON_RepairAppendsToStreamedTranscript(t *testing.T) {
 	// Main run: request+assistant. Repair: request+assistant. All on disk,
 	// in order — the main run's events first (no truncation), the repair's
 	// appended after.
-	if len(loaded.Events) != 4 {
-		t.Fatalf("on-disk events = %d, want 4 (main run request+assistant, then repair request+assistant); on-disk=%+v",
-			len(loaded.Events), loaded.Events)
+	if len(loaded.Record) != 4 {
+		t.Fatalf("on-disk events = %d, want 4 (start + main completion + repair completion + finalize); on-disk=%+v",
+			len(loaded.Record), loaded.Record)
 	}
 	mainIdx, repairIdx := -1, -1
-	for i, ev := range loaded.Events {
-		if ev.Kind == EventAssistant && ev.Text == "here is the answer: not json at all" {
+	for i, ev := range loaded.Record {
+		if ev.Kind != llmkit.KindCompletion || ev.Completion == nil {
+			continue
+		}
+		if ev.Completion.Response.Text == "here is the answer: not json at all" {
 			mainIdx = i
 		}
-		if ev.Kind == EventAssistant && ev.Text == `{"path":"c.go","note":"fixed"}` {
+		if ev.Completion.Response.Text == `{"path":"c.go","note":"fixed"}` {
 			repairIdx = i
 		}
 	}
 	if mainIdx == -1 {
-		t.Errorf("on-disk transcript missing the main run's assistant text (truncated by reopen?); got %+v", loaded.Events)
+		t.Errorf("on-disk transcript missing the main run's assistant text (truncated by reopen?); got %+v", loaded.Record)
 	}
 	if repairIdx == -1 {
-		t.Errorf("on-disk transcript missing the repair's assistant text (repair invisible on disk); got %+v", loaded.Events)
+		t.Errorf("on-disk transcript missing the repair's assistant text (repair invisible on disk); got %+v", loaded.Record)
 	}
 	if mainIdx != -1 && repairIdx != -1 && mainIdx > repairIdx {
-		t.Errorf("main-run assistant event at %d AFTER repair's at %d — append order violated", mainIdx, repairIdx)
+		t.Errorf("main-run completion event at %d AFTER repair's at %d — append order violated", mainIdx, repairIdx)
 	}
 
 	// The in-memory Outcome.Transcript matches the on-disk picture.
-	if len(out.Transcript.Events) != 4 {
-		t.Errorf("in-memory Transcript.Events = %d, want 4 (main run + repair)", len(out.Transcript.Events))
+	if len(out.Transcript.Record) != 4 {
+		t.Errorf("in-memory Transcript.Record = %d, want 4 (main run + repair)", len(out.Transcript.Record))
 	}
 	// A repair on a NON-truncated run must leave the truncation fields alone:
 	// only the original run's state folds through, and there is none here.
@@ -655,12 +658,13 @@ func TestRunJSON_MiniMaxM27Reasoning(t *testing.T) {
 	}
 }
 
-// assistantText returns the first EventAssistant text from the outcome's
-// transcript, used to assert the raw model text is preserved unmodified.
+// assistantText returns the first Completion response's text from the
+// outcome's transcript, used to assert the raw model text is preserved
+// unmodified.
 func assistantText(out *Outcome) string {
-	for _, ev := range out.Transcript.Events {
-		if ev.Kind == EventAssistant {
-			return ev.Text
+	for _, ev := range out.Transcript.Record {
+		if ev.Kind == llmkit.KindCompletion && ev.Completion != nil {
+			return ev.Completion.Response.Text
 		}
 	}
 	return ""
@@ -829,7 +833,9 @@ func TestRunJSON_BudgetFinalizeEmptyStillClassified(t *testing.T) {
 			TokenBudget:   -1,
 		}),
 		WithBudgetPool(pool))
-	out, _ := r2.run(context.Background(), nil, "audit", nil, finalizationPrompt(json.RawMessage(`{"type":"object"}`)), nil, nil)
+	tr2 := NewTranscript()
+	em2 := runEmitter{tr: tr2, obs: llmkit.Observers(tr2)}
+	out, _ := r2.run(context.Background(), em2, nil, "audit", nil, finalizationPrompt(json.RawMessage(`{"type":"object"}`)), nil, nil)
 	if !out.Truncated() {
 		t.Error("Outcome.Truncated() = false, want true (budget stop should still mark truncated)")
 	}
@@ -1567,10 +1573,10 @@ func TestRunJSON_RepairStepContinuesParentSequence(t *testing.T) {
 	}
 	// Events within one turn SHARE that turn's Step (it is the join key);
 	// across turns the number must never go backwards, and the repair's
-	// request/assistant pair must sit at step 3 — one continuous sequence.
+	// completion must sit at step 3 — one continuous sequence.
 	prev := 0
-	repairSteps := map[EventKind]bool{}
-	for _, ev := range out.Transcript.Events {
+	repairSteps := map[llmkit.EventKind]bool{}
+	for _, ev := range out.Transcript.Record {
 		if ev.Step < prev {
 			t.Errorf("transcript Step went backwards: step %d after %d (kind %s)", ev.Step, prev, ev.Kind)
 		}
@@ -1579,7 +1585,7 @@ func TestRunJSON_RepairStepContinuesParentSequence(t *testing.T) {
 			repairSteps[ev.Kind] = true
 		}
 	}
-	if !repairSteps[EventRequest] || !repairSteps[EventAssistant] {
+	if !repairSteps[llmkit.KindCompletion] {
 		t.Errorf("repair completion not recorded at step 3 (events at step 3: %v)", repairSteps)
 	}
 }

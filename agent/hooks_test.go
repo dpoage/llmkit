@@ -31,7 +31,6 @@ type hookRecorder struct {
 	compactions []CompactionEvent
 	finalizes   []TruncationReason
 	repairs     int
-	streamErrs  []error
 }
 
 func newHookRecorder() *hookRecorder { return &hookRecorder{} }
@@ -98,12 +97,6 @@ func (h *hookRecorder) hooks() Hooks {
 			h.mu.Lock()
 			defer h.mu.Unlock()
 			h.finalizes = append(h.finalizes, reason)
-		},
-		TranscriptError: func(err error) {
-			h.record("streamerr")
-			h.mu.Lock()
-			defer h.mu.Unlock()
-			h.streamErrs = append(h.streamErrs, err)
 		},
 	}
 }
@@ -376,7 +369,9 @@ func TestHook_Finalize_FiresWithStopReason(t *testing.T) {
 	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys",
 		WithHooks(rec.hooks()),
 		WithLimits(Limits{MaxIterations: 1}))
-	out, err := r.run(context.Background(), nil, "task", nil, finalizationPrompt(nil), nil, nil)
+	tr := NewTranscript()
+	em := runEmitter{tr: tr, obs: llmkit.Observers(tr)}
+	out, err := r.run(context.Background(), em, nil, "task", nil, finalizationPrompt(nil), nil, nil)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -454,40 +449,46 @@ func TestHook_Repair_FiresOnceAtRepairStart(t *testing.T) {
 	}
 }
 
-// TestHook_TranscriptError_FiresOnStreamFailure verifies transcript streaming
-// failures surface through Hooks.TranscriptError instead of being swallowed,
-// while the run itself still succeeds (streaming is best-effort).
-func TestHook_TranscriptError_FiresOnStreamFailure(t *testing.T) {
-	// Point transcriptDir at an existing FILE: creating the autosave
-	// directory under it must fail on the first recorded event.
+// TestJSONLOnErr_FiresOnUnwritableDir verifies sink write failures surface
+// through the onErr callback the sink was constructed with — never through
+// Hooks (TranscriptError is gone) and never by failing the run.
+func TestJSONLOnErr_FiresOnUnwritableDir(t *testing.T) {
+	// Point the sink's dir at an existing FILE: creating anything under it
+	// must fail on the first event.
 	dir := t.TempDir()
 	fileAsDir := filepath.Join(dir, "not-a-dir")
 	if err := os.WriteFile(fileAsDir, []byte("x"), 0o644); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
 
+	var mu sync.Mutex
+	var sinkErrs []error
 	fc := newFakeClient(textResp("done", 1, 1))
-	rec := newHookRecorder()
 	r := NewRunner(fc, nil, "sys",
-		WithHooks(rec.hooks()),
-		WithTranscriptDir(fileAsDir))
+		WithObserver(JSONL(fileAsDir, func(err error) {
+			mu.Lock()
+			defer mu.Unlock()
+			sinkErrs = append(sinkErrs, err)
+		})))
 
 	out, err := r.Run(context.Background(), "task")
 	if err != nil {
-		t.Fatalf("Run must not fail on a broken autosave path: %v", err)
+		t.Fatalf("Run must not fail on a broken sink path: %v", err)
 	}
 	if out.FinalText != "done" {
 		t.Fatalf("FinalText = %q", out.FinalText)
 	}
-	if len(rec.streamErrs) == 0 {
-		t.Fatal("TranscriptError never fired despite the unusable stream path")
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sinkErrs) == 0 {
+		t.Fatal("sink onErr never fired despite the unusable path")
 	}
-	for i, serr := range rec.streamErrs {
+	for i, serr := range sinkErrs {
 		if serr == nil {
-			t.Errorf("streamErrs[%d] = nil", i)
+			t.Errorf("sinkErrs[%d] = nil", i)
 		}
-		if !strings.Contains(serr.Error(), "transcript") && !strings.Contains(serr.Error(), fileAsDir) {
-			t.Errorf("streamErrs[%d] = %v, want a path-qualified transcript error", i, serr)
+		if !strings.Contains(serr.Error(), fileAsDir) {
+			t.Errorf("sinkErrs[%d] = %v, want a path-qualified error", i, serr)
 		}
 	}
 }

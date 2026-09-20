@@ -32,24 +32,27 @@ func TestTranscript_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadJSONL: %v", err)
 	}
-	if len(loaded.Events) != len(out.Transcript.Events) {
-		t.Fatalf("event count: loaded %d, original %d", len(loaded.Events), len(out.Transcript.Events))
+	if len(loaded.Record) != len(out.Transcript.Record) {
+		t.Fatalf("event count: loaded %d, original %d", len(loaded.Record), len(out.Transcript.Record))
 	}
 	// Spot-check kinds and key fields survived.
-	var sawToolResult, sawAssistant bool
-	for _, ev := range loaded.Events {
+	var sawToolRun, sawCompletion bool
+	for _, ev := range loaded.Record {
 		switch ev.Kind {
-		case EventToolResult:
-			sawToolResult = true
-			if ev.ToolName != "echo" || ev.ToolCallID != "c1" {
-				t.Errorf("tool result event lost fields: %+v", ev)
+		case llmkit.KindToolRun:
+			sawToolRun = true
+			if ev.ToolRun == nil || ev.ToolRun.Call.Name != "echo" || ev.ToolRun.Call.ID != "c1" {
+				t.Errorf("tool run event lost fields: %+v", ev)
 			}
-		case EventAssistant:
-			sawAssistant = true
+		case llmkit.KindCompletion:
+			sawCompletion = true
 		}
 	}
-	if !sawToolResult || !sawAssistant {
+	if !sawToolRun || !sawCompletion {
 		t.Error("round-trip lost event kinds")
+	}
+	if out.Transcript.RunID == "" || loaded.Record[0].RunID != out.Transcript.RunID {
+		t.Errorf("run identity lost in round-trip: transcript %q, event 0 %q", out.Transcript.RunID, loaded.Record[0].RunID)
 	}
 }
 
@@ -100,7 +103,7 @@ func TestReplayClient_ReplaysRun(t *testing.T) {
 	}
 
 	// Replay it through a fresh runner with the same tools.
-	replay, err := NewReplayClient(rec.Transcript, llmkit.Capabilities{})
+	replay, err := NewReplayClient(rec.Transcript, rec.RunID, llmkit.Capabilities{})
 	if err != nil {
 		t.Fatalf("NewReplayClient: %v", err)
 	}
@@ -126,7 +129,7 @@ func TestReplayClient_Divergence(t *testing.T) {
 	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys")
 	rec, _ := r.Run(context.Background(), "task")
 
-	replay, err := NewReplayClient(rec.Transcript, llmkit.Capabilities{})
+	replay, err := NewReplayClient(rec.Transcript, rec.RunID, llmkit.Capabilities{})
 	if err != nil {
 		t.Fatalf("NewReplayClient: %v", err)
 	}
@@ -201,13 +204,18 @@ func TestSaveJSONL_FlushesPrefixOnEncodeError(t *testing.T) {
 	const n = 5
 	payload := "this is a longish result payload so each event encodes to more than 100 bytes"
 	for i := range n {
-		tr.Events = append(tr.Events, Event{
-			Kind:       EventToolResult,
-			Step:       i + 1,
-			ToolName:   "echo",
-			ToolCallID: "c1",
-			Result:     payload,
+		tr.Record = append(tr.Record, llmkit.Event{
+			Kind: llmkit.KindToolRun,
+			Step: i + 1,
+			ToolRun: &llmkit.ToolRunEvent{
+				Call:   llmkit.ToolCall{ID: "c1", Name: "echo"},
+				Result: payload,
+			},
 		})
+	}
+	// The shape guard requires a schema_version on every encoded event.
+	for i := range tr.Record {
+		tr.Record[i].SchemaVersion = llmkit.EventSchemaVersion
 	}
 
 	// Use a bufio.Writer with a 64-byte buffer so writes to the underlying
@@ -223,8 +231,8 @@ func TestSaveJSONL_FlushesPrefixOnEncodeError(t *testing.T) {
 	var probe bytes.Buffer
 	probeBW := bufio.NewWriter(&probe)
 	probeEnc := json.NewEncoder(probeBW)
-	for i := range tr.Events {
-		if err := probeEnc.Encode(&tr.Events[i]); err != nil {
+	for i := range tr.Record {
+		if err := probeEnc.Encode(&tr.Record[i]); err != nil {
 			t.Fatalf("probe encode %d: %v", i, err)
 		}
 	}
@@ -279,27 +287,54 @@ func TestSaveJSONL_FlushesPrefixOnEncodeError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadJSONL on the persisted prefix: %v", err)
 	}
-	if len(loaded.Events) < 1 {
+	if len(loaded.Record) < 1 {
 		t.Fatalf("LoadJSONL recovered %d events from a %d-byte prefix; expected at least 1",
-			len(loaded.Events), fw.written.Len())
+			len(loaded.Record), fw.written.Len())
 	}
 	// Every recovered event must match the originals (same kind, step,
 	// tool name, payload).
-	for i, ev := range loaded.Events {
-		if ev.Kind != EventToolResult {
-			t.Errorf("recovered event %d: kind = %q, want %q", i, ev.Kind, EventToolResult)
+	for i, ev := range loaded.Record {
+		if ev.Kind != llmkit.KindToolRun {
+			t.Errorf("recovered event %d: kind = %q, want %q", i, ev.Kind, llmkit.KindToolRun)
 		}
 		if ev.Step < 1 || ev.Step > n {
 			t.Errorf("recovered event %d: step = %d, want in [1,%d]", i, ev.Step, n)
 		}
-		if ev.ToolName != "echo" {
-			t.Errorf("recovered event %d: tool = %q, want %q", i, ev.ToolName, "echo")
+		if ev.ToolRun.Call.Name != "echo" {
+			t.Errorf("recovered event %d: tool = %q, want %q", i, ev.ToolRun.Call.Name, "echo")
 		}
-		if ev.Result != payload {
-			t.Errorf("recovered event %d: result = %q, want %q", i, ev.Result, payload)
+		if ev.ToolRun.Result != payload {
+			t.Errorf("recovered event %d: result = %q, want %q", i, ev.ToolRun.Result, payload)
 		}
 	}
 	_ = bw
+}
+
+// TestLoadJSONL_RejectsPreSchemaLines pins the standing ruling (llmkit-ly5):
+// a line without schema_version is a pre-schema recording — unsupported. The
+// load must ERROR naming the line, never silently load zero values.
+func TestLoadJSONL_RejectsPreSchemaLines(t *testing.T) {
+	// A valid event line, then a hand-written pre-schema line.
+	valid := NewTranscript()
+	valid.Record = append(valid.Record, llmkit.Event{
+		Kind:          llmkit.KindToolRun,
+		Step:          1,
+		SchemaVersion: llmkit.EventSchemaVersion,
+		ToolRun:       &llmkit.ToolRunEvent{Call: llmkit.ToolCall{ID: "c1", Name: "echo"}, Result: "ok"},
+	})
+	var buf bytes.Buffer
+	if err := valid.SaveJSONL(&buf); err != nil {
+		t.Fatalf("SaveJSONL: %v", err)
+	}
+	buf.WriteString(`{"kind":"request","step":1,"messages":[]}` + "\n")
+
+	_, err := LoadJSONL(&buf)
+	if err == nil {
+		t.Fatal("LoadJSONL accepted a pre-schema line; want an error")
+	}
+	if !strings.Contains(err.Error(), "line 2") || !strings.Contains(err.Error(), "schema_version") {
+		t.Errorf("error = %v, want it to name line 2 and schema_version", err)
+	}
 }
 
 // flakyBuffer embeds flakyWriter so we can pass it through bufio.NewWriterSize
