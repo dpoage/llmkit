@@ -1296,8 +1296,9 @@ func TestObserver_DuplicateStartRefusalDetails(t *testing.T) {
 	joined := strings.Join(msgs, "\n")
 	reported := len(msgs)
 	mu.Unlock()
-	if !strings.Contains(joined, "duplicate Start") || !strings.Contains(joined, "dup-x") {
-		t.Errorf("refusal messages = %v, want a duplicate-Start report naming the run", msgs)
+	if !strings.Contains(joined, "duplicate Start") || !strings.Contains(joined, "dup-x") ||
+		!strings.Contains(joined, "already recorded or refused") {
+		t.Errorf("refusal messages = %v, want a duplicate-Start report naming the run and not claiming it is live", msgs)
 	}
 	sink.mu.Lock()
 	entry := sink.runs["dup-x"]
@@ -2013,5 +2014,151 @@ func TestObserver_EventsRefusesUnsafeIDsBeforeOpen(t *testing.T) {
 		if !errors.Is(err, ErrUnknownRun) || !strings.Contains(err.Error(), "not a safe filename component") {
 			t.Errorf("Events(%q) err = %v (%d events), want ErrUnknownRun naming the unsafe component", id, err, len(got))
 		}
+	}
+}
+
+// TestObserver_ConcurrentFinalizeClosesOnce pins the Finalize row against a
+// duplicate run's second Finalize. The entry leaves the table in the same
+// critical section that finds it, so of two concurrent Finalizes for one
+// live run exactly one writes the line and closes the fd while the other
+// takes the unknown-run path: 400 pairs, 400 reports, every record holding
+// one Start and one Finalize. Deleting the entry after the write instead
+// would let both goroutines find it — reports lost, and two of them inside
+// one run's critical section around one fd.
+func TestObserver_ConcurrentFinalizeClosesOnce(t *testing.T) {
+	const races = 400
+	ctx := context.Background()
+	dir := t.TempDir()
+	var mu sync.Mutex
+	var reports int
+	var unnamed int
+	sink := JSONL(dir, func(err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		reports++
+		if !strings.Contains(err.Error(), "unknown or closed run") {
+			unnamed++
+		}
+	})
+	before := openFDs()
+	var badRecord int
+	var firstBad error
+	for i := range races {
+		id := llmkit.RunID(fmt.Sprintf("fin-%d", i))
+		sink.Observe(ctx, sinkStart(ctx, id, "g"))
+		var ready, wg sync.WaitGroup
+		ready.Add(2)
+		gun := make(chan struct{})
+		for range 2 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				ready.Done()
+				<-gun
+				sink.Observe(ctx, sinkFin(ctx, id))
+			}()
+		}
+		ready.Wait()
+		close(gun)
+		wg.Wait()
+
+		evs, err := sink.Events(ctx, id)
+		if err != nil {
+			badRecord++
+			if firstBad == nil {
+				firstBad = err
+			}
+			continue
+		}
+		starts, fins := 0, 0
+		for _, ev := range evs {
+			switch ev.Kind {
+			case llmkit.KindStart:
+				starts++
+			case llmkit.KindFinalize:
+				fins++
+			}
+		}
+		if starts != 1 || fins != 1 {
+			badRecord++
+		}
+	}
+	mu.Lock()
+	gotReports, gotUnnamed := reports, unnamed
+	mu.Unlock()
+	if gotReports != races {
+		t.Errorf("onErr fired %d times for %d double-Finalize pairs, want exactly one report per pair (%d)", gotReports, races, races)
+	}
+	if gotUnnamed != 0 {
+		t.Errorf("%d reports do not name the unknown-or-closed run", gotUnnamed)
+	}
+	if badRecord != 0 {
+		t.Errorf("%d of %d records are not one Start plus one Finalize; want 0 (first read error: %v)", badRecord, races, firstBad)
+	}
+	sink.mu.Lock()
+	live := len(sink.runs)
+	sink.mu.Unlock()
+	if live != 0 {
+		t.Errorf("sink holds %d entries after %d double-finalized runs; want 0", live, races)
+	}
+	if after := openFDs(); before >= 0 && after >= 0 && after > before+4 {
+		t.Errorf("fd count grew from %d to %d across %d double-Finalize pairs; an fd leaked", before, after, races)
+	}
+}
+
+// TestObserver_ReentrantOnErrDoesNotDeadlock pins that a report never runs
+// under a sink lock: an onErr that turns around and drives the SAME sink —
+// Start, a stray event, Finalize, Events — completes instead of wedging it.
+// Reporting from inside the critical section would deadlock the sink, and
+// with it every run sharing it, on the first refusal.
+func TestObserver_ReentrantOnErrDoesNotDeadlock(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	var mu sync.Mutex
+	var reports, reentries, depth int
+	var sink *JSONLSink
+	sink = JSONL(dir, func(error) {
+		mu.Lock()
+		reports++
+		seq := reports
+		nested := depth > 0
+		depth++
+		mu.Unlock()
+		if nested {
+			return // one level of re-entry proves the point and terminates
+		}
+		inner := llmkit.RunID(fmt.Sprintf("inner-%d", seq))
+		sink.Observe(ctx, sinkStart(ctx, inner, "from onErr"))
+		sink.Observe(ctx, sinkTool(ctx, "never-started", "c0"))
+		sink.Observe(ctx, sinkFin(ctx, inner))
+		_, _ = sink.Events(ctx, inner)
+		mu.Lock()
+		reentries++
+		depth = 0
+		mu.Unlock()
+	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// One event per reporting row of the admission table.
+		sink.Observe(ctx, sinkStart(ctx, "", "unsafe id"))
+		sink.Observe(ctx, sinkTool(ctx, "ghost", "c0"))
+		sink.Observe(ctx, sinkFin(ctx, "ghost"))
+		sink.Observe(ctx, sinkStart(ctx, "dup", "first"))
+		sink.Observe(ctx, sinkStart(ctx, "dup", "second"))
+		sink.Observe(ctx, sinkFin(ctx, "dup"))
+		sink.Observe(ctx, sinkStart(ctx, "dup", "third"))
+	}()
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("a re-entrant onErr deadlocked the sink: the report ran under a sink lock")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if reentries < 5 {
+		t.Errorf("only %d reports re-entered the sink (of %d); the test proved nothing", reentries, reports)
 	}
 }
