@@ -59,10 +59,10 @@
     "response": {
       "Model": "jev-1.13.0",
       "Usage": {
-        "InputTokens": 540,
-        "OutputTokens": 80,
-        "CacheReadInputTokens": 0,
-        "CacheCreationInputTokens": 0
+        "input_tokens": 540,
+        "output_tokens": 80,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0
       },
       "Nouls": {
         "hardware_fault": 0.85

@@ -206,8 +206,8 @@ Every run records an ordered `Transcript` of events. Each event has a kind, a 1-
 `SaveJSONL` writes one event per line as JSONL (JSON Lines); `LoadJSONL` reads them back. This is a real transcript from a scripted two-turn run (timestamps come from the run clock):
 
 ```jsonl
-{"kind":"request","step":1,"time":"2026-09-19T15:16:26.585632674-06:00","messages":[{"Role":"user","Content":[{"kind":"text","text":"What is the weather in Tokyo?"}],"ToolCalls":null,"ToolCallID":"","IsError":false}]}
-{"kind":"assistant","step":1,"time":"2026-09-19T15:16:26.585634929-06:00","tool_calls":[{"ID":"call-1","Name":"weather","Arguments":{"city":"Tokyo"}}],"stop_reason":"tool_use","usage":{"InputTokens":312,"OutputTokens":24,"CacheReadInputTokens":0,"CacheCreationInputTokens":0}}
+{"kind":"request","step":1,"time":"2026-09-19T15:16:26.585632674-06:00","messages":[{"role":"user","content":[{"kind":"text","text":"What is the weather in Tokyo?"}]}]}
+{"kind":"assistant","step":1,"time":"2026-09-19T15:16:26.585634929-06:00","tool_calls":[{"id":"call-1","name":"weather","arguments":{"city":"Tokyo"}}],"stop_reason":"tool_use","usage":{"input_tokens":312,"output_tokens":24}}
 {"kind":"tool_result","step":1,"time":"2026-09-19T15:16:26.585649386-06:00","tool_call_id":"call-1","tool_name":"weather","result":"18°C, clear"}
 ```
 

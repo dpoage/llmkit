@@ -13,9 +13,12 @@
 //     adapter honors) so callers can adapt without provider sniffing;
 //   - errors (rate limiting, auth, context-too-long, ...) into a small typed set.
 //
-// The layer is deliberately thin: each adapter maps these normalized types
-// to/from its vendor SDK and nothing more. Higher-level concerns (agent tool
-// loops, budgets, transcripts) live in the caller's code.
+// The layer is deliberately thin at the vendor edge: each adapter maps the
+// normalized types to/from its SDK and nothing more. This package owns the
+// normalized wire vocabulary AND the observation vocabulary ([Observer],
+// [Event]) that higher layers emit at their nondeterministic boundaries;
+// the implementations — the tool loop, budgets, transcript sinks — live in
+// the agent package and in caller code.
 //
 // # Messages and blocks
 //
@@ -102,6 +105,24 @@
 // The wrappers compose over streaming too: retry stops once a delta is
 // delivered, the recorder reports the final streamed response, and
 // serialization drops tool-call deltas for any index beyond the first.
+//
+// # Observability
+//
+// The nondeterministic boundaries — completions, provider attempts, tool
+// runs, compaction, steering, finalization, decisions, embeddings, and
+// sandbox executions — report through one seam: an [Observer] receives a
+// typed [Event] per boundary, correlated by a [RunID] the caller mints with
+// [NewRunID] and places in the context with [WithRun]. Observers are data
+// sinks: they never affect the caller's result, and a panicking observer is
+// a harness bug that propagates. Emission rule: a Completion event is
+// emitted exactly once per logical completion by the outermost harness
+// layer — the agent Runner (with Step) for agent runs, or the
+// llmkit.Observe decorator for bare clients — never by both. The emitter
+// mints a fresh [SpanID] per logical completion ([WithSpan]) so the retry
+// stage's Attempt events join it. Attempt events
+// come only from the provider retry stage, and deterministic replay
+// consumes Completion events only. [Recorder] remains the usage-ledger
+// hook; folding it into the Observer stream is deferred.
 //
 // # Streaming
 //
@@ -235,15 +256,15 @@ type Block struct {
 // text/image/document; RoleAssistant carries text/thinking; RoleSystem and
 // RoleToolResult carry text only.
 type Message struct {
-	Role Role
+	Role Role `json:"role"`
 	// Content is the message's content blocks.
-	Content []Block
+	Content []Block `json:"content,omitempty"`
 	// ToolCalls holds tool-use requests on assistant turns.
-	ToolCalls []ToolCall
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 	// ToolCallID is set only on RoleToolResult messages.
-	ToolCallID string
+	ToolCallID string `json:"tool_call_id,omitempty"`
 	// IsError marks a RoleToolResult as a failed tool execution.
-	IsError bool
+	IsError bool `json:"is_error,omitempty"`
 }
 
 // TextMessage returns a Message whose content is the single text block s —
@@ -358,9 +379,9 @@ func ToolError(callID, text string) Message {
 // describing the tool's arguments, carried verbatim as raw JSON so callers keep
 // full control over the schema and adapters never lose fidelity.
 type ToolDef struct {
-	Name        string
-	Description string
-	Parameters  json.RawMessage
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
 }
 
 // ToolCall is a single tool invocation requested by the model. Arguments is the
@@ -368,9 +389,9 @@ type ToolDef struct {
 // json.Unmarshal it rather than string-matching, since providers differ in
 // escaping.
 type ToolCall struct {
-	ID        string
-	Name      string
-	Arguments json.RawMessage
+	ID        string          `json:"id"`
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments,omitempty"`
 }
 
 // ThinkingConfig requests provider reasoning (Anthropic extended thinking,
@@ -380,7 +401,7 @@ type ToolCall struct {
 // providers without reasoning support (Capabilities.Thinking = false, e.g.
 // OpenAI adapters) drop the whole field and never see the budget.
 type ThinkingConfig struct {
-	BudgetTokens int
+	BudgetTokens int `json:"budget_tokens,omitempty"`
 }
 
 // ToolChoiceMode enumerates how strongly the model is steered toward tool
@@ -405,36 +426,36 @@ const (
 // ResponseSchema is honored via the forced synthetic tool, ToolChoice is
 // overridden by that forcing.
 type ToolChoice struct {
-	Mode ToolChoiceMode
-	Name string
+	Mode ToolChoiceMode `json:"mode,omitempty"`
+	Name string         `json:"name,omitempty"`
 }
 
 // Request is a normalized completion request.
 type Request struct {
 	// System is an optional system prompt. It is kept separate from Messages so
 	// adapters can route it to the provider's dedicated system field.
-	System string
+	System string `json:"system,omitempty"`
 	// Messages is the ordered conversation. It must not be empty. An inline
 	// RoleSystem message is honored, but where it lands on the wire differs:
 	// OpenAI keeps it as a system-role entry in place; Anthropic and Gemini
 	// have no system role inside the message list, so it is sent as a user
 	// turn (Request.System is the reliable system channel).
-	Messages []Message
+	Messages []Message `json:"messages,omitempty"`
 	// Tools is the set of tools the model may call. May be empty.
-	Tools []ToolDef
+	Tools []ToolDef `json:"tools,omitempty"`
 	// MaxTokens caps output tokens. If zero (or negative), every adapter
 	// applies the same default: llmkit.DefaultMaxTokens. An explicit value is
 	// passed through verbatim.
-	MaxTokens int
+	MaxTokens int `json:"max_tokens,omitempty"`
 	// Temperature is the sampling temperature. Nil means "use the provider
 	// default" (some models reject an explicit temperature). Use a pointer so
 	// callers can distinguish "0.0" from "unset".
-	Temperature *float64
+	Temperature *float64 `json:"temperature,omitempty"`
 	// Thinking requests provider reasoning. Nil means off. Adapters that do
 	// not support reasoning drop it silently and report Capabilities.Thinking
 	// = false. On Anthropic, combining Thinking with forced tool use (see
 	// [Request.ToolChoice] and [Request.ResponseSchema]) is refused pre-wire.
-	Thinking *ThinkingConfig
+	Thinking *ThinkingConfig `json:"thinking,omitempty"`
 	// ToolChoice steers tool use. Zero value = auto (never sent on the wire).
 	// Three rejection paths wrap ErrInvalidRequest rather than silently
 	// ignoring the request: an adapter that cannot express a mode; a model
@@ -445,20 +466,20 @@ type Request struct {
 	// Mode required or tool combined with Request.Thinking while
 	// Capabilities.Thinking is true, because forced tool use is incompatible
 	// with manual extended thinking.
-	ToolChoice ToolChoice
+	ToolChoice ToolChoice `json:"tool_choice"`
 	// StopSequences makes the model stop when it generates any of these
 	// strings (a matching provider reports StopEndTurn).
-	StopSequences []string
+	StopSequences []string `json:"stop_sequences,omitempty"`
 	// TopP is nucleus-sampling mass. Nil means provider default.
-	TopP *float64
+	TopP *float64 `json:"top_p,omitempty"`
 	// TopK truncates sampling to the K most likely tokens. Nil means
 	// provider default; adapters without a TopK concept report
 	// Capabilities.TopK = false and drop it.
-	TopK *int
+	TopK *int `json:"top_k,omitempty"`
 	// Seed biases providers that support deterministic sampling toward the
 	// same output for identical requests. Nil means unset; adapters without
 	// a seed concept report Capabilities.Seed = false and drop it.
-	Seed *int64
+	Seed *int64 `json:"seed,omitempty"`
 	// ResponseSchema is an optional JSON Schema (encoded as raw JSON) requesting
 	// schema-constrained output. Adapters honor it only when their
 	// Capabilities().StructuredOutput is true; otherwise the schema is
@@ -468,12 +489,12 @@ type Request struct {
 	// synthetic path is skipped), so combining it with Request.Thinking is
 	// refused pre-wire on the synthetic path (see [Request.ToolChoice]). Zero
 	// value (nil) means no schema request.
-	ResponseSchema json.RawMessage
+	ResponseSchema json.RawMessage `json:"response_schema,omitempty"`
 	// ResponseSchemaName names the schema on the wire. It is used as the
 	// response_format name on OpenAI-style backends and as the synthetic
 	// forced-output tool name on Anthropic. Adapters default it to
 	// "response" / "emit_answer" when empty.
-	ResponseSchemaName string
+	ResponseSchemaName string `json:"response_schema_name,omitempty"`
 }
 
 // StopReason is the normalized reason a completion ended.
@@ -516,16 +537,16 @@ const (
 // regardless of cache hits, and a caller that ignores the cache fields sees
 // exactly the pre-caching numbers.
 type Usage struct {
-	InputTokens  int64
-	OutputTokens int64
+	InputTokens  int64 `json:"input_tokens,omitempty"`
+	OutputTokens int64 `json:"output_tokens,omitempty"`
 	// CacheReadInputTokens is the subset of InputTokens served from the
 	// provider's prompt cache (billed at a steep discount: ~0.1x on Anthropic,
 	// 0.25–0.5x on OpenAI). Zero when the provider reports no cache activity.
-	CacheReadInputTokens int64
+	CacheReadInputTokens int64 `json:"cache_read_input_tokens,omitempty"`
 	// CacheCreationInputTokens is the subset of InputTokens written to the
 	// prompt cache this call (Anthropic bills these at 1.25x). Only Anthropic
 	// reports this; it is zero elsewhere.
-	CacheCreationInputTokens int64
+	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens,omitempty"`
 }
 
 // ChargeableTokens returns the budget-relevant token count for this usage,
@@ -550,17 +571,17 @@ func (u Usage) ChargeableTokens(cacheReadWeight float64) int64 {
 type Response struct {
 	// Text is the concatenated assistant text output (may be empty when the model
 	// only requested tools).
-	Text string
+	Text string `json:"text,omitempty"`
 	// Blocks carries every content block of the response in provider order —
 	// text, thinking, and any other kind the adapter surfaced. Text equals
 	// the concatenation of the BlockText blocks here.
-	Blocks []Block
+	Blocks []Block `json:"blocks,omitempty"`
 	// ToolCalls holds any tool-use requests the model made.
-	ToolCalls []ToolCall
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 	// Usage reports token consumption.
-	Usage Usage
+	Usage Usage `json:"usage"`
 	// StopReason is the normalized stop reason.
-	StopReason StopReason
+	StopReason StopReason `json:"stop_reason,omitempty"`
 }
 
 // Capabilities describes what a given provider+model supports, so callers can

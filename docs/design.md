@@ -128,6 +128,47 @@ when you want one and a type when you need state.
 - **What it costs:** cross-cutting rules span two seams. A rule about both
   requests and tools needs two policies or a `Tool` wrapper.
 
+## Observability and replay
+
+Every nondeterministic boundary — a completion, a provider retry attempt, a
+tool run, a compaction pass, a steering injection, run finalization, a
+decision, an embedding, a sandbox execution — emits one typed `llmkit.Event`
+to an `llmkit.Observer`, a single-method data sink. A `RunID` minted per run
+rides the context (`llmkit.WithRun`), so tool implementations, policies, and
+decorators stamp the same correlation key the runner does. Replay reads the
+same stream back: a Completion event carries the full request/response
+round-trip, which is why deterministic replay consumes Completion events
+only.
+
+The emission rule keeps the record honest: a Completion event is emitted
+exactly once per logical completion by the outermost harness layer — the
+agent Runner (with its Step) or, for bare clients, the `llmkit.Observe`
+decorator — never both. Attempt events come only from inside the provider
+retry stage, so a sink can see flakiness without double-counting spend.
+Policy denials are ToolRun events with `Denied` set, not a separate kind:
+what happened at the boundary is one fact with one shape.
+
+Attempts join their Completion on a span id, not a time window: the
+Completion emitter mints a fresh `SpanID` per logical completion and puts
+it in the context it passes to the client, so concurrent or nested
+completions (a tool calling the model) stay separable in the record.
+
+A run has exactly ONE durable sink. JSONL transcripts and a SQLite store
+never coexist as a split history of the same run (user ruling, 2026-09-20):
+the transcript is a view of the event stream, not a second record, and the
+Runner's in-memory `Outcome.Transcript` stays that same view, not a store.
+Sinks that fan out compose through `llmkit.Observers`, but at most one of
+them is durable.
+
+- **What it buys:** one correlation key and one wire shape across five
+  components; offline replay and evaluation from any sink; a panicking
+  observer is visible as a harness bug instead of silently dropping data.
+- **What it costs:** event fields are contract — a rename changes every
+  sink's format, so the per-kind wire shapes are pinned by golden-literal
+  tests. `llmkit.Recorder` stays the usage-ledger hook for now; folding it
+  into the Observer stream is deferred because the cutover touches
+  provider, decide, embed, and bugbot in one change.
+
 ## The sandbox refuses; it never drops
 
 `sandbox.Spec` is honest per backend. A field a backend cannot honor fails

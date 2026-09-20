@@ -23,6 +23,26 @@ entry below is marked.
   `Config.Rand` are exported hooks — nil means a real timer and the
   package-level random source — so tests can pin the schedule
   deterministically.
+- `llmkit`: the observability seam. `Observer` receives a typed `Event` per
+  nondeterministic boundary — one `Observe(ctx, Event)` method, with
+  `ObserverFunc` as the closure adapter and `Observers` as an
+  order-preserving fan-out that skips nil Observer interface values. `Event`
+  is one Kind-discriminated struct with snake_case tags and a
+  `schema_version` on every encoding; the kinds are start, completion,
+  attempt, tool_run (policy denials ride its `Denied` field), compaction,
+  steer, finalize, decision, embed, and exec, each carried by a payload
+  type: `StartEvent`, `CompletionEvent`, `AttemptEvent`, `ToolRunEvent`,
+  `CompactionEvent`, `SteerEvent`, `FinalizeEvent`, `DecisionEvent`,
+  `EmbedEvent`, and `ExecEvent`. Run identity travels the context: `RunID`,
+  `WithRun`, `RunFromContext`, and `NewRunID`, whose ids sort lexically in
+  mint order.
+  Spans join attempts to their completion: the Completion emitter mints a
+  `SpanID` per logical completion (`WithSpan`, `SpanFromContext`,
+  `NewSpanID`) and the retry stage's Attempt events inherit it.
+  A Completion event is emitted once per logical completion by the outermost
+  layer; Attempt events come only from the provider retry stage, and replay
+  consumes Completion only. `Recorder` is unchanged; folding it into the
+  stream is deferred.
 
 ### Changed
 
@@ -33,6 +53,15 @@ entry below is marked.
   `WithRetry` takes a `retry.Config`, and `provider.Options.Retry`,
   `embed.Config.Retry`, and `decide.Config.Retry` are `retry.Config`.
   There are no compatibility aliases.
+- **Breaking:** the root wire types now carry snake_case `json` tags:
+  `Message`, `ToolDef`, `ToolCall`, `ThinkingConfig`, `ToolChoice`,
+  `Request`, `Response`, and `Usage` previously serialized with Go field
+  names (`InputTokens`, `ToolCallID`, ...). Transcript JSONL and any JSON
+  recorded before this change no longer round-trips — per the standing
+  ruling, pre-tag recordings are unsupported and must be re-recorded.
+  Unmarshaling is unaffected for single-word keys (encoding/json matches
+  case-insensitively), but multi-word keys such as `InputTokens` or
+  `MaxTokens` silently drop.
 - `internal/retry` is deleted. Its loop and header parser now live in the
   `llmkit/retry` leaf package; `embed`, `decide`, and `internal/adapter`
   call them there. Internal package; no caller-facing change; retry
