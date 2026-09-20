@@ -1,0 +1,68 @@
+{
+  "case": "structured_state",
+  "lane": "typesafe",
+  "model": "jev-latest",
+  "state": {
+    "environment": {
+      "connection": "Wi-Fi",
+      "os": "Windows 11"
+    },
+    "ticket": {
+      "body": "Since yesterday's firmware update the device disappears from the network every few minutes. A power cycle helps for about an hour. Duplex printing always triggers the drop.",
+      "id": "T-1024",
+      "subject": "Printer drops off the network after firmware update"
+    }
+  },
+  "questions": {
+    "hardware_issue": {
+      "kind": "noul",
+      "instructions": {
+        "question": "Does this describe a hardware or firmware defect?",
+        "signal": "post-update connectivity loss that duplex printing reproducibly triggers"
+      },
+      "true": "firmware or hardware defect",
+      "false": "environment or configuration problem"
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/systemone",
+        "headers": {
+          "accept": "application/json",
+          "content-type": "application/json"
+        },
+        "body": "{\"state\":{\"environment\":{\"connection\":\"Wi-Fi\",\"os\":\"Windows 11\"},\"ticket\":{\"body\":\"Since yesterday's firmware update the device disappears from the network every few minutes. A power cycle helps for about an hour. Duplex printing always triggers the drop.\",\"id\":\"T-1024\",\"subject\":\"Printer drops off the network after firmware update\"}},\"model\":\"jev-latest\",\"questions\":{\"hardware_issue\":{\"type\":\"noul\",\"instructions\":{\"question\":\"Does this describe a hardware or firmware defect?\",\"signal\":\"post-update connectivity loss that duplex printing reproducibly triggers\"},\"criteria\":{\"true\":\"firmware or hardware defect\",\"false\":\"environment or configuration problem\"}}}}"
+      },
+      "response": {
+        "headers": {
+          "content-length": "127",
+          "content-type": "application/json",
+          "date": "Sun, 20 Sep 2026 00:51:10 GMT",
+          "server": "istio-envoy",
+          "x-envoy-upstream-service-time": "148",
+          "x-typesafe-request-id": "req_01a0bc4bae0b747f964bee9956a20a2b"
+        },
+        "body": "{\"model\":\"jev-1.13.0\",\"answers\":{\"hardware_issue\":{\"type\":\"noul\",\"noul\":0.82}},\"usage\":{\"input_tokens\":423,\"output_tokens\":21}}",
+        "status": 200
+      }
+    }
+  ],
+  "normalized": {
+    "response": {
+      "Model": "jev-1.13.0",
+      "Usage": {
+        "InputTokens": 423,
+        "OutputTokens": 21,
+        "CacheReadInputTokens": 0,
+        "CacheCreationInputTokens": 0
+      },
+      "Nouls": {
+        "hardware_issue": 0.82
+      },
+      "Choices": null,
+      "Scores": null
+    }
+  }
+}
