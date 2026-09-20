@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -665,5 +666,96 @@ func TestRun_TextAfterToolsReplacesFinalText(t *testing.T) {
 	}
 	if out.FinalText != "final answer" {
 		t.Errorf("FinalText = %q, want the LAST completion's text", out.FinalText)
+	}
+}
+
+// TestAssistantMessageTextGuard pins how a completion becomes the assistant
+// history turn: blocks are recorded verbatim, and when a Response carries
+// text but its Blocks omit any text block — violating the llmkit.Response
+// invariant (Text equals the concatenation of BlockText blocks) — the
+// surfaced text is appended, so history always agrees with what llmkit.Stream
+// and FinalText delivered. Think-only responses (Text == "") stay verbatim:
+// no empty text block is invented.
+func TestAssistantMessageTextGuard(t *testing.T) {
+	thinking := llmkit.Block{Kind: llmkit.BlockThinking, Text: "why", Provider: "anthropic"}
+	tests := []struct {
+		name string
+		resp llmkit.Response
+		want []llmkit.Block
+	}{
+		{
+			name: "blocks_without_text_block_gets_text_appended",
+			resp: llmkit.Response{Blocks: []llmkit.Block{thinking}, Text: "the answer"},
+			want: []llmkit.Block{thinking, {Kind: llmkit.BlockText, Text: "the answer"}},
+		},
+		{
+			name: "think_only_stays_verbatim",
+			resp: llmkit.Response{Blocks: []llmkit.Block{thinking}},
+			want: []llmkit.Block{thinking},
+		},
+		{
+			name: "text_block_present_not_duplicated",
+			resp: llmkit.Response{Blocks: []llmkit.Block{thinking, {Kind: llmkit.BlockText, Text: "the answer"}}, Text: "the answer"},
+			want: []llmkit.Block{thinking, {Kind: llmkit.BlockText, Text: "the answer"}},
+		},
+		{
+			name: "no_blocks_degrades_to_text",
+			resp: llmkit.Response{Text: "the answer"},
+			want: []llmkit.Block{{Kind: llmkit.BlockText, Text: "the answer"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := assistantMessage(tt.resp)
+			if !reflect.DeepEqual(msg.Content, tt.want) {
+				t.Fatalf("Content = %#v, want %#v", msg.Content, tt.want)
+			}
+		})
+	}
+}
+
+// TestRun_TextWithoutTextBlockReachesHistory is the end-to-end pin for the
+// assistant history guard: a scripted response shaped like the pre-fix
+// structured-output finalize (a thinking block plus Text, no text block)
+// must still record the surfaced text into the conversation history, so the
+// next request carries what llmkit.Stream delivered to the caller.
+func TestRun_TextWithoutTextBlockReachesHistory(t *testing.T) {
+	thinking := llmkit.Block{
+		Kind:     llmkit.BlockThinking,
+		Text:     "calling the tool",
+		Provider: "x",
+		Raw:      json.RawMessage(`{"type":"thinking","thinking":"calling the tool","signature":"sig-1"}`),
+	}
+	step1 := scriptStep{resp: llmkit.Response{
+		Blocks:     []llmkit.Block{thinking},
+		Text:       "calling the tool",
+		StopReason: llmkit.StopToolUse,
+		ToolCalls:  []llmkit.ToolCall{{ID: "c1", Name: "echo", Arguments: json.RawMessage(`{"v":"hi"}`)}},
+		Usage:      llmkit.Usage{InputTokens: 10, OutputTokens: 4},
+	}}
+	fc := newFakeClient(step1, textResp("answer", 8, 3))
+	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys")
+	if _, err := r.Run(context.Background(), "task"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var asst llmkit.Message
+	found := false
+	for _, m := range fc.requests[1].Messages {
+		if m.Role == llmkit.RoleAssistant {
+			asst, found = m, true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("no assistant message in the follow-up request")
+	}
+	if len(asst.Content) != 2 {
+		t.Fatalf("assistant Content = %d blocks, want 2 (thinking + text)", len(asst.Content))
+	}
+	if asst.Content[0].Kind != llmkit.BlockThinking {
+		t.Errorf("block 0 Kind = %q, want thinking", asst.Content[0].Kind)
+	}
+	if asst.Content[1].Kind != llmkit.BlockText || asst.Content[1].Text != "calling the tool" {
+		t.Errorf("block 1 = %+v, want the surfaced text block", asst.Content[1])
 	}
 }
