@@ -1,7 +1,8 @@
 # Documentation
 
 llmkit ships a provider-agnostic completion client, a tool-calling agent
-loop, sandboxed command execution, and embeddings. Start with the
+loop, sandboxed command execution, embeddings, and TypeSafe Jev decisions.
+Start with the
 [README quick start](../README.md#quick-start), then read the pages in this
 order:
 
@@ -9,8 +10,9 @@ order:
 2. [capabilities](capabilities.md) — what a client reports and what it enforces.
 3. [agent loop](agent-loop.md) — the `agent.Runner` loop, policies, hooks, steering.
 4. [sandbox](sandbox.md) — untrusted command execution and `fsroot` path containment.
-5. [testing](testing.md) — the test suites and the live acceptance regime.
-6. [design](design.md) — the architecture and the decisions behind it.
+5. [decide](decide.md) — the `decide` package: TypeSafe Jev decisions, limits, and the live lane.
+6. [testing](testing.md) — the test suites and the live acceptance regime.
+7. [design](design.md) — the architecture and the decisions behind it.
 
 | Page | Describes |
 |---|---|
@@ -18,6 +20,7 @@ order:
 | [capabilities](capabilities.md) | The `Capabilities` profile: the four enforcement classes and the per-field table. |
 | [agent loop](agent-loop.md) | Tools, limits, policies, hooks, steering, structured output, budgets, transcripts, replay. |
 | [sandbox](sandbox.md) | Backends, threat model, the spec-field honor matrix, watchdog, workspaces, probes. |
+| [decide](decide.md) | The `decide` package: question types, confidence, errors, vendor limits, the live lane. |
 | [testing](testing.md) | The hermetic, live, and integration suites; the live lanes; fixture replay. |
 | [design](design.md) | The layering and one decision record per architecture choice, with costs. |
 
