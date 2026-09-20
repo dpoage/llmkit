@@ -43,6 +43,21 @@ entry below is marked.
   layer; Attempt events come only from the provider retry stage, and replay
   consumes Completion only. `Recorder` is unchanged; folding it into the
   stream is deferred.
+- `llmkit/embed` and `llmkit/sandbox`: `Observe` decorators at the last two
+  unobserved nondeterministic boundaries. `embed.Observe(e, obs)` emits one
+  Embed event per `Embed`/`EmbedBatch` call — model, requested input count,
+  vector dimensions, duration, and the error; `CacheHits` and `Usage` stay
+  zero because the `Embedder` interface exposes neither per-call cache
+  attribution nor token usage. `sandbox.Observe(s, obs)` emits one Exec
+  event per `Exec` — backend name, command, exit code (`-1` when the
+  process never ran to an exit), captured byte counts per stream,
+  truncation, the run's measured duration, and the infrastructure error; a
+  non-zero exit code is the command's verdict, not an error, exactly like
+  the `Sandbox` contract.
+  Both wrappers pass results and errors through
+  unchanged and take `RunID`/`SpanID` from the call's context; the sandbox
+  wrapper emits nothing from `MaterializeWorkspace`. Either wrapper
+  returns its input unchanged for a nil observer.
 
 ### Changed
 
