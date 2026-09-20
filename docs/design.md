@@ -87,12 +87,20 @@ deltas from the response (`stream.go`).
 The order fixes who sees what. The tool-call serializer truncates a
 multi-call response to one before your loop sees it. The recorder books usage
 only for the final successful attempt. The retry wrapper sees raw adapter
-errors, so its classification and `Retry-After` handling stay accurate.
+errors, so its classification and `Retry-After` handling stay accurate —
+and it is the only layer that sees attempt boundaries, which is why
+`Options.Observer` wires its Attempt events there: one event per wire call,
+failures included, joined to the completion's span.
 
 - **What it buys:** each wrapper has one job and one viewpoint; usage is
-  never double-counted across attempts.
-- **What it costs:** the order is fixed. A caller cannot record every
-  attempt, and the serializer cannot inspect post-retry results.
+  never double-counted across attempts, and a sink can watch per-attempt
+  flakiness without double-counting spend.
+- **What it costs:** the order is fixed. `New` never emits `Completion`
+  events — the outermost layer owns those: the agent Runner for agent runs,
+  or wrap the returned client with `llmkit.Observe` for bare clients (never
+  both for the same client). And because the Attempt events sit below the
+  serializer, a truncated response is visible as a difference between the
+  raw Attempt response and the Completion response your loop sees.
 
 ## Honest capabilities
 

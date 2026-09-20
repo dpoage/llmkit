@@ -44,6 +44,25 @@ entry below is marked.
   consumes Completion only. `Recorder` is unchanged; folding it into the
   stream is deferred.
 
+- `llmkit`: `Observe(c, obs, provider, model)` wraps any `Client` so each
+  logical completion — one `Complete` or `Stream` call, success or error —
+  emits exactly one `Completion` event: the request as received, the final
+  response (on the stream path assembled through the same synthesis
+  `llmkit.Stream` performs) or the error text, tagged with the provider and
+  model arguments. It mints a fresh span per call and stamps it into the
+  client's context, so provider `Attempt` events join it; a nil observer
+  returns the client unchanged.
+- `llmkit`: `WithRetryObserver(c, cfg, obs, provider, model)` — the retry
+  stage emitting one `Attempt` event per attempt, failures included,
+  numbered 1..N by the loop, span inherited from the context, duration
+  covering just that attempt. `WithRetry` keeps its signature and emits
+  nothing.
+- `provider`: `Options.Observer` plumbs an `llmkit.Observer` into `New`'s
+  retry stage; `New` emits Attempt events only and never `Completion`
+  events — wrap its result with `llmkit.Observe` (or run it under the agent
+  Runner, which emits its own) to capture completions, and never both for
+  the same client.
+
 ### Changed
 
 - **Breaking:** the retry vocabulary moved from the root package into
