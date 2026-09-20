@@ -41,7 +41,8 @@ entry below is marked.
   rejects remotely.
 - Anthropic adapter: structured-output finalize appends the surfaced
   tool-call arguments as a `BlockText`; previously such completions returned
-  `Response.Text` with an empty `Blocks` list, violating the Response
+  `Response.Text` with no text block (`Blocks` empty, or only a thinking
+  block), violating the Response
   invariant (Text equals the concatenation of `BlockText` blocks) for every
   consumer that reads `Blocks` — transcripts, replay, and the agent's
   assistant history. The agent additionally appends surfaced text to
