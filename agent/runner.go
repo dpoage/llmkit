@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/dpoage/llmkit"
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -79,9 +78,10 @@ func WithLimits(l Limits) Option {
 // last (see [llmkit.Observers]). The transcript always backs
 // [Outcome.Transcript]; obs is the durable record.
 //
-// obs is called from every concurrent run's goroutine — under
-// [WithParallelTools] and across concurrent Run calls — so it must be safe
-// for concurrent use ([JSONL] is). The sink reports its own failures through
+// Emission happens on the loop goroutine, so obs must be safe for
+// concurrent use only because concurrent Run calls on one Runner are
+// allowed — each run emits from its own goroutine ([JSONL] is safe). The
+// sink reports its own failures through
 // the callback it was constructed with ([JSONL]) and never fails the run.
 // Calling WithObserver twice is last-wins: a Runner has exactly ONE durable
 // sink, so a second installation replaces the first rather than stacking a
@@ -307,12 +307,10 @@ type runConfig struct {
 // records by that identifier later. An empty id is a no-op: the Runner mints
 // one with [llmkit.NewRunID].
 //
-// The id must be a safe filename component — non-empty, no path separators,
-// never ".." — because the durable sink names the run's file
-// "<RunID>-<task-slug>.jsonl". To compute the name yourself: slug(task)
-// lowercases the task text, maps every non-[a-z0-9] run to a single dash,
-// trims leading/trailing dashes, and caps at 48 characters ("run" when
-// nothing survives).
+// The id must be a safe filename component — non-empty, not "." or "..",
+// no path separators, no NUL — because the durable sink names the run's file
+// exactly "<RunID>.jsonl". The task text is not part of the name: it rides
+// the run's Start event.
 func WithRunID(id llmkit.RunID) RunOption {
 	return func(c *runConfig) { c.runID = id }
 }
@@ -1239,24 +1237,4 @@ func (r *Runner) overBudget(u llmkit.Usage) bool {
 // the stop condition in Outcome.TruncationReason.
 func (r *Runner) finishTruncated(o *Outcome, reason TruncationReason) {
 	o.TruncationReason = reason
-}
-
-// slugRE keeps slugs filesystem-safe: lowercase alphanumerics and dashes.
-var slugRE = regexp.MustCompile(`[^a-z0-9]+`)
-
-// slug derives a short, filesystem-safe label from a task string.
-func slug(task string) string {
-	s := strings.ToLower(task)
-	s = slugRE.ReplaceAllString(s, "-")
-	s = strings.Trim(s, "-")
-	if s == "" {
-		return "run"
-	}
-	if len(s) > 48 {
-		s = strings.Trim(s[:48], "-")
-		if s == "" {
-			s = "run"
-		}
-	}
-	return s
 }

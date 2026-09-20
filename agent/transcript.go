@@ -52,7 +52,8 @@ func (t *Transcript) Observe(_ context.Context, ev llmkit.Event) {
 // transcript itself is unnamed) fails with an error wrapping
 // [ErrUnknownRun].
 func (t *Transcript) Events(_ context.Context, run llmkit.RunID) ([]llmkit.Event, error) {
-	if run != t.RunID {
+	if t.RunID == "" || run != t.RunID {
+		// An unnamed (hand-built) transcript records no run at all.
 		return nil, fmt.Errorf("agent: transcript records run %q, not %q: %w", t.RunID, run, ErrUnknownRun)
 	}
 	return slices.Clone(t.Record), nil
@@ -125,22 +126,31 @@ func LoadJSONL(r io.Reader) (*Transcript, error) {
 // file per run under a directory. Construct it with [JSONL] and install it
 // with [WithObserver].
 //
-// One RunID is one file, created exactly once: the run's first event opens
-// "<RunID>-<task-slug>.jsonl" (the name derives from the Start event, so a
-// caller that pinned the id with [WithRunID] can compute it) exclusively
-// (O_EXCL), and the file closes when the run's Finalize event arrives. A
-// RunID whose file already exists on disk — a leftover from a prior process,
-// or a duplicate id — is refused: the failure is reported through onErr
-// naming the run and the path, and every event of that run is dropped. The
-// same refusal applies to a second in-process run presenting an
-// already-open RunID, to a RunID that is empty or not a safe filename
-// component (a path separator or ".."), and to any event arriving after the
-// run's Finalize closed its file.
+// Identity is the RunID alone: the file is "<dir>/<RunID>.jsonl", opened
+// exclusively (O_EXCL) by the run's Start event and closed when its Finalize
+// arrives — one RunID is one file, created exactly once. The admission state
+// machine, per RunID:
 //
-// Streaming is best-effort and never fails a run: a directory or file open
-// failure disables that run's remaining writes and reports through onErr; an
-// encode failure drops the single line. Every failure is path-qualified so
-// an operator can tell WHICH file stopped being written. onErr may be nil.
+//	Start, no entry:    create O_EXCL. Success → live entry, event written.
+//	                    File exists (leftover from a prior process) → onErr
+//	                    ("leftover file …; run refused") and a disabled
+//	                    entry: the rest of this run's events drop silently,
+//	                    reported once. Any other open error → same.
+//	Start, entry live:  onErr ("duplicate Start for live run"), the entry is
+//	                    poisoned (disabled, fd closed). Further events for
+//	                    the id drop silently — the file keeps the first
+//	                    run's prefix; nothing is ever merged.
+//	Non-Start, no entry: onErr ("event for unknown or closed run") and drop.
+//	                    Every occurrence reports — a harness bug is loud.
+//	Non-Start, live:    written.
+//	Finalize:           written if live; the fd closes and the entry is
+//	                    deleted unconditionally (live, disabled, poisoned).
+//	                    A later event for the id takes the unknown-run path.
+//
+// Everything is best-effort and never fails a run: refusals and write
+// failures flow to the onErr callback given at construction, path-qualified
+// so an operator can tell WHICH file stopped being written. onErr may be
+// nil. An encode failure drops the single line and keeps the run live.
 //
 // A JSONLSink is safe for concurrent use: events from concurrent runs on one
 // [Runner] multiplex by [llmkit.RunID], each run writing under its own lock.
@@ -153,198 +163,220 @@ type JSONLSink struct {
 	runs map[llmkit.RunID]*jsonlRun
 }
 
-// jsonlRun is one live run's open file state inside a [JSONLSink].
+// jsonlRun is one run's admission state inside a [JSONLSink].
 type jsonlRun struct {
 	mu       sync.Mutex
 	path     string
 	file     *os.File
 	enc      *json.Encoder
-	disabled bool // an open failure retired this run's writes
+	disabled bool // refused (leftover/duplicate) or poisoned: events drop silently
 }
 
 // JSONL returns a durable event sink that appends one JSON line per event to
-// "<RunID>-<task-slug>.jsonl" under dir, creating the directory on demand at
-// the first event. Pass it to [WithObserver]; a Runner accepts at most one
-// durable sink, and a later WithObserver wins (last-wins).
+// "<RunID>.jsonl" under dir, creating the directory when the run's Start
+// event opens its file. Pass it to [WithObserver]; a Runner accepts at most
+// one durable sink, and a later WithObserver wins (last-wins).
 //
 // onErr, when non-nil, receives every refusal or write failure with the run
-// and file path attached (see [JSONLSink]). The sink never fails the run.
+// and file path attached (see [JSONLSink] for the admission table). The sink
+// never fails the run.
 func JSONL(dir string, onErr func(error)) *JSONLSink {
-	return &JSONLSink{dir: dir, onErr: onErr}
+	return &JSONLSink{dir: dir, onErr: onErr, runs: map[llmkit.RunID]*jsonlRun{}}
 }
 
-// Observe appends ev to its run's JSONL file. It satisfies
-// [llmkit.Observer]. The Start event opens the run record (it derives the
-// filename); the Finalize event closes the file and retires the run's entry.
+// Observe routes ev through the admission state machine documented on
+// [JSONLSink].
 func (s *JSONLSink) Observe(_ context.Context, ev llmkit.Event) {
+	switch ev.Kind {
+	case llmkit.KindStart:
+		s.startRun(ev)
+	case llmkit.KindFinalize:
+		s.finalizeRun(ev)
+	default:
+		s.appendRun(ev)
+	}
+}
+
+// startRun admits a run's Start event (see the table on [JSONLSink]).
+func (s *JSONLSink) startRun(ev llmkit.Event) {
+	path := s.pathFor(ev)
+	if !safeRunID(ev.RunID) {
+		s.fail(ev.RunID, path, errors.New(`run id is not a safe filename component (empty, "." or "..", a path separator, or a NUL)`))
+		return
+	}
+	s.mu.Lock()
+	if live, exists := s.runs[ev.RunID]; exists {
+		s.mu.Unlock()
+		// Duplicate Start: report, poison the existing entry — both runs
+		// drop from here; the file keeps the first run's prefix.
+		s.fail(ev.RunID, path, errors.New("duplicate Start for live run"))
+		live.mu.Lock()
+		live.disabled = true
+		if live.file != nil {
+			_ = live.file.Close()
+			live.file = nil
+			live.enc = nil
+		}
+		live.mu.Unlock()
+		return
+	}
+	run := &jsonlRun{path: path}
+	s.runs[ev.RunID] = run
+	s.mu.Unlock()
+
+	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+		s.disable(ev.RunID, run, fmt.Errorf("mkdir %s: %w", s.dir, err))
+		return
+	}
+	f, err := os.OpenFile(run.path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			s.disable(ev.RunID, run, fmt.Errorf("leftover file for run at %s; run refused: %w", run.path, err))
+		} else {
+			s.disable(ev.RunID, run, fmt.Errorf("open %s: %w", run.path, err))
+		}
+		return
+	}
+	run.mu.Lock()
+	run.file = f
+	run.enc = json.NewEncoder(f)
+	err = run.enc.Encode(&ev)
+	run.mu.Unlock()
+	if err != nil {
+		// Drop the line, keep the run live (a later event might encode).
+		s.fail(ev.RunID, run.path, fmt.Errorf("encode: %w", err))
+	}
+}
+
+// appendRun writes a non-Start, non-Finalize event (see the table on
+// [JSONLSink]).
+func (s *JSONLSink) appendRun(ev llmkit.Event) {
 	s.mu.Lock()
 	run := s.runs[ev.RunID]
 	s.mu.Unlock()
 	if run == nil {
-		// First sight of this run in the sink — normally its Start. A
-		// non-Start first event (a sink misused outside a Runner, or an event
-		// arriving after Finalize retired the entry) re-runs the exclusive
-		// open: the finished run's file is still on disk, so the open fails
-		// with ErrExist and the event is refused and reported.
-		if !openRun(s, ev) {
-			return // refused: every event of this run is dropped
-		}
-		s.mu.Lock()
-		run = s.runs[ev.RunID]
-		s.mu.Unlock()
-		if run == nil {
-			return
-		}
+		s.fail(ev.RunID, s.pathFor(ev), errors.New("event for unknown or closed run dropped"))
+		return
 	}
 	run.mu.Lock()
 	defer run.mu.Unlock()
-	if run.disabled {
-		return
-	}
-	if run.file == nil {
-		// First append: the run's one and only open, exclusive (O_EXCL). A
-		// file already on disk — leftover from a prior process, or events
-		// arriving after Finalize — refuses the run.
-		if err := os.MkdirAll(s.dir, 0o755); err != nil {
-			run.disabled = true
-			s.fail(ev.RunID, run.path, fmt.Errorf("mkdir %s: %w", s.dir, err))
-			return
-		}
-		f, err := os.OpenFile(run.path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-		if err != nil {
-			run.disabled = true
-			s.fail(ev.RunID, run.path, fmt.Errorf("open %s: %w", run.path, err))
-			return
-		}
-		run.file = f
-		run.enc = json.NewEncoder(f)
+	if run.disabled || run.enc == nil {
+		return // refused or poisoned runs drop silently
 	}
 	if err := run.enc.Encode(&ev); err != nil {
-		// Leave the file open (a later event might still succeed); drop this
-		// line, matching autosave's discard-on-error contract.
+		// Drop the line, keep the run live.
 		s.fail(ev.RunID, run.path, fmt.Errorf("encode: %w", err))
+	}
+}
+
+// finalizeRun writes the Finalize if the run is live, closes the fd, and
+// deletes the entry unconditionally (see the table on [JSONLSink]).
+func (s *JSONLSink) finalizeRun(ev llmkit.Event) {
+	s.mu.Lock()
+	run := s.runs[ev.RunID]
+	s.mu.Unlock()
+	if run == nil {
+		s.fail(ev.RunID, s.pathFor(ev), errors.New("event for unknown or closed run dropped"))
 		return
 	}
-	if ev.Kind == llmkit.KindFinalize {
-		// The run is over: close its file and retire the entry. A post-close
-		// event for the same RunID re-runs the O_EXCL open path, fails with
-		// ErrExist (the file is still on disk), and is reported — a harness
-		// bug, not something to swallow.
+	run.mu.Lock()
+	if !run.disabled && run.enc != nil {
+		if err := run.enc.Encode(&ev); err != nil {
+			s.fail(ev.RunID, run.path, fmt.Errorf("encode: %w", err))
+		}
+	}
+	if run.file != nil {
 		_ = run.file.Close()
 		run.file = nil
 		run.enc = nil
-		s.mu.Lock()
-		delete(s.runs, ev.RunID)
-		s.mu.Unlock()
 	}
+	run.mu.Unlock()
+	s.mu.Lock()
+	delete(s.runs, ev.RunID)
+	s.mu.Unlock()
 }
 
-// openRun admits a run's first event in this sink: it validates the RunID as
-// a filename component, refuses a RunID that is already live, and creates the
-// run's entry with its path — derived from the Start event, or, for a
-// non-Start first event (post-Finalize arrival, misuse outside a Runner),
-// located among the run's existing files so the exclusive open refuses
-// against the record that already exists. It reports every refusal through
-// onErr and returns false when the run's events must be dropped.
-func openRun(s *JSONLSink, ev llmkit.Event) bool {
-	id := ev.RunID
-	path := s.pathFor(ev)
-	if !safeRunID(id) {
-		s.fail(id, path, errors.New(`run id is not a safe filename component (empty, a path separator, or ..)`))
-		return false
+// disable retires a refused run's entry: onErr fires once here, and every
+// later event of the run drops silently.
+func (s *JSONLSink) disable(run llmkit.RunID, r *jsonlRun, err error) {
+	r.mu.Lock()
+	r.disabled = true
+	if r.file != nil {
+		_ = r.file.Close()
+		r.file = nil
+		r.enc = nil
 	}
-	if ev.Kind != llmkit.KindStart {
-		// Not the run's opening event: the record must already exist. Locate
-		// it so the exclusive open refuses against the RIGHT file.
-		matches, err := filepath.Glob(filepath.Join(s.dir, string(id)+"-*.jsonl"))
-		if err != nil || len(matches) != 1 {
-			if err == nil && len(matches) > 1 {
-				s.fail(id, "", fmt.Errorf("no single record for run: %d candidates (%v)", len(matches), matches))
-			} else {
-				s.fail(id, path, fmt.Errorf("no record for run: %w", ErrUnknownRun))
-			}
-			return false
-		}
-		path = matches[0]
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.runs == nil {
-		s.runs = map[llmkit.RunID]*jsonlRun{}
-	}
-	if _, live := s.runs[id]; live {
-		s.fail(id, path, errors.New("run id already has an open record in this sink"))
-		return false
-	}
-	s.runs[id] = &jsonlRun{path: path}
-	return true
+	r.mu.Unlock()
+	s.fail(run, r.path, err)
 }
 
 // safeRunID reports whether id can be a JSONL filename component: non-empty,
-// no path separators, never ".." .
+// not "." or "..", no path separators, no NUL.
 func safeRunID(id llmkit.RunID) bool {
 	s := string(id)
-	if s == "" || s == ".." || strings.Contains(s, "/") || strings.Contains(s, string(os.PathSeparator)) {
+	if s == "" || s == "." || s == ".." {
+		return false
+	}
+	if strings.ContainsAny(s, `/\`) || strings.ContainsRune(s, 0) {
 		return false
 	}
 	return true
 }
 
-// Events returns the recorded events of run by reading its JSONL file back —
-// the read side of [JSONL]. It satisfies [Source], so [NewReplayClient] and
-// [ReplayTools] replay from the sink exactly as from a [Transcript]; the
-// caller owns the returned slice.
+// Events returns the recorded events of run by reading the run's file back —
+// the read side of [JSONL]. It satisfies [Source], so [NewReplayClient]
+// replays from the sink exactly as from a [Transcript]; the caller owns the
+// returned slice.
 //
-// Only files named "<RunID>-*.jsonl" are considered, and only events whose
-// RunID matches are returned. A directory with no file for run yields an
-// error wrapping [ErrUnknownRun]; more than one candidate file is an error
-// naming them — one RunID is one file.
+// The exact path "<dir>/<RunID>.jsonl" is opened; a missing file wraps
+// [ErrUnknownRun]. Every decoded event must carry run, a file mixing run ids
+// is an error naming file and line, an empty record wraps [ErrUnknownRun],
+// and a record holding more than one Start is an error naming the run — one
+// RunID is one run.
 func (s *JSONLSink) Events(_ context.Context, run llmkit.RunID) ([]llmkit.Event, error) {
-	if run == "" {
-		return nil, fmt.Errorf("agent: JSONL source needs a run id: %w", ErrUnknownRun)
-	}
-	matches, err := filepath.Glob(filepath.Join(s.dir, string(run)+"-*.jsonl"))
+	path := filepath.Join(s.dir, string(run)+".jsonl")
+	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("agent: scan %s for run %s: %w", s.dir, run, err)
-	}
-	if len(matches) == 0 {
-		return nil, fmt.Errorf("agent: no JSONL transcript for run %s under %s: %w", run, s.dir, ErrUnknownRun)
-	}
-	if len(matches) > 1 {
-		return nil, fmt.Errorf("agent: %d JSONL transcripts match run %s under %s (%v): one run must be one file", len(matches), run, s.dir, matches)
-	}
-	f, err := os.Open(matches[0])
-	if err != nil {
-		return nil, fmt.Errorf("agent: open %s: %w", matches[0], err)
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("agent: no JSONL transcript for run %s at %s: %w", run, path, ErrUnknownRun)
+		}
+		return nil, fmt.Errorf("agent: open %s: %w", path, err)
 	}
 	t, err := LoadJSONL(f)
 	_ = f.Close()
 	if err != nil {
-		return nil, fmt.Errorf("agent: %s: %w", matches[0], err)
+		return nil, fmt.Errorf("agent: %s: %w", path, err)
 	}
-	evs := make([]llmkit.Event, 0, len(t.Record))
-	for _, ev := range t.Record {
-		if ev.RunID == run {
-			evs = append(evs, ev)
+	if len(t.Record) == 0 {
+		return nil, fmt.Errorf("agent: %s holds no events for run %s: %w", path, run, ErrUnknownRun)
+	}
+	for i, ev := range t.Record {
+		if ev.RunID != run {
+			return nil, fmt.Errorf("agent: %s line %d: event run id %q does not match %q", path, i+1, ev.RunID, run)
 		}
 	}
-	return evs, nil
+	starts := 0
+	for _, ev := range t.Record {
+		if ev.Kind == llmkit.KindStart {
+			starts++
+		}
+	}
+	if starts > 1 {
+		return nil, fmt.Errorf("agent: record for run %s holds %d runs", run, starts)
+	}
+	return slices.Clone(t.Record), nil
 }
 
-// pathFor derives a run's file name from its Start event:
-// "<RunID>-<task-slug>.jsonl". Events that arrive without a RunID (a sink
-// driven outside a Runner) fall back to the literal name "run"; a first
-// event that is not the Start has no task to slug, so it does too.
+// pathFor is a run's file name: "<RunID>.jsonl". Events that arrive without
+// a RunID (a sink driven outside a Runner) fall back to the literal name
+// "run" for the error message; the Start-admission guard rejects the empty
+// id before any file is touched.
 func (s *JSONLSink) pathFor(ev llmkit.Event) string {
 	id := string(ev.RunID)
 	if id == "" {
 		id = "run"
 	}
-	task := ""
-	if ev.Start != nil {
-		task = ev.Start.Task
-	}
-	return filepath.Join(s.dir, id+"-"+slug(task)+".jsonl")
+	return filepath.Join(s.dir, id+".jsonl")
 }
 
 // fail reports a sink refusal or failure through onErr, run- and

@@ -333,10 +333,28 @@ func ExampleSource() {
 	for _, ev := range events {
 		fmt.Printf("step %d: %s\n", ev.Step, ev.Kind)
 	}
+
+	// Replay the recorded run offline: the client's bound tools serve the
+	// recorded results, and Err() must be nil — a non-nil value means the
+	// replay diverged from its record.
+	rc, err := agent.NewReplayClient(src, "demo-run", llmkit.Capabilities{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	replayed, err := agent.NewRunner(rc, rc.Tools(), "Tick once.").
+		Run(context.Background(), "Tick")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := rc.Err(); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(replayed.FinalText)
 	// Output:
 	// step 0: start
 	// step 1: completion
 	// step 1: tool_run
 	// step 2: completion
 	// step 2: finalize
+	// finished
 }

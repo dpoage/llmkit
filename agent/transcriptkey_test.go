@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"os"
-	"strings"
 	"sync"
 	"testing"
 
@@ -34,11 +33,8 @@ func TestWithRunID_PinnedFilename(t *testing.T) {
 		t.Fatalf("entries = %d, want 1: %v", len(entries), entries)
 	}
 	name := entries[0].Name()
-	if !strings.HasPrefix(name, "run-abc123-") {
-		t.Errorf("filename %q does not start with the pinned run id", name)
-	}
-	if !strings.HasSuffix(name, "-my-task.jsonl") {
-		t.Errorf("filename %q does not end with the expected task slug", name)
+	if name != "run-abc123.jsonl" {
+		t.Errorf("filename = %q, want exactly the pinned id: run-abc123.jsonl (identity is the RunID alone; the task rides the Start event)", name)
 	}
 	if out.RunID != "run-abc123" {
 		t.Errorf("Outcome.RunID = %q, want the pinned id", out.RunID)

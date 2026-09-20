@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/dpoage/llmkit"
+	"slices"
 	"strings"
 	"sync"
+
+	"github.com/dpoage/llmkit"
 )
 
 // ErrUnknownRun reports that a [Source] has no record of the requested run.
@@ -20,16 +22,11 @@ var ErrUnknownRun = errors.New("agent: unknown run")
 // with a wrong answer. Match it with errors.Is.
 var ErrReplayDiverged = errors.New("agent: replay diverged")
 
-// errReplayDivergedMarker is the text a [ReplayTools] tool returns through
-// the harness's renderer, so a ReplayClient can recognize a diverged replay
-// from the conversation it is handed (see [ReplayClient.Complete]).
-const errReplayDivergedMarker = "agent: replay diverged at step "
-
 // Source is the read side of recording: the ordered events of one run.
 // [Transcript] and the JSONL sink ([JSONL]) implement it; store/sqlite does
-// in a later round. [NewReplayClient] and [ReplayTools] rebuild a run's
-// completions and tool results from any Source, so replay never depends on a
-// JSONL file existing.
+// in a later round. [NewReplayClient] rebuilds a run's completions, and its
+// [ReplayClient.Tools] serve the recorded tool results, from any Source —
+// replay never depends on a JSONL file existing.
 //
 // Events returns the run's events in emission order; the caller owns the
 // returned slice. A Source with no record of run returns an error wrapping
@@ -52,6 +49,23 @@ type Source interface {
 // exact message text — only the tool-call structure must line up — so prompt
 // wording can change between record and replay without breaking the replay.
 //
+// Divergence is run state owned by the client, never inferred from
+// conversation text. [ReplayClient.Tools] returns the run's recorded tool
+// set, bound to this client: each tool serves the recorded result for the
+// earliest unconsumed (name, arguments) match within the current recorded
+// step, so replay is deterministic under [WithParallelTools]; a call with no
+// unconsumed match records the divergence on the client and is returned as
+// that call's error (the harness renders it as data). Complete refuses to
+// serve further responses once a divergence is recorded, and every other
+// divergence path — structure mismatch, exhausted record — fails the same
+// way, all wrapping [ErrReplayDiverged].
+//
+// A divergence in the run's FINAL tool turn can end the run before another
+// Complete happens (a recording truncated at its step cap, or a run that
+// finishes cleanly), so Run may return nil with the divergence still set.
+// Callers MUST assert [ReplayClient.Err] returns nil after a replayed run —
+// a diverged replay is a failed evaluation even when Run itself succeeded.
+//
 // ReplayClient is safe for concurrent use, though a single Runner calls it
 // sequentially.
 //
@@ -65,6 +79,9 @@ type ReplayClient struct {
 	responses []replayStep
 	idx       int
 	caps      llmkit.Capabilities
+	set       *replayToolSet
+	tools     []Tool
+	diverged  error
 }
 
 // replayStep pairs a recorded response with the tool-call structure expected
@@ -95,15 +112,16 @@ func NewReplayClient(src Source, run llmkit.RunID, caps llmkit.Capabilities) (*R
 	if err != nil {
 		return nil, fmt.Errorf("agent: read events for run %s: %w", run, err)
 	}
-	rc := &ReplayClient{caps: caps}
+	rc := &ReplayClient{caps: caps, set: &replayToolSet{}}
 	// Walk events, accumulating the tool-call ids recorded since the last
-	// completion; attach them as the "expected preceding tool results" for
-	// the next recorded response.
+	// completion (for structure validation) and the ToolRun events grouped
+	// by step (for the bound tool set).
 	var pending []string
 	for _, ev := range evs {
 		switch {
 		case ev.Kind == llmkit.KindToolRun && ev.ToolRun != nil:
 			pending = append(pending, ev.ToolRun.Call.ID)
+			rc.set.add(ev.Step, *ev.ToolRun)
 		case ev.Kind == llmkit.KindCompletion && ev.Completion != nil && ev.Completion.Err == "":
 			rc.responses = append(rc.responses, replayStep{
 				resp:          ev.Completion.Response,
@@ -115,6 +133,7 @@ func NewReplayClient(src Source, run llmkit.RunID, caps llmkit.Capabilities) (*R
 	if len(rc.responses) == 0 {
 		return nil, fmt.Errorf("agent: run %s has no completions to replay", run)
 	}
+	rc.tools = rc.set.tools(rc)
 	return rc, nil
 }
 
@@ -122,7 +141,7 @@ func NewReplayClient(src Source, run llmkit.RunID, caps llmkit.Capabilities) (*R
 // order without any tool-call structure validation. Useful for hand-scripted
 // tests.
 func NewReplayClientFromResponses(resps []llmkit.Response, caps llmkit.Capabilities) *ReplayClient {
-	rc := &ReplayClient{caps: caps}
+	rc := &ReplayClient{caps: caps, set: &replayToolSet{}}
 	for _, r := range resps {
 		rc.responses = append(rc.responses, replayStep{resp: r})
 	}
@@ -134,8 +153,7 @@ func (rc *ReplayClient) Capabilities() llmkit.Capabilities { return rc.caps }
 
 // Complete serves the next recorded response, validating tool-call structure.
 // It also fails the replay loudly: if the request's trailing tool results
-// carry a replay-divergence rendering (a [ReplayTools] call that matched
-// nothing), Complete returns an error wrapping [ErrReplayDiverged] instead of
+// carry a replay divergence, Complete returns an error wrapping [ErrReplayDiverged] instead of
 // serving the next response — a diverged replay fails Run, it does not finish
 // with a wrong answer.
 func (rc *ReplayClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
@@ -146,8 +164,11 @@ func (rc *ReplayClient) Complete(ctx context.Context, req llmkit.Request) (llmki
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 
+	if rc.diverged != nil {
+		return llmkit.Response{}, fmt.Errorf("agent: replay diverged on a previous tool turn: %w", rc.diverged)
+	}
 	if rc.idx >= len(rc.responses) {
-		return llmkit.Response{}, fmt.Errorf("agent: replay exhausted after %d responses; request sequence diverged (extra completion call)", len(rc.responses))
+		return llmkit.Response{}, fmt.Errorf("agent: %w: replay exhausted after %d responses; request sequence diverged (extra completion call)", ErrReplayDiverged, len(rc.responses))
 	}
 	step := rc.responses[rc.idx]
 
@@ -159,26 +180,8 @@ func (rc *ReplayClient) Complete(ctx context.Context, req llmkit.Request) (llmki
 			return llmkit.Response{}, err
 		}
 	}
-	if n := trailingDivergence(req.Messages); n >= 0 {
-		return llmkit.Response{}, fmt.Errorf("%w: tool call %d of this turn did not match the record", ErrReplayDiverged, n)
-	}
-
 	rc.idx++
 	return step.resp, nil
-}
-
-// trailingDivergence returns the 1-based position (counting back from the
-// last message) of the first trailing tool-result carrying a replay
-// divergence rendering, or -1 when none do. Trailing means: scanning back
-// over consecutive RoleToolResult messages, the ones answering this turn's
-// calls.
-func trailingDivergence(msgs []llmkit.Message) int {
-	for i := len(msgs) - 1; i >= 0 && msgs[i].Role == llmkit.RoleToolResult; i-- {
-		if strings.HasPrefix(msgs[i].Text(), "ERROR: "+errReplayDivergedMarker) {
-			return len(msgs) - i
-		}
-	}
-	return -1
 }
 
 // trailingToolResultIDs returns the ToolCallIDs of the last n tool-result
@@ -201,21 +204,21 @@ func trailingToolResultIDs(msgs []llmkit.Message, n int) []string {
 // a descriptive divergence error if they differ.
 func matchToolIDs(step int, want, got []string) error {
 	if len(want) != len(got) {
-		return fmt.Errorf("agent: replay diverged at step %d: expected %d preceding tool result(s) %v, got %d %v",
-			step+1, len(want), want, len(got), got)
+		return fmt.Errorf("agent: %w at step %d: expected %d preceding tool result(s) %v, got %d %v",
+			ErrReplayDiverged, step+1, len(want), want, len(got), got)
 	}
 	for i := range want {
 		if want[i] != got[i] {
-			return fmt.Errorf("agent: replay diverged at step %d: tool result %d was %q, recorded %q",
-				step+1, i, got[i], want[i])
+			return fmt.Errorf("agent: %w at step %d: tool result %d was %q, recorded %q",
+				ErrReplayDiverged, step+1, i, got[i], want[i])
 		}
 	}
 	return nil
 }
 
-// replayedToolCall is one recorded tool call inside a [replayToolSet]: the
-// model's call, the model-visible result, the error/denial marks, and the
-// step the call belongs to (named by divergence errors).
+// replayedToolCall is one recorded tool call: the model's call, the
+// model-visible result, the error/denial marks, and the step the call
+// belongs to.
 type replayedToolCall struct {
 	call       llmkit.ToolCall
 	result     string
@@ -226,74 +229,87 @@ type replayedToolCall struct {
 	used       bool
 }
 
-// replayToolSet is the shared record of a run's tool calls. The tools
-// [ReplayTools] returns match each incoming call by (name, arguments) over
-// the UNCONSUMED set — not a strict cursor — so replay is deterministic under
-// [WithParallelTools] however the calls interleave.
-type replayToolSet struct {
-	mu    sync.Mutex
+// replayStepCalls is one recorded tool turn: every ToolRun event sharing a
+// step.
+type replayStepCalls struct {
+	step  int
 	calls []replayedToolCall
 }
 
-// ReplayTools rebuilds a recorded run's tool set from src: one [Tool] per
-// distinct tool name the run called, each serving the recorded [llmkit.
-// ToolRunEvent] results instead of executing. Feeding the returned tools to a
-// [Runner] driven by a [NewReplayClient] replays a run fully offline — zero
-// live tool executions, to the same final answer.
-//
-// Each call is matched by (name, arguments) against the UNCONSUMED recorded
-// calls — not a strict cursor — so a replay under [WithParallelTools] is
-// deterministic however the calls interleave. A call with no unconsumed match
-// fails with an error wrapping [ErrReplayDiverged] naming the recorded step;
-// the harness renders it as that call's ERROR result, and [ReplayClient]
-// turns it into a Run failure on the next completion. A recorded error or
-// policy denial is served as a Tool error re-rendered to the recorded text;
-// the denial FACT itself is not replayable (a replayed run runs no policy),
-// so the re-recorded ToolRun event carries IsError with the rendered denial
-// text rather than Denied.
-//
-// A run that exists and recorded no tool calls yields a nil tool set and no
-// error: the natural tool set for replaying it is the empty one. An unknown
-// run fails with an error wrapping [ErrUnknownRun].
-func ReplayTools(src Source, run llmkit.RunID) ([]Tool, error) {
-	if src == nil {
-		return nil, errors.New("agent: nil event source")
-	}
-	evs, err := src.Events(context.Background(), run)
-	if err != nil {
-		return nil, fmt.Errorf("agent: read events for run %s: %w", run, err)
-	}
-	set := &replayToolSet{}
-	var names []string
-	seen := map[string]bool{}
-	for _, ev := range evs {
-		if ev.Kind != llmkit.KindToolRun || ev.ToolRun == nil {
-			continue
-		}
-		tre := ev.ToolRun
-		set.calls = append(set.calls, replayedToolCall{
-			call:       tre.Call,
-			result:     tre.Result,
-			isError:    tre.IsError,
-			denied:     tre.Denied,
-			denyReason: tre.DenyReason,
-			step:       ev.Step,
-		})
-		if !seen[tre.Call.Name] {
-			seen[tre.Call.Name] = true
-			names = append(names, tre.Call.Name)
-		}
-	}
-	tools := make([]Tool, len(names))
-	for i, name := range names {
-		tools[i] = replayTool{set: set, name: name}
-	}
-	return tools, nil
+// replayToolSet is a [ReplayClient]'s recorded tool calls, grouped by step in
+// recorded order, plus the index of the step currently being consumed.
+// Matching is by (name, arguments) over the UNCONSUMED calls of the current
+// step — not a strict cursor — so replay is deterministic under
+// [WithParallelTools] however the calls interleave; an exhausted step
+// advances to the next recorded tool turn.
+type replayToolSet struct {
+	groups []replayStepCalls
+	gi     int
 }
 
-// replayTool serves one recorded tool name out of a [replayToolSet].
+// add records one ToolRun event into its step group.
+func (ts *replayToolSet) add(step int, tre llmkit.ToolRunEvent) {
+	if len(ts.groups) == 0 || ts.groups[len(ts.groups)-1].step != step {
+		ts.groups = append(ts.groups, replayStepCalls{step: step})
+	}
+	g := &ts.groups[len(ts.groups)-1]
+	g.calls = append(g.calls, replayedToolCall{
+		call:       tre.Call,
+		result:     tre.Result,
+		isError:    tre.IsError,
+		denied:     tre.Denied,
+		denyReason: tre.DenyReason,
+		step:       step,
+	})
+}
+
+// tools returns one [Tool] per distinct recorded name, all reading the set.
+// A run with no tool calls yields an empty (non-nil) slice.
+func (ts *replayToolSet) tools(rc *ReplayClient) []Tool {
+	var names []string
+	seen := map[string]bool{}
+	for _, g := range ts.groups {
+		for _, c := range g.calls {
+			if !seen[c.call.Name] {
+				seen[c.call.Name] = true
+				names = append(names, c.call.Name)
+			}
+		}
+	}
+	tools := make([]Tool, 0, len(names))
+	for _, name := range names {
+		tools = append(tools, replayTool{rc: rc, name: name})
+	}
+	return tools
+}
+
+// Tools returns the recorded run's tool set, bound to this client: each tool
+// serves the recorded result for the matching (name, arguments) call instead
+// of executing. Feed it to a [Runner] driven by this same client to replay a
+// run fully offline — zero live tool executions. A run that recorded no tool
+// calls yields an empty slice.
+//
+// A call with no unconsumed match records this client's divergence (see
+// [ReplayClient.Err]) and is returned as the tool's error — the harness
+// renders it as data, and the next Complete refuses to serve.
+func (rc *ReplayClient) Tools() []Tool {
+	return slices.Clone(rc.tools)
+}
+
+// Err returns the replay's first divergence, or nil when the replay matched
+// its record throughout. A divergence in the run's FINAL tool turn can end
+// the run before another Complete happens, so Run may return nil with a
+// divergence still set: callers MUST assert Err() == nil after a replayed
+// run. The error wraps [ErrReplayDiverged] and names the recorded step.
+func (rc *ReplayClient) Err() error {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	return rc.diverged
+}
+
+// replayTool serves one recorded tool name out of the client's set.
 type replayTool struct {
-	set  *replayToolSet
+	rc   *ReplayClient
 	name string
 }
 
@@ -303,53 +319,66 @@ func (t replayTool) Def() llmkit.ToolDef {
 	return llmkit.ToolDef{Name: t.name}
 }
 
-// Run serves one recorded call for this tool's name: the earliest unconsumed
-// recorded call matching BOTH the name and the arguments. No match means the
-// replay diverged — the returned error wraps [ErrReplayDiverged] naming the
-// recorded step, and the Runner renders it as that call's ERROR result (the
-// divergence is the test failure to read; [ReplayClient] converts it into a
-// Run failure on the next completion).
+// Run serves the earliest unconsumed recorded call of the current step
+// matching both the name and the arguments. No match records the client's
+// divergence — the returned error wraps [ErrReplayDiverged] naming the
+// recorded step, and the harness renders it as this call's ERROR result.
 func (t replayTool) Run(_ context.Context, args json.RawMessage) (string, error) {
-	s := t.set
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	match := -1
-	for i := range s.calls {
-		if s.calls[i].used || s.calls[i].call.Name != t.name {
-			continue
-		}
-		if argsEqual(s.calls[i].call.Arguments, args) {
-			match = i
-			break
-		}
-	}
-	if match < 0 {
-		// Name the earliest unconsumed recorded call for this tool (the one
-		// the replay "should have" made); none left means extra calls.
-		step := -1
-		want := ""
-		for i := range s.calls {
-			if !s.calls[i].used && s.calls[i].call.Name == t.name {
-				step, want = s.calls[i].step, argsString(s.calls[i].call.Arguments)
+	return t.rc.serveCall(t.name, args)
+}
+
+// serveCall is [replayTool.Run]'s body, under the client's lock.
+func (rc *ReplayClient) serveCall(name string, args json.RawMessage) (string, error) {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	set := rc.set
+	for set != nil && set.gi < len(set.groups) {
+		g := &set.groups[set.gi]
+		match := -1
+		for i := range g.calls {
+			if !g.calls[i].used && g.calls[i].call.Name == name && argsEqual(g.calls[i].call.Arguments, args) {
+				match = i
 				break
 			}
 		}
-		if step < 0 {
-			return "", fmt.Errorf("%w at step ?: tool %q called with arguments %s, but every recorded call for it is already served (%d recorded)", ErrReplayDiverged, t.name, argsString(args), len(s.calls))
+		if match >= 0 {
+			g.calls[match].used = true
+			return serveRecorded(&g.calls[match])
 		}
-		return "", fmt.Errorf("%w at step %d: tool %q called with arguments %s, recorded %s", ErrReplayDiverged, step, t.name, argsString(args), want)
+		// No match in this step. Still-unconsumed calls here mean the replay
+		// genuinely diverged; a fully consumed step advances to the next
+		// recorded tool turn.
+		unconsumed := -1
+		for i := range g.calls {
+			if !g.calls[i].used {
+				unconsumed = i
+				break
+			}
+		}
+		if unconsumed >= 0 {
+			rec := &g.calls[unconsumed]
+			err := fmt.Errorf("%w at step %d: tool %q called with arguments %s, recorded %s",
+				ErrReplayDiverged, rec.step, name, argsString(args), argsString(rec.call.Arguments))
+			rc.diverged = err
+			return "", err
+		}
+		set.gi++
 	}
-	rec := &s.calls[match]
-	rec.used = true
+	err := fmt.Errorf("%w: extra tool call to %q with arguments %s; every recorded call is served", ErrReplayDiverged, name, argsString(args))
+	rc.diverged = err
+	return "", err
+}
+
+// serveRecorded renders one recorded call's outcome the way the original run
+// fed it to the model: a denial re-renders the denial text, an error strips
+// the "ERROR: " prefix so the Runner's renderer re-adds it (the fed-back
+// result is byte-identical and the history keeps the is_error mark), and a
+// success returns the recorded result verbatim.
+func serveRecorded(rec *replayedToolCall) (string, error) {
 	switch {
 	case rec.denied:
-		// Re-render through the harness so the model-visible text matches the
-		// original run: toolError prefixes "ERROR: " onto this.
 		return "", fmt.Errorf("tool %s denied: %s", rec.call.Name, rec.denyReason)
 	case rec.isError:
-		// The recorded text already carries the "ERROR: " prefix; strip it
-		// and let the Runner's renderer re-add it, so the fed-back result is
-		// byte-identical and the history keeps the is_error mark.
 		return "", errors.New(strings.TrimPrefix(rec.result, "ERROR: "))
 	default:
 		return rec.result, nil
