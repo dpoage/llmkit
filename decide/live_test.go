@@ -202,8 +202,10 @@ func caseMixedQuestions(t *testing.T, sess *livetest.Session) {
 	if got, ok := resp.Nouls["hardware_fault"]; !ok || got < 0 || got > 1 {
 		t.Fatalf("noul hardware_fault = %v (present=%t), want a value in [0, 1]", got, ok)
 	}
-	// Choice: one probability per asked option; the selected option is the
-	// argmax; the distribution sums to 1; confidence is a probability.
+	// Choice: one probability per asked option; the selected option carries
+	// the maximum probability (compared by value: at a tied maximum the id is
+	// ambiguous, and iterating the map for it would race Go's random order);
+	// the distribution sums to 1; confidence is a probability.
 	ch := resp.Choices["next_action"]
 	if ch.Choice == "" {
 		t.Fatalf("no answer for next_action: %+v", resp.Choices)
@@ -211,19 +213,25 @@ func caseMixedQuestions(t *testing.T, sess *livetest.Session) {
 	if len(ch.Probabilities) != len(ticketQuestions()["next_action"].(decide.Choice).Options) {
 		t.Fatalf("choice probabilities %v, want one entry per asked option", ch.Probabilities)
 	}
-	best, bestP := "", math.NaN()
 	var sum float64
-	for opt, p := range ch.Probabilities {
+	for _, p := range ch.Probabilities {
 		sum += p
-		if math.IsNaN(bestP) || p > bestP {
-			best, bestP = opt, p
+	}
+	chosen, ok := ch.Probabilities[ch.Choice]
+	if !ok {
+		t.Fatalf("choice %q is not a reported option (%v)", ch.Choice, ch.Probabilities)
+	}
+	best := 0.0
+	for _, p := range ch.Probabilities {
+		if p > best {
+			best = p
 		}
 	}
-	if ch.Choice != best {
-		t.Fatalf("choice %q, want argmax %q (probabilities %v)", ch.Choice, best, ch.Probabilities)
+	if chosen != best {
+		t.Fatalf("choice %q probability %v, want the maximum %v (%v)", ch.Choice, chosen, best, ch.Probabilities)
 	}
 	if math.Abs(sum-1) > probSumTol(len(ch.Probabilities)) {
-		t.Fatalf("choice probabilities sum %f, want within %g of 1 (%v)", sum, probSumTol(len(ch.Probabilities)), ch.Probabilities)
+		t.Fatalf("choice probabilities sum %.3f, want within %.3g of 1 (%v)", sum, probSumTol(len(ch.Probabilities)), ch.Probabilities)
 	}
 	if ch.Confidence < 0 || ch.Confidence > 1 {
 		t.Fatalf("choice confidence %f outside [0, 1]", ch.Confidence)
@@ -245,7 +253,7 @@ func caseMixedQuestions(t *testing.T, sess *livetest.Session) {
 		sum += p
 	}
 	if math.Abs(sum-1) > probSumTol(len(sc.Probabilities)) {
-		t.Fatalf("score probabilities sum %f, want within %g of 1 (%v)", sum, probSumTol(len(sc.Probabilities)), sc.Probabilities)
+		t.Fatalf("score probabilities sum %.3f, want within %.3g of 1 (%v)", sum, probSumTol(len(sc.Probabilities)), sc.Probabilities)
 	}
 	if sc.Confidence < 0 || sc.Confidence > 1 {
 		t.Fatalf("score confidence %f outside [0, 1]", sc.Confidence)
