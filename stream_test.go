@@ -112,6 +112,63 @@ func TestStream_SynthesizesFromCompleteOnlyClient(t *testing.T) {
 	}
 }
 
+// TestStream_TextOnlyResponseEmitsOneDelta pins the synthesizer fallback: a
+// Complete-only client may return Text set with Blocks empty (the Response
+// contract permits it; shipped adapters always populate Blocks, but custom
+// Clients need not). Stream must emit exactly one DeltaText with the full
+// Text.
+func TestStream_TextOnlyResponseEmitsOneDelta(t *testing.T) {
+	inner := &fakeClient{responses: []Response{{
+		Text:       "just text, no blocks",
+		Usage:      Usage{InputTokens: 4, OutputTokens: 6},
+		StopReason: StopEndTurn,
+	}}}
+	var got []Delta
+	out, err := Stream(context.Background(), inner, simpleRequest(), func(d Delta) error {
+		got = append(got, d)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	want := []Delta{{Kind: DeltaText, Text: "just text, no blocks"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("deltas = %+v, want %+v", got, want)
+	}
+	if !reflect.DeepEqual(out, inner.responses[0]) {
+		t.Fatalf("Response = %+v, want the Complete response %+v", out, inner.responses[0])
+	}
+}
+
+// TestStream_TextFallbackNotFiredWhenBlocksCarryText pins the other half of
+// the fallback: when Blocks already contain a text block, Text must NOT be
+// emitted a second time (no double emission).
+func TestStream_TextFallbackNotFiredWhenBlocksCarryText(t *testing.T) {
+	inner := &fakeClient{responses: []Response{{
+		Text: "hello world",
+		Blocks: []Block{
+			Text("hello "),
+			Text("world"),
+			{Kind: BlockThinking, Text: "hmm"},
+		},
+	}}}
+	var got []Delta
+	if _, err := Stream(context.Background(), inner, simpleRequest(), func(d Delta) error {
+		got = append(got, d)
+		return nil
+	}); err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	want := []Delta{
+		{Kind: DeltaText, Text: "hello "},
+		{Kind: DeltaText, Text: "world"},
+		{Kind: DeltaThinking, Text: "hmm"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("deltas = %+v, want %+v", got, want)
+	}
+}
+
 func TestStream_PrefersStreamingClient(t *testing.T) {
 	want := Response{Text: "streamed", Usage: Usage{OutputTokens: 3}, StopReason: StopEndTurn}
 	inner := &scriptedStreamClient{
