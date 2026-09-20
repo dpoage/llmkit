@@ -336,7 +336,7 @@ func TestObserveHostExecRefusalJoinsBackendName(t *testing.T) {
 	sb := sandbox.Observe(sandbox.NewHostExec(), log)
 
 	_, err := sb.Exec(context.Background(), sandbox.Spec{
-		RepoDir: "/tmp/llmkit-observe-test",
+		RepoDir: t.TempDir(),
 		Cmd:     []string{"true"},
 		Image:   "alpine",
 	})
@@ -369,8 +369,16 @@ func TestObserveNestedWrapperReportsInnerBackend(t *testing.T) {
 	sb := sandbox.Observe(sandbox.Observe(sandbox.NewMock(sandbox.MockResponse{}), log), log)
 
 	_, _ = sb.Exec(context.Background(), sandbox.Spec{Cmd: []string{"cmd"}})
-	if got := log.events()[0].Exec.Backend; got != "mock" {
-		t.Errorf("Backend = %q, want mock (a wrapped backend reports its inner backend)", got)
+
+	// One event per layer: [0] is the inner wrapper's (its Backend is
+	// trivially "mock"); [1] is the OUTER wrapper's, which must report
+	// through the nested case instead of leaking its own Go type.
+	evs := log.events()
+	if len(evs) != 2 {
+		t.Fatalf("got %d events, want 2 (one per wrapper layer)", len(evs))
+	}
+	if got := evs[1].Exec.Backend; got != "mock" {
+		t.Errorf("outer wrapper's Backend = %q, want mock (a wrapped backend reports its inner backend)", got)
 	}
 }
 

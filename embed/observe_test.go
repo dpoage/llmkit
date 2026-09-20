@@ -346,3 +346,17 @@ func TestObservePassesCallerCtxToObserver(t *testing.T) {
 		t.Errorf("observer saw ctx value %v, want \"present\" — the observer must receive the caller's context", got)
 	}
 }
+
+func TestObserveEmbedDimensionsFromResult(t *testing.T) {
+	log := &eventLog{}
+	// dims 77 stands in for e.Dimensions(); a successful call must report
+	// the returned vector's length, not the embedder's own report.
+	emb := embed.Observe(&scriptedEmbedder{vec: []float32{0.1, 0.2, 0.3}, dims: 77}, log)
+
+	if _, err := emb.Embed(context.Background(), "hello"); err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if got := log.events()[0].Embed.Dimensions; got != 3 {
+		t.Errorf("Dimensions = %d, want 3 (the returned vector's length, not e.Dimensions() = 77)", got)
+	}
+}

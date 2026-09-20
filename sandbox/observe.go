@@ -18,8 +18,8 @@ import (
 // Completion emitters do. Populated fields:
 //   - Backend: the concrete backend — "cli", "bwrap", and "host" match
 //     UnsupportedSpecError.Backend; "mock" is this package's own name for
-//     the backend that refuses nothing; any other implementation is named
-//     by its Go type.
+//     the backend that refuses nothing; a nested Observe reports its
+//     inner backend; any other implementation is named by its Go type.
 //   - Command: Spec.Cmd, copied — the event outlives the call, and the
 //     caller owns the Spec's backing arrays.
 //   - ExitCode: the command's own exit code; -1 when the process never ran
@@ -28,9 +28,11 @@ import (
 //     classifying a verdict; the event records the summary, not the kill
 //     reason.
 //   - StdoutBytes / StderrBytes: the lengths of the captured
-//     Result.Stdout / Result.Stderr text — including the truncation
-//     marker the backend appends, so a truncated stream can exceed the
-//     capture cap.
+//     Result.Stdout / Result.Stderr text — markers included, so a
+//     truncated stream can exceed the capture cap. In the common case
+//     the text carries the mid-stream gap marker "[N bytes elided by
+//     sandbox]"; when no tail was retained the backend appends
+//     "[output truncated by sandbox]" instead.
 //   - Truncated: Result.StdoutTruncated or Result.StderrTruncated — either
 //     stream was cut off at the capture cap.
 //   - Duration: Result.Duration, the execution's measured wall time; 0
