@@ -628,6 +628,26 @@ func TestRun_TextFinalTurnCarriesFinalText(t *testing.T) {
 	}
 }
 
+// TestRun_FinalTextPreservesInlineThink pins that FinalText carries the
+// completion's raw text verbatim, inline <think> span included: stripping
+// is the consumer's job (llmkit.StripThinkBlocks), and RunJSON strips
+// separately on its parse path. Without this pin, "helpfully" pre-stripping
+// FinalText at the assignment site would be invisible to the hermetic suite
+// and surface only as live-lane skips.
+func TestRun_FinalTextPreservesInlineThink(t *testing.T) {
+	const raw = "<think>17+25 is 42</think>42"
+	fc := newFakeClient(textResp(raw, 10, 5))
+	r := NewRunner(fc, nil, "sys")
+
+	out, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out.FinalText != raw {
+		t.Errorf("FinalText = %q, want the raw completion %q verbatim (think span included)", out.FinalText, raw)
+	}
+}
+
 // TestRun_TextAfterToolsReplacesFinalText pins the replace-not-carry rule:
 // an earlier turn that carries text alongside a tool call, followed by a
 // final text turn, leaves the LAST completion's text standing.

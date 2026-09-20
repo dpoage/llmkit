@@ -810,6 +810,11 @@ func TestRunJSON_BudgetFinalizeEmptyStillClassified(t *testing.T) {
 	if err == nil {
 		t.Fatal("RunJSON should fail to parse empty finalization output")
 	}
+	// The wrap site owns no "agent: " prefix of its own: the sentinel's
+	// message carries it, and it must appear exactly once.
+	if n := strings.Count(err.Error(), "agent: "); n != 1 {
+		t.Errorf("budget-skip error %q carries the %q prefix %d times, want exactly once", err.Error(), "agent: ", n)
+	}
 	// Now look at the outcome (returned alongside err per RunJSON contract).
 	// We re-run and inspect via the Run path's outcome to check classification.
 	// Simpler: re-check via a direct run + outcome check.
@@ -1163,6 +1168,9 @@ func TestRunJSON_ParseFailureWrapsSentinel(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "after one repair") {
 			t.Errorf("message regressed; err = %v", err)
+		}
+		if n := strings.Count(err.Error(), "agent: "); n != 1 {
+			t.Errorf("error %q carries the %q prefix %d times, want exactly once (the sentinel owns it)", err.Error(), "agent: ", n)
 		}
 	})
 
