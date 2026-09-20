@@ -604,24 +604,28 @@ func TestAnthropicStreamServerToolDropped(t *testing.T) {
 }
 
 // TestAnthropicThinkingRawPadding pins the thinking replay guard's Raw
-// handling. Raw that decodes to nothing — nil, plain "null", or "null" /
-// whitespace-only padded with the bytes JSON permits as space — must fail
-// with a local ErrInvalidRequest BEFORE anything reaches the wire: a padded
-// form would otherwise bypass the guard, no-op through json.Unmarshal, and
-// emit an empty unsigned thinking block the API rejects remotely. Padding
-// JSON does not permit (U+00A0) stays malformed, and valid thinking JSON
-// padded with JSON whitespace still replays verbatim.
+// handling. Raw that carries nothing the API accepts on replay — nil, plain
+// "null" or whitespace-only (padded with the bytes JSON permits as space),
+// or a JSON object that DECODES to an empty payload ({}, {"type":"thinking"})
+// — must fail with a local ErrInvalidRequest BEFORE anything reaches the
+// wire: a padded form would otherwise bypass the guard, no-op through
+// json.Unmarshal, and emit {"signature":"","thinking":"","type":"thinking"}
+// which the API rejects remotely. Padding JSON does not permit (U+00A0)
+// stays malformed, and valid thinking/redacted payloads — padded or not —
+// still replay verbatim.
 func TestAnthropicThinkingRawPadding(t *testing.T) {
 	valid := `{"type":"thinking","thinking":"why","signature":"sig-1"}`
 	// wsOnly is a payload of exactly the bytes JSON permits as space:
 	// space, tab, LF, CR (written via runes so the source carries no
 	// escape sequences).
 	wsOnly := " " + string(rune(0x09)) + string(rune(0x0A)) + string(rune(0x0D))
+	// paddedEmptyObject is {} padded with JSON whitespace.
+	paddedEmptyObject := " {} " + string(rune(0x0A))
 	tests := []struct {
 		name    string
 		raw     string // the Raw payload; empty means leave Raw nil
 		wantErr bool
-		errMsg  string // "empty": missing-Raw message; "malformed": malformed-JSON message
+		errMsg  string // "empty": missing-Raw; "empty_decode": decoded-to-empty; "malformed": malformed-JSON
 	}{
 		{name: "nil_raw", wantErr: true, errMsg: "empty"},
 		{name: "plain_null", raw: `null`, wantErr: true, errMsg: "empty"},
@@ -629,6 +633,12 @@ func TestAnthropicThinkingRawPadding(t *testing.T) {
 		{name: "padded_whitespace_only", raw: wsOnly, wantErr: true, errMsg: "empty"},
 		{name: "nbsp_null", raw: "\u00a0null", wantErr: true, errMsg: "malformed"},
 		{name: "valid_padded_json", raw: " " + valid + "\n"},
+		{name: "empty_object", raw: `{}`, wantErr: true, errMsg: "empty_decode"},
+		{name: "padded_empty_object", raw: paddedEmptyObject, wantErr: true, errMsg: "empty_decode"},
+		{name: "spaces_in_object", raw: `{  }`, wantErr: true, errMsg: "empty_decode"},
+		{name: "typed_empty_thinking", raw: `{"type":"thinking"}`, wantErr: true, errMsg: "empty_decode"},
+		{name: "redacted_empty_data", raw: `{"type":"redacted_thinking"}`, wantErr: true, errMsg: "empty_decode"},
+		{name: "valid_redacted", raw: `{"type":"redacted_thinking","data":"cGF5bG9hZA=="}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -673,6 +683,10 @@ func TestAnthropicThinkingRawPadding(t *testing.T) {
 			case "empty":
 				if !strings.Contains(apiErr.Message, "Raw is empty") {
 					t.Errorf("Message = %q, want the missing-Raw message", apiErr.Message)
+				}
+			case "empty_decode":
+				if !strings.Contains(apiErr.Message, "decodes to an empty payload") {
+					t.Errorf("Message = %q, want the decoded-to-empty message", apiErr.Message)
 				}
 			case "malformed":
 				if !strings.Contains(apiErr.Message, "malformed Raw JSON") {

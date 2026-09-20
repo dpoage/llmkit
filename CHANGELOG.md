@@ -32,18 +32,21 @@ entry below is marked.
 - Google adapter: an assistant thinking block whose `Raw` is `null` or `{}`
   padded with JSON whitespace is skipped on replay instead of being sent as
   an empty part.
-- Anthropic adapter: a thinking block whose `Raw` decodes to nothing — `null`
-  or whitespace-only, with or without JSON-whitespace padding — now fails
-  locally with `ErrInvalidRequest` before any wire call; previously a padded
-  form slipped past the guard and emitted an empty unsigned thinking block
-  the API rejects remotely.
+- Anthropic adapter: a thinking block whose `Raw` carries nothing replayable —
+  missing, `null` or whitespace-only (with or without JSON-whitespace
+  padding), or a JSON payload that decodes to an empty thinking/redacted
+  block (`{}`, `{"type":"thinking"}`) — now fails locally with
+  `ErrInvalidRequest` before any wire call; previously such a block slipped
+  past the guard and emitted an empty unsigned thinking block the API
+  rejects remotely.
 - Anthropic adapter: structured-output finalize appends the surfaced
-  tool-call arguments as a `BlockText`, so `Response.Text` equals the
-  concatenation of `BlockText` blocks; the agent's assistant history now
-  keeps the text on thinking+structured-output turns instead of recording
-  only the thinking block. The agent additionally appends surfaced text
-  when a client's `Blocks` omit any text block, so history can no longer
-  diverge from what `llmkit.Stream` delivered.
+  tool-call arguments as a `BlockText`; previously such completions returned
+  `Response.Text` with an empty `Blocks` list, violating the Response
+  invariant (Text equals the concatenation of `BlockText` blocks) for every
+  consumer that reads `Blocks` — transcripts, replay, and the agent's
+  assistant history. The agent additionally appends surfaced text to
+  history when a client's `Blocks` omit any text block, so history can no
+  longer diverge from what `llmkit.Stream` delivered.
 
 ## [0.4.0] - 2026-09-19
 

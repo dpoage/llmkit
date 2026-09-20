@@ -736,9 +736,9 @@ func stitchContinuation(head, cont string) string {
 // form. A response whose blocks omit any text block while resp.Text is
 // non-empty violates the llmkit.Response invariant (Text equals the
 // concatenation of BlockText blocks); the surfaced text is appended so the
-// history this Runner records always carries what llmkit.Stream and
-// FinalText delivered. Think-only responses (Text == "") stay verbatim —
-// no empty text block is invented.
+// history this Runner records always carries what llmkit.Stream delivered.
+// Think-only responses (Text == "") stay verbatim — no empty text block is
+// invented.
 func assistantMessage(resp llmkit.Response) llmkit.Message {
 	if len(resp.Blocks) > 0 {
 		blocks := resp.Blocks

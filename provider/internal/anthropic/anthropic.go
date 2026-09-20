@@ -110,12 +110,13 @@ func (a *anthropicAdapter) Complete(ctx context.Context, req llmkit.Request) (ll
 // (downstream layers have no handler for the synthetic tool), and
 // Anthropic's "tool_use" stop reason for the forced call would otherwise
 // mis-classify the completion. The surfaced text is also appended as a
-// BlockText so the Response honors its invariant (Text equals the
-// concatenation of BlockText blocks) the same way the openai and google
-// toResponse emit surfaced text — verbatim-block consumers such as the
-// agent's assistant history would otherwise drop the text whenever a
-// thinking block precedes it. Complete and Stream both go through this
-// step so the same wire exchange returns identical Responses.
+// BlockText, the same way the openai and google toResponse emit surfaced
+// text: under forced tool_choice the wire cannot also carry a visible text
+// block, so this appends the ONE BlockText the Response's invariant (Text
+// equals the concatenation of BlockText blocks) needs — without it,
+// verbatim-block consumers such as the agent's assistant history would
+// drop the text. Complete and Stream both go through this step so the same
+// wire exchange returns identical Responses.
 func (a *anthropicAdapter) finalize(req llmkit.Request, resp llmkit.Response) llmkit.Response {
 	if toolName, ok := structuredOutputToolName(req, a.caps); ok &&
 		len(resp.ToolCalls) == 1 && resp.ToolCalls[0].Name == toolName {
@@ -572,10 +573,29 @@ func anthropicThinkingBlock(b llmkit.Block) (anthropic.ContentBlockParamUnion, e
 			Err:      err,
 		}
 	}
+	// A payload that DECODES to nothing carries nothing the API accepts on
+	// replay either: forwarding would put an unsigned
+	// {"signature":"","thinking":"","type":"thinking"} (or an empty
+	// redacted block) on the wire and fail remotely. Fail locally instead,
+	// in the same ErrInvalidRequest class as the missing-Raw case.
 	if probe.Type == "redacted_thinking" {
+		if probe.Data == "" {
+			return anthropic.ContentBlockParamUnion{}, &llmkit.APIError{
+				Kind:     llmkit.ErrInvalidRequest,
+				Provider: "anthropic",
+				Message:  "thinking block: Raw decodes to an empty payload; the verbatim provider payload is required",
+			}
+		}
 		return anthropic.ContentBlockParamUnion{
 			OfRedactedThinking: &anthropic.RedactedThinkingBlockParam{Data: probe.Data},
 		}, nil
+	}
+	if probe.Thinking == "" && probe.Signature == "" {
+		return anthropic.ContentBlockParamUnion{}, &llmkit.APIError{
+			Kind:     llmkit.ErrInvalidRequest,
+			Provider: "anthropic",
+			Message:  "thinking block: Raw decodes to an empty payload; the verbatim provider payload is required",
+		}
 	}
 	return anthropic.ContentBlockParamUnion{
 		OfThinking: &anthropic.ThinkingBlockParam{
