@@ -106,9 +106,14 @@ func Retry(ctx context.Context, cfg RetryConfig, classify func(err error) (retry
 	}
 	var err error
 	for attempt := 1; ; attempt++ {
-		actx, cancel := context.WithTimeout(ctx, cfg.RequestTimeout)
-		err = fn(actx)
-		cancel()
+		// The attempt's context is scoped to this closure so its cancel runs
+		// via defer — even when fn panics — without accumulating defers in
+		// the loop.
+		err = func() error {
+			actx, cancel := context.WithTimeout(ctx, cfg.RequestTimeout)
+			defer cancel()
+			return fn(actx)
+		}()
 		if err == nil {
 			return nil
 		}
@@ -294,6 +299,7 @@ func (r *retryClient) Stream(ctx context.Context, req Request, fn func(Delta) er
 	var resp Response
 	var err error
 	err = Retry(ctx, r.cfg, classify, func(actx context.Context) error {
+		delivered = false // a delta from an EARLIER attempt never leaks in
 		resp, err = Stream(actx, r.inner, req, func(d Delta) error {
 			delivered = true
 			return fn(d)

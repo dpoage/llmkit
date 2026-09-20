@@ -84,7 +84,7 @@
 // # Retries
 //
 // Ask retries HTTP 429, every 5xx (529 included), and timeout-classified
-// transport errors through the shared internal loop. Each attempt runs
+// transport errors through the shared retry loop, [llmkit.Retry]. Each attempt runs
 // under a per-attempt RequestTimeout deadline, and parent cancellation
 // is always terminal. The client parses the Retry-After header for
 // every status. When a status is retried, a server-supplied delay

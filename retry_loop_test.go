@@ -295,7 +295,8 @@ func TestParseRetryAfter(t *testing.T) {
 // point now shares: a table of (cfg, attempt, after, hasAfter) cases run
 // through Retry's own sleep hook with a deterministic rng, asserting exact
 // delays including the clamp edges — negative Retry-After, BaseDelay*2^k
-// overflow, and MaxDelay 0 meaning uncapped.
+// overflow, MaxDelay 0 meaning uncapped, and BaseDelay above MaxDelay on the
+// first retry (the post-loop cap is the only clamp that reaches it).
 func TestRetryLoop_DelayAgreement(t *testing.T) {
 	base := 500 * time.Millisecond
 	cases := []struct {
@@ -305,19 +306,22 @@ func TestRetryLoop_DelayAgreement(t *testing.T) {
 		after    time.Duration
 		hasAfter bool
 		want     time.Duration
+		wantAll  []time.Duration // set: assert the full sleep sequence
 	}{
-		{"retry-after capped at MaxDelay", RetryConfig{BaseDelay: base, MaxDelay: 30 * time.Second, Jitter: 0}, 1, time.Hour, true, 30 * time.Second},
-		{"retry-after under cap wins over backoff", RetryConfig{BaseDelay: base, MaxDelay: 30 * time.Second, Jitter: 0}, 1, 2 * time.Second, true, 2 * time.Second},
-		{"negative retry-after clamps to zero", RetryConfig{BaseDelay: base, MaxDelay: 30 * time.Second, Jitter: 0}, 1, -5 * time.Second, true, 0},
-		{"zero retry-after with presence waits nothing", RetryConfig{BaseDelay: base, MaxDelay: 30 * time.Second, Jitter: 0}, 1, 0, true, 0},
-		{"MaxDelay zero leaves retry-after uncapped", RetryConfig{BaseDelay: base, MaxDelay: 0, Jitter: 0}, 1, time.Hour, true, time.Hour},
-		{"first exponential delay is BaseDelay", RetryConfig{BaseDelay: base, MaxDelay: 30 * time.Second, Jitter: 0}, 1, 0, false, 500 * time.Millisecond},
-		{"third exponential delay is four times BaseDelay", RetryConfig{BaseDelay: base, MaxDelay: 30 * time.Second, Jitter: 0}, 3, 0, false, 2 * time.Second},
-		{"schedule caps at MaxDelay", RetryConfig{BaseDelay: 20 * time.Second, MaxDelay: 30 * time.Second, Jitter: 0}, 2, 0, false, 30 * time.Second},
-		{"MaxDelay zero leaves the schedule uncapped", RetryConfig{BaseDelay: base, MaxDelay: 0, Jitter: 0}, 10, 0, false, 256 * time.Second},
-		{"doubling past int64 clamps instead of overflowing", RetryConfig{BaseDelay: time.Duration(1) << 62, MaxDelay: 0, Jitter: 0}, 2, 0, false, time.Duration(1) << 62},
-		{"zero BaseDelay stays zero", RetryConfig{BaseDelay: 0, MaxDelay: 30 * time.Second, Jitter: 0}, 3, 0, false, 0},
-		{"jitter scales with the rng source", RetryConfig{BaseDelay: base, MaxDelay: 30 * time.Second, Jitter: 0.2}, 1, 0, false, 550 * time.Millisecond},
+		{"retry-after capped at MaxDelay", RetryConfig{BaseDelay: base, MaxDelay: 30 * time.Second, Jitter: 0}, 1, time.Hour, true, 30 * time.Second, nil},
+		{"retry-after under cap wins over backoff", RetryConfig{BaseDelay: base, MaxDelay: 30 * time.Second, Jitter: 0}, 1, 2 * time.Second, true, 2 * time.Second, nil},
+		{"negative retry-after clamps to zero", RetryConfig{BaseDelay: base, MaxDelay: 30 * time.Second, Jitter: 0}, 1, -5 * time.Second, true, 0, nil},
+		{"zero retry-after with presence waits nothing", RetryConfig{BaseDelay: base, MaxDelay: 30 * time.Second, Jitter: 0}, 1, 0, true, 0, nil},
+		{"MaxDelay zero leaves retry-after uncapped", RetryConfig{BaseDelay: base, MaxDelay: 0, Jitter: 0}, 1, time.Hour, true, time.Hour, nil},
+		{"retry-after without presence is ignored", RetryConfig{BaseDelay: base, MaxDelay: 30 * time.Second, Jitter: 0}, 1, 5 * time.Second, false, 500 * time.Millisecond, nil},
+		{"first delay caps at MaxDelay", RetryConfig{BaseDelay: time.Minute, MaxDelay: 30 * time.Second, Jitter: 0}, 1, 0, false, 30 * time.Second, nil},
+		{"third exponential delay is four times BaseDelay", RetryConfig{BaseDelay: base, MaxDelay: 30 * time.Second, Jitter: 0}, 3, 0, false, 2 * time.Second, nil},
+		{"schedule caps at MaxDelay", RetryConfig{BaseDelay: 20 * time.Second, MaxDelay: 30 * time.Second, Jitter: 0}, 2, 0, false, 30 * time.Second, nil},
+		{"sequence grows then caps", RetryConfig{BaseDelay: 20 * time.Second, MaxDelay: 30 * time.Second, Jitter: 0}, 3, 0, false, 30 * time.Second,
+			[]time.Duration{20 * time.Second, 30 * time.Second, 30 * time.Second}},
+		{"doubling past int64 clamps instead of overflowing", RetryConfig{BaseDelay: time.Duration(1) << 62, MaxDelay: 0, Jitter: 0}, 2, 0, false, time.Duration(1) << 62, nil},
+		{"zero BaseDelay stays zero", RetryConfig{BaseDelay: 0, MaxDelay: 30 * time.Second, Jitter: 0}, 3, 0, false, 0, nil},
+		{"jitter scales with the rng source", RetryConfig{BaseDelay: base, MaxDelay: 30 * time.Second, Jitter: 0.2}, 1, 0, false, 550 * time.Millisecond, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -340,9 +344,102 @@ func TestRetryLoop_DelayAgreement(t *testing.T) {
 			if len(slept) == 0 {
 				t.Fatal("no sleeps recorded; the loop never backed off")
 			}
+			if tc.wantAll != nil {
+				if len(slept) != len(tc.wantAll) {
+					t.Fatalf("sleeps = %v, want %v", slept, tc.wantAll)
+				}
+				for i := range tc.wantAll {
+					if slept[i] != tc.wantAll[i] {
+						t.Fatalf("sleeps = %v, want %v (sleep %d = %v, want %v)", slept, tc.wantAll, i, slept[i], tc.wantAll[i])
+					}
+				}
+				return
+			}
 			if got := slept[len(slept)-1]; got != tc.want {
 				t.Errorf("delay after attempt %d = %v, want %v (all sleeps: %v)", tc.attempt, got, tc.want, slept)
 			}
 		})
+	}
+}
+
+// panicClient captures the attempt context, then panics: the loop must
+// release that context even on the panic path.
+type panicClient struct {
+	completeCtx context.Context
+	streamCtx   context.Context
+}
+
+func (p *panicClient) Capabilities() Capabilities { return Capabilities{} }
+
+func (p *panicClient) Complete(ctx context.Context, req Request) (Response, error) {
+	p.completeCtx = ctx
+	panic("inner complete panic")
+}
+
+func (p *panicClient) Stream(ctx context.Context, req Request, fn func(Delta) error) (Response, error) {
+	p.streamCtx = ctx
+	panic("inner stream panic")
+}
+
+// recovered runs fn, swallows a panic, and reports whether one happened.
+func recovered(fn func()) (panicked bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			panicked = true
+		}
+	}()
+	fn()
+	return false
+}
+
+// TestRetry_PanicReleasesAttemptContext pins the per-attempt cleanup: fn's
+// panic propagates, and the attempt context is still cancelled — its cancel
+// runs via defer during the unwind, never an inline call a panic could skip.
+func TestRetry_PanicReleasesAttemptContext(t *testing.T) {
+	// Directly through Retry.
+	var attemptCtx context.Context
+	panicked := recovered(func() {
+		_ = Retry(context.Background(), RetryConfig{RequestTimeout: time.Hour}, retryAny, func(ctx context.Context) error {
+			attemptCtx = ctx
+			panic("fn panic")
+		})
+	})
+	if !panicked {
+		t.Fatal("expected fn's panic to propagate out of Retry")
+	}
+	if attemptCtx == nil {
+		t.Fatal("fn never saw an attempt context")
+	}
+	if attemptCtx.Err() != context.Canceled {
+		t.Errorf("attempt ctx after panic: err = %v, want context.Canceled (cancel ran during unwind)", attemptCtx.Err())
+	}
+
+	// Through WithRetry's Complete path. RequestTimeout is an hour, so an
+	// un-released context would still report Err() == nil here.
+	cfg := RetryConfig{MaxAttempts: 3, RequestTimeout: time.Hour}
+	cfg.sleep = func(ctx context.Context, d time.Duration) error { return nil }
+	pc := &panicClient{}
+	if !recovered(func() { _, _ = WithRetry(pc, cfg).Complete(context.Background(), simpleRequest()) }) {
+		t.Error("expected the inner panic to propagate through WithRetry Complete")
+	}
+	if pc.completeCtx == nil {
+		t.Fatal("inner Complete never saw an attempt context")
+	}
+	if pc.completeCtx.Err() != context.Canceled {
+		t.Errorf("Complete attempt ctx after panic: err = %v, want context.Canceled", pc.completeCtx.Err())
+	}
+
+	// Through WithRetry's Stream path.
+	ps := &panicClient{}
+	if !recovered(func() {
+		_, _ = Stream(context.Background(), WithRetry(ps, cfg), simpleRequest(), func(Delta) error { return nil })
+	}) {
+		t.Error("expected the inner panic to propagate through WithRetry Stream")
+	}
+	if ps.streamCtx == nil {
+		t.Fatal("inner Stream never saw an attempt context")
+	}
+	if ps.streamCtx.Err() != context.Canceled {
+		t.Errorf("Stream attempt ctx after panic: err = %v, want context.Canceled", ps.streamCtx.Err())
 	}
 }
