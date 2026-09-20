@@ -21,6 +21,13 @@ entry below is marked.
   extracted from `embed`, so `embed` and `decide` share one implementation.
   Internal package; no caller-facing change; `embed` behavior is unchanged.
 
+### Fixed
+
+- `llmkit.Stream` now emits one `DeltaText` from `Response.Text` when
+  `Response.Blocks` carries no text block; previously a Complete-only client
+  returning a text-only response — including `agent.ReplayClient` replaying a
+  recorded run — fired `Hooks.Delta` zero times for the reply text.
+
 ## [0.4.0] - 2026-09-19
 
 ### Added
