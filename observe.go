@@ -71,7 +71,7 @@ const (
 	// KindStart opens a run. The agent Runner emits it as the first event of
 	// every run so a sink can open its run record (a task slug for a JSONL
 	// filename, a row for a runs table) before the first Completion. Payload:
-	// [StartEvent]. Step is set; ParentRunID rides here on continued runs.
+	// [StartEvent]. Step 0; ParentRunID rides here on continued runs.
 	KindStart EventKind = "start"
 	// KindCompletion records one logical completion — the request, the final
 	// response or the error, provider and model. Emitted once per completion
@@ -220,15 +220,25 @@ type CompletionEvent struct {
 // its 1-based position. Attempt 1 is the first wire call. The response is
 // the raw adapter response — attempts are observed below the tool-call
 // serializer — so the CompletionEvent's Response may differ from it where
-// the serializer truncated. Event.SpanID joins it to its logical completion.
+// the serializer truncated. A failed attempt carries the error text and
+// the zero Response; when that error is an [*APIError], StatusCode and
+// RetryAfter carry its HTTP status and the server-suggested delay the
+// retry classifier read (both zero on success and for unclassified
+// transport failures). Event.SpanID joins it to its logical completion.
 type AttemptEvent struct {
 	// Attempt is the 1-based attempt number within the logical completion.
 	Attempt  int      `json:"attempt"`
 	Request  Request  `json:"request"`
 	Response Response `json:"response"`
 	Err      string   `json:"err,omitempty"`
-	Provider string   `json:"provider,omitempty"`
-	Model    string   `json:"model,omitempty"`
+	// StatusCode is the HTTP status of a failed attempt whose error is an
+	// [*APIError]; 0 on success and for unclassified transport failures.
+	StatusCode int `json:"status_code,omitempty"`
+	// RetryAfter is the failed attempt's server-suggested delay as read by
+	// the retry classifier; 0 when the server supplied none.
+	RetryAfter time.Duration `json:"retry_after,omitempty"`
+	Provider   string        `json:"provider,omitempty"`
+	Model      string        `json:"model,omitempty"`
 }
 
 // ToolRunEvent records one tool call ([KindToolRun]). Call is the model's

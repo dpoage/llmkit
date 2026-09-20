@@ -178,7 +178,8 @@ type Spec struct {
 }
 
 // Options tunes client construction. The zero value is valid: it uses
-// default retry policy, no recorder, and the default HTTP transport.
+// default retry policy, no recorder, no observer, and the default HTTP
+// transport.
 type Options struct {
 	// Retry configures the shared retry wrapper. If MaxAttempts is 0,
 	// retry.Default is used.
@@ -193,10 +194,12 @@ type Options struct {
 	// outermost harness layer emits that one. Wrap the returned client with
 	// llmkit.Observe (or run it under the agent Runner, which emits its own)
 	// to capture completions, and do not wrap a Runner-run client twice.
+	// Without such an emitter above the stack, the events' SpanID is empty:
+	// the span is minted by the Completion emitter, not by New.
 	Observer llmkit.Observer
-	// Provider overrides the provider tag on emitted UsageEvents. Empty
-	// tags events with string(spec.Type); set it when your ledger keys on
-	// a config-map name rather than the provider type.
+	// Provider overrides the provider tag on emitted usage and attempt
+	// events. Empty tags events with string(spec.Type); set it when your
+	// ledger keys on a config-map name rather than the provider type.
 	Provider string
 	// HTTPClient overrides the transport used by the underlying SDKs.
 	// Primarily for tests (httptest) and proxies. nil uses the SDK

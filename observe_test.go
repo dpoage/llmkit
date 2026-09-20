@@ -124,10 +124,12 @@ func goldEvents() []struct {
 					// A failed attempt carries the zero Response; its Usage
 					// field has no omitempty (a struct tag cannot omit a
 					// struct), so the wire shows it as {"usage":{}}.
-					Response: Response{},
-					Err:      "429 too many requests",
-					Provider: "openai",
-					Model:    "gpt",
+					Response:   Response{},
+					Err:        "429 too many requests",
+					StatusCode: 429,
+					RetryAfter: 30 * time.Second,
+					Provider:   "openai",
+					Model:      "gpt",
 				},
 			},
 		},
@@ -384,6 +386,8 @@ func TestEventGoldenJSON(t *testing.T) {
     },
     "response": {"usage":{}},
     "err": "429 too many requests",
+    "status_code": 429,
+    "retry_after": 30000000000,
     "provider": "openai",
     "model": "gpt"
   }

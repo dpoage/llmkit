@@ -2,6 +2,7 @@ package llmkit
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/dpoage/llmkit/retry"
@@ -31,9 +32,13 @@ func WithRetry(c Client, cfg retry.Config) Client {
 // the wire call, or the stream plus its delta delivery — tagged with the
 // provider and model arguments and numbered 1..N by the loop itself.
 // Failures are events too: a failed attempt carries the error text and the
-// zero Response. SpanID is inherited from the context, so the attempts join
-// the Completion event their emitter minted ([Observe] or the agent Runner)
-// on SpanID; Step stays 0. The stage never emits a Completion event — the
+// zero Response; when that error is an [*APIError] the event also carries
+// its StatusCode and RetryAfter. Events are emitted on the retry caller's
+// context — not the per-attempt timeout context — so a ctx-honouring sink
+// never drops the timed-out attempts and never sees a leftover per-attempt
+// deadline. SpanID is inherited from the context, so the attempts join the
+// Completion event their emitter minted ([Observe] or the agent Runner) on
+// SpanID; Step stays 0. The stage never emits a Completion event — the
 // outermost harness layer owns that.
 func WithRetryObserver(c Client, cfg retry.Config, obs Observer, provider, model string) Client {
 	return &retryClient{inner: c, cfg: cfg, obs: obs, provider: provider, model: model}
@@ -54,7 +59,7 @@ func (r *retryClient) Complete(ctx context.Context, req Request) (Response, erro
 		attempt++
 		start := time.Now()
 		resp, err = r.inner.Complete(actx, req)
-		r.observe(actx, attempt, req, resp, err, time.Since(start))
+		r.observe(ctx, attempt, req, resp, err, time.Since(start))
 		return err
 	})
 	if err != nil {
@@ -94,7 +99,7 @@ func (r *retryClient) Stream(ctx context.Context, req Request, fn func(Delta) er
 			delivered = true
 			return fn(d)
 		})
-		r.observe(actx, attempt, req, resp, err, time.Since(start))
+		r.observe(ctx, attempt, req, resp, err, time.Since(start))
 		return err
 	})
 	if err != nil {
@@ -103,12 +108,14 @@ func (r *retryClient) Stream(ctx context.Context, req Request, fn func(Delta) er
 	return resp, nil
 }
 
-// observe reports one finished attempt to the stage's observer, when wired.
-// The attempt's Duration is the wall time of the inner call — backoff
-// between attempts belongs to no attempt. A failed attempt carries the
-// error text and the zero Response; the successful attempt's Response is
-// the raw adapter response, before any outer decorator (the tool-call
-// serializer) adjusts it.
+// observe reports one finished attempt to the stage's observer, when wired,
+// on the retry caller's context: the per-attempt RequestTimeout context is
+// frequently done by emission time, and a ctx-honouring sink must not drop
+// the very attempts that timed out. The attempt's Duration is the wall time
+// of the inner call — backoff between attempts belongs to no attempt. A
+// failed attempt carries the error text and the zero Response; the
+// successful attempt's Response is the raw adapter response, before any
+// outer decorator (the tool-call serializer) adjusts it.
 func (r *retryClient) observe(ctx context.Context, n int, req Request, resp Response, err error, d time.Duration) {
 	if r.obs == nil {
 		return
@@ -121,6 +128,11 @@ func (r *retryClient) observe(ctx context.Context, n int, req Request, resp Resp
 	}
 	if err != nil {
 		ae.Err = err.Error()
+		var apiErr *APIError
+		if errors.As(err, &apiErr) {
+			ae.StatusCode = apiErr.StatusCode
+			ae.RetryAfter = apiErr.RetryAfter
+		}
 	} else {
 		ae.Response = resp
 	}

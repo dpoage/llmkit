@@ -126,17 +126,20 @@ All three decorators compose over streaming: retry stops once a delta is deliver
 `Options.Observer` puts an `llmkit.Observer` inside the retry stage: it receives one `Attempt` event per wire call — failures included — numbered from 1, so a sink can watch flakiness without counting spend twice. `New` never emits `Completion` events: the outermost layer owns that one. For a bare client, wrap the constructed client with `llmkit.Observe`, which emits exactly one `Completion` event per logical call — the request as received, the final response (on the stream path assembled from the same synthesis `llmkit.Stream` performs) or the error text:
 
 ```go
+spec := provider.Spec{Type: provider.TypeAnthropic, Model: "claude-sonnet-4-5", Secret: key}
 var events []llmkit.Event
 obs := llmkit.ObserverFunc(func(ctx context.Context, ev llmkit.Event) {
     events = append(events, ev)
 })
 client, err := provider.New(ctx, spec, provider.Options{Observer: obs})
-observed := llmkit.Observe(client, obs, "anthropic", spec.Model)
+// Pass the same tags New derives, so one span never carries two provider
+// identities: Options.Provider when set, string(spec.Type) otherwise.
+observed := llmkit.Observe(client, obs, string(spec.Type), spec.Model)
 ```
 
 `llmkit.Observe` mints a fresh span per logical completion and stamps it into the context it hands the client, so every `Attempt` event joins its `Completion` event on `ev.SpanID`; a nested completion (a tool calling the model) gets its own span. Because the observer sits below the serializer, an `Attempt` event shows the raw adapter response while the `Completion` event shows the truncated response your loop sees.
 
-If the same client runs inside an `agent.Runner`, do not wrap it with `llmkit.Observe`: the Runner emits `Completion` events itself (with `Step` set), and double-wrapping records every completion twice. Pass the durable sink to the Runner instead.
+The attempt emitter is `llmkit.WithRetryObserver(c, cfg, obs, provider, model)`, and it works on ANY `llmkit.Client` — not only through `provider.New`. If the same client runs inside an `agent.Runner`, do not wrap it with `llmkit.Observe`: the Runner emits `Completion` events itself (with `Step` set), and double-wrapping records every completion twice. Pass the durable sink to the Runner instead.
 
 ## Error normalization
 

@@ -98,9 +98,10 @@ failures included, joined to the completion's span.
 - **What it costs:** the order is fixed. `New` never emits `Completion`
   events — the outermost layer owns those: the agent Runner for agent runs,
   or wrap the returned client with `llmkit.Observe` for bare clients (never
-  both for the same client). And because the Attempt events sit below the
-  serializer, a truncated response is visible as a difference between the
-  raw Attempt response and the Completion response your loop sees.
+  both for the same client). And because Attempt events sit below the
+  serializer, a sink correlating them with the Completion must account for
+  the truncation itself: the Attempt carries the raw response, the
+  Completion the truncated one your loop sees.
 
 ## Honest capabilities
 
