@@ -198,6 +198,9 @@ func TestNewEventStampsHeader(t *testing.T) {
 func TestNewEventRoundTripsDeepEqual(t *testing.T) {
 	ctx := WithSpan(WithRun(context.Background(), RunID("1758366600000-deadbeef00112233")), SpanID("1758366600001-0123456789abcdef"))
 	ev := NewEvent(ctx, KindExec)
+	if ev.Time.Location() != time.UTC {
+		t.Fatalf("NewEvent stamped %s, want UTC so the decode is DeepEqual", ev.Time.Location())
+	}
 	ev.Exec = &ExecEvent{Backend: "docker", Command: []string{"sh"}, ExitCode: 0}
 	data, err := json.Marshal(ev)
 	if err != nil {

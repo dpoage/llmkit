@@ -70,24 +70,19 @@ func SpanFromContext(ctx context.Context) SpanID {
 
 // newID mints "<unix-millis>-<hex>": the current time as 13 zero-padded
 // decimal digits plus 16 lowercase hex characters (8 bytes from
-// crypto/rand). Ids sort lexically in mint order — a sink can range over
-// id-prefixed records without a separate timestamp column — and two ids
-// collide only if minted in the same millisecond with an identical 64-bit
-// random suffix.
-//
-// It panics if the system entropy source fails. That is a broken machine,
-// not a caller-handleable condition.
+// crypto/rand, which never returns an error and always fills b entirely).
+// Ids sort lexically in mint order — a sink can range over id-prefixed
+// records without a separate timestamp column — and two ids collide only
+// if minted in the same millisecond with an identical 64-bit random
+// suffix.
 func newID() string {
 	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		panic(fmt.Sprintf("llmkit: crypto/rand failed: %v", err))
-	}
+	rand.Read(b[:])
 	return fmt.Sprintf("%013d-%s", time.Now().UnixMilli(), hex.EncodeToString(b[:]))
 }
 
-// NewRunID mints a fresh run id in the format documented on [newID]'s
-// counterpart [RunID]: "<unix-millis>-<hex>", lexically sortable by mint
-// time.
+// NewRunID mints a fresh run id: "<unix-millis>-<hex>", lexically sortable
+// by mint time.
 func NewRunID() RunID { return RunID(newID()) }
 
 // NewSpanID mints a fresh span id — same format as [NewRunID] (see

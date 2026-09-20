@@ -142,10 +142,11 @@ type Event struct {
 	// ParentRunID is set by the agent Runner on every event of a run
 	// continued from a previous one; decorators leave it empty.
 	ParentRunID RunID `json:"parent_run_id,omitempty"`
-	// SpanID joins an Attempt event to its Completion: the Completion
-	// emitter mints one per logical completion and passes it to the client
-	// in the context ([WithSpan]); the retry stage inherits it. A nested
-	// completion gets its own span.
+	// SpanID is stamped by [NewEvent] on every kind from the context
+	// ([WithSpan]); it is load-bearing on Completion and Attempt: the
+	// Completion emitter mints one per logical completion and passes it to
+	// the client in the context, the retry stage inherits it, so an Attempt
+	// joins its Completion on SpanID. A nested completion gets its own span.
 	SpanID SpanID `json:"span_id,omitempty"`
 	// Step is the 1-based model turn within an agent run, set only on events
 	// the Runner emits; 0 on decorator-emitted events.
@@ -275,12 +276,13 @@ type FinalizeEvent struct {
 // root-owned types — the root package cannot import decide (decide imports
 // root), so decide converts to and from these types at its boundary.
 //
-// Exactly one of Err (the call failed) or the Questions/Answers pair (it
-// succeeded) is populated. Question and answer kinds are the decide wire
-// discriminators: "noul" (binary belief), "choice" (one option picked),
-// "score" (levels rated). Questions and Answers are each sorted by ID
-// (decide.Questions is a map; the conversion layer sorts), and an answer
-// matches its question by ID.
+// On a failed Ask, Err is non-empty (State and Questions may still be
+// recorded — what was judged and asked is known even when the call
+// failed); on success Answers is populated and Err is empty. Question and
+// answer kinds are the decide wire discriminators: "noul" (binary
+// belief), "choice" (one option picked), "score" (levels rated).
+// Questions and Answers are each sorted by ID (decide.Questions is a map;
+// the conversion layer sorts), and an answer matches its question by ID.
 type DecisionEvent struct {
 	// Backend names the decision backend (e.g. "typesafe"); Model its model
 	// identifier.
@@ -288,7 +290,9 @@ type DecisionEvent struct {
 	Model   string `json:"model,omitempty"`
 	// State is the state the Ask judged, as raw JSON (string, object, or
 	// array) — the input half of the call, so a sink can interpret or replay
-	// the decision from this event alone.
+	// the decision from this event alone. State is emitted verbatim: an
+	// invalid RawMessage fails Marshal for the whole event, so converters
+	// must pre-validate.
 	State json.RawMessage `json:"state,omitempty"`
 	// Questions is what was asked, sorted by ID.
 	Questions []DecisionQuestion `json:"questions,omitempty"`
@@ -321,8 +325,8 @@ type DecisionQuestion struct {
 //
 //   - noul: Belief (0..1);
 //   - choice: Choice plus Probabilities (per option) and Confidence;
-//   - score: Score (the server's numeric score) plus Levels (the chosen
-//     legend indices' values) index-aligned with LevelProbabilities.
+//   - score: Score (the server's numeric score) plus Levels, the full
+//     dense legend, index-aligned with LevelProbabilities.
 //
 // Belief and Score are pointers so a 0 value survives the round-trip
 // distinct from "absent".

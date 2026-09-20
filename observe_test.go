@@ -209,11 +209,15 @@ func goldEvents() []struct {
 							ID: "q3", Kind: "score", Instructions: json.RawMessage(`{"prompt":"rate it"}`),
 							Levels: []json.RawMessage{json.RawMessage(`"low"`), json.RawMessage(`"high"`)},
 						},
+						{ID: "q4", Kind: "noul", Instructions: json.RawMessage(`{"prompt":"safe?"}`)},
+						{ID: "q5", Kind: "score", Instructions: json.RawMessage(`{"prompt":"how bad?"}`)},
 					},
 					Answers: []DecisionAnswer{
 						{ID: "q1", Belief: &belief},
 						{ID: "q2", Choice: "go", Probabilities: map[string]float64{"go": 0.7, "stay": 0.3}, Confidence: 0.8},
-						{ID: "q3", Score: &score, Levels: []string{"high"}, LevelProbabilities: []float64{0.2, 0.8}},
+						{ID: "q3", Score: &score, Levels: []string{"low", "high"}, LevelProbabilities: []float64{0.2, 0.8}},
+						{ID: "q4", Belief: f64(0)},
+						{ID: "q5", Score: f64(0)},
 					},
 					Usage: Usage{InputTokens: 50, OutputTokens: 10},
 				},
@@ -500,6 +504,16 @@ func TestEventGoldenJSON(t *testing.T) {
           "low",
           "high"
         ]
+      },
+      {
+        "id": "q4",
+        "kind": "noul",
+        "instructions": {"prompt":"safe?"}
+      },
+      {
+        "id": "q5",
+        "kind": "score",
+        "instructions": {"prompt":"how bad?"}
       }
     ],
     "answers": [
@@ -520,12 +534,21 @@ func TestEventGoldenJSON(t *testing.T) {
         "id": "q3",
         "score": 2.09,
         "levels": [
+          "low",
           "high"
         ],
         "level_probabilities": [
           0.2,
           0.8
         ]
+      },
+      {
+        "id": "q4",
+        "belief": 0
+      },
+      {
+        "id": "q5",
+        "score": 0
       }
     ],
     "usage": {
@@ -953,5 +976,44 @@ func TestDecisionMirrorRoundTrip(t *testing.T) {
 		if !reflect.DeepEqual(q, got) {
 			t.Fatalf("question %q lost:\norig: %+v\nback: %+v", q.mirrorID(), q, got)
 		}
+	}
+}
+
+// TestEmptyPayloadRoundTrip pushes an all-zero payload of every kind
+// through the wire: omitempty must collapse the empty halves (State,
+// Answers, Finalized, Exec.Command, ...) to absent and decode back to the
+// zero payload with DeepEqual, so sinks never see phantom distinctions.
+func TestEmptyPayloadRoundTrip(t *testing.T) {
+	kinds := map[EventKind]func(*Event){
+		KindStart:      func(e *Event) { e.Start = &StartEvent{} },
+		KindCompletion: func(e *Event) { e.Completion = &CompletionEvent{} },
+		KindAttempt:    func(e *Event) { e.Attempt = &AttemptEvent{} },
+		KindToolRun:    func(e *Event) { e.ToolRun = &ToolRunEvent{} },
+		KindCompaction: func(e *Event) { e.Compaction = &CompactionEvent{} },
+		KindSteer:      func(e *Event) { e.Steer = &SteerEvent{} },
+		KindFinalize:   func(e *Event) { e.Finalize = &FinalizeEvent{} },
+		KindDecision:   func(e *Event) { e.Decision = &DecisionEvent{} },
+		KindEmbed:      func(e *Event) { e.Embed = &EmbedEvent{} },
+		KindExec:       func(e *Event) { e.Exec = &ExecEvent{} },
+	}
+	if len(kinds) != 10 {
+		t.Fatalf("%d kinds wired, want 10", len(kinds))
+	}
+	for kind, setPayload := range kinds {
+		t.Run(string(kind), func(t *testing.T) {
+			ev := NewEvent(context.Background(), kind)
+			setPayload(&ev)
+			data, err := json.Marshal(ev)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var back Event
+			if err := json.Unmarshal(data, &back); err != nil {
+				t.Fatalf("unmarshal: %v\njson: %s", err, data)
+			}
+			if !reflect.DeepEqual(ev, back) {
+				t.Fatalf("empty %s payload did not round-trip\njson: %s\nwant: %#v\ngot:  %#v", kind, data, ev, back)
+			}
+		})
 	}
 }
