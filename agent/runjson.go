@@ -22,6 +22,8 @@ import (
 // revision loop can test errors.Is(err, ErrUnparseableOutput) to treat a
 // malformed model answer as a recoverable, retry-able outcome instead of a
 // hard abort.
+// The message already carries the "agent: " prefix; wrap sites must not
+// add another.
 var ErrUnparseableOutput = errors.New("agent: model output did not parse as JSON")
 
 // RunJSON runs the tool loop for task, instructing the model to return its
@@ -131,7 +133,7 @@ func (r *Runner) runJSON(ctx context.Context, seed []llmkit.Message, task string
 	// a budget stop, not a parse failure. Skipping the repair here
 	// also preserves the budget overshoot bound (no extra post-exhaustion call).
 	if outcome.TruncationReason == TruncTokenBudget || outcome.TruncationReason == TruncBudgetPool {
-		return outcome, fmt.Errorf("agent: %w%s: %w",
+		return outcome, fmt.Errorf("%w%s: %w",
 			ErrUnparseableOutput, truncationNote(outcome), perr)
 	}
 
@@ -187,7 +189,7 @@ func (r *Runner) runJSON(ctx context.Context, seed []llmkit.Message, task string
 				return repairOutcome, nil
 			}
 		}
-		return repairOutcome, fmt.Errorf("agent: %w after one repair%s: %w",
+		return repairOutcome, fmt.Errorf("%w after one repair%s: %w",
 			ErrUnparseableOutput, truncationNote(repairOutcome), perr2)
 	}
 	return repairOutcome, nil
