@@ -8,6 +8,19 @@ entry below is marked.
 
 ## [Unreleased]
 
+### Added
+
+- `llmkit/decide`: a client for TypeSafe's Jev decision model (the System One
+  API): `decide.New` and `Client.Ask` with the sealed `Noul`, `Choice`, and
+  `Score` question types, normalized answers with probabilities and
+  confidence, `*llmkit.APIError` error normalization, and a usage recorder.
+  `decide` populates `llmkit.APIError.RetryAfter` on any status carrying the
+  header; the root `APIError` doc comment still describes 429/529 only (bead
+  llmkit-gac tracks the Go doc fix).
+- `internal/retry`: the backoff, `Retry-After`, and per-attempt-timeout loop
+  extracted from `embed`, so `embed` and `decide` share one implementation.
+  Internal package; no caller-facing change; `embed` behavior is unchanged.
+
 ## [0.4.0] - 2026-09-19
 
 ### Added
