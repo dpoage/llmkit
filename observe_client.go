@@ -20,6 +20,15 @@ import (
 // wrapping retry stage's Attempt events join this Completion on SpanID and
 // a nested completion (a tool calling the model) gets its own span.
 // Event.Duration covers the whole call, inner retries and backoff included.
+// On failure the caller receives the inner client's (response, error) pair
+// unchanged; only the event's Response is zeroed, per the CompletionEvent
+// contract.
+//
+// The provider and model tags must identify the same backend the client
+// calls: when wrapping a client from provider.New, pass what New itself
+// derives — the spec's model, and Options.Provider when set or
+// string(spec.Type) otherwise. Mismatched tags put two provider identities
+// on one span.
 //
 // The emission rule lives on [Observer]: the OUTERMOST harness layer emits
 // the Completion event. Observe is that layer for bare clients; the agent
@@ -50,10 +59,7 @@ func (o *observingClient) Complete(ctx context.Context, req Request) (Response, 
 	start := time.Now()
 	resp, err := o.inner.Complete(ctx, req)
 	o.emit(ctx, req, resp, err, time.Since(start))
-	if err != nil {
-		return Response{}, err
-	}
-	return resp, nil
+	return resp, err
 }
 
 func (o *observingClient) Stream(ctx context.Context, req Request, fn func(Delta) error) (Response, error) {
@@ -61,15 +67,14 @@ func (o *observingClient) Stream(ctx context.Context, req Request, fn func(Delta
 	start := time.Now()
 	resp, err := Stream(ctx, o.inner, req, fn)
 	o.emit(ctx, req, resp, err, time.Since(start))
-	if err != nil {
-		return Response{}, err
-	}
-	return resp, nil
+	return resp, err
 }
 
 // emit closes one logical completion with exactly one Completion event. A
 // failed completion carries the error text and the zero Response, per the
-// [CompletionEvent] contract.
+// [CompletionEvent] contract — even when the inner client returned a
+// partial response alongside the error; the caller still gets that partial
+// response, unchanged.
 func (o *observingClient) emit(ctx context.Context, req Request, resp Response, err error, d time.Duration) {
 	ce := &CompletionEvent{
 		Request:  req,

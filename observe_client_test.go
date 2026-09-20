@@ -12,23 +12,32 @@ import (
 	"github.com/dpoage/llmkit/retry"
 )
 
-// captureObserver collects every event it receives, for asserting emission
-// counts, ordering, and payloads in the Observe tests.
+// captureObserver collects every event it receives — with the context it
+// was delivered on — for asserting emission counts, ordering, payloads, and
+// which context emitters hand their sinks.
 type captureObserver struct {
 	mu     sync.Mutex
 	events []Event
+	ctxs   []context.Context
 }
 
-func (c *captureObserver) Observe(_ context.Context, ev Event) {
+func (c *captureObserver) Observe(ctx context.Context, ev Event) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.events = append(c.events, ev)
+	c.ctxs = append(c.ctxs, ctx)
 }
 
 func (c *captureObserver) snapshot() []Event {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]Event(nil), c.events...)
+}
+
+func (c *captureObserver) ctxAt(i int) context.Context {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ctxs[i]
 }
 
 // byKind returns the captured events of one kind, in emission order.
@@ -42,14 +51,30 @@ func (c *captureObserver) byKind(k EventKind) []Event {
 	return out
 }
 
-func fastRetryCfg() retry.Config {
-	return retry.Config{
-		MaxAttempts:    4,
-		BaseDelay:      time.Millisecond,
+// retrySleeps is a retry.Config whose backoff sleeps are recorded, so tests
+// can pin that the Completion Duration covers the attempts plus the backoff.
+type retrySleeps struct {
+	cfg   retry.Config
+	slept []time.Duration
+}
+
+// newRetrySleeps builds a retry.Config whose backoff sleeps are recorded
+// AND actually taken (microsecond-scale, capped at MaxDelay), so tests can
+// pin that the Completion Duration covers the attempts plus real backoff
+// wall time.
+func newRetrySleeps(maxAttempts int) *retrySleeps {
+	r := &retrySleeps{cfg: retry.Config{
+		MaxAttempts:    maxAttempts,
+		BaseDelay:      200 * time.Microsecond,
 		MaxDelay:       time.Millisecond,
 		RequestTimeout: time.Second,
-		Sleep:          func(context.Context, time.Duration) error { return nil },
+	}}
+	r.cfg.Sleep = func(_ context.Context, d time.Duration) error {
+		r.slept = append(r.slept, d)
+		time.Sleep(d)
+		return nil
 	}
+	return r
 }
 
 func okResponse() Response {
@@ -76,7 +101,7 @@ func TestObserve_CompleteEmitsExactlyOneEvent(t *testing.T) {
 	fc := &fakeClient{responses: []Response{okResponse()}}
 	obs := &captureObserver{}
 	runID := NewRunID()
-	client := Observe(WithRetry(fc, fastRetryCfg()), obs, "anthropic", "claude-test")
+	client := Observe(WithRetry(fc, newRetrySleeps(4).cfg), obs, "anthropic", "claude-test")
 
 	req := simpleRequest()
 	resp, err := client.Complete(WithRun(context.Background(), runID), req)
@@ -125,16 +150,24 @@ func TestObserve_CompleteEmitsExactlyOneEvent(t *testing.T) {
 	}
 }
 
-// TestObserve_CompleteError: a failed completion carries the error text and
-// the zero Response, and the error reaches the caller unchanged.
+// TestObserve_CompleteError: a failed completion's event carries the error
+// text and the zero Response — even when the inner client returned a partial
+// response alongside the error — while the caller still receives that
+// partial response unchanged.
 func TestObserve_CompleteError(t *testing.T) {
-	fc := &fakeClient{errs: []error{&APIError{Kind: ErrAuth, StatusCode: 401, Provider: "fake", Message: "bad key"}}}
+	fc := &fakeClient{
+		errs:      []error{&APIError{Kind: ErrAuth, StatusCode: 401, Provider: "fake", Message: "bad key"}},
+		responses: []Response{{Text: "partial"}},
+	}
 	obs := &captureObserver{}
 	client := Observe(fc, obs, "p", "m")
 
-	_, err := client.Complete(context.Background(), simpleRequest())
+	resp, err := client.Complete(context.Background(), simpleRequest())
 	if !errors.Is(err, ErrAuth) {
 		t.Fatalf("err = %v, want ErrAuth", err)
+	}
+	if resp.Text != "partial" {
+		t.Errorf("caller Response.Text = %q, want the inner partial response passed through", resp.Text)
 	}
 	events := obs.snapshot()
 	if len(events) != 1 || events[0].Completion == nil {
@@ -145,7 +178,7 @@ func TestObserve_CompleteError(t *testing.T) {
 		t.Errorf("Err = %q, want the error text %q", ce.Err, err.Error())
 	}
 	if !reflect.DeepEqual(ce.Response, Response{}) {
-		t.Errorf("Response = %+v, want the zero Response on failure", ce.Response)
+		t.Errorf("event Response = %+v, want the zero Response on failure (not the partial the caller got)", ce.Response)
 	}
 }
 
@@ -246,16 +279,22 @@ func TestObserve_StreamAndCompleteDeepEqual(t *testing.T) {
 }
 
 // TestObserve_AttemptsJoinCompletionSpan: N retried attempts produce Attempt
-// events numbered 1..N with the completion's SpanID, failed ones carrying
-// the error and a zero Response.
+// events numbered 1..N with the completion's SpanID. Failed ones carry the
+// error, the zero Response (even when the inner client returned a partial
+// one), and the APIError's status and Retry-After; the completion's Duration
+// covers every attempt plus the backoff between them.
 func TestObserve_AttemptsJoinCompletionSpan(t *testing.T) {
 	fc := &fakeClient{
-		errs:      []error{rateLimitErr(0), rateLimitErr(0)},
-		responses: []Response{{}, {}, okResponse()},
+		// The inner client returns a partial Response alongside each
+		// failure, so the zero-Response assertion below discriminates:
+		// the event is zeroed by the emitter, not by the fixture.
+		errs:      []error{rateLimitErr(2 * time.Second), rateLimitErr(2 * time.Second)},
+		responses: []Response{{Text: "partial"}, {Text: "partial"}, okResponse()},
 	}
 	obs := &captureObserver{}
 	runID := NewRunID()
-	client := Observe(WithRetryObserver(fc, fastRetryCfg(), obs, "anthropic", "claude-test"), obs, "anthropic", "claude-test")
+	rc := newRetrySleeps(4)
+	client := Observe(WithRetryObserver(fc, rc.cfg, obs, "anthropic", "claude-test"), obs, "anthropic", "claude-test")
 
 	resp, err := client.Complete(WithRun(context.Background(), runID), simpleRequest())
 	if err != nil {
@@ -276,11 +315,13 @@ func TestObserve_AttemptsJoinCompletionSpan(t *testing.T) {
 	if span == "" {
 		t.Fatal("completion SpanID empty")
 	}
+	var attemptDurations time.Duration
 	for i, ev := range attempts {
 		ae := ev.Attempt
 		if ae == nil {
 			t.Fatalf("attempt %d has no payload", i)
 		}
+		attemptDurations += ev.Duration
 		if ae.Attempt != i+1 {
 			t.Errorf("attempt %d numbered %d, want %d", i, ae.Attempt, i+1)
 		}
@@ -298,17 +339,92 @@ func TestObserve_AttemptsJoinCompletionSpan(t *testing.T) {
 				t.Errorf("attempt %d Err empty, want the rate-limit failure", i)
 			}
 			if !reflect.DeepEqual(ae.Response, Response{}) {
-				t.Errorf("attempt %d Response = %+v, want zero on failure", i, ae.Response)
+				t.Errorf("attempt %d Response = %+v, want zero on failure (not the partial the inner returned)", i, ae.Response)
+			}
+			if ae.StatusCode != 429 {
+				t.Errorf("attempt %d StatusCode = %d, want 429 from the APIError", i, ae.StatusCode)
+			}
+			if ae.RetryAfter != 2*time.Second {
+				t.Errorf("attempt %d RetryAfter = %v, want 2s as read by the retry classifier", i, ae.RetryAfter)
 			}
 		} else {
 			if ae.Err != "" {
 				t.Errorf("successful attempt Err = %q", ae.Err)
+			}
+			if ae.StatusCode != 0 || ae.RetryAfter != 0 {
+				t.Errorf("successful attempt StatusCode/RetryAfter = %d/%v, want zeros", ae.StatusCode, ae.RetryAfter)
 			}
 			if !reflect.DeepEqual(ae.Response, resp) {
 				t.Errorf("successful attempt Response = %+v, want the completion's %+v", ae.Response, resp)
 			}
 		}
 	}
+	var backoff time.Duration
+	for _, d := range rc.slept {
+		backoff += d
+	}
+	if completions[0].Duration < attemptDurations+backoff {
+		t.Errorf("completion Duration %v < attempts %v + backoff %v: the whole call is not covered",
+			completions[0].Duration, attemptDurations, backoff)
+	}
+}
+
+// TestObserve_AttemptEventsUseRetryCallerContext: attempt events are
+// delivered on the retry caller's context. With a non-zero RequestTimeout
+// the per-attempt context is done by emission time — a ctx-honouring sink
+// must still see ok == false from Deadline and a nil Err, or it would drop
+// exactly the timed-out attempts.
+func TestObserve_AttemptEventsUseRetryCallerContext(t *testing.T) {
+	stalls := &stallClient{}
+	obs := &captureObserver{}
+	cfg := retry.Config{
+		MaxAttempts:    2,
+		BaseDelay:      time.Millisecond,
+		MaxDelay:       time.Millisecond,
+		RequestTimeout: 50 * time.Millisecond,
+		Sleep:          func(context.Context, time.Duration) error { return nil },
+	}
+	client := WithRetryObserver(stalls, cfg, obs, "p", "m")
+
+	// Plain Background: any deadline the observer sees would have to come
+	// from the retry stage's per-attempt context, which must not leak.
+	_, err := client.Complete(context.Background(), simpleRequest())
+	if err == nil {
+		t.Fatal("Complete: want the final timeout error")
+	}
+	if stalls.calls != 2 {
+		t.Fatalf("wire calls = %d, want 2", stalls.calls)
+	}
+	attempts := obs.byKind(KindAttempt)
+	if len(attempts) != 2 {
+		t.Fatalf("attempt events = %d, want 2 (both timed-out attempts delivered)", len(attempts))
+	}
+	for i, ev := range attempts {
+		ctx := obs.ctxAt(i)
+		if _, ok := ctx.Deadline(); ok {
+			t.Errorf("attempt %d delivered on a context with a deadline", i)
+		}
+		if ctx.Err() != nil {
+			t.Errorf("attempt %d delivered with ctx.Err() = %v, want nil", i, ctx.Err())
+		}
+		if ev.Attempt == nil || ev.Attempt.Err == "" {
+			t.Errorf("attempt %d carries no error; want the timeout failure", i)
+		}
+	}
+}
+
+// stallClient blocks every Complete until its context is done, simulating a
+// wire call the per-attempt RequestTimeout has to abort.
+type stallClient struct {
+	calls int
+}
+
+func (s *stallClient) Capabilities() Capabilities { return Capabilities{} }
+
+func (s *stallClient) Complete(ctx context.Context, req Request) (Response, error) {
+	s.calls++
+	<-ctx.Done()
+	return Response{}, ctx.Err()
 }
 
 // TestObserve_FailedFinalAttempt: a terminal failure still emits its Attempt
@@ -316,7 +432,7 @@ func TestObserve_AttemptsJoinCompletionSpan(t *testing.T) {
 func TestObserve_FailedFinalAttempt(t *testing.T) {
 	fc := &fakeClient{errs: []error{&APIError{Kind: ErrAuth, StatusCode: 401, Provider: "fake", Message: "denied"}}}
 	obs := &captureObserver{}
-	client := Observe(WithRetryObserver(fc, fastRetryCfg(), obs, "p", "m"), obs, "p", "m")
+	client := Observe(WithRetryObserver(fc, newRetrySleeps(4).cfg, obs, "p", "m"), obs, "p", "m")
 
 	_, err := client.Complete(context.Background(), simpleRequest())
 	if !errors.Is(err, ErrAuth) {
@@ -328,6 +444,9 @@ func TestObserve_FailedFinalAttempt(t *testing.T) {
 	}
 	if attempts[0].Attempt.Err != err.Error() {
 		t.Errorf("attempt Err = %q, want %q", attempts[0].Attempt.Err, err.Error())
+	}
+	if attempts[0].Attempt.StatusCode != 401 {
+		t.Errorf("attempt StatusCode = %d, want 401 from the APIError", attempts[0].Attempt.StatusCode)
 	}
 	if completions[0].Completion.Err != err.Error() {
 		t.Errorf("completion Err = %q, want %q", completions[0].Completion.Err, err.Error())
@@ -416,12 +535,127 @@ func TestObserve_SynthesizedStreamFromPlainClient(t *testing.T) {
 	}
 }
 
+// TestObserve_StreamAttemptsExhausted: retrying a native stream emits one
+// Attempt event per wire stream call — numbered 1..N, each joined to the
+// (failed) completion's SpanID, each carrying its failure.
+func TestObserve_StreamAttemptsExhausted(t *testing.T) {
+	inner := &scriptedStreamClient{err: rateLimitErr(0)}
+	obs := &captureObserver{}
+	client := Observe(WithRetryObserver(inner, newRetrySleeps(3).cfg, obs, "openai", "gpt-test"), obs, "openai", "gpt-test")
+
+	runID := NewRunID()
+	_, err := Stream(WithRun(context.Background(), runID), client, simpleRequest(), func(Delta) error { return nil })
+	if !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("err = %v, want ErrRateLimited", err)
+	}
+	if inner.calls != 3 {
+		t.Fatalf("wire stream calls = %d, want 3", inner.calls)
+	}
+	completions := obs.byKind(KindCompletion)
+	attempts := obs.byKind(KindAttempt)
+	if len(completions) != 1 || len(attempts) != 3 {
+		t.Fatalf("completions=%d attempts=%d, want 1 and 3", len(completions), len(attempts))
+	}
+	span := completions[0].SpanID
+	for i, ev := range attempts {
+		ae := ev.Attempt
+		if ae == nil {
+			t.Fatalf("attempt %d has no payload", i)
+		}
+		if ae.Attempt != i+1 {
+			t.Errorf("attempt %d numbered %d, want %d", i, ae.Attempt, i+1)
+		}
+		if ev.SpanID != span {
+			t.Errorf("attempt %d SpanID = %q, want the completion's %q", i, ev.SpanID, span)
+		}
+		if ae.Err == "" || !reflect.DeepEqual(ae.Response, Response{}) {
+			t.Errorf("attempt %d = %q/%+v, want the failure with a zero Response", i, ae.Err, ae.Response)
+		}
+	}
+	if completions[0].Completion.Err == "" {
+		t.Error("failed stream completion carries no error")
+	}
+}
+
+// TestObserve_StreamAttemptSucceedsAfterRetry: a stream that succeeds on a
+// later attempt numbers its attempts across the wire calls, joins them to
+// the successful completion's span, and the successful attempt's Response
+// matches the completion's.
+func TestObserve_StreamAttemptSucceedsAfterRetry(t *testing.T) {
+	inner := &scriptedAttempts{
+		errs:  []error{rateLimitErr(0)},
+		resps: []Response{{}, okResponse()},
+	}
+	obs := &captureObserver{}
+	client := Observe(WithRetryObserver(inner, newRetrySleeps(4).cfg, obs, "openai", "gpt-test"), obs, "openai", "gpt-test")
+
+	resp, err := Stream(context.Background(), client, simpleRequest(), func(Delta) error { return nil })
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if inner.calls != 2 {
+		t.Fatalf("wire stream calls = %d, want 2", inner.calls)
+	}
+	completions := obs.byKind(KindCompletion)
+	attempts := obs.byKind(KindAttempt)
+	if len(completions) != 1 || len(attempts) != 2 {
+		t.Fatalf("completions=%d attempts=%d, want 1 and 2", len(completions), len(attempts))
+	}
+	for i, ev := range attempts {
+		if ev.Attempt == nil || ev.Attempt.Attempt != i+1 {
+			t.Errorf("attempt %d numbered %+v, want %d", i, ev.Attempt, i+1)
+		}
+		if ev.SpanID != completions[0].SpanID {
+			t.Errorf("attempt %d SpanID = %q, want the completion's %q", i, ev.SpanID, completions[0].SpanID)
+		}
+	}
+	if attempts[0].Attempt.Err == "" || !reflect.DeepEqual(attempts[0].Attempt.Response, Response{}) {
+		t.Errorf("failed attempt = %q/%+v, want the failure with a zero Response",
+			attempts[0].Attempt.Err, attempts[0].Attempt.Response)
+	}
+	if !reflect.DeepEqual(attempts[1].Attempt.Response, resp) {
+		t.Errorf("successful attempt Response = %+v, want the completion's %+v", attempts[1].Attempt.Response, resp)
+	}
+}
+
+// TestObserve_StreamPartialResponseDiscriminated: an inner stream that
+// returns a partial Response alongside a terminal error yields that partial
+// to the CALLER unchanged, while the Completion event carries the zero
+// Response — the event zeroing must not depend on the fixture returning zero.
+func TestObserve_StreamPartialResponseDiscriminated(t *testing.T) {
+	inner := &scriptedAttempts{
+		errs:  []error{&APIError{Kind: ErrServer, StatusCode: 500, Provider: "openai", Message: "boom"}},
+		resps: []Response{{Text: "partial"}},
+	}
+	obs := &captureObserver{}
+	client := Observe(inner, obs, "openai", "gpt-test")
+
+	resp, err := Stream(context.Background(), client, simpleRequest(), func(Delta) error { return nil })
+	if !errors.Is(err, ErrServer) {
+		t.Fatalf("err = %v, want ErrServer", err)
+	}
+	if resp.Text != "partial" {
+		t.Errorf("caller Response.Text = %q, want the inner partial response passed through", resp.Text)
+	}
+	completions := obs.byKind(KindCompletion)
+	if len(completions) != 1 {
+		t.Fatalf("completions = %d, want 1", len(completions))
+	}
+	if completions[0].Completion.Err != err.Error() {
+		t.Errorf("Err = %q, want %q", completions[0].Completion.Err, err.Error())
+	}
+	if !reflect.DeepEqual(completions[0].Completion.Response, Response{}) {
+		t.Errorf("event Response = %+v, want the zero Response on failure (not the partial the caller got)",
+			completions[0].Completion.Response)
+	}
+}
+
 // TestWithRetry_NilObserverEmitsNothing: WithRetry keeps its exact old
 // behavior — no events — when a stack is wrapped only by an outer Observe.
 func TestWithRetry_NilObserverEmitsNothing(t *testing.T) {
 	fc := &fakeClient{responses: []Response{okResponse()}}
 	obs := &captureObserver{}
-	client := Observe(WithRetry(fc, fastRetryCfg()), obs, "p", "m")
+	client := Observe(WithRetry(fc, newRetrySleeps(4).cfg), obs, "p", "m")
 	if _, err := client.Complete(context.Background(), simpleRequest()); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
@@ -433,4 +667,39 @@ func TestWithRetry_NilObserverEmitsNothing(t *testing.T) {
 	if len(obs.snapshot()) != 1 {
 		t.Errorf("events = %d, want only the Completion", len(obs.snapshot()))
 	}
+}
+
+// scriptedAttempts is a StreamingClient with per-call error and response
+// scripts, so retry tests can script fail-then-succeed sequences and
+// partial-response failures the shared scriptedStreamClient cannot express.
+type scriptedAttempts struct {
+	caps  Capabilities
+	errs  []error // per Stream call; nil means success with the scripted resp
+	resps []Response
+	calls int
+}
+
+func (s *scriptedAttempts) Capabilities() Capabilities { return s.caps }
+
+func (s *scriptedAttempts) Complete(ctx context.Context, req Request) (Response, error) {
+	return Response{}, errors.New("scriptedAttempts: unexpected Complete call")
+}
+
+func (s *scriptedAttempts) Stream(ctx context.Context, req Request, fn func(Delta) error) (Response, error) {
+	i := s.calls
+	s.calls++
+	if i < len(s.errs) && s.errs[i] != nil {
+		var resp Response
+		if i < len(s.resps) {
+			resp = s.resps[i]
+		}
+		return resp, s.errs[i]
+	}
+	var resp Response
+	if i < len(s.resps) {
+		resp = s.resps[i]
+	} else if len(s.resps) > 0 {
+		resp = s.resps[len(s.resps)-1]
+	}
+	return resp, nil
 }

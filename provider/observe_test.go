@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -136,6 +137,9 @@ func TestNew_ObserverEmitsAttemptsOnly(t *testing.T) {
 			if ae.Err == "" {
 				t.Error("failed attempt carries no error text")
 			}
+			if ae.StatusCode != 429 {
+				t.Errorf("failed attempt StatusCode = %d, want 429 from the APIError", ae.StatusCode)
+			}
 			if !reflect.DeepEqual(ae.Response, llmkit.Response{}) {
 				t.Errorf("failed attempt Response = %+v, want zero", ae.Response)
 			}
@@ -195,5 +199,103 @@ func TestNew_TruncationVisibleInCompletion(t *testing.T) {
 	if completions[0].SpanID == "" || completions[0].SpanID != attempts[0].SpanID {
 		t.Errorf("span join broken: completion %q attempt %q, want one non-empty shared span",
 			completions[0].SpanID, attempts[0].SpanID)
+	}
+}
+
+// sseHello is a minimal successful Chat Completions stream: one text delta,
+// the finish chunk, and the include_usage chunk, terminated by [DONE].
+const sseHello = "data: " +
+	`{"id":"chatcmpl-s","object":"chat.completion.chunk","created":1,"model":"llama-test",` +
+	`"system_fingerprint":"fp_1","choices":[{"index":0,"delta":{"role":"assistant","content":"hello"},` +
+	`"finish_reason":null}],"usage":null}` + "\n\n" + "data: " +
+	`{"id":"chatcmpl-s","object":"chat.completion.chunk","created":1,"model":"llama-test",` +
+	`"system_fingerprint":"fp_1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],` +
+	`"usage":null}` + "\n\n" + "data: " +
+	`{"id":"chatcmpl-s","object":"chat.completion.chunk","created":1,"model":"llama-test",` +
+	`"system_fingerprint":"fp_1","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,` +
+	`"total_tokens":7}}` + "\n\ndata: [DONE]\n\n"
+
+// TestNew_StreamAttemptEventsAfterRetry: the retry stage emits Attempt
+// events on the STREAM path too — a 503 attempt followed by a successful
+// SSE attempt yields two events (the failed one carrying the APIError's
+// status), joined to the completion's span, with deltas delivered once.
+func TestNew_StreamAttemptEventsAfterRetry(t *testing.T) {
+	hits := 0
+	var mu sync.Mutex
+	base := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		i := hits
+		hits++
+		mu.Unlock()
+		if i == 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(errorBody("openai-compatible", 503, "overloaded")))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sseHello))
+	})
+
+	obs := &eventCapture{}
+	stacked, err := New(context.Background(), observeSpec(base), Options{
+		Retry:    fastRetry(),
+		Observer: obs,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	observed := llmkit.Observe(stacked, obs, "openai-compatible", "llama-test")
+
+	var texts []string
+	resp, err := llmkit.Stream(context.Background(), observed, simpleRequest(), func(d llmkit.Delta) error {
+		if d.Kind == llmkit.DeltaText {
+			texts = append(texts, d.Text)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if hits != 2 {
+		t.Fatalf("wire calls = %d, want 2", hits)
+	}
+	if strings.Join(texts, "") != "hello" {
+		t.Errorf("deltas = %q, want hello delivered once from the successful attempt", strings.Join(texts, ""))
+	}
+	if resp.Text != "hello" || resp.Usage.InputTokens != 5 || resp.Usage.OutputTokens != 2 {
+		t.Errorf("final response = %+v, want the assembled stream response", resp)
+	}
+
+	completions := obs.byKind(llmkit.KindCompletion)
+	attempts := obs.byKind(llmkit.KindAttempt)
+	if len(completions) != 1 || len(attempts) != 2 {
+		t.Fatalf("completions=%d attempts=%d, want 1 and 2", len(completions), len(attempts))
+	}
+	span := completions[0].SpanID
+	for i, ev := range attempts {
+		ae := ev.Attempt
+		if ae == nil {
+			t.Fatalf("attempt %d has no payload", i)
+		}
+		if ae.Attempt != i+1 {
+			t.Errorf("attempt %d numbered %d, want %d", i, ae.Attempt, i+1)
+		}
+		if ev.SpanID != span {
+			t.Errorf("attempt %d SpanID = %q, want the completion's %q", i, ev.SpanID, span)
+		}
+		if i == 0 {
+			if ae.Err == "" || ae.StatusCode != 503 {
+				t.Errorf("failed attempt = %q (status %d), want the 503 failure", ae.Err, ae.StatusCode)
+			}
+			if !reflect.DeepEqual(ae.Response, llmkit.Response{}) {
+				t.Errorf("failed attempt Response = %+v, want zero", ae.Response)
+			}
+		} else if ae.Err != "" || ae.Response.Text != "hello" {
+			t.Errorf("successful attempt = %q/%+v, want clean hello", ae.Err, ae.Response)
+		}
+	}
+	if completions[0].Completion.Err != "" || completions[0].Completion.Response.Text != "hello" {
+		t.Errorf("completion = %q/%+v, want clean hello", completions[0].Completion.Err, completions[0].Completion.Response)
 	}
 }
