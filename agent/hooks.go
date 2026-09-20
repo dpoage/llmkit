@@ -61,8 +61,6 @@ import (
 //   - Repair at the start of RunJSON's single repair pass.
 //   - Finalize when the reserved forced-finalization turn is taken; reason is
 //     the stop condition (a Trunc* constant) that triggered it.
-//   - TranscriptError on transcript streaming write/encode/open failures.
-//     Streaming stays best-effort — the failure never fails the run.
 //
 // Invocation is synchronous: each hook runs inline on the goroutine that
 // reaches the fire point (the loop goroutine, or the per-call goroutine for
@@ -95,8 +93,6 @@ type Hooks struct {
 	Repair func(ctx context.Context)
 	// Finalize fires when the reserved forced-finalization turn is taken.
 	Finalize func(ctx context.Context, reason TruncationReason)
-	// TranscriptError fires on transcript streaming open/encode/write failures.
-	TranscriptError func(err error)
 }
 
 // ToolEvent is one tool call's lifecycle, as delivered to [Hooks.ToolStart]

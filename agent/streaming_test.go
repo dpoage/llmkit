@@ -27,13 +27,13 @@ func (h *hookClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.R
 	return resp, err
 }
 
-// TestTranscript_StreamsIncrementally verifies WithTranscriptDir writes each
-// transcript event to disk AS IT IS RECORDED rather than only after the run
-// completes: a hook fired from inside the first Complete call (i.e. while the
-// run is still in its tool-execution turn) must already find a valid,
-// line-by-line-parseable JSONL prefix on disk (at least the first request
-// event), proving a stuck run can be tailed live.
-func TestTranscript_StreamsIncrementally(t *testing.T) {
+// TestJSONL_StreamsIncrementally verifies the JSONL durable sink writes each
+// event to disk AS IT IS EMITTED rather than only after the run completes: a
+// hook fired from inside the first Complete call (i.e. while the run is still
+// in its tool-execution turn) must already find a valid,
+// line-by-line-parseable JSONL prefix on disk (at least the Start event),
+// proving a stuck run can be tailed live.
+func TestJSONL_StreamsIncrementally(t *testing.T) {
 	dir := t.TempDir()
 
 	var midRunLines int
@@ -72,8 +72,7 @@ func TestTranscript_StreamsIncrementally(t *testing.T) {
 	}}
 
 	tools := []Tool{&stubReadFileTool{}}
-	r := NewRunner(hooked, tools, "sys", WithTranscriptDir(dir))
-
+	r := NewRunner(hooked, tools, "sys", WithObserver(JSONL(dir, nil)))
 	if _, err := r.Run(context.Background(), "streaming task"); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -81,15 +80,13 @@ func TestTranscript_StreamsIncrementally(t *testing.T) {
 	if midRunErr != nil {
 		t.Fatalf("mid-run transcript read failed: %v", midRunErr)
 	}
-	// The first Complete's onComplete fires after recordRequest (before the
-	// call) and recordAssistant (after the call, inside complete()) have both
-	// already streamed — so at least the request event for step 1 must be on
-	// disk already, before the run has executed the tool or taken its second
-	// turn.
+	// The first Complete's onComplete fires after the completion event has
+	// been emitted (right after the client call returns, before the run has
+	// executed the tool or taken its second turn) — so at least the Start and
+	// the first Completion events must be on disk already.
 	if midRunLines == 0 {
 		t.Fatal("expected at least one streamed transcript line visible mid-run, got 0")
 	}
-
 	// After the run finishes, the file must still be a fully valid, complete
 	// transcript (streaming didn't corrupt or truncate anything).
 	entries, err := os.ReadDir(dir)
@@ -105,9 +102,9 @@ func TestTranscript_StreamsIncrementally(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadJSONL: %v", err)
 	}
-	// request+assistant (turn 1) + tool_result + request+assistant (turn 2) = 5.
-	if len(tr.Events) != 5 {
-		t.Errorf("Events = %d, want 5 (2 requests, 2 assistants, 1 tool_result)", len(tr.Events))
+	// start + completion (turn 1) + tool_run + completion (turn 2) + finalize = 5.
+	if len(tr.Record) != 5 {
+		t.Errorf("Events = %d, want 5 (start, 2 completions, 1 tool_run, finalize)", len(tr.Record))
 	}
 }
 

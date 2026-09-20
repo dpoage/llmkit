@@ -69,7 +69,7 @@ func (r *Runner) RunJSON(ctx context.Context, task string, schema json.RawMessag
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	return r.runJSON(ctx, cfg.seed, task, cfg.attach, schema, out, cfg.steering)
+	return r.runJSON(ctx, cfg, task, schema, out)
 }
 
 // RunJSONAs is [Runner.RunJSON] with the schema derived from T via [SchemaOf]
@@ -83,12 +83,19 @@ func RunJSONAs[T any](ctx context.Context, r *Runner, task string, opts ...RunOp
 	return out, outcome, err
 }
 
-// runJSON is the shared implementation behind RunJSON. seed is nil (reseed
-// every call) or a prior Outcome's Messages ([Continue]); attach rides on
-// the seeded task turn (see [Attach]); steering drains at the loop's turn
-// boundaries ([Steering]).
-func (r *Runner) runJSON(ctx context.Context, seed []llmkit.Message, task string, attach []llmkit.Block, schema json.RawMessage, out any, steering *Steering) (*Outcome, error) {
+// runJSON is the shared implementation behind RunJSON. cfg.seed is nil
+// (reseed every call) or a prior Outcome's Messages ([Continue]); attach
+// rides on the seeded task turn (see [Attach]); steering drains at the loop's
+// turn boundaries ([Steering]). cfg.runID/cfg.parentRunID resolve the run's
+// identity the same way [Runner.Run] does.
+func (r *Runner) runJSON(ctx context.Context, cfg runConfig, task string, schema json.RawMessage, out any) (outcome *Outcome, err error) {
 	prompt := task + "\n\n" + jsonInstruction(schema)
+
+	ctx, em := r.begin(ctx, cfg, prompt)
+	// Finalize closes the run on every return path — including after the
+	// repair completion below, so the run's last recorded turn is the repair
+	// and Finalize.Step names it (see [emitFinalize]).
+	defer func() { r.emitFinalize(ctx, em, outcome) }()
 
 	// Reserve the last iteration for a forced finalization turn: if the model is
 	// still investigating when the iteration cap is reached, it gets one final
@@ -96,7 +103,7 @@ func (r *Runner) runJSON(ctx context.Context, seed []llmkit.Message, task string
 	// dangling exploration prose that can never parse. The schema is threaded
 	// natively so the finalization turn also benefits from grammar-constrained
 	// output on capable adapters.
-	outcome, err := r.run(ctx, seed, prompt, attach, finalizationPrompt(schema), schema, steering)
+	outcome, err = r.run(ctx, em, cfg.seed, prompt, cfg.attach, finalizationPrompt(schema), schema, cfg.steering)
 	if err != nil {
 		return outcome, err
 	}
@@ -149,14 +156,11 @@ func (r *Runner) runJSON(ctx context.Context, seed []llmkit.Message, task string
 		repair += "\nIt must match this JSON schema:\n" + string(schema)
 	}
 
-	repairOutcome, rerr := r.repair(ctx, outcome.Transcript, repair, schema, outcome.Iterations)
-	// repair() reopened the streamed transcript (O_APPEND) to record its
-	// turn; close that fd here so it does not outlive the call. Over a long
-	// backlog run every repaired call would otherwise leak one fd until a
-	// GC finalizer happened to run. Deferred so it fires on all paths below.
-	if repairOutcome.Transcript != nil {
-		defer repairOutcome.Transcript.closeStream()
-	}
+	repairOutcome, rerr := r.repair(ctx, em, repair, schema, outcome.Iterations)
+	// The repair completion rides the SAME run emitter (transcript + durable
+	// sink), so its events land in the same on-disk transcript as the main
+	// run; the file closes when the deferred Finalize fires at this function's
+	// return.
 	// The repair completion runs against its own throwaway single-turn history
 	// (see [Runner.repair]), not outcome.messages, so it never sees — and
 	// therefore repairOutcome.Messages never carries — the run's investigation.
@@ -166,7 +170,7 @@ func (r *Runner) runJSON(ctx context.Context, seed []llmkit.Message, task string
 	// of an empty history.
 	repairOutcome.Messages = outcome.Messages
 	// repairOutcome starts from the parent run's Iterations (repair seeds it
-	// with baseIter so transcript steps continue the parent's sequence), so
+	// with baseIter so event steps continue the parent's sequence), so
 	// Iterations is already cumulative; carry the original run's
 	// TruncationReason/Finalized through and make Usage cumulative.
 	// LastStopReason keeps reflecting the repair completion itself (set by
@@ -178,21 +182,25 @@ func (r *Runner) runJSON(ctx context.Context, seed []llmkit.Message, task string
 	repairOutcome.Usage.OutputTokens += outcome.Usage.OutputTokens
 	repairOutcome.Usage.CacheReadInputTokens += outcome.Usage.CacheReadInputTokens
 	repairOutcome.Usage.CacheCreationInputTokens += outcome.Usage.CacheCreationInputTokens
+	// From here the repair outcome IS the run's outcome — the deferred
+	// Finalize reports its Iterations/Usage, so the last recorded turn is the
+	// repair's.
+	outcome = repairOutcome
 	if rerr != nil {
-		return repairOutcome, rerr
+		return outcome, rerr
 	}
-	if perr2 := parseJSONInto(repairOutcome.FinalText, schema, out); perr2 != nil {
+	if perr2 := parseJSONInto(outcome.FinalText, schema, out); perr2 != nil {
 		// Same rescue as the pre-repair path: a repair completion that
 		// wrapped a schema-valid answer in prose still counts.
-		if body, ok := rescueBody(repairOutcome.FinalText, schema); ok {
+		if body, ok := rescueBody(outcome.FinalText, schema); ok {
 			if uerr := json.Unmarshal([]byte(body), out); uerr == nil {
-				return repairOutcome, nil
+				return outcome, nil
 			}
 		}
-		return repairOutcome, fmt.Errorf("%w after one repair%s: %w",
-			ErrUnparseableOutput, truncationNote(repairOutcome), perr2)
+		return outcome, fmt.Errorf("%w after one repair%s: %w",
+			ErrUnparseableOutput, truncationNote(outcome), perr2)
 	}
-	return repairOutcome, nil
+	return outcome, nil
 }
 
 // parseJSONInto strips text to its JSON body (think blocks and fences

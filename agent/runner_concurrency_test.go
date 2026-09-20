@@ -244,9 +244,9 @@ func TestRun_ParallelTools_OrderAndTiming(t *testing.T) {
 			}
 		}
 		transcript := map[string]string{}
-		for _, ev := range out.Transcript.Events {
-			if ev.Kind == EventToolResult {
-				transcript[ev.ToolCallID] = ev.Result
+		for _, ev := range out.Transcript.Record {
+			if ev.Kind == llmkit.KindToolRun && ev.ToolRun != nil {
+				transcript[ev.ToolRun.Call.ID] = ev.ToolRun.Result
 			}
 		}
 		return elapsed, history, transcript
@@ -436,7 +436,7 @@ func TestRunner_ConcurrentRunsDistinctTranscripts(t *testing.T) {
 	dir := t.TempDir()
 	client := &alwaysToolClient{}
 	r := NewRunner(client, []Tool{echoTool{name: "echo"}}, "sys",
-		WithTranscriptDir(dir),
+		WithObserver(JSONL(dir, nil)),
 		WithLimits(Limits{MaxIterations: 1}))
 
 	const n = 10
@@ -554,11 +554,11 @@ func TestRun_ThinkingBlocksForwardedAcrossToolTurns(t *testing.T) {
 		t.Fatalf("LoadJSONL: %v", err)
 	}
 	found := false
-	for _, ev := range loaded.Events {
-		if ev.Kind != EventRequest || ev.Step != 2 {
+	for _, ev := range loaded.Record {
+		if ev.Kind != llmkit.KindCompletion || ev.Completion == nil || ev.Step != 2 {
 			continue
 		}
-		for _, m := range ev.Messages {
+		for _, m := range ev.Completion.Request.Messages {
 			if m.Role != llmkit.RoleAssistant || len(m.Content) == 0 {
 				continue
 			}
@@ -638,11 +638,11 @@ func TestRun_MaxTokensContinuation_PreservesThinkingBlocks(t *testing.T) {
 		t.Fatalf("LoadJSONL: %v", err)
 	}
 	sawHead, sawTail := false, false
-	for _, ev := range loaded.Events {
-		if ev.Kind != EventAssistant {
+	for _, ev := range loaded.Record {
+		if ev.Kind != llmkit.KindCompletion || ev.Completion == nil {
 			continue
 		}
-		for _, b := range ev.Blocks {
+		for _, b := range ev.Completion.Response.Blocks {
 			if b.Kind == llmkit.BlockThinking && bytes.Equal(b.Raw, th1.Raw) {
 				sawHead = true
 			}
@@ -810,7 +810,7 @@ func TestRun_HookPanic_ParallelPropagatesAfterSiblings(t *testing.T) {
 	}
 	trDir := t.TempDir()
 	r := NewRunner(fc, []Tool{staggerTool{name: "fast", delay: time.Millisecond, result: "R_fast"}, slow}, "sys",
-		WithHooks(hooks), WithParallelTools(), WithTranscriptDir(trDir))
+		WithHooks(hooks), WithParallelTools(), WithObserver(JSONL(trDir, nil)))
 	type result struct {
 		panicked any
 	}

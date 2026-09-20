@@ -52,9 +52,9 @@ func TestRun_CleanFinish(t *testing.T) {
 	if out.Usage.InputTokens != 10 || out.Usage.OutputTokens != 5 {
 		t.Errorf("Usage = %+v, want {10 5}", out.Usage)
 	}
-	// Transcript should have a request + assistant event.
-	if got := len(out.Transcript.Events); got != 2 {
-		t.Errorf("transcript events = %d, want 2", got)
+	// Transcript should have a start + completion + finalize event.
+	if got := len(out.Transcript.Record); got != 3 {
+		t.Errorf("transcript events = %d, want 3 (start, completion, finalize)", got)
 	}
 	// A normal text-only final turn must not trigger the
 	// empty-turn nudge: zero nudges, no nudge message in the conversation.

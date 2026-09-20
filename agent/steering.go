@@ -18,12 +18,17 @@ var ErrSteeringInUse = errors.New("agent: steering handle already bound to an ac
 type steerKind int
 
 const (
-	// kindSteer delivers at the pre-completion boundary: after the current
-	// turn's tool results, before the next model call.
 	kindSteer steerKind = iota
-	// kindFollowUp delivers only when the run would otherwise finish.
 	kindFollowUp
 )
+
+// deliveredTurn is one steering turn leaving the queue: the message the loop
+// appends, and whether it was queued as a follow-up — the followUp fact the
+// Runner stamps on the run's Steer event.
+type deliveredTurn struct {
+	msg      llmkit.Message
+	followUp bool
+}
 
 // queuedTurn is one pending user turn: its kind and the message the loop
 // appends when it drains.
@@ -128,14 +133,14 @@ func (s *Steering) unbind() {
 
 // drainSteers removes and returns the queued steer turns in queue order,
 // leaving follow-ups queued for the would-be-finish drain.
-func (s *Steering) drainSteers() []llmkit.Message {
+func (s *Steering) drainSteers() []deliveredTurn {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var out []llmkit.Message
+	var out []deliveredTurn
 	var kept []queuedTurn
 	for _, t := range s.queue {
 		if t.kind == kindSteer {
-			out = append(out, t.message)
+			out = append(out, deliveredTurn{msg: t.message})
 		} else {
 			kept = append(kept, t)
 		}
@@ -146,15 +151,15 @@ func (s *Steering) drainSteers() []llmkit.Message {
 
 // drainAll removes and returns every queued turn in enqueue order across
 // both kinds — the would-be-finish drain.
-func (s *Steering) drainAll() []llmkit.Message {
+func (s *Steering) drainAll() []deliveredTurn {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.queue) == 0 {
 		return nil
 	}
-	out := make([]llmkit.Message, len(s.queue))
+	out := make([]deliveredTurn, len(s.queue))
 	for i, t := range s.queue {
-		out[i] = t.message
+		out[i] = deliveredTurn{msg: t.message, followUp: t.kind == kindFollowUp}
 	}
 	s.queue = nil
 	return out

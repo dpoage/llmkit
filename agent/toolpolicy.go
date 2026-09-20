@@ -92,16 +92,20 @@ func (r *Runner) authorizeCalls(ctx context.Context, calls []llmkit.ToolCall, re
 			// no call past this point can be authorized or dispatched.
 			denied[i] = true
 			results[i] = toolResult{
-				result: toolError(fmt.Errorf("tool %s denied: %w", calls[i].Name, ctx.Err())),
-				isErr:  true,
+				result:     toolError(fmt.Errorf("tool %s denied: %w", calls[i].Name, ctx.Err())),
+				isErr:      true,
+				denied:     true,
+				denyReason: ctx.Err().Error(),
 			}
 			continue
 		}
 		if err := r.toolPolicy.Authorize(ctx, &dispatch[i]); err != nil {
 			denied[i] = true
 			results[i] = toolResult{
-				result: toolError(fmt.Errorf("tool %s denied: %w", calls[i].Name, err)),
-				isErr:  true,
+				result:     toolError(fmt.Errorf("tool %s denied: %w", calls[i].Name, err)),
+				isErr:      true,
+				denied:     true,
+				denyReason: err.Error(),
 			}
 			continue
 		}
