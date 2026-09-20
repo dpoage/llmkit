@@ -148,6 +148,48 @@ func ExampleWithRecorder() {
 	// anthropic/claude-sonnet-4-5 in=12 out=5
 }
 
+func ExampleObserve() {
+	c := &echoClient{
+		errs: []error{
+			&llmkit.APIError{Kind: llmkit.ErrRateLimited, StatusCode: 429, Provider: "demo", Message: "slow down"},
+		},
+		responses: []llmkit.Response{
+			{Text: "observed", StopReason: llmkit.StopEndTurn},
+		},
+	}
+	// Observe is the outermost layer: it emits one Completion event per
+	// logical call, while WithRetryObserver reports each Attempt from inside
+	// the retry stage — joined to the completion by the event's SpanID.
+	var kinds []llmkit.EventKind
+	obs := llmkit.ObserverFunc(func(ctx context.Context, ev llmkit.Event) {
+		kinds = append(kinds, ev.Kind)
+	})
+	observed := llmkit.Observe(
+		llmkit.WithRetryObserver(c, retry.Config{
+			MaxAttempts:    3,
+			BaseDelay:      time.Millisecond,
+			MaxDelay:       time.Millisecond,
+			RequestTimeout: time.Minute,
+		}, obs, "anthropic", "claude-sonnet-4-5"),
+		obs,
+		"anthropic", "claude-sonnet-4-5",
+	)
+	_, err := observed.Complete(context.Background(), llmkit.Request{
+		Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "hi")},
+	})
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	for _, k := range kinds {
+		fmt.Println(k)
+	}
+	// Output:
+	// attempt
+	// attempt
+	// completion
+}
+
 func ExampleAPIError() {
 	var err error = &llmkit.APIError{
 		Kind:       llmkit.ErrRateLimited,
