@@ -164,8 +164,10 @@ const (
 	BlockDocument BlockKind = "document"
 	// BlockThinking is a provider reasoning block (e.g. Anthropic extended
 	// thinking). Provider names the adapter that produced/signed it (e.g.
-	// "anthropic"); Raw carries the provider's wire block verbatim and is
-	// never interpreted. An adapter re-emits a thinking block verbatim ONLY
+	// "anthropic"); Raw carries the provider's wire block verbatim — opaque
+	// to llmkit's own logic, but validated by the adapter to carry a
+	// replayable payload before any wire call. An adapter re-emits a
+	// thinking block verbatim ONLY
 	// when its Provider matches the adapter — blocks from a foreign
 	// provider are silently dropped on the way out. For anthropic/google
 	// blocks Text additionally carries the thinking payload for readability;
@@ -205,9 +207,11 @@ type Block struct {
 	// Provider names the adapter that produced/signed a BlockThinking block
 	// ("anthropic", "google"). See BlockThinking for the round-trip rule.
 	Provider string `json:"provider,omitempty"`
-	// Raw carries a BlockThinking block's provider wire JSON verbatim and is
-	// never interpreted. When the vendor SDK does not expose the original
-	// bytes (google), Raw is a faithful re-encoding of the parsed block.
+	// Raw carries a BlockThinking block's provider wire JSON verbatim: it is
+	// opaque to llmkit's own logic and forwarded as received, but adapters
+	// validate that it carries a replayable payload before any wire call.
+	// When the vendor SDK does not expose the original bytes (google), Raw
+	// is a faithful re-encoding of the parsed block.
 	Raw json.RawMessage `json:"raw,omitempty"`
 }
 
@@ -426,16 +430,18 @@ type Request struct {
 	Temperature *float64
 	// Thinking requests provider reasoning. Nil means off. Adapters that do
 	// not support reasoning drop it silently and report Capabilities.Thinking
-	// = false.
+	// = false. On Anthropic, combining Thinking with forced tool use (see
+	// [Request.ToolChoice] and [Request.ResponseSchema]) is refused pre-wire.
 	Thinking *ThinkingConfig
 	// ToolChoice steers tool use. Zero value = auto (never sent on the wire).
-	// Two rejection paths wrap ErrInvalidRequest rather than silently
-	// ignoring the request: an adapter that cannot express a mode, and —
-	// enforced by every adapter before the wire call — a model whose
-	// Capabilities.ToolChoice is false receives an error for any explicit
-	// mode (auto stays allowed). Dropping an explicit "none" would let the
-	// model call tools the caller tried to forbid, so it is refused, not
-	// ignored.
+	// Three rejection paths wrap ErrInvalidRequest rather than silently
+	// ignoring the request: an adapter that cannot express a mode; a model
+	// whose Capabilities.ToolChoice is false, which every adapter refuses
+	// before the wire call for any explicit mode (auto stays allowed —
+	// dropping an explicit "none" would let the model call tools the caller
+	// tried to forbid, so it is refused, not ignored); and on Anthropic,
+	// Mode required or tool combined with Request.Thinking, because forced
+	// tool use is incompatible with manual extended thinking.
 	ToolChoice ToolChoice
 	// StopSequences makes the model stop when it generates any of these
 	// strings (a matching provider reports StopEndTurn).
@@ -454,7 +460,10 @@ type Request struct {
 	// schema-constrained output. Adapters honor it only when their
 	// Capabilities().StructuredOutput is true; otherwise the schema is
 	// silently dropped (callers should check the capability before relying
-	// on structured output). Zero value (nil) means no schema request.
+	// on structured output). On Anthropic the schema rides a synthetic
+	// forced-output tool, so combining it with Request.Thinking is refused
+	// pre-wire (see [Request.ToolChoice]). Zero value (nil) means no schema
+	// request.
 	ResponseSchema json.RawMessage
 	// ResponseSchemaName names the schema on the wire. It is used as the
 	// response_format name on OpenAI-style backends and as the synthetic
