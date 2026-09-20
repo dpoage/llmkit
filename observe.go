@@ -234,8 +234,9 @@ type AttemptEvent struct {
 	// StatusCode is the HTTP status of a failed attempt whose error is an
 	// [*APIError]; 0 on success and for unclassified transport failures.
 	StatusCode int `json:"status_code,omitempty"`
-	// RetryAfter is the failed attempt's server-suggested delay as read by
-	// the retry classifier; 0 when the server supplied none.
+	// RetryAfter is the *APIError's RetryAfter as the server sent it,
+	// before the stage caps it at MaxDelay; 0 when the server supplied
+	// none.
 	RetryAfter time.Duration `json:"retry_after,omitempty"`
 	Provider   string        `json:"provider,omitempty"`
 	Model      string        `json:"model,omitempty"`

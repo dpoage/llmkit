@@ -537,14 +537,23 @@ func TestObserve_SynthesizedStreamFromPlainClient(t *testing.T) {
 
 // TestObserve_StreamAttemptsExhausted: retrying a native stream emits one
 // Attempt event per wire stream call — numbered 1..N, each joined to the
-// (failed) completion's SpanID, each carrying its failure.
+// (failed) completion's SpanID, each carrying its failure and the request
+// as received. The events ride the retry caller's context (never the
+// per-attempt timeout context), the span is minted fresh even over an
+// inherited one, and the completion's Duration covers the attempts plus the
+// real backoff between them.
 func TestObserve_StreamAttemptsExhausted(t *testing.T) {
 	inner := &scriptedStreamClient{err: rateLimitErr(0)}
 	obs := &captureObserver{}
-	client := Observe(WithRetryObserver(inner, newRetrySleeps(3).cfg, obs, "openai", "gpt-test"), obs, "openai", "gpt-test")
+	rc := newRetrySleeps(3)
+	client := Observe(WithRetryObserver(inner, rc.cfg, obs, "openai", "gpt-test"), obs, "openai", "gpt-test")
 
+	// A context that already carries a span: the stream emitter must mint
+	// its own anyway.
+	inherited := NewSpanID()
 	runID := NewRunID()
-	_, err := Stream(WithRun(context.Background(), runID), client, simpleRequest(), func(Delta) error { return nil })
+	ctx := WithSpan(WithRun(context.Background(), runID), inherited)
+	_, err := Stream(ctx, client, simpleRequest(), func(Delta) error { return nil })
 	if !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("err = %v, want ErrRateLimited", err)
 	}
@@ -557,20 +566,47 @@ func TestObserve_StreamAttemptsExhausted(t *testing.T) {
 		t.Fatalf("completions=%d attempts=%d, want 1 and 3", len(completions), len(attempts))
 	}
 	span := completions[0].SpanID
+	if span == "" || span == inherited {
+		t.Fatalf("completion SpanID = %q, want a fresh span (inherited %q)", span, inherited)
+	}
+	var attemptDurations time.Duration
 	for i, ev := range attempts {
 		ae := ev.Attempt
 		if ae == nil {
 			t.Fatalf("attempt %d has no payload", i)
 		}
+		attemptDurations += ev.Duration
 		if ae.Attempt != i+1 {
 			t.Errorf("attempt %d numbered %d, want %d", i, ae.Attempt, i+1)
 		}
 		if ev.SpanID != span {
 			t.Errorf("attempt %d SpanID = %q, want the completion's %q", i, ev.SpanID, span)
 		}
+		if ev.RunID != runID {
+			t.Errorf("attempt %d RunID = %q, want %q", i, ev.RunID, runID)
+		}
+		if !reflect.DeepEqual(ae.Request, simpleRequest()) {
+			t.Errorf("attempt %d Request = %+v, want the request as received", i, ae.Request)
+		}
+		// Delivered on the retry caller's context: no per-attempt deadline
+		// may leak, or a ctx-honouring sink would drop timed-out streams.
+		if _, ok := obs.ctxAt(i).Deadline(); ok {
+			t.Errorf("attempt %d delivered on a context with a deadline", i)
+		}
+		if ctxErr := obs.ctxAt(i).Err(); ctxErr != nil {
+			t.Errorf("attempt %d delivered with ctx.Err() = %v, want nil", i, ctxErr)
+		}
 		if ae.Err == "" || !reflect.DeepEqual(ae.Response, Response{}) {
 			t.Errorf("attempt %d = %q/%+v, want the failure with a zero Response", i, ae.Err, ae.Response)
 		}
+	}
+	var backoff time.Duration
+	for _, d := range rc.slept {
+		backoff += d
+	}
+	if completions[0].Duration < attemptDurations+backoff {
+		t.Errorf("completion Duration %v < attempts %v + backoff %v: the stream call is not fully covered",
+			completions[0].Duration, attemptDurations, backoff)
 	}
 	if completions[0].Completion.Err == "" {
 		t.Error("failed stream completion carries no error")
@@ -702,4 +738,89 @@ func (s *scriptedAttempts) Stream(ctx context.Context, req Request, fn func(Delt
 		resp = s.resps[len(s.resps)-1]
 	}
 	return resp, nil
+}
+
+// TestObserve_AttemptCounterIsPerCall: the 1..N numbering restarts with
+// every logical completion on the same client — no counter state leaks
+// between completions.
+func TestObserve_AttemptCounterIsPerCall(t *testing.T) {
+	fc := &fakeClient{errs: []error{
+		rateLimitErr(0), rateLimitErr(0), rateLimitErr(0), rateLimitErr(0),
+	}}
+	obs := &captureObserver{}
+	client := WithRetryObserver(fc, newRetrySleeps(2).cfg, obs, "p", "m")
+	for round := 0; round < 2; round++ {
+		if _, err := client.Complete(context.Background(), simpleRequest()); !errors.Is(err, ErrRateLimited) {
+			t.Fatalf("Complete %d: err = %v, want ErrRateLimited", round, err)
+		}
+	}
+	var got []int
+	for _, ev := range obs.byKind(KindAttempt) {
+		got = append(got, ev.Attempt.Attempt)
+	}
+	if !reflect.DeepEqual(got, []int{1, 2, 1, 2}) {
+		t.Fatalf("attempt numbers across two completions = %v, want [1 2 1 2]", got)
+	}
+}
+
+// TestObserve_ConcurrentSpanJoin: one Observe+WithRetryObserver stack shared
+// by 64 concurrent completions keeps the span join exact — every Attempt
+// joins exactly one Completion, every Completion owns exactly one Attempt,
+// and no span is ever shared. Runs under -race.
+func TestObserve_ConcurrentSpanJoin(t *testing.T) {
+	obs := &captureObserver{}
+	inner := &safeClient{resp: okResponse()}
+	client := Observe(WithRetryObserver(inner, newRetrySleeps(2).cfg, obs, "p", "m"), obs, "p", "m")
+
+	const runs = 64
+	var wg sync.WaitGroup
+	for i := 0; i < runs; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := client.Complete(context.Background(), simpleRequest()); err != nil {
+				t.Errorf("Complete: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	completions := obs.byKind(KindCompletion)
+	attempts := obs.byKind(KindAttempt)
+	if len(completions) != runs || len(attempts) != runs {
+		t.Fatalf("completions=%d attempts=%d, want %d each", len(completions), len(attempts), runs)
+	}
+	attemptsBySpan := map[SpanID]int{}
+	for _, ev := range attempts {
+		attemptsBySpan[ev.SpanID]++
+		if ev.Attempt.Attempt != 1 {
+			t.Errorf("attempt %d on span %q: failure-free completions have exactly one attempt numbered 1",
+				ev.Attempt.Attempt, ev.SpanID)
+		}
+	}
+	for _, ev := range completions {
+		if attemptsBySpan[ev.SpanID] != 1 {
+			t.Errorf("completion span %q joined by %d attempts, want exactly 1", ev.SpanID, attemptsBySpan[ev.SpanID])
+		}
+	}
+	if len(attemptsBySpan) != runs {
+		t.Errorf("%d distinct spans across %d completions; spans must be minted per completion",
+			len(attemptsBySpan), runs)
+	}
+}
+
+// safeClient is a concurrency-safe scripted Client: the shared fakeClient is
+// not (its calls counter races), and the concurrency test shares one client
+// across goroutines.
+type safeClient struct {
+	mu   sync.Mutex
+	resp Response
+}
+
+func (s *safeClient) Capabilities() Capabilities { return Capabilities{} }
+
+func (s *safeClient) Complete(ctx context.Context, req Request) (Response, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.resp, nil
 }
