@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -273,4 +274,129 @@ func ExampleObserve() {
 	}
 	// Output:
 	// exec backend=mock cmd=[echo hello] exit=0 stdout=6B truncated=false
+}
+
+func TestObserveCommandIsCopiedNotAliased(t *testing.T) {
+	log := &execLog{}
+	sb := sandbox.Observe(sandbox.NewMock(sandbox.MockResponse{}), log)
+
+	cmd := []string{"go", "test", "./a"}
+	_, _ = sb.Exec(context.Background(), sandbox.Spec{Cmd: cmd})
+
+	// A sink retains events past the call; the caller owns the argv and
+	// may reuse its backing array. The event must hold its own copy.
+	cmd[2] = "./MUTATED"
+	x := log.events()[0].Exec
+	if len(x.Command) != 3 || x.Command[2] != "./a" {
+		t.Errorf("Command = %v, want the argv at Exec time [go test ./a]", x.Command)
+	}
+}
+
+func TestObservePopulatedResultWithErrorPassesThrough(t *testing.T) {
+	boom := errors.New("boom")
+	want := sandbox.Result{
+		ExitCode:          -1,
+		Stdout:            "partial output",
+		Stderr:            "warn",
+		Duration:          7 * time.Millisecond,
+		StdoutTruncated:   true,
+		WorkspaceCacheHit: true,
+	}
+	log := &execLog{}
+	m := sandbox.NewMock(sandbox.MockResponse{})
+	m.EnqueueResponse(sandbox.MockResponse{Result: want, Err: boom})
+	sb := sandbox.Observe(m, log)
+
+	res, err := sb.Exec(context.Background(), sandbox.Spec{Cmd: []string{"cmd"}})
+	if err != boom {
+		t.Fatalf("err = %v, want the identical scripted error", err)
+	}
+	if !reflect.DeepEqual(res, want) {
+		t.Fatalf("res = %+v, want the scripted Result verbatim alongside the error", res)
+	}
+
+	ev := log.events()[0]
+	x := ev.Exec
+	if x.ExitCode != -1 {
+		t.Errorf("ExitCode = %d, want -1 (an infrastructure error, whatever the Result carried)", x.ExitCode)
+	}
+	if x.StdoutBytes != int64(len("partial output")) || x.StderrBytes != int64(len("warn")) {
+		t.Errorf("bytes = %d/%d, want the populated Result's capture sizes", x.StdoutBytes, x.StderrBytes)
+	}
+	if ev.Duration != 7*time.Millisecond {
+		t.Errorf("Duration = %v, want the populated Result's 7ms", ev.Duration)
+	}
+	if x.Err != boom.Error() {
+		t.Errorf("Err = %q, want %q", x.Err, boom.Error())
+	}
+}
+
+func TestObserveHostExecRefusalJoinsBackendName(t *testing.T) {
+	log := &execLog{}
+	sb := sandbox.Observe(sandbox.NewHostExec(), log)
+
+	_, err := sb.Exec(context.Background(), sandbox.Spec{
+		RepoDir: "/tmp/llmkit-observe-test",
+		Cmd:     []string{"true"},
+		Image:   "alpine",
+	})
+	var use *sandbox.UnsupportedSpecError
+	if !errors.As(err, &use) {
+		t.Fatalf("err = %v, want *UnsupportedSpecError", err)
+	}
+	if use.Backend != "host" {
+		t.Fatalf("UnsupportedSpecError.Backend = %q, want host", use.Backend)
+	}
+
+	x := log.events()[0].Exec
+	if x.Backend != use.Backend {
+		t.Errorf("event Backend = %q, want %q (the same name the real refusal used)", x.Backend, use.Backend)
+	}
+}
+
+func TestObserveUnknownBackendNamedByGoType(t *testing.T) {
+	log := &execLog{}
+	sb := sandbox.Observe(customSandbox{}, log)
+
+	_, _ = sb.Exec(context.Background(), sandbox.Spec{Cmd: []string{"cmd"}})
+	if got := log.events()[0].Exec.Backend; got != "sandbox_test.customSandbox" {
+		t.Errorf("Backend = %q, want the Go type name", got)
+	}
+}
+
+func TestObserveNestedWrapperReportsInnerBackend(t *testing.T) {
+	log := &execLog{}
+	sb := sandbox.Observe(sandbox.Observe(sandbox.NewMock(sandbox.MockResponse{}), log), log)
+
+	_, _ = sb.Exec(context.Background(), sandbox.Spec{Cmd: []string{"cmd"}})
+	if got := log.events()[0].Exec.Backend; got != "mock" {
+		t.Errorf("Backend = %q, want mock (a wrapped backend reports its inner backend)", got)
+	}
+}
+
+func TestObservePassesCallerCtxToObserver(t *testing.T) {
+	type marker struct{}
+	var got any
+	obs := llmkit.ObserverFunc(func(ctx context.Context, _ llmkit.Event) {
+		got = ctx.Value(marker{})
+	})
+	sb := sandbox.Observe(sandbox.NewMock(sandbox.MockResponse{}), obs)
+
+	ctx := context.WithValue(context.Background(), marker{}, "present")
+	_, _ = sb.Exec(ctx, sandbox.Spec{Cmd: []string{"cmd"}})
+	if got != "present" {
+		t.Errorf("observer saw ctx value %v, want \"present\" — the observer must receive the caller's context", got)
+	}
+}
+
+// customSandbox is an out-of-package Sandbox implementation, so the
+// backend name falls back to the Go type.
+type customSandbox struct{}
+
+func (customSandbox) Exec(context.Context, sandbox.Spec) (sandbox.Result, error) {
+	return sandbox.Result{ExitCode: 0}, nil
+}
+
+func (customSandbox) MaterializeWorkspace(repoDir string) (string, error) {
+	return repoDir, nil
 }

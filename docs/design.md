@@ -18,7 +18,8 @@ flowchart TD
     ADAPTERS --> ROOT
     PROV --> ROOT
     AGENT --> ROOT
-    EMBED["embed"]
+    EMBED["embed"] --> ROOT
+    SANDBOX["sandbox"] --> ROOT
     DECIDE["decide"] --> ROOT
     DECIDE --> IA
     RETRY["retry"]
@@ -27,14 +28,14 @@ flowchart TD
     PROV --> RETRY
     EMBED --> RETRY
     DECIDE --> RETRY
-    SANDBOX["sandbox"]
     FSROOT["fsroot"]
 ```
 
-`retry`, `sandbox`, and `fsroot` import no other kit package. `retry` holds
+`retry` and `fsroot` import no other kit package. `retry` holds
 the backoff loop: `retry.Config`, `retry.Do`, and `retry.ParseRetryAfter`.
 The root package, the adapter layer, `provider`, `embed`, and `decide` all
-import it directly. `embed` imports only `retry`; `decide` imports the root
+import it directly. `embed` imports the root vocabulary and `retry`;
+`decide` imports the root
 vocabulary, `internal/adapter` for status classification, and `retry`.
 Neither goes through `provider`. `agent` drives any `llmkit.Client`, so a
 `Runner` runs against a provider client, a replay client, or your own

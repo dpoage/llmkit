@@ -53,10 +53,11 @@ entry below is marked.
   process never ran to an exit), captured byte counts per stream,
   truncation, the run's measured duration, and the infrastructure error; a
   non-zero exit code is the command's verdict, not an error, exactly like
-  the `Sandbox` contract. Both wrappers pass results and errors through
-  unchanged, take `RunID`/`SpanID` from the call's context, emit nothing
-  from `MaterializeWorkspace`, and return the input unchanged for a nil
-  observer.
+  the `Sandbox` contract.
+  Both wrappers pass results and errors through
+  unchanged and take `RunID`/`SpanID` from the call's context; the sandbox
+  wrapper emits nothing from `MaterializeWorkspace`. Either wrapper
+  returns its input unchanged for a nil observer.
 
 ### Changed
 

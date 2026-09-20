@@ -19,9 +19,10 @@ import (
 //   - Model: e.ModelName().
 //   - Inputs: 1 for Embed, len(texts) for EmbedBatch — the requested input
 //     count, error or not.
-//   - Dimensions: the length of the returned vector on success; on error
-//     (and for an empty successful batch) e.Dimensions(), which is 0 while
-//     a backend's dimensionality is still undetected.
+//   - Dimensions: the length of the returned vector on success; whenever
+//     the call produced no vector — an error, an empty batch, or a success
+//     returning none — e.Dimensions(), which is 0 while a backend's
+//     dimensionality is still undetected.
 //   - Duration: the call's wall time.
 //   - Err: the error's text, non-empty exactly when the call failed.
 //
@@ -30,8 +31,14 @@ import (
 // *CachedEmbedder exposes only lifetime counters (read CachedEmbedder.Stats
 // yourself for hit counts), and a before/after delta would attribute a
 // concurrent call's hit to this call. No Embedder in this module exposes
-// token usage either. Inputs and vectors are not recorded; v1 embed events
-// are a summary, so replaying this boundary is not possible today.
+// token usage either. Input texts and vectors are not recorded; v1 embed
+// events are a summary, so replaying this boundary is not possible today.
+//
+// Placement around a cache is the honest per-call attribution:
+// NewCachedEmbedder(Observe(inner, obs), n) emits exactly one event per
+// cache miss (a hit never reaches the observer);
+// Observe(NewCachedEmbedder(inner, n), obs) emits one event per call, with
+// CacheHits 0.
 //
 // Observers are synchronous data sinks: a panic in obs propagates to the
 // caller and obs never affects the returned vectors.
