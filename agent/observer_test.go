@@ -1421,8 +1421,9 @@ func TestObserver_FdCountFlatAcrossFinalizedRuns(t *testing.T) {
 	}
 }
 
-// TestObserver_PostFinalizeEventsEachReport pins M33/M10: N events after a
-// run's Finalize produce N onErr reports — every occurrence is loud.
+// TestObserver_PostFinalizeEventsEachReport pins M33: N post-finalize
+// events on the appendRun path (neither Start nor Finalize) produce N onErr
+// reports naming the unknown-or-closed run — every occurrence is loud.
 func TestObserver_PostFinalizeEventsEachReport(t *testing.T) {
 	dir := t.TempDir()
 	var mu sync.Mutex
@@ -1440,12 +1441,20 @@ func TestObserver_PostFinalizeEventsEachReport(t *testing.T) {
 	fin.Finalize = &llmkit.FinalizeEvent{}
 	sink.Observe(ctx, fin)
 	for range 5 {
-		sink.Observe(ctx, fin)
+		late := llmkit.NewEvent(llmkit.WithRun(ctx, "p-1"), llmkit.KindToolRun)
+		late.ToolRun = &llmkit.ToolRunEvent{Call: llmkit.ToolCall{ID: "late", Name: "gate"}}
+		sink.Observe(ctx, late)
 	}
 	mu.Lock()
 	defer mu.Unlock()
 	if len(errs) != 5 {
 		t.Errorf("onErr fired %d times for 5 post-finalize events, want 5", len(errs))
+	}
+	for _, e := range errs {
+		if e != nil && !strings.Contains(e.Error(), "unknown or closed run") {
+			t.Errorf("post-finalize report %q does not name the unknown-or-closed run", e)
+			break
+		}
 	}
 }
 
@@ -1577,6 +1586,35 @@ func TestObserver_ExtraCallSetsErr(t *testing.T) {
 	}
 	if !errors.Is(rc.Err(), ErrReplayDiverged) {
 		t.Error("extra-call divergence not recorded on the client")
+	}
+}
+
+// TestObserver_StructureMismatchPerID pins the per-ID branch of the
+// structure validation: the same number of preceding tool results under a
+// FOREIGN id diverges with ErrReplayDiverged recorded on the client.
+func TestObserver_StructureMismatchPerID(t *testing.T) {
+	tr := NewTranscript()
+	tr.RunID = "s-3"
+	tr.Record = append(tr.Record,
+		llmkit.Event{Kind: llmkit.KindToolRun, RunID: "s-3", Step: 1, SchemaVersion: 1,
+			ToolRun: &llmkit.ToolRunEvent{Call: llmkit.ToolCall{ID: "c1", Name: "echo"}, Result: "x"}},
+		llmkit.Event{Kind: llmkit.KindCompletion, RunID: "s-3", Step: 2, SchemaVersion: 1,
+			Completion: &llmkit.CompletionEvent{Response: llmkit.Response{Text: "final"}}},
+	)
+	rc, err := NewReplayClient(tr, "s-3", llmkit.Capabilities{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := llmkit.Request{Messages: []llmkit.Message{
+		llmkit.TextMessage(llmkit.RoleUser, "seed"),
+		llmkit.ToolResult("FOREIGN-ID", "a result the record never saw"),
+	}}
+	_, err = rc.Complete(context.Background(), req)
+	if !errors.Is(err, ErrReplayDiverged) || !strings.Contains(err.Error(), "at step 1") {
+		t.Errorf("err = %v, want ErrReplayDiverged naming step 1", err)
+	}
+	if !errors.Is(rc.Err(), ErrReplayDiverged) {
+		t.Error("per-ID divergence not recorded on the client")
 	}
 }
 

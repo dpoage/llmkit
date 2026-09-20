@@ -48,6 +48,7 @@ entry below is marked.
 - `llmkit/agent`: the read side of recording. `Source` is a single-method interface (`Events(ctx, run)`) implemented by `Transcript` and the JSONL sink; `NewReplayClient(src, run, caps)` replays a recorded run from any Source, `ReplayClient.Tools` serves the recorded tool results instead of executing them (a fully offline replay, deterministic under parallel dispatch), and `ReplayClient.Err` reports a diverged replay. The sentinels `ErrUnknownRun` (a Source has no record of the run) and `ErrReplayDiverged` (a replay no longer matches its record) support errors.Is.
 ### Changed
 
+
 - **Breaking:** the agent transcript is the new event stream. `agent.Event`/`EventKind` and the `request`/`assistant`/`tool_result` kinds are deleted in favor of `llmkit.Event` (`Transcript.Events` is now `Transcript.Record`, of `llmkit.Event`); `WithTranscriptDir` and `WithTranscriptKey` are removed in favor of `WithObserver(agent.JSONL(dir, onErr))` (the key's motivation moved to `WithRunID`); `Hooks.TranscriptError` is removed (sink failures go to the callback the sink was constructed with); `NewReplayClient` takes `(src Source, run llmkit.RunID, caps)`. There are no compatibility aliases. A tool-call-only assistant turn no longer invents an empty text block in history (llmkit-ly5).
 - **Breaking:** the retry vocabulary moved from the root package into
   `llmkit/retry`: `llmkit.RetryConfig` is now `retry.Config`,
