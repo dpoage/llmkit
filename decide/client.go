@@ -28,11 +28,12 @@ type Response struct {
 	Model string
 	// Usage is the token consumption. TypeSafe bills input tokens only.
 	Usage llmkit.Usage
-	// Nouls holds one entry per Noul question, keyed by question id.
+	// Nouls holds one entry per Noul question, keyed by question id. It is
+	// nil when the Ask included no Noul questions.
 	Nouls map[string]float64
-	// Choices holds one entry per Choice question.
+	// Choices holds one entry per Choice question; nil when none were asked.
 	Choices map[string]ChoiceAnswer
-	// Scores holds one entry per Score question.
+	// Scores holds one entry per Score question; nil when none were asked.
 	Scores map[string]ScoreAnswer
 }
 
@@ -61,11 +62,13 @@ type wireRequest struct {
 	Questions map[string]json.RawMessage `json:"questions"`
 }
 
-// wireResponse is the JSON envelope the endpoint returns.
+// wireResponse is the JSON envelope the endpoint returns. Model and Usage
+// are required by the vendor contract; a 200 body missing either is a
+// server contract violation, not a silent zero.
 type wireResponse struct {
 	Model   string                     `json:"model"`
 	Answers map[string]json.RawMessage `json:"answers"`
-	Usage   wireUsage                  `json:"usage"`
+	Usage   *wireUsage                 `json:"usage"`
 }
 
 type wireUsage struct {
@@ -84,6 +87,17 @@ type answerBody struct {
 	Probabilities map[string]float64 `json:"probabilities"`
 	Legend        map[string]string  `json:"legend"`
 	Confidence    float64            `json:"confidence"`
+}
+
+// statusAttempt carries one HTTP attempt's classified APIError plus the
+// Retry-After presence bit. llmkit.APIError records the parsed delay but not
+// whether a header was present, and presence — including a zero delay or a
+// past HTTP-date, which ParseRetryAfter clamps to 0 — is the embed-parity
+// signal for an immediate retry instead of exponential backoff. Ask
+// unwraps and returns the concrete *llmkit.APIError.
+type statusAttempt struct {
+	*llmkit.APIError
+	hasRetryAfter bool
 }
 
 // Ask evaluates state against questions in one request: it validates and
@@ -110,6 +124,10 @@ func (c *Client) Ask(ctx context.Context, state any, questions Questions) (Respo
 		return nil
 	})
 	if err != nil {
+		var st *statusAttempt
+		if errors.As(err, &st) {
+			return Response{}, st.APIError
+		}
 		return Response{}, err
 	}
 	if c.recorder != nil {
@@ -153,8 +171,10 @@ func (c *Client) attempt(ctx context.Context, body []byte, questions Questions) 
 }
 
 // newAPIStatusError maps a non-200 response to a sentinel-classified
-// *llmkit.APIError. The Message carries the vendor body text, truncated; it
-// never carries the request's credential.
+// *llmkit.APIError, wrapped with the Retry-After presence bit. As in embed,
+// the header is parsed for every status; the retry loop honors it whenever
+// the status is retried. The Message carries the vendor body text,
+// truncated; it never carries the request's credential.
 func newAPIStatusError(resp *http.Response, body []byte) error {
 	kind := adapter.ClassifyStatus(resp.StatusCode, string(body))
 	msg := strings.TrimSpace(string(body))
@@ -167,22 +187,26 @@ func newAPIStatusError(resp *http.Response, body []byte) error {
 		Provider:   providerName,
 		Message:    truncate(msg, 200),
 	}
-	if kind == llmkit.ErrRateLimited || kind == llmkit.ErrOverloaded {
-		if d, ok := retry.ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now()); ok {
-			apiErr.RetryAfter = d
-		}
-	}
-	return apiErr
+	after, hasAfter := retry.ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+	apiErr.RetryAfter = after
+	return &statusAttempt{APIError: apiErr, hasRetryAfter: hasAfter}
 }
 
 // parseResponse validates the answer set against the questions and converts
-// it to a Response. Any violation of the server's own answer contract is an
-// ErrServer-class APIError at the serving status: the server, not the
-// caller, broke the protocol.
+// it to a Response. Any violation of the server's own answer contract — a
+// missing model or usage block, a missing or extra answer, a type that does
+// not match its question, a sparse legend — is an ErrServer-class APIError
+// at the serving status: the server, not the caller, broke the protocol.
 func parseResponse(status int, body []byte, questions Questions) (Response, error) {
 	var wire wireResponse
 	if err := json.Unmarshal(body, &wire); err != nil {
 		return Response{}, serverError(status, fmt.Sprintf("response: malformed JSON: %s", err))
+	}
+	if wire.Model == "" {
+		return Response{}, serverError(status, "model: missing model id")
+	}
+	if wire.Usage == nil {
+		return Response{}, serverError(status, "usage: missing usage block")
 	}
 
 	nouls := make(map[string]float64)
@@ -270,21 +294,45 @@ func denseSlice[T any](status int, id, field string, m map[string]T, n int) ([]T
 	return out, nil
 }
 
-// classifyRetryable reports whether an Ask attempt is worth retrying: the
-// rate-limited, server, and overloaded kinds are transient, with a
-// server-supplied Retry-After replacing the computed backoff; everything
-// else — auth, invalid request, context-too-long — is terminal.
+// classifyRetryable reports whether an Ask attempt is worth retrying,
+// mirroring embed's boundary exactly: HTTP 429, every 5xx (529 included),
+// and transport failures. Everything else — auth, invalid request,
+// context-too-long, and a 200 response that violates the body contract — is
+// terminal: a deterministic server-side violation must not burn the retry
+// budget. When a retried status carried a Retry-After header, its delay
+// replaces the computed backoff; presence alone — even the 0 a past
+// HTTP-date clamps to — means an immediate retry.
 func classifyRetryable(err error) (time.Duration, bool, bool) {
-	var apiErr *llmkit.APIError
-	if errors.As(err, &apiErr) {
-		switch apiErr.Kind {
-		case llmkit.ErrRateLimited, llmkit.ErrServer, llmkit.ErrOverloaded:
-			return apiErr.RetryAfter, apiErr.RetryAfter > 0, true
-		default:
+	var st *statusAttempt
+	if errors.As(err, &st) {
+		if !retryWorthy(st.APIError) {
 			return 0, false, false
 		}
+		return st.RetryAfter, st.hasRetryAfter, true
+	}
+	var apiErr *llmkit.APIError
+	if errors.As(err, &apiErr) {
+		if !retryWorthy(apiErr) {
+			return 0, false, false
+		}
+		return apiErr.RetryAfter, apiErr.RetryAfter > 0, true
 	}
 	return 0, false, false
+}
+
+// retryWorthy is the status boundary for retries: 429, any 5xx (529
+// included), and transport failures — the only StatusCode-0 errors attempt
+// produces, guarded by their ErrServer kind so a pre-wire validation error
+// could never look transient.
+func retryWorthy(apiErr *llmkit.APIError) bool {
+	switch {
+	case apiErr.StatusCode == http.StatusTooManyRequests, apiErr.StatusCode >= 500:
+		return true
+	case apiErr.StatusCode == 0:
+		return apiErr.Kind == llmkit.ErrServer
+	default:
+		return false
+	}
 }
 
 // serverError builds the ErrServer-class APIError: transport failures carry

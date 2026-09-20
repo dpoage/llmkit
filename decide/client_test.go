@@ -73,7 +73,7 @@ func mixedQuestions() Questions {
 func mixedAnswers(model string) string {
 	return fmt.Sprintf(`{"model":%q,"answers":{`+
 		`"belief":{"type":"noul","noul":0.9},`+
-		`"pick":{"type":"choice","choice":"blue","probabilities":{"blue":0.8,"red":0.2},"confidence":0.7},`+
+		`"pick":{"type":"choice","choice":"blue","probabilities":{"blue":0.8,"red":0.15},"confidence":0.7},`+
 		`"quality":{"type":"score","score":0.75,"legend":{"0":"bad","1":"ok","2":"good"},"probabilities":{"0":0.1,"1":0.5,"2":0.4},"confidence":0.6}`+
 		`},"usage":{"input_tokens":120,"output_tokens":15}}`, model)
 }
@@ -157,7 +157,7 @@ func TestAsk_ResponseNormalized(t *testing.T) {
 	if choice.Choice != "blue" || choice.Confidence != 0.7 {
 		t.Errorf("Choices[pick] = %+v, want choice blue with confidence 0.7", choice)
 	}
-	if choice.Probabilities["blue"] != 0.8 || choice.Probabilities["red"] != 0.2 {
+	if choice.Probabilities["blue"] != 0.8 || choice.Probabilities["red"] != 0.15 {
 		t.Errorf("Choices[pick].Probabilities = %v, want blue 0.8 / red 0.2", choice.Probabilities)
 	}
 	score := resp.Scores["quality"]
@@ -247,39 +247,6 @@ func TestAsk_StatusMapping(t *testing.T) {
 				t.Errorf("hits = %d, want 1 (MaxAttempts 1)", hits.Load())
 			}
 		})
-	}
-}
-
-// TestAsk_RetryAfterSecondsHonored proves the server delay wins over
-// exponential backoff: BaseDelay is an hour, so only the one-second
-// Retry-After can let the test finish this fast.
-func TestAsk_RetryAfterSecondsHonored(t *testing.T) {
-	var hits atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if hits.Add(1) == 1 {
-			w.Header().Set("Retry-After", "1")
-			writeStatus(w, http.StatusTooManyRequests, `{"error":"slow down"}`)
-			return
-		}
-		_, _ = io.WriteString(w, mixedAnswers("jev-1.13.0"))
-	}))
-	defer srv.Close()
-
-	c := newTestClient(t, srv.URL, llmkit.RetryConfig{MaxAttempts: 2, BaseDelay: time.Hour, MaxDelay: time.Hour, Jitter: 0})
-	start := time.Now()
-	_, err := c.Ask(context.Background(), "s", mixedQuestions())
-	elapsed := time.Since(start)
-	if err != nil {
-		t.Fatalf("Ask: %v", err)
-	}
-	if got := hits.Load(); got != 2 {
-		t.Errorf("hits = %d, want 2", got)
-	}
-	if elapsed < 900*time.Millisecond {
-		t.Errorf("elapsed = %v; the Retry-After second was not honored", elapsed)
-	}
-	if elapsed > 10*time.Second {
-		t.Errorf("elapsed = %v; exponential backoff ran instead of the Retry-After", elapsed)
 	}
 }
 
@@ -501,6 +468,16 @@ func TestAsk_ResponseValidation(t *testing.T) {
 			body:         `{"model":`,
 			wantInErrMsg: "malformed JSON",
 		},
+		{
+			name:         "missing model",
+			body:         `{"answers":{},"usage":{}}`,
+			wantInErrMsg: "model",
+		},
+		{
+			name:         "missing usage",
+			body:         `{"model":"m","answers":{}}`,
+			wantInErrMsg: "usage",
+		},
 	}
 	questionsFor := func(name string) Questions {
 		switch name {
@@ -665,5 +642,122 @@ func TestAsk_ConcurrentAsksRaceClean(t *testing.T) {
 		if err != nil {
 			t.Errorf("ask %d: %v", i, err)
 		}
+	}
+}
+
+// TestAsk_RetryAfterSecondsHonored proves the server delay wins over
+// exponential backoff for every retried status: BaseDelay is an hour, so
+// only the one-second Retry-After can let the test finish this fast. 429 and
+// 503 cover both halves of the retried boundary.
+func TestAsk_RetryAfterSecondsHonored(t *testing.T) {
+	for _, status := range []int{http.StatusTooManyRequests, http.StatusServiceUnavailable} {
+		t.Run(fmt.Sprintf("%d", status), func(t *testing.T) {
+			var hits atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if hits.Add(1) == 1 {
+					w.Header().Set("Retry-After", "1")
+					writeStatus(w, status, `{"error":"slow down"}`)
+					return
+				}
+				_, _ = io.WriteString(w, mixedAnswers("jev-1.13.0"))
+			}))
+			defer srv.Close()
+
+			c := newTestClient(t, srv.URL, llmkit.RetryConfig{MaxAttempts: 2, BaseDelay: time.Hour, MaxDelay: time.Hour, Jitter: 0})
+			start := time.Now()
+			_, err := c.Ask(context.Background(), "s", mixedQuestions())
+			elapsed := time.Since(start)
+			if err != nil {
+				t.Fatalf("Ask: %v", err)
+			}
+			if got := hits.Load(); got != 2 {
+				t.Errorf("hits = %d, want 2", got)
+			}
+			if elapsed < 900*time.Millisecond {
+				t.Errorf("elapsed = %v; the Retry-After second was not honored", elapsed)
+			}
+			if elapsed > 10*time.Second {
+				t.Errorf("elapsed = %v; exponential backoff ran instead of the Retry-After", elapsed)
+			}
+		})
+	}
+}
+
+// TestAsk_RetryAfterImmediateHint pins the presence rule: a Retry-After
+// header whose delay clamps to 0 — a literal zero, or a past HTTP-date —
+// means an immediate retry, not a BaseDelay-sized sleep.
+func TestAsk_RetryAfterImmediateHint(t *testing.T) {
+	pastDate := time.Now().Add(-time.Minute).UTC().Format(http.TimeFormat)
+	tests := []struct {
+		name       string
+		retryAfter string
+	}{
+		{"zero delay", "0"},
+		{"past HTTP-date", pastDate},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var hits atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if hits.Add(1) == 1 {
+					w.Header().Set("Retry-After", tt.retryAfter)
+					writeStatus(w, http.StatusTooManyRequests, `{"error":"slow down"}`)
+					return
+				}
+				_, _ = io.WriteString(w, mixedAnswers("jev-1.13.0"))
+			}))
+			defer srv.Close()
+
+			// BaseDelay 500ms: an exponential or honored-as-written sleep
+			// would blow the 400ms budget; only the immediate hint fits.
+			c := newTestClient(t, srv.URL, llmkit.RetryConfig{MaxAttempts: 2, BaseDelay: 500 * time.Millisecond, MaxDelay: 30 * time.Second, Jitter: 0})
+			start := time.Now()
+			_, err := c.Ask(context.Background(), "s", mixedQuestions())
+			elapsed := time.Since(start)
+			if err != nil {
+				t.Fatalf("Ask: %v", err)
+			}
+			if got := hits.Load(); got != 2 {
+				t.Errorf("hits = %d, want 2", got)
+			}
+			if elapsed >= 400*time.Millisecond {
+				t.Errorf("elapsed = %v; a zero Retry-After must retry immediately", elapsed)
+			}
+		})
+	}
+}
+
+// TestAsk_RetryBoundary pins the terminal side of the retry boundary: auth
+// and validation statuses, and a 200 response violating the body contract,
+// end the loop after one attempt even with retries available — a
+// deterministic violation must not burn the retry budget.
+func TestAsk_RetryBoundary(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"401 auth", http.StatusUnauthorized, `{"error":"bad key"}`},
+		{"422 validation", 422, `{"error":"state must be a string"}`},
+		{"violating 200 body", http.StatusOK, `{"model":"m","answers":{},"usage":{}}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var hits atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits.Add(1)
+				writeStatus(w, tt.status, tt.body)
+			}))
+			defer srv.Close()
+
+			c := newTestClient(t, srv.URL, llmkit.RetryConfig{MaxAttempts: 3, BaseDelay: time.Millisecond, MaxDelay: 5 * time.Millisecond})
+			_, err := c.Ask(context.Background(), "s", mixedQuestions())
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if got := hits.Load(); got != 1 {
+				t.Errorf("hits = %d, want 1 (terminal errors never retry)", got)
+			}
+		})
 	}
 }
