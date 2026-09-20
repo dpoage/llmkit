@@ -51,11 +51,15 @@
 //
 // The returned client is decorated, outer to inner:
 //
-//	serialize -> recorder -> retry -> adapter
+//	serialize -> recorder -> retry[Attempt events] -> adapter
 //
 // so usage is recorded only for the final successful attempt, retries see the
 // raw adapter errors, and models without parallel tool calls have their
-// multi-call responses truncated to one before the caller sees them.
+// multi-call responses truncated to one before the caller sees them. When
+// [Options.Observer] is set, the retry stage emits one Attempt event per
+// attempt (failures included); New never emits Completion events — the
+// outermost harness layer owns those (the agent Runner, or wrap the
+// returned client with llmkit.Observe).
 package provider
 
 import (
@@ -174,7 +178,8 @@ type Spec struct {
 }
 
 // Options tunes client construction. The zero value is valid: it uses
-// default retry policy, no recorder, and the default HTTP transport.
+// default retry policy, no recorder, no observer, and the default HTTP
+// transport.
 type Options struct {
 	// Retry configures the shared retry wrapper. If MaxAttempts is 0,
 	// retry.Default is used.
@@ -182,9 +187,19 @@ type Options struct {
 	// Recorder, if non-nil, receives a UsageEvent after each successful
 	// completion.
 	Recorder llmkit.Recorder
-	// Provider overrides the provider tag on emitted UsageEvents. Empty
-	// tags events with string(spec.Type); set it when your ledger keys on
-	// a config-map name rather than the provider type.
+	// Observer, if non-nil, receives one Attempt event per provider attempt
+	// from the retry stage, failures included, tagged with the resolved
+	// provider name ([Options.Provider], or string(spec.Type)) and the
+	// model. New emits Attempt events only — never a Completion event; the
+	// outermost harness layer emits that one. Wrap the returned client with
+	// llmkit.Observe (or run it under the agent Runner, which emits its own)
+	// to capture completions, and do not wrap a Runner-run client twice.
+	// Without such an emitter above the stack, the events' SpanID is empty:
+	// the span is minted by the Completion emitter, not by New.
+	Observer llmkit.Observer
+	// Provider overrides the provider tag on emitted usage and attempt
+	// events. Empty tags events with string(spec.Type); set it when your
+	// ledger keys on a config-map name rather than the provider type.
 	Provider string
 	// HTTPClient overrides the transport used by the underlying SDKs.
 	// Primarily for tests (httptest) and proxies. nil uses the SDK
@@ -195,7 +210,7 @@ type Options struct {
 // New builds a fully-wrapped Client for the given provider spec.
 // The returned client is decorated, outer-to-inner, with:
 //
-//	serialize -> recorder -> retry -> adapter
+//	serialize -> recorder -> retry[Attempt events] -> adapter
 //
 // so usage is recorded only for the final successful attempt, retries see
 // the raw adapter errors, and non-parallel-capable providers (e.g. arbitrary
@@ -203,7 +218,10 @@ type Options struct {
 // truncated to one before the agent loop sees them. WithSerializedToolCalls
 // is a no-op for providers whose Capabilities report ParallelToolCalls=true
 // (Anthropic, Google, first-party OpenAI), so decorating unconditionally is
-// safe and capability-driven.
+// safe and capability-driven. With [Options.Observer] set, the retry stage
+// emits one Attempt event per attempt, joined to the completion's span;
+// New itself never emits a Completion event — wrap the result with
+// llmkit.Observe for bare-client capture, or let the agent Runner emit it.
 //
 // spec.Secret is the resolved credential (callers obtain it via their own
 // config); New performs no network I/O and no environment lookups of its
@@ -298,11 +316,14 @@ func New(ctx context.Context, spec Spec, opts Options) (llmkit.Client, error) {
 	if retryCfg.MaxAttempts == 0 {
 		retryCfg = retry.Default()
 	}
-	client := llmkit.WithRetry(adapter, retryCfg)
 	providerTag := opts.Provider
 	if providerTag == "" {
 		providerTag = string(spec.Type)
 	}
+	// The attempt observer lives in the retry stage: it is the only layer
+	// that sees attempt boundaries. With the observer nil this is exactly
+	// the old WithRetry wiring.
+	client := llmkit.WithRetryObserver(adapter, retryCfg, opts.Observer, providerTag, spec.Model)
 	client = llmkit.WithRecorder(client, opts.Recorder, providerTag, spec.Model)
 	// Outermost: force at-most-one tool call per response when the backend
 	// does not support parallel tool calls (see llmkit serialize.go). Capable

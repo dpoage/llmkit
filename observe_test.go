@@ -95,7 +95,7 @@ func goldEvents() []struct {
 		{
 			name: "start",
 			ev: Event{
-				Kind: KindStart, RunID: goldRun, ParentRunID: goldParent, Step: 1,
+				Kind: KindStart, RunID: goldRun, ParentRunID: goldParent,
 				Time: goldTime, SchemaVersion: EventSchemaVersion,
 				Start: &StartEvent{Task: "summarize the ledger", Tools: []string{"search", "calc"}},
 			},
@@ -124,10 +124,12 @@ func goldEvents() []struct {
 					// A failed attempt carries the zero Response; its Usage
 					// field has no omitempty (a struct tag cannot omit a
 					// struct), so the wire shows it as {"usage":{}}.
-					Response: Response{},
-					Err:      "429 too many requests",
-					Provider: "openai",
-					Model:    "gpt",
+					Response:   Response{},
+					Err:        "429 too many requests",
+					StatusCode: 429,
+					RetryAfter: 30 * time.Second,
+					Provider:   "openai",
+					Model:      "gpt",
 				},
 			},
 		},
@@ -173,7 +175,7 @@ func goldEvents() []struct {
 		{
 			name: "finalize",
 			ev: Event{
-				Kind: KindFinalize, RunID: goldRun, ParentRunID: goldParent,
+				Kind: KindFinalize, RunID: goldRun, ParentRunID: goldParent, Step: 8,
 				Time: goldTime, Duration: time.Minute, SchemaVersion: EventSchemaVersion,
 				Finalize: &FinalizeEvent{
 					TruncationReason: "max_steps",
@@ -264,7 +266,6 @@ func TestEventGoldenJSON(t *testing.T) {
   "kind": "start",
   "run_id": "1758366600000-deadbeef00112233",
   "parent_run_id": "1758366500000-cafebabefeedface",
-  "step": 1,
   "time": "2026-09-20T12:30:00Z",
   "schema_version": 1,
   "start": {
@@ -384,6 +385,8 @@ func TestEventGoldenJSON(t *testing.T) {
     },
     "response": {"usage":{}},
     "err": "429 too many requests",
+    "status_code": 429,
+    "retry_after": 30000000000,
     "provider": "openai",
     "model": "gpt"
   }
@@ -456,6 +459,7 @@ func TestEventGoldenJSON(t *testing.T) {
   "kind": "finalize",
   "run_id": "1758366600000-deadbeef00112233",
   "parent_run_id": "1758366500000-cafebabefeedface",
+  "step": 8,
   "time": "2026-09-20T12:30:00Z",
   "duration": 60000000000,
   "schema_version": 1,
