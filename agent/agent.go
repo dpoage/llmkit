@@ -47,9 +47,9 @@
 //     Runner calls it before every completion: the main turn, the
 //     max-tokens continuation turn, the forced-finalization turn, and the
 //     RunJSON repair turn. It runs before [Hooks.BeforeCompletion], and the
-//     transcript records the post-policy request. req.Messages is a shallow
-//     clone of the loop's history, so a policy reshapes this turn without
-//     touching the loop's history.
+//     completion event records the post-policy request. req.Messages is a
+//     shallow clone of the loop's history, so a policy reshapes this turn
+//     without touching the loop's history.
 //   - [ToolPolicy] ([WithToolPolicy]) authorizes every tool call of a turn,
 //     in model order, on the loop goroutine, before any [Tool.Run] starts —
 //     in both dispatch modes. A denial feeds the model
@@ -61,14 +61,16 @@
 //
 // [WithHooks] registers the observer struct [Hooks]: one optional callback
 // per loop event, covering completions, deltas, tool calls, compaction,
-// repair, finalization, and transcript-streaming failures. Hooks run
-// synchronously, inline on the goroutine that reaches the fire point. Every
-// hook family reports the same 1-based step for a turn — [ToolEvent.Step],
-// [CompactionEvent.Step], and [Event.Step] — so consumers join on it, and a
+// repair, and finalization. Hooks run synchronously, inline on the goroutine
+// that reaches the fire point. Every hook family reports the same 1-based
+// step for a turn — [ToolEvent.Step], [CompactionEvent.Step], and the
+// Completion event's [llmkit.Event].Step — so consumers join on it, and a
 // RunJSON repair turn continues the numbering. When [Hooks.Delta] is set,
-// the Runner streams each completion through [llmkit.Stream]. A panicking
-// hook is a harness bug: it propagates out of [Runner.Run] and is never
-// rendered to the model.
+// the Runner streams each completion through [llmkit.Stream]. Durable event
+// recording is a separate seam: [WithObserver] installs the single sink
+// ([JSONL]), whose failures surface through the callback it was constructed
+// with, never through Hooks or the run. A panicking hook is a harness bug:
+// it propagates out of [Runner.Run] and is never rendered to the model.
 //
 // # Steering
 //
@@ -106,12 +108,20 @@
 // [TruncBudgetPool]; [ErrBudgetExhausted] is the check failure. A nil pool
 // is the default and means unlimited.
 //
-// # Transcripts and replay
+// # Transcripts, observers, and replay
 //
-// Every run records an ordered [Transcript] of events: requests, assistant
-// turns, tool results, and usage. Transcripts serialize to JSONL with
-// [Transcript.SaveJSONL], load back with [LoadJSONL], and replay offline
-// through [ReplayClient] — the building block for offline evaluation.
+// Every run emits [llmkit.Event] values through one observer chain: the
+// in-memory [Transcript] first (it backs [Outcome.Transcript] and always
+// exists), then the single durable sink installed with [WithObserver] —
+// [JSONL] streams one JSON line per event to a file per run. Events carry
+// the run's identity ([WithRunID], [llmkit.RunID]; [Continue] chains record
+// ParentRunID) and the 1-based turn as Step. Transcripts serialize to JSONL
+// with [Transcript.SaveJSONL], load back with [LoadJSONL], and replay
+// offline through [NewReplayClient] and [ReplayTools] — both consume the
+// read-side [Source] interface, so replay works from any sink. Do not wrap
+// a Runner's client with [llmkit.Observe]: the Runner already emits the
+// Completion event for every completion it makes, and a decorator would
+// double it.
 package agent
 
 import (
@@ -239,6 +249,10 @@ type Outcome struct {
 	// which JSON-expecting callers use to distinguish "truncated mid-answer" from
 	// a genuine parse failure.
 	LastStopReason llmkit.StopReason
+	// RunID is the id of this run: minted with [llmkit.NewRunID], or the
+	// caller's id via [WithRunID]. Every event of the run carries it, and
+	// [Continue] records it as the next run's ParentRunID.
+	RunID llmkit.RunID
 	// Transcript is the full ordered record of the run. Never nil.
 	Transcript *Transcript
 	// Messages is the conversation state at the point the run returned: the

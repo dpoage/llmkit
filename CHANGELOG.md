@@ -44,6 +44,16 @@ entry below is marked.
   consumes Completion only. `Recorder` is unchanged; folding it into the
   stream is deferred.
 
+### Added
+
+- `llmkit/agent`: run identity and durable observation on the tool loop.
+  `WithObserver(obs)` installs the Runner's single durable event sink (last-wins — a second call replaces the first, never a second history) behind the always-present in-memory `Transcript`, which now stores `llmkit.Event` values in `Transcript.Record` and carries `RunID`/`ParentRunID`. `JSONL(dir, onErr)` streams one JSON line per event to `<RunID>-<task-slug>.jsonl` per run (best-effort; failures go to `onErr`, never the run) and reads them back through the same `Source` interface replay builds on. The Runner emits `start`, `completion` (one per logical completion, span-minted per C2), `tool_run` (with `Denied`/`deny_reason` for policy denials), `compaction`, `steer`, and `finalize` (on every run end including error returns). `WithRunID(id)` pins a run's identity; `Outcome.RunID` is exported; `Continue` chains carry `ParentRunID`.
+- `llmkit/agent`: the read side of recording. `Source` is a single-method interface (`Events(ctx, run)`) implemented by `Transcript` and the JSONL sink; `NewReplayClient(src, run, caps)` replays a recorded run from any Source, and `ReplayTools(src, run)` serves recorded tool results instead of executing, so a replayed run is fully offline — a diverging call fails naming the recorded step.
+
+### Changed
+
+- **Breaking:** the agent transcript is the new event stream. `agent.Event`/`EventKind` and the `request`/`assistant`/`tool_result` kinds are deleted in favor of `llmkit.Event` (`Transcript.Events` is now `Transcript.Record`, of `llmkit.Event`); `WithTranscriptDir` and `WithTranscriptKey` are removed in favor of `WithObserver(agent.JSONL(dir, onErr))` (the key's motivation moved to `WithRunID`); `Hooks.TranscriptError` is removed (sink failures go to the callback the sink was constructed with); `NewReplayClient` takes `(src Source, run llmkit.RunID, caps)`. There are no compatibility aliases. A tool-call-only assistant turn no longer invents an empty text block in history (llmkit-ly5).
+
 ### Changed
 
 - **Breaking:** the retry vocabulary moved from the root package into

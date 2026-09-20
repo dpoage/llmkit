@@ -139,9 +139,8 @@ When to use: guardrails. Allowlists and denylists, argument rewrites (constrain 
 | `Compaction` | when compaction actually pruned history |
 | `Repair` | at the start of a `RunJSON` repair pass |
 | `Finalize` | when the reserved finalization turn is taken |
-| `TranscriptError` | on transcript streaming failures; never fails the run |
 
-Hooks run synchronously, inline on the goroutine that reaches the fire point. Every hook family reports the same 1-based step for a turn: `ToolEvent.Step`, `CompactionEvent.Step`, and `Event.Step`. Consumers join on it. A repair turn continues the numbering.
+Hooks run synchronously, inline on the goroutine that reaches the fire point. Every hook family reports the same 1-based step for a turn: `ToolEvent.Step`, `CompactionEvent.Step`, and the `step` the Runner stamps on the run's `llmkit.Event` values. Consumers join on it. A repair turn continues the numbering.
 
 ```go
 agent.WithHooks(agent.Hooks{
@@ -193,44 +192,40 @@ When to use: any caller that needs a machine-readable answer — extraction, rou
 
 When to use: cap the total spend of a fan-out (many runners, one ceiling) without giving each run its own allowance. Record external spend against the same ceiling with `BudgetPool.Add`.
 
-## Transcripts and replay
+## Transcripts, observers, and replay
 
-Every run records an ordered `Transcript` of events. Each event has a kind, a 1-based step, and the fields its kind needs:
+Every run emits `llmkit.Event` values through one observer chain: the in-memory `agent.Transcript` first (it always exists and backs `Outcome.Transcript`), then the single durable sink installed with `WithObserver` — `agent.JSONL(dir, onErr)` streams one JSON line per event to a file per run. The chain is built with `llmkit.Observers`, and the events are the same ones bare clients see; a Runner already emits the `completion` event for every completion it makes, so never wrap a Runner's client with `llmkit.Observe` — that would double it.
 
-| Kind | Records |
-|---|---|
-| `request` | the full conversation sent to the model (post-policy) |
-| `assistant` | the model's text, content blocks, tool calls, stop reason, and usage |
-| `tool_result` | one executed call's result, tool name, and error flag |
+Each event carries `run_id` (minted per run, or pinned with the `WithRunID` run option), `schema_version`, and — on Runner-emitted kinds — the 1-based turn as `step`. A run continued with `Continue` stamps `parent_run_id` on every event, so a sink can reconstruct the whole lineage.
 
-`SaveJSONL` writes one event per line as JSONL (JSON Lines); `LoadJSONL` reads them back. This is a real transcript from a scripted two-turn run (timestamps come from the run clock):
+| Kind | Step | Records |
+|---|---|---|
+| `start` | 0 | the task text and the tool names offered; `parent_run_id` rides here on continued runs |
+| `completion` | turn | the full request–response round-trip (post-policy request, response, usage) or the failure as `err`; one per model turn, span-joined to any provider attempts |
+| `tool_run` | turn | the model's call, the result verbatim as fed to the model; `Denied` + `deny_reason` for policy denials, `is_error` for failures |
+| `compaction` | next turn | token totals before/after and the prune count; only when something was actually pruned |
+| `steer` | next turn | a delivered steering message; `follow_up` marks follow-up turns |
+| `finalize` | last turn | why the run stopped (`truncation_reason`), iterations, total usage, whether forced finalization fired; emitted on every run end, including error returns |
+
+A real recorded run (weather tool, two turns) looks like this — timestamps and ids are the only things that change between runs:
 
 ```jsonl
-{"kind":"request","step":1,"time":"2026-09-19T15:16:26.585632674-06:00","messages":[{"role":"user","content":[{"kind":"text","text":"What is the weather in Tokyo?"}]}]}
-{"kind":"assistant","step":1,"time":"2026-09-19T15:16:26.585634929-06:00","tool_calls":[{"id":"call-1","name":"weather","arguments":{"city":"Tokyo"}}],"stop_reason":"tool_use","usage":{"input_tokens":312,"output_tokens":24}}
-{"kind":"tool_result","step":1,"time":"2026-09-19T15:16:26.585649386-06:00","tool_call_id":"call-1","tool_name":"weather","result":"18°C, clear"}
+{"kind":"start","run_id":"1789933747392-c107dc1d30048f48","time":"2026-09-20T19:49:07.393004616Z","schema_version":1,"start":{"task":"What is the weather in Tokyo?","tools":["weather"]}}
+{"kind":"tool_run","run_id":"1789933747392-c107dc1d30048f48","step":1,"time":"2026-09-20T19:49:07.393026357Z","schema_version":1,"tool_run":{"call":{"id":"call-1","name":"weather","arguments":{"city":"Tokyo"}},"result":"18°C, clear"}}
+{"kind":"finalize","run_id":"1789933747392-c107dc1d30048f48","step":2,"time":"2026-09-20T19:49:07.393034362Z","schema_version":1,"finalize":{"iterations":2,"usage":{"input_tokens":647,"output_tokens":36}}}
 ```
 
-Step 2 repeats the pattern: a `request` event carrying the grown conversation, then the final `assistant` event with `stop_reason: end_turn`. `WithTranscriptDir` autosaves each run's transcript under a directory, and `WithTranscriptKey` adds a stable name to the file for later recovery.
+The omitted `completion` lines each carry the full request–response round-trip under `completion.request` / `completion.response`, which is what replay reads. The JSONL sink names each file `<RunID>-<task-slug>.jsonl` — pin the id with `WithRunID` when a caller generates stable identifiers up front and must recover the exact file later. The sink is best-effort: it never fails a run, and every write failure flows to the `onErr` callback given at construction. Calling `WithObserver` twice is last-wins: a Runner has exactly one durable sink.
 
-`ReplayClient` serves a recorded sequence back as an `llmkit.Client`. `NewReplayClient` replays a recorded `Transcript` with tool-call structure validation; `NewReplayClientFromResponses` serves hand-scripted responses without validation.
+`Transcript.SaveJSONL` and `LoadJSONL` serialize the in-memory view; `LoadJSONL` errors on a line without `schema_version` — pre-schema recordings are unsupported. Both read sides meet at one interface:
 
 ```go
-client := agent.NewReplayClientFromResponses([]llmkit.Response{
-	{
-		ToolCalls: []llmkit.ToolCall{{
-			ID:        "call-1",
-			Name:      "weather",
-			Arguments: json.RawMessage(`{"city":"Tokyo"}`),
-		}},
-		StopReason: llmkit.StopToolUse,
-	},
-	{
-		Text:       "Tokyo is 18°C and clear.",
-		StopReason: llmkit.StopEndTurn,
-	},
-}, llmkit.Capabilities{})
+type Source interface {
+	Events(ctx context.Context, run llmkit.RunID) ([]llmkit.Event, error)
+}
 ```
+
+`Transcript` and the `JSONL` sink both implement it; `store/sqlite` joins them in a later round. Replay consumes `completion` events only (never attempts): `NewReplayClient(src, run, caps)` serves the recorded responses with tool-call structure validation, and `ReplayTools(src, run)` returns one `Tool` per recorded name that serves the recorded results instead of executing — a fully offline replay with zero live tool executions. A diverging tool call fails with an error naming the recorded step.
 
 When to use: record a run once, then replay it deterministically against modified harness code — the building block for offline evaluation. `EstimateHistoryTokens` and `SimulateCompaction` export the compaction decision so replay tooling reproduces it exactly.
 
@@ -248,10 +243,10 @@ Constructor options apply to every run of a Runner; run options apply to a singl
 | `WithBudgetPool(pool *BudgetPool)` | nil pool: unlimited, no check, no charge |
 | `WithRequestPolicy(p RequestPolicy)` | nil policy: the request goes out as built, no clone |
 | `WithToolPolicy(p ToolPolicy)` | nil policy: every call is allowed |
-| `WithTranscriptDir(dir string)` | empty: no autosave |
-| `WithTranscriptKey(key string)` | empty: no-op unless `WithTranscriptDir` is set |
+| `WithObserver(obs llmkit.Observer)` | nil: no durable sink; last-wins, one sink per Runner |
 | `Attach(blocks ...llmkit.Block)` (run) | no blocks: the plain text task turn; repeated calls accumulate |
-| `Continue(prev *Outcome)` (run) | nil or empty `prev`: the run reseeds from `task` |
+| `Continue(prev *Outcome)` (run) | nil or empty `prev`: the run reseeds from `task`; else `ParentRunID` = `prev.RunID` |
+| `WithRunID(id llmkit.RunID)` (run) | empty: the Runner mints one with `llmkit.NewRunID` |
 | `WithSteering(s *Steering)` (run) | nil handle: no steering |
 
 ## What Run returns

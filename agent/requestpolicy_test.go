@@ -101,12 +101,12 @@ func TestRequestPolicyShapesWireMessagesOnly(t *testing.T) {
 		if len(out2.Messages) != 4 || out2.Messages[0].Text() != "a" {
 			t.Errorf("run 2 history = %+v, want the 4-message conversation incl. seed turn", out2.Messages)
 		}
-		for _, ev := range out2.Transcript.Events {
-			if ev.Kind != EventRequest || ev.Step != 1 {
+		for _, ev := range out2.Transcript.Record {
+			if ev.Kind != llmkit.KindCompletion || ev.Completion == nil || ev.Step != 1 {
 				continue
 			}
-			if !reflect.DeepEqual(ev.Messages, wire) {
-				t.Errorf("transcript step-1 request = %+v, want the wire messages %+v", ev.Messages, wire)
+			if !reflect.DeepEqual(ev.Completion.Request.Messages, wire) {
+				t.Errorf("transcript step-1 request = %+v, want the wire messages %+v", ev.Completion.Request.Messages, wire)
 			}
 		}
 	})
@@ -204,12 +204,12 @@ func TestReplayClientReplaysPolicyRecordedRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record run: %v", err)
 	}
-	for _, ev := range want.Transcript.Events {
-		if ev.Kind == EventRequest && ev.Step == 1 && len(ev.Messages) != 2 {
-			t.Errorf("recorded step-1 request has %d messages, want the post-policy 2", len(ev.Messages))
+	for _, ev := range want.Transcript.Record {
+		if ev.Kind == llmkit.KindCompletion && ev.Completion != nil && ev.Step == 1 && len(ev.Completion.Request.Messages) != 2 {
+			t.Errorf("recorded step-1 request has %d messages, want the post-policy 2", len(ev.Completion.Request.Messages))
 		}
 	}
-	rp, err := NewReplayClient(want.Transcript, recFake.Capabilities())
+	rp, err := NewReplayClient(want.Transcript, want.RunID, recFake.Capabilities())
 	if err != nil {
 		t.Fatalf("NewReplayClient: %v", err)
 	}
@@ -280,9 +280,10 @@ func TestRequestPolicyInPlaceWritesLeaveHistoryUntouched(t *testing.T) {
 		if !reflect.DeepEqual(out1.Messages, wantOut[:2]) {
 			t.Errorf("run-1 history = %+v, want untouched seed %+v", out1.Messages, wantOut[:2])
 		}
-		for _, ev := range out2.Transcript.Events {
-			if ev.Kind == EventRequest && ev.Step == 1 && !reflect.DeepEqual(ev.Messages, want) {
-				t.Errorf("transcript step-1 request = %+v, want the wire messages", ev.Messages)
+		for _, ev := range out2.Transcript.Record {
+			if ev.Kind == llmkit.KindCompletion && ev.Completion != nil && ev.Step == 1 &&
+				!reflect.DeepEqual(ev.Completion.Request.Messages, want) {
+				t.Errorf("transcript step-1 request = %+v, want the wire messages", ev.Completion.Request.Messages)
 			}
 		}
 	})
@@ -362,9 +363,9 @@ func TestRequestPolicyInPlaceWritesLeaveHistoryUntouched(t *testing.T) {
 			}
 		}
 		for _, step := range []int{1, 2} {
-			for _, ev := range out2.Transcript.Events {
-				if ev.Kind == EventRequest && ev.Step == step &&
-					!reflect.DeepEqual(ev.Messages, fake.requests[step].Messages) {
+			for _, ev := range out2.Transcript.Record {
+				if ev.Kind == llmkit.KindCompletion && ev.Completion != nil && ev.Step == step &&
+					!reflect.DeepEqual(ev.Completion.Request.Messages, fake.requests[step].Messages) {
 					t.Errorf("transcript step-%d request != retained wire request", step)
 				}
 			}
