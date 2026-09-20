@@ -114,7 +114,7 @@ All three decorators compose over streaming: retry stops once a delta is deliver
 
 | Field | Effect | Default |
 |---|---|---|
-| `Retry` | Retry policy for `WithRetry`. A zero `MaxAttempts` selects the default policy. | 4 attempts, 500 ms base delay, 30 s cap, 20% jitter, 5 m per-attempt timeout (`llmkit.DefaultRetryConfig`) |
+| `Retry` | Retry policy for `WithRetry`. A zero `MaxAttempts` selects the default policy. | 4 attempts, 500 ms base delay, 30 s cap, 20% jitter, 5 m per-attempt timeout (`retry.Default`) |
 | `Recorder` | Receives a `llmkit.UsageEvent` after each successful completion. | nil (no recording) |
 | `Provider` | Overrides the provider tag on usage events; set it when your ledger keys on a config name. | `string(spec.Type)` |
 | `HTTPClient` | Overrides the transport the SDKs use; for `httptest` and proxies. | SDK default |
@@ -143,6 +143,10 @@ Outcomes below 400 are body-parse-driven, not status-driven:
 
 A refused pre-wire request (a `Capabilities` violation, a malformed block, an unknown role) also returns `ErrInvalidRequest` before any network call. See [capabilities](capabilities.md) for which profile fields refuse rather than drop, and the `llmkit` package documentation for the `APIError` fields.
 
-Two `Retry-After` rules apply across the table. First, only Anthropic and OpenAI surface the header: the Google SDK hides response headers, so Google errors carry `RetryAfter` 0 and the retry wrapper falls back to exponential backoff. Second, a `Retry-After` above `RetryConfig.MaxDelay` is truncated to `MaxDelay` (30 s by default).
+Two `Retry-After` rules apply across the table. First, only Anthropic and
+OpenAI surface the header: the Google SDK hides response headers, so
+Google errors carry `RetryAfter` 0 and the retry wrapper falls back to
+exponential backoff. Second, a `Retry-After` above `retry.Config.MaxDelay`
+is truncated to `MaxDelay` (30 s by default).
 
 The `decide` package parses `Retry-After` on every status and honors it on 429 and every 5xx. Its exact semantics are in [decide](decide.md).

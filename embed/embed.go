@@ -45,7 +45,7 @@
 // # Retries
 //
 // Both backends retry transient failures through the shared
-// [llmkit.RetryConfig]: HTTP 429 and 5xx (honoring Retry-After when the
+// [retry.Config]: HTTP 429 and 5xx (honoring Retry-After when the
 // server supplies it) and timeout-classified network errors. Other errors,
 // including context cancellation, are terminal.
 // The per-attempt bound depends on [Config.HTTPClient]. When nil, the
@@ -55,8 +55,8 @@
 // earlier of RequestTimeout and the client's Timeout. Unset knobs resolve
 // at construction to the embed defaults of 3 attempts and a 60s
 // per-attempt timeout. BaseDelay and MaxDelay fall back to
-// [llmkit.DefaultRetryConfig]. Jitter is taken literally: 0 means no
-// jitter, and [LoadConfig] seeds llmkit's default of 20%.
+// [retry.Default]. Jitter is taken literally: 0 means no
+// jitter, and [LoadConfig] seeds the default of 20%.
 //
 // # Caching
 //

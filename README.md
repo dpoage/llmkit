@@ -105,6 +105,7 @@ resp, err = llmkit.Stream(context.Background(), client, req,
 | Package | Provides | Reference |
 |---|---|---|
 | [`llmkit`](https://pkg.go.dev/github.com/dpoage/llmkit) | The normalized vocabulary: messages, blocks, requests, responses, usage, capabilities, errors, decorators, streaming. | [capabilities](docs/capabilities.md) |
+| [`retry`](https://pkg.go.dev/github.com/dpoage/llmkit/retry) | The shared retry loop: `retry.Do`, `retry.Config`, `retry.Default`, and `retry.ParseRetryAfter`. | [reference](https://pkg.go.dev/github.com/dpoage/llmkit/retry) |
 | [`provider`](https://pkg.go.dev/github.com/dpoage/llmkit/provider) | Client construction: one `New` per endpoint; validation, adapters, and the decorator stack. | [providers](docs/providers.md) |
 | [`agent`](https://pkg.go.dev/github.com/dpoage/llmkit/agent) | The tool-calling loop: budgets, policies, hooks, steering, structured output, transcripts. | [agent loop](docs/agent-loop.md) |
 | [`sandbox`](https://pkg.go.dev/github.com/dpoage/llmkit/sandbox) | Isolated execution of untrusted commands: Bubblewrap, container CLIs, `HostExec`, `Mock`. | [sandbox](docs/sandbox.md) |

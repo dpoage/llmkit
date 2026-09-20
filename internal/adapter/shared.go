@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/retry"
 )
 
 // This file collects the small parsing/assembly helpers shared by the
@@ -115,7 +116,11 @@ func NormalizeSDKError(provider string, status int, msg string, resp *http.Respo
 	kind := ClassifyStatus(status, msg)
 	var ra time.Duration
 	if kind == llmkit.ErrRateLimited || kind == llmkit.ErrOverloaded {
-		ra = ParseRetryAfter(resp)
+		// The root parser returns (0, false) for an absent or malformed
+		// header; only the duration is stored, so an absent header stays 0.
+		if resp != nil {
+			ra, _ = retry.ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+		}
 	}
 	return &llmkit.APIError{Kind: kind, StatusCode: status, RetryAfter: ra, Provider: provider, Message: msg, Err: underlying}
 }

@@ -3,7 +3,7 @@ package embed
 import (
 	"errors"
 	"fmt"
-	"github.com/dpoage/llmkit/internal/retry"
+	"github.com/dpoage/llmkit/retry"
 	"net"
 	"net/http"
 	"time"
@@ -24,14 +24,12 @@ func (e *statusError) Error() string {
 	return fmt.Sprintf("%s: HTTP %d: %s", e.backend, e.status, e.body)
 }
 
-// retryAfterDuration returns the server-supplied delay and whether one was
-// present.
+// retryAfterDuration returns the server-supplied Retry-After delay and
+// whether one was present in the response.
 func (e *statusError) retryAfterDuration() (time.Duration, bool) {
 	return e.retryAfter, e.hasRetryAfter
 }
 
-// newStatusError builds a statusError with a truncated body and the parsed
-// Retry-After header value, if any.
 func newStatusError(backend string, status int, retryAfterHeader, body string) *statusError {
 	se := &statusError{backend: backend, status: status, body: truncate(body, 200)}
 	if d, ok := retry.ParseRetryAfter(retryAfterHeader, time.Now()); ok {
@@ -44,9 +42,6 @@ func newStatusError(backend string, status int, retryAfterHeader, body string) *
 // Transient: HTTP 429 and 5xx (honoring Retry-After when supplied), and
 // network errors that are timeouts or marked temporary. Everything else —
 // other 4xx, decode failures, context cancellation — is terminal.
-//
-// hasDelay reports whether the server supplied a Retry-After delay that
-// should replace the computed backoff.
 func retryable(err error) (delay time.Duration, hasDelay bool, ok bool) {
 	var se *statusError
 	if errors.As(err, &se) {

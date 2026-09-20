@@ -68,6 +68,7 @@ import (
 	"github.com/dpoage/llmkit/provider/internal/anthropic"
 	"github.com/dpoage/llmkit/provider/internal/google"
 	"github.com/dpoage/llmkit/provider/internal/openai"
+	"github.com/dpoage/llmkit/retry"
 )
 
 // Type enumerates the supported LLM provider backends.
@@ -176,8 +177,8 @@ type Spec struct {
 // default retry policy, no recorder, and the default HTTP transport.
 type Options struct {
 	// Retry configures the shared retry wrapper. If MaxAttempts is 0,
-	// DefaultRetryConfig is used.
-	Retry llmkit.RetryConfig
+	// retry.Default is used.
+	Retry retry.Config
 	// Recorder, if non-nil, receives a UsageEvent after each successful
 	// completion.
 	Recorder llmkit.Recorder
@@ -295,7 +296,7 @@ func New(ctx context.Context, spec Spec, opts Options) (llmkit.Client, error) {
 
 	retryCfg := opts.Retry
 	if retryCfg.MaxAttempts == 0 {
-		retryCfg = llmkit.DefaultRetryConfig()
+		retryCfg = retry.Default()
 	}
 	client := llmkit.WithRetry(adapter, retryCfg)
 	providerTag := opts.Provider

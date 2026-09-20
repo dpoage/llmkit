@@ -15,22 +15,23 @@ import (
 	"time"
 
 	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/retry"
 )
 
 // testAPIKey is a distinctive fake credential used to prove keys never leak
 // into error strings.
 const testAPIKey = "sk-super-secret-do-not-echo"
 
-var fastRetry = llmkit.RetryConfig{
+var fastRetry = retry.Config{
 	MaxAttempts: 3,
 	BaseDelay:   time.Millisecond,
 	MaxDelay:    5 * time.Millisecond,
 }
 
 // newTestClient points a client at srv with a jitter-free retry policy.
-func newTestClient(t *testing.T, srvURL string, retry llmkit.RetryConfig) *Client {
+func newTestClient(t *testing.T, srvURL string, policy retry.Config) *Client {
 	t.Helper()
-	c, err := New(Config{APIKey: testAPIKey, Model: "jev-latest", BaseURL: srvURL, Retry: retry})
+	c, err := New(Config{APIKey: testAPIKey, Model: "jev-latest", BaseURL: srvURL, Retry: policy})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -69,7 +70,6 @@ func mixedQuestions() Questions {
 	}
 }
 
-// mixedAnswers returns a valid 200 body for mixedQuestions.
 func mixedAnswers(model string) string {
 	return fmt.Sprintf(`{"model":%q,"answers":{`+
 		`"belief":{"type":"noul","noul":0.9},`+
@@ -225,7 +225,7 @@ func TestAsk_StatusMapping(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			c := newTestClient(t, srv.URL, llmkit.RetryConfig{MaxAttempts: 1})
+			c := newTestClient(t, srv.URL, retry.Config{MaxAttempts: 1})
 			_, err := c.Ask(context.Background(), "s", Questions{"q": Noul{Instructions: "i"}})
 			if err == nil {
 				t.Fatal("expected an error")
@@ -264,7 +264,7 @@ func TestAsk_RetryAfterCappedAtMaxDelay(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := newTestClient(t, srv.URL, llmkit.RetryConfig{MaxAttempts: 2, BaseDelay: time.Hour, MaxDelay: 50 * time.Millisecond, Jitter: 0})
+	c := newTestClient(t, srv.URL, retry.Config{MaxAttempts: 2, BaseDelay: time.Hour, MaxDelay: 50 * time.Millisecond, Jitter: 0})
 	start := time.Now()
 	_, err := c.Ask(context.Background(), "s", mixedQuestions())
 	elapsed := time.Since(start)
@@ -308,7 +308,7 @@ func TestAsk_TransportFailureIsErrServer(t *testing.T) {
 	url := srv.URL
 	srv.Close() // dead endpoint: every dial fails
 
-	c := newTestClient(t, url, llmkit.RetryConfig{MaxAttempts: 1})
+	c := newTestClient(t, url, retry.Config{MaxAttempts: 1})
 	_, err := c.Ask(context.Background(), "s", Questions{"q": Noul{Instructions: "i"}})
 	if err == nil {
 		t.Fatal("expected a transport error")
@@ -344,7 +344,7 @@ func TestAsk_ParentCancellationTerminal(t *testing.T) {
 		cancel()
 	}()
 
-	c := newTestClient(t, srv.URL, llmkit.RetryConfig{MaxAttempts: 5, BaseDelay: time.Millisecond, RequestTimeout: 10 * time.Second})
+	c := newTestClient(t, srv.URL, retry.Config{MaxAttempts: 5, BaseDelay: time.Millisecond, RequestTimeout: 10 * time.Second})
 	_, err := c.Ask(ctx, "s", Questions{"q": Noul{Instructions: "i"}})
 	close(release) // unblock the held handler so srv.Close can finish
 	if err == nil {
@@ -371,7 +371,7 @@ func TestAsk_PerAttemptTimeoutRetried(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := newTestClient(t, srv.URL, llmkit.RetryConfig{MaxAttempts: 2, BaseDelay: time.Millisecond, Jitter: 0, RequestTimeout: 30 * time.Millisecond})
+	c := newTestClient(t, srv.URL, retry.Config{MaxAttempts: 2, BaseDelay: time.Millisecond, Jitter: 0, RequestTimeout: 30 * time.Millisecond})
 	_, err := c.Ask(context.Background(), "s", Questions{"q": Noul{Instructions: "i"}})
 	if err == nil {
 		t.Fatal("expected a timeout error")
@@ -496,7 +496,7 @@ func TestAsk_ResponseValidation(t *testing.T) {
 			srv := httptest.NewServer(okHandler(tt.body))
 			defer srv.Close()
 
-			c := newTestClient(t, srv.URL, llmkit.RetryConfig{MaxAttempts: 1})
+			c := newTestClient(t, srv.URL, retry.Config{MaxAttempts: 1})
 			_, err := c.Ask(context.Background(), "s", questionsFor(tt.name))
 			if err == nil {
 				t.Fatal("expected a response validation error")
@@ -559,7 +559,7 @@ func TestAsk_RecorderSilentOnFailure(t *testing.T) {
 	defer srv.Close()
 
 	rec := &recorder{}
-	c, err := New(Config{APIKey: testAPIKey, Model: "jev-latest", BaseURL: srv.URL, Retry: llmkit.RetryConfig{MaxAttempts: 2, BaseDelay: time.Millisecond}, Recorder: rec})
+	c, err := New(Config{APIKey: testAPIKey, Model: "jev-latest", BaseURL: srv.URL, Retry: retry.Config{MaxAttempts: 2, BaseDelay: time.Millisecond}, Recorder: rec})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -602,7 +602,7 @@ func TestAsk_APIKeyNeverInErrorStrings(t *testing.T) {
 		writeStatus(w, http.StatusUnauthorized, `{"error":"invalid api key"}`)
 	}))
 	defer srv1.Close()
-	c1 := newTestClient(t, srv1.URL, llmkit.RetryConfig{MaxAttempts: 1})
+	c1 := newTestClient(t, srv1.URL, retry.Config{MaxAttempts: 1})
 	_, err = c1.Ask(context.Background(), "s", Questions{"q": Noul{Instructions: "i"}})
 	run(t, err)
 
@@ -610,14 +610,14 @@ func TestAsk_APIKeyNeverInErrorStrings(t *testing.T) {
 	dead := httptest.NewServer(okHandler(`{}`))
 	deadURL := dead.URL
 	dead.Close()
-	c2 := newTestClient(t, deadURL, llmkit.RetryConfig{MaxAttempts: 1})
+	c2 := newTestClient(t, deadURL, retry.Config{MaxAttempts: 1})
 	_, err = c2.Ask(context.Background(), "s", Questions{"q": Noul{Instructions: "i"}})
 	run(t, err)
 
 	// Response contract violation.
 	srv3 := httptest.NewServer(okHandler(`{"model":"m","answers":{},"usage":{}}`))
 	defer srv3.Close()
-	c3 := newTestClient(t, srv3.URL, llmkit.RetryConfig{MaxAttempts: 1})
+	c3 := newTestClient(t, srv3.URL, retry.Config{MaxAttempts: 1})
 	_, err = c3.Ask(context.Background(), "s", Questions{"q": Noul{Instructions: "i"}})
 	run(t, err)
 }
@@ -663,7 +663,7 @@ func TestAsk_RetryAfterSecondsHonored(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			c := newTestClient(t, srv.URL, llmkit.RetryConfig{MaxAttempts: 2, BaseDelay: time.Hour, MaxDelay: time.Hour, Jitter: 0})
+			c := newTestClient(t, srv.URL, retry.Config{MaxAttempts: 2, BaseDelay: time.Hour, MaxDelay: time.Hour, Jitter: 0})
 			start := time.Now()
 			_, err := c.Ask(context.Background(), "s", mixedQuestions())
 			elapsed := time.Since(start)
@@ -710,7 +710,7 @@ func TestAsk_RetryAfterImmediateHint(t *testing.T) {
 
 			// BaseDelay 500ms: an exponential or honored-as-written sleep
 			// would blow the 400ms budget; only the immediate hint fits.
-			c := newTestClient(t, srv.URL, llmkit.RetryConfig{MaxAttempts: 2, BaseDelay: 500 * time.Millisecond, MaxDelay: 30 * time.Second, Jitter: 0})
+			c := newTestClient(t, srv.URL, retry.Config{MaxAttempts: 2, BaseDelay: 500 * time.Millisecond, MaxDelay: 30 * time.Second, Jitter: 0})
 			start := time.Now()
 			_, err := c.Ask(context.Background(), "s", mixedQuestions())
 			elapsed := time.Since(start)
@@ -750,7 +750,7 @@ func TestAsk_RetryBoundary(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			c := newTestClient(t, srv.URL, llmkit.RetryConfig{MaxAttempts: 3, BaseDelay: time.Millisecond, MaxDelay: 5 * time.Millisecond})
+			c := newTestClient(t, srv.URL, retry.Config{MaxAttempts: 3, BaseDelay: time.Millisecond, MaxDelay: 5 * time.Millisecond})
 			_, err := c.Ask(context.Background(), "s", mixedQuestions())
 			if err == nil {
 				t.Fatal("expected an error")

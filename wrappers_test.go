@@ -7,6 +7,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/dpoage/llmkit/retry"
 )
 
 // fakeClient is a programmable Client for testing the wrappers in isolation.
@@ -43,9 +45,9 @@ func TestRetry_SucceedsAfterRateLimit(t *testing.T) {
 		responses: []Response{{}, {}, {Text: "ok", StopReason: StopEndTurn}},
 	}
 	var slept []time.Duration
-	cfg := DefaultRetryConfig()
-	cfg.sleep = func(ctx context.Context, d time.Duration) error { slept = append(slept, d); return nil }
-	cfg.rng = func() float64 { return 0.5 } // deterministic: jitter factor = 1.0
+	cfg := retry.Default()
+	cfg.Sleep = func(ctx context.Context, d time.Duration) error { slept = append(slept, d); return nil }
+	cfg.Rand = func() float64 { return 0.5 } // deterministic: jitter factor = 1.0
 
 	client := WithRetry(fc, cfg)
 	resp, err := client.Complete(context.Background(), simpleRequest())
@@ -76,8 +78,8 @@ func TestRetry_HonorsRetryAfter(t *testing.T) {
 		responses: []Response{{}, {Text: "ok"}},
 	}
 	var slept []time.Duration
-	cfg := DefaultRetryConfig()
-	cfg.sleep = func(ctx context.Context, d time.Duration) error { slept = append(slept, d); return nil }
+	cfg := retry.Default()
+	cfg.Sleep = func(ctx context.Context, d time.Duration) error { slept = append(slept, d); return nil }
 
 	client := WithRetry(fc, cfg)
 	if _, err := client.Complete(context.Background(), simpleRequest()); err != nil {
@@ -91,8 +93,8 @@ func TestRetry_HonorsRetryAfter(t *testing.T) {
 func TestRetry_DoesNotRetryAuth(t *testing.T) {
 	authErr := &APIError{Kind: ErrAuth, StatusCode: 401, Provider: "fake", Message: "401"}
 	fc := &fakeClient{errs: []error{authErr}}
-	cfg := DefaultRetryConfig()
-	cfg.sleep = func(ctx context.Context, d time.Duration) error { return nil }
+	cfg := retry.Default()
+	cfg.Sleep = func(ctx context.Context, d time.Duration) error { return nil }
 
 	client := WithRetry(fc, cfg)
 	_, err := client.Complete(context.Background(), simpleRequest())
@@ -106,8 +108,8 @@ func TestRetry_DoesNotRetryAuth(t *testing.T) {
 
 func TestRetry_ExhaustsAttempts(t *testing.T) {
 	fc := &fakeClient{errs: []error{rateLimitErr(0), rateLimitErr(0), rateLimitErr(0), rateLimitErr(0)}}
-	cfg := DefaultRetryConfig() // 4 attempts
-	cfg.sleep = func(ctx context.Context, d time.Duration) error { return nil }
+	cfg := retry.Default() // 4 attempts
+	cfg.Sleep = func(ctx context.Context, d time.Duration) error { return nil }
 
 	client := WithRetry(fc, cfg)
 	_, err := client.Complete(context.Background(), simpleRequest())
@@ -121,8 +123,8 @@ func TestRetry_ExhaustsAttempts(t *testing.T) {
 
 func TestRetry_StopsOnContextCancel(t *testing.T) {
 	fc := &fakeClient{errs: []error{rateLimitErr(0), rateLimitErr(0)}}
-	cfg := DefaultRetryConfig()
-	cfg.sleep = func(ctx context.Context, d time.Duration) error { return context.Canceled }
+	cfg := retry.Default()
+	cfg.Sleep = func(ctx context.Context, d time.Duration) error { return context.Canceled }
 
 	client := WithRetry(fc, cfg)
 	_, err := client.Complete(context.Background(), simpleRequest())
