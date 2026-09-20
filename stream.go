@@ -61,9 +61,10 @@ type StreamingClient interface {
 // Stream uses c's Stream when c implements StreamingClient; otherwise it
 // calls c.Complete and synthesizes deltas from the Response in block order
 // (text blocks → DeltaText, thinking blocks → DeltaThinking, each ToolCall →
-// one DeltaToolCall with ID/Name/Index and the full Arguments). When Blocks
-// carries no text block but Text is set, it emits one DeltaText from Text.
-// fn runs on the calling goroutine, and its execution time
+// one DeltaToolCall with ID/Name/Index and the full Arguments) before
+// returning it. When Blocks carries no text block but Text is set, one
+// DeltaText from Text is emitted after the blocks and before the tool-call
+// deltas. fn runs on the calling goroutine, and its execution time
 // counts toward the per-attempt RequestTimeout when Stream is wrapped in
 // WithRetry.
 func Stream(ctx context.Context, c Client, req Request, fn func(Delta) error) (Response, error) {
