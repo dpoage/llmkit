@@ -37,6 +37,13 @@ entry below is marked.
   locally with `ErrInvalidRequest` before any wire call; previously a padded
   form slipped past the guard and emitted an empty unsigned thinking block
   the API rejects remotely.
+- Anthropic adapter: structured-output finalize appends the surfaced
+  tool-call arguments as a `BlockText`, so `Response.Text` equals the
+  concatenation of `BlockText` blocks; the agent's assistant history now
+  keeps the text on thinking+structured-output turns instead of recording
+  only the thinking block. The agent additionally appends surfaced text
+  when a client's `Blocks` omit any text block, so history can no longer
+  diverge from what `llmkit.Stream` delivered.
 
 ## [0.4.0] - 2026-09-19
 

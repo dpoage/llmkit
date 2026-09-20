@@ -109,7 +109,12 @@ func (a *anthropicAdapter) Complete(ctx context.Context, req llmkit.Request) (ll
 // Response.Text and StopEndTurn: the call's Arguments become Text
 // (downstream layers have no handler for the synthetic tool), and
 // Anthropic's "tool_use" stop reason for the forced call would otherwise
-// mis-classify the completion. Complete and Stream both go through this
+// mis-classify the completion. The surfaced text is also appended as a
+// BlockText so the Response honors its invariant (Text equals the
+// concatenation of BlockText blocks) the same way the openai and google
+// toResponse emit surfaced text — verbatim-block consumers such as the
+// agent's assistant history would otherwise drop the text whenever a
+// thinking block precedes it. Complete and Stream both go through this
 // step so the same wire exchange returns identical Responses.
 func (a *anthropicAdapter) finalize(req llmkit.Request, resp llmkit.Response) llmkit.Response {
 	if toolName, ok := structuredOutputToolName(req, a.caps); ok &&
@@ -117,6 +122,9 @@ func (a *anthropicAdapter) finalize(req llmkit.Request, resp llmkit.Response) ll
 		resp.Text = string(resp.ToolCalls[0].Arguments)
 		resp.ToolCalls = nil
 		resp.StopReason = llmkit.StopEndTurn
+		if resp.Text != "" {
+			resp.Blocks = append(resp.Blocks, llmkit.Block{Kind: llmkit.BlockText, Text: resp.Text})
+		}
 	}
 	return resp
 }
