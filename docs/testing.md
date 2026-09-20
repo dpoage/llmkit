@@ -9,7 +9,7 @@ CI (`.github/workflows/ci.yml`) runs these commands on every push and pull reque
 ```bash
 go build ./...
 go vet ./...
-go vet -tags live ./provider/ ./agent/ ./decide/ ./examples/... # the `live` acceptance suite must keep compiling
+go vet -tags live ./provider/ ./agent/ ./examples/... ./decide/ # the `live` acceptance suite must keep compiling
 go vet -tags integration ./embed/  # the `integration` Ollama test must keep compiling
 go vet -tags integration ./sandbox/ # the sandbox integration test must keep compiling
 go test -race -count=1 ./...
@@ -24,7 +24,7 @@ The tag-gated `go vet` steps compile the gated suites without running them. CI p
 | Suite | Command | Needs | Skip behavior |
 | --- | --- | --- | --- |
 | Hermetic (default) | `go test -race -count=1 ./...` | No network, no credentials, no backends. | Needs no network or credentials. A few host-capability tests skip when the host lacks the tool: sandbox bwrap and container-CLI presence checks, platform guards, and the example builds under `-short`. |
-| Live (`live` tag) | `go test -tags live -count=1 ./provider/ ./agent/ ./decide/ ./examples/...` | Vendor credentials in `LLMKIT_LIVE_*` variables. Calls real vendor APIs and costs money. | Each lane skips at the lane level and names the lane and its missing variables. |
+| Live (`live` tag) | `go test -tags live -count=1 ./provider/ ./agent/ ./examples/... ./decide/` | Vendor credentials in `LLMKIT_LIVE_*` variables. Calls real vendor APIs and costs money. | Each lane skips at the lane level and names the lane and its missing variables. |
 | Integration (`integration` tag) | `go test -tags integration -count=1 ./embed/` and `go test -tags integration -count=1 ./sandbox/` | `./embed/`: a local Ollama server (typical address `localhost:11434`). `./sandbox/`: bwrap (`bubblewrap` on Linux) and/or a container runtime (podman or docker). | Each test auto-skips when its backend is missing. CI runs the sandbox suite in a dedicated `sandbox-integration` job. |
 
 ## Running the live suite locally
@@ -48,7 +48,7 @@ The live suite calls real vendor APIs and costs real money. Prompts stay tiny an
 3. Run the suite:
 
    ```bash
-   go test -tags live -count=1 ./provider/ ./agent/ ./decide/ ./examples/... -v
+   go test -tags live -count=1 ./provider/ ./agent/ ./examples/... ./decide/ -v
    ```
 
 4. To re-record the compat fixtures (`provider/testdata/compat/*.json`), add `-update` to the same command. Treat this as a deliberate local operation: every recording differs in model ids, sample text, and token counts.
