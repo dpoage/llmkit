@@ -98,10 +98,12 @@ func TestThinking_EmptyRawSkipped(t *testing.T) {
 	}
 }
 
-// TestThinking_MalformedRawStillErrors pins the guard's boundary: an empty
-// Raw is skipped, but a Raw that is neither empty nor parseable as a
-// genai.Part is a malformed provider payload and must fail with
-// ErrInvalidRequest rather than be silently dropped.
+// TestThinking_MalformedRawStillErrors pins the guard's boundary: a Raw
+// carrying only JSON whitespace is skipped, but a Raw that is neither empty
+// nor parseable as a genai.Part — including one padded with non-JSON
+// whitespace such as U+00A0, which the guard deliberately does not trim —
+// is a malformed provider payload and must fail with ErrInvalidRequest
+// rather than be silently dropped.
 func TestThinking_MalformedRawStillErrors(t *testing.T) {
 	base := newServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -114,21 +116,26 @@ func TestThinking_MalformedRawStillErrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	req := simpleRequest()
-	req.Messages = []llmkit.Message{
-		llmkit.TextMessage(llmkit.RoleUser, "hi"),
-		{
-			Role: llmkit.RoleAssistant,
-			Content: []llmkit.Block{
-				{Kind: llmkit.BlockThinking, Provider: "google", Raw: json.RawMessage("{not json")},
+	for _, raw := range []json.RawMessage{
+		json.RawMessage("{not json"),
+		json.RawMessage("\u00a0null"),
+	} {
+		req := simpleRequest()
+		req.Messages = []llmkit.Message{
+			llmkit.TextMessage(llmkit.RoleUser, "hi"),
+			{
+				Role: llmkit.RoleAssistant,
+				Content: []llmkit.Block{
+					{Kind: llmkit.BlockThinking, Provider: "google", Raw: raw},
+				},
 			},
-		},
-	}
-	_, err = client.Complete(context.Background(), req)
-	if err == nil {
-		t.Fatal("expected error for malformed thinking Raw, got nil")
-	}
-	if !errors.Is(err, llmkit.ErrInvalidRequest) {
-		t.Fatalf("error = %v, want ErrInvalidRequest", err)
+		}
+		_, err = client.Complete(context.Background(), req)
+		if err == nil {
+			t.Fatalf("Raw=%q: expected error for malformed thinking Raw, got nil", raw)
+		}
+		if !errors.Is(err, llmkit.ErrInvalidRequest) {
+			t.Fatalf("Raw=%q: error = %v, want ErrInvalidRequest", raw, err)
+		}
 	}
 }
