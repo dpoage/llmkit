@@ -40,6 +40,20 @@ func (c *captureObserver) ctxAt(i int) context.Context {
 	return c.ctxs[i]
 }
 
+// ctxByKind returns the delivery contexts of one kind's events, in
+// emission order — index-aligned with byKind.
+func (c *captureObserver) ctxByKind(k EventKind) []context.Context {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []context.Context
+	for i, ev := range c.events {
+		if ev.Kind == k {
+			out = append(out, c.ctxs[i])
+		}
+	}
+	return out
+}
+
 // byKind returns the captured events of one kind, in emission order.
 func (c *captureObserver) byKind(k EventKind) []Event {
 	var out []Event
@@ -396,11 +410,13 @@ func TestObserve_AttemptEventsUseRetryCallerContext(t *testing.T) {
 		t.Fatalf("wire calls = %d, want 2", stalls.calls)
 	}
 	attempts := obs.byKind(KindAttempt)
-	if len(attempts) != 2 {
-		t.Fatalf("attempt events = %d, want 2 (both timed-out attempts delivered)", len(attempts))
+	attemptCtxs := obs.ctxByKind(KindAttempt)
+	if len(attempts) != 2 || len(attemptCtxs) != 2 {
+		t.Fatalf("attempt events = %d ctxs = %d, want 2 each (both timed-out attempts delivered)",
+			len(attempts), len(attemptCtxs))
 	}
 	for i, ev := range attempts {
-		ctx := obs.ctxAt(i)
+		ctx := attemptCtxs[i]
 		if _, ok := ctx.Deadline(); ok {
 			t.Errorf("attempt %d delivered on a context with a deadline", i)
 		}
@@ -562,8 +578,10 @@ func TestObserve_StreamAttemptsExhausted(t *testing.T) {
 	}
 	completions := obs.byKind(KindCompletion)
 	attempts := obs.byKind(KindAttempt)
-	if len(completions) != 1 || len(attempts) != 3 {
-		t.Fatalf("completions=%d attempts=%d, want 1 and 3", len(completions), len(attempts))
+	attemptCtxs := obs.ctxByKind(KindAttempt)
+	if len(completions) != 1 || len(attempts) != 3 || len(attemptCtxs) != 3 {
+		t.Fatalf("completions=%d attempts=%d ctxs=%d, want 1, 3 and 3",
+			len(completions), len(attempts), len(attemptCtxs))
 	}
 	span := completions[0].SpanID
 	if span == "" || span == inherited {
@@ -590,10 +608,10 @@ func TestObserve_StreamAttemptsExhausted(t *testing.T) {
 		}
 		// Delivered on the retry caller's context: no per-attempt deadline
 		// may leak, or a ctx-honouring sink would drop timed-out streams.
-		if _, ok := obs.ctxAt(i).Deadline(); ok {
+		if _, ok := attemptCtxs[i].Deadline(); ok {
 			t.Errorf("attempt %d delivered on a context with a deadline", i)
 		}
-		if ctxErr := obs.ctxAt(i).Err(); ctxErr != nil {
+		if ctxErr := attemptCtxs[i].Err(); ctxErr != nil {
 			t.Errorf("attempt %d delivered with ctx.Err() = %v, want nil", i, ctxErr)
 		}
 		if ae.Err == "" || !reflect.DeepEqual(ae.Response, Response{}) {
@@ -785,6 +803,9 @@ func TestObserve_ConcurrentSpanJoin(t *testing.T) {
 	}
 	wg.Wait()
 
+	if inner.calls != runs {
+		t.Fatalf("inner wire calls = %d, want %d", inner.calls, runs)
+	}
 	completions := obs.byKind(KindCompletion)
 	attempts := obs.byKind(KindAttempt)
 	if len(completions) != runs || len(attempts) != runs {
@@ -811,10 +832,11 @@ func TestObserve_ConcurrentSpanJoin(t *testing.T) {
 
 // safeClient is a concurrency-safe scripted Client: the shared fakeClient is
 // not (its calls counter races), and the concurrency test shares one client
-// across goroutines.
+// across goroutines. The mutex guards the calls counter it exposes.
 type safeClient struct {
-	mu   sync.Mutex
-	resp Response
+	mu    sync.Mutex
+	calls int
+	resp  Response
 }
 
 func (s *safeClient) Capabilities() Capabilities { return Capabilities{} }
@@ -822,5 +844,6 @@ func (s *safeClient) Capabilities() Capabilities { return Capabilities{} }
 func (s *safeClient) Complete(ctx context.Context, req Request) (Response, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.calls++
 	return s.resp, nil
 }
