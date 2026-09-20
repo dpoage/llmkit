@@ -2,6 +2,8 @@ package llmkit
 
 import (
 	"context"
+	"encoding/json"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -37,9 +39,61 @@ func TestWithRunRoundTrip(t *testing.T) {
 	}
 }
 
-func TestWithRunEmptyIsAsAbsent(t *testing.T) {
-	if got := RunFromContext(WithRun(context.Background(), "")); got != "" {
-		t.Fatalf("RunFromContext(WithRun(\"\")) = %q, want empty", got)
+// TestWithRunEmptyPreservesOuter pins the documented contract: an empty id
+// returns ctx unchanged, so a decorator whose options left the id unset can
+// never erase an enclosing run. The outer context is non-empty — that is
+// the only case where "absent" and "erased" differ.
+func TestWithRunEmptyPreservesOuter(t *testing.T) {
+	outer := WithRun(context.Background(), RunID("1758366600000-deadbeef00112233"))
+	if got := RunFromContext(WithRun(outer, "")); got != "1758366600000-deadbeef00112233" {
+		t.Fatalf("WithRun(outer, \"\") erased the enclosing run id: got %q", got)
+	}
+	if got := RunFromContext(context.Background()); got != "" {
+		t.Fatalf("RunFromContext(absent) = %q, want empty", got)
+	}
+}
+
+func TestSpanFromContextAbsent(t *testing.T) {
+	if got := SpanFromContext(context.Background()); got != "" {
+		t.Fatalf("SpanFromContext(absent) = %q, want empty", got)
+	}
+	type sneaky struct{}
+	ctx := context.WithValue(context.Background(), sneaky{}, SpanID("other"))
+	if got := SpanFromContext(ctx); got != "" {
+		t.Fatalf("SpanFromContext(foreign key) = %q, want empty", got)
+	}
+}
+
+func TestWithSpanRoundTrip(t *testing.T) {
+	ctx := WithSpan(context.Background(), SpanID("1758366600001-0123456789abcdef"))
+	if got := SpanFromContext(ctx); got != "1758366600001-0123456789abcdef" {
+		t.Fatalf("SpanFromContext = %q, want the stored id", got)
+	}
+	inner := WithSpan(ctx, SpanID("second"))
+	if got := SpanFromContext(inner); got != "second" {
+		t.Fatalf("SpanFromContext(overwritten) = %q, want %q", got, "second")
+	}
+	if got := SpanFromContext(ctx); got != "1758366600001-0123456789abcdef" {
+		t.Fatalf("outer context mutated: %q", got)
+	}
+}
+
+func TestWithSpanEmptyPreservesOuter(t *testing.T) {
+	outer := WithSpan(context.Background(), SpanID("1758366600001-0123456789abcdef"))
+	if got := SpanFromContext(WithSpan(outer, "")); got != "1758366600001-0123456789abcdef" {
+		t.Fatalf("WithSpan(outer, \"\") erased the enclosing span id: got %q", got)
+	}
+}
+
+// Run and span ids live under independent keys: one context carries both,
+// which is how a Completion's Attempts join on span inside a run.
+func TestRunAndSpanKeysAreIndependent(t *testing.T) {
+	ctx := WithSpan(WithRun(context.Background(), RunID("run-1")), SpanID("span-1"))
+	if got := RunFromContext(ctx); got != "run-1" {
+		t.Fatalf("RunFromContext = %q, want run-1", got)
+	}
+	if got := SpanFromContext(ctx); got != "span-1" {
+		t.Fatalf("SpanFromContext = %q, want span-1", got)
 	}
 }
 
@@ -50,12 +104,30 @@ func TestNewRunIDFormat(t *testing.T) {
 	}
 }
 
+func TestNewSpanIDFormat(t *testing.T) {
+	id := NewSpanID()
+	if !regexp.MustCompile(`^[0-9]{13}-[0-9a-f]{16}$`).MatchString(string(id)) {
+		t.Fatalf("NewSpanID() = %q, want <13-digit millis>-<16 hex chars>", id)
+	}
+}
+
 func TestNewRunIDUniqueAcross10k(t *testing.T) {
 	seen := make(map[RunID]struct{}, 10000)
 	for i := 0; i < 10000; i++ {
 		id := NewRunID()
 		if _, dup := seen[id]; dup {
 			t.Fatalf("duplicate RunID %q at iteration %d", id, i)
+		}
+		seen[id] = struct{}{}
+	}
+}
+
+func TestNewSpanIDUniqueAcross10k(t *testing.T) {
+	seen := make(map[SpanID]struct{}, 10000)
+	for i := 0; i < 10000; i++ {
+		id := NewSpanID()
+		if _, dup := seen[id]; dup {
+			t.Fatalf("duplicate SpanID %q at iteration %d", id, i)
 		}
 		seen[id] = struct{}{}
 	}
@@ -91,7 +163,7 @@ func parseMillisPrefix(id RunID) int64 {
 
 func TestNewEventStampsHeader(t *testing.T) {
 	before := time.Now()
-	ctx := WithRun(context.Background(), RunID("1758366600000-deadbeef00112233"))
+	ctx := WithSpan(WithRun(context.Background(), RunID("1758366600000-deadbeef00112233")), SpanID("1758366600001-0123456789abcdef"))
 	ev := NewEvent(ctx, KindCompletion)
 	after := time.Now()
 
@@ -100,6 +172,9 @@ func TestNewEventStampsHeader(t *testing.T) {
 	}
 	if ev.RunID != "1758366600000-deadbeef00112233" {
 		t.Fatalf("RunID = %q, want the context's run id", ev.RunID)
+	}
+	if ev.SpanID != "1758366600001-0123456789abcdef" {
+		t.Fatalf("SpanID = %q, want the context's span id", ev.SpanID)
 	}
 	if ev.SchemaVersion != EventSchemaVersion {
 		t.Fatalf("SchemaVersion = %d, want %d", ev.SchemaVersion, EventSchemaVersion)
@@ -110,8 +185,29 @@ func TestNewEventStampsHeader(t *testing.T) {
 	if ev.Time.Before(before) || ev.Time.After(after) {
 		t.Fatalf("Time %v outside [%v, %v]", ev.Time, before, after)
 	}
-	// Outside a run, RunID stays empty.
-	if got := NewEvent(context.Background(), KindExec).RunID; got != "" {
-		t.Fatalf("NewEvent(outside run).RunID = %q, want empty", got)
+	// Outside a run and span, both stay empty.
+	bare := NewEvent(context.Background(), KindExec)
+	if bare.RunID != "" || bare.SpanID != "" {
+		t.Fatalf("NewEvent(outside run).RunID/SpanID = %q/%q, want empty/empty", bare.RunID, bare.SpanID)
+	}
+}
+
+// TestNewEventRoundTripsDeepEqual pins that a stamped event survives the
+// wire exactly: the header Time is stamped without a monotonic clock
+// reading, in UTC, so the decoded copy is DeepEqual to the emitted one.
+func TestNewEventRoundTripsDeepEqual(t *testing.T) {
+	ctx := WithSpan(WithRun(context.Background(), RunID("1758366600000-deadbeef00112233")), SpanID("1758366600001-0123456789abcdef"))
+	ev := NewEvent(ctx, KindExec)
+	ev.Exec = &ExecEvent{Backend: "docker", Command: []string{"sh"}, ExitCode: 0}
+	data, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back Event
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(ev, back) {
+		t.Fatalf("stamped event did not survive the wire\nwant: %#v\ngot:  %#v", ev, back)
 	}
 }

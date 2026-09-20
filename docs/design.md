@@ -148,6 +148,11 @@ retry stage, so a sink can see flakiness without double-counting spend.
 Policy denials are ToolRun events with `Denied` set, not a separate kind:
 what happened at the boundary is one fact with one shape.
 
+Attempts join their Completion on a span id, not a time window: the
+Completion emitter mints a fresh `SpanID` per logical completion and puts
+it in the context it passes to the client, so concurrent or nested
+completions (a tool calling the model) stay separable in the record.
+
 A run has exactly ONE durable sink. JSONL transcripts and a SQLite store
 never coexist as a split history of the same run (user ruling, 2026-09-20):
 the transcript is a view of the event stream, not a second record, and the

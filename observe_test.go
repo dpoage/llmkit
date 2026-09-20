@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ var (
 var (
 	goldRun    = RunID("1758366600000-deadbeef00112233")
 	goldParent = RunID("1758366500000-cafebabefeedface")
+	goldSpan   = SpanID("1758366600001-0123456789abcdef")
 	goldTime   = time.Date(2026, 9, 20, 12, 30, 0, 0, time.UTC)
 )
 
@@ -85,6 +87,7 @@ func goldEvents() []struct {
 	ev   Event
 } {
 	belief := 0.25
+	score := 2.09
 	return []struct {
 		name string
 		ev   Event
@@ -94,15 +97,15 @@ func goldEvents() []struct {
 			ev: Event{
 				Kind: KindStart, RunID: goldRun, ParentRunID: goldParent, Step: 1,
 				Time: goldTime, SchemaVersion: EventSchemaVersion,
-				Start: &Start{Task: "summarize the ledger", Continued: true, Tools: []string{"search", "calc"}},
+				Start: &StartEvent{Task: "summarize the ledger", Tools: []string{"search", "calc"}},
 			},
 		},
 		{
 			name: "completion",
 			ev: Event{
-				Kind: KindCompletion, RunID: goldRun, Step: 2,
+				Kind: KindCompletion, RunID: goldRun, SpanID: goldSpan, Step: 2,
 				Time: goldTime, Duration: 1500 * time.Millisecond, SchemaVersion: EventSchemaVersion,
-				Completion: &Completion{
+				Completion: &CompletionEvent{
 					Request:  goldRequest(),
 					Response: goldResponse(),
 					Provider: "anthropic",
@@ -113,9 +116,9 @@ func goldEvents() []struct {
 		{
 			name: "attempt",
 			ev: Event{
-				Kind: KindAttempt, RunID: goldRun,
+				Kind: KindAttempt, RunID: goldRun, SpanID: goldSpan,
 				Time: goldTime, Duration: 250 * time.Millisecond, SchemaVersion: EventSchemaVersion,
-				Attempt: &Attempt{
+				Attempt: &AttemptEvent{
 					Attempt: 1,
 					Request: Request{Messages: []Message{TextMessage(RoleUser, "hi")}},
 					// A failed attempt carries the zero Response; its Usage
@@ -133,7 +136,7 @@ func goldEvents() []struct {
 			ev: Event{
 				Kind: KindToolRun, RunID: goldRun, Step: 3,
 				Time: goldTime, Duration: 200 * time.Millisecond, SchemaVersion: EventSchemaVersion,
-				ToolRun: &ToolRun{
+				ToolRun: &ToolRunEvent{
 					Call:   ToolCall{ID: "t1", Name: "calc", Arguments: json.RawMessage(`{"x":2}`)},
 					Result: `{"y":4}`,
 				},
@@ -144,7 +147,7 @@ func goldEvents() []struct {
 			ev: Event{
 				Kind: KindToolRun, RunID: goldRun, Step: 3,
 				Time: goldTime, SchemaVersion: EventSchemaVersion,
-				ToolRun: &ToolRun{
+				ToolRun: &ToolRunEvent{
 					Call:       ToolCall{ID: "t2", Name: "rm", Arguments: json.RawMessage(`{"path":"/"}`)},
 					Denied:     true,
 					DenyReason: "blocked by policy",
@@ -156,7 +159,7 @@ func goldEvents() []struct {
 			ev: Event{
 				Kind: KindCompaction, RunID: goldRun, Step: 4,
 				Time: goldTime, Duration: 5 * time.Millisecond, SchemaVersion: EventSchemaVersion,
-				Compaction: &Compaction{BeforeTokens: 9000, AfterTokens: 4000, Pruned: 6},
+				Compaction: &CompactionEvent{BeforeTokens: 9000, AfterTokens: 4000, Pruned: 6},
 			},
 		},
 		{
@@ -164,7 +167,7 @@ func goldEvents() []struct {
 			ev: Event{
 				Kind: KindSteer, RunID: goldRun, Step: 5,
 				Time: goldTime, SchemaVersion: EventSchemaVersion,
-				Steer: &Steer{Message: TextMessage(RoleUser, "focus on taxes"), FollowUp: true},
+				Steer: &SteerEvent{Message: TextMessage(RoleUser, "focus on taxes"), FollowUp: true},
 			},
 		},
 		{
@@ -172,8 +175,9 @@ func goldEvents() []struct {
 			ev: Event{
 				Kind: KindFinalize, RunID: goldRun, ParentRunID: goldParent,
 				Time: goldTime, Duration: time.Minute, SchemaVersion: EventSchemaVersion,
-				Finalize: &Finalize{
+				Finalize: &FinalizeEvent{
 					TruncationReason: "max_steps",
+					Finalized:        true,
 					Iterations:       8,
 					Usage:            Usage{InputTokens: 1000, OutputTokens: 200},
 				},
@@ -187,8 +191,13 @@ func goldEvents() []struct {
 				Decision: &DecisionEvent{
 					Backend: "typesafe",
 					Model:   "jev-1",
+					State:   json.RawMessage(`{"host":"db-1"}`),
 					Questions: []DecisionQuestion{
-						{ID: "q1", Kind: "noul", Instructions: json.RawMessage(`{"prompt":"confident?"}`)},
+						{
+							ID: "q1", Kind: "noul", Instructions: json.RawMessage(`{"prompt":"confident?"}`),
+							True:  json.RawMessage(`"clearly risky"`),
+							False: json.RawMessage(`"clearly safe"`),
+						},
 						{
 							ID: "q2", Kind: "choice", Instructions: json.RawMessage(`{"prompt":"stay or go?"}`),
 							Options: map[string]json.RawMessage{
@@ -204,7 +213,7 @@ func goldEvents() []struct {
 					Answers: []DecisionAnswer{
 						{ID: "q1", Belief: &belief},
 						{ID: "q2", Choice: "go", Probabilities: map[string]float64{"go": 0.7, "stay": 0.3}, Confidence: 0.8},
-						{ID: "q3", Levels: []string{"high"}, LevelProbabilities: []float64{0.2, 0.8}},
+						{ID: "q3", Score: &score, Levels: []string{"high"}, LevelProbabilities: []float64{0.2, 0.8}},
 					},
 					Usage: Usage{InputTokens: 50, OutputTokens: 10},
 				},
@@ -215,7 +224,7 @@ func goldEvents() []struct {
 			ev: Event{
 				Kind: KindEmbed, RunID: goldRun,
 				Time: goldTime, Duration: 120 * time.Millisecond, SchemaVersion: EventSchemaVersion,
-				Embed: &Embed{Model: "text-embed-3", Inputs: 4, Dimensions: 1536, CacheHits: 1, Usage: Usage{InputTokens: 900}},
+				Embed: &EmbedEvent{Model: "text-embed-3", Inputs: 4, Dimensions: 1536, CacheHits: 1, Usage: Usage{InputTokens: 900}},
 			},
 		},
 		{
@@ -223,7 +232,7 @@ func goldEvents() []struct {
 			ev: Event{
 				Kind: KindExec, RunID: goldRun,
 				Time: goldTime, Duration: 2 * time.Second, SchemaVersion: EventSchemaVersion,
-				Exec: &Exec{
+				Exec: &ExecEvent{
 					Backend:     "docker",
 					Command:     []string{"sh", "-c", "ls"},
 					ExitCode:    2,
@@ -256,7 +265,6 @@ func TestEventGoldenJSON(t *testing.T) {
   "schema_version": 1,
   "start": {
     "task": "summarize the ledger",
-    "continued": true,
     "tools": [
       "search",
       "calc"
@@ -266,6 +274,7 @@ func TestEventGoldenJSON(t *testing.T) {
 		"completion": `{
   "kind": "completion",
   "run_id": "1758366600000-deadbeef00112233",
+  "span_id": "1758366600001-0123456789abcdef",
   "step": 2,
   "time": "2026-09-20T12:30:00Z",
   "duration": 1500000000,
@@ -349,6 +358,7 @@ func TestEventGoldenJSON(t *testing.T) {
 		"attempt": `{
   "kind": "attempt",
   "run_id": "1758366600000-deadbeef00112233",
+  "span_id": "1758366600001-0123456789abcdef",
   "time": "2026-09-20T12:30:00Z",
   "duration": 250000000,
   "schema_version": 1,
@@ -447,6 +457,7 @@ func TestEventGoldenJSON(t *testing.T) {
   "schema_version": 1,
   "finalize": {
     "truncation_reason": "max_steps",
+    "finalized": true,
     "iterations": 8,
     "usage": {
       "input_tokens": 1000,
@@ -463,11 +474,14 @@ func TestEventGoldenJSON(t *testing.T) {
   "decision": {
     "backend": "typesafe",
     "model": "jev-1",
+    "state": {"host":"db-1"},
     "questions": [
       {
         "id": "q1",
         "kind": "noul",
-        "instructions": {"prompt":"confident?"}
+        "instructions": {"prompt":"confident?"},
+        "true": "clearly risky",
+        "false": "clearly safe"
       },
       {
         "id": "q2",
@@ -504,6 +518,7 @@ func TestEventGoldenJSON(t *testing.T) {
       },
       {
         "id": "q3",
+        "score": 2.09,
         "levels": [
           "high"
         ],
@@ -675,13 +690,14 @@ func TestObserverPanicPropagates(t *testing.T) {
 
 func TestObserverMustNotSeeMutatedEvent(t *testing.T) {
 	// Documented contract: an Observer is a data sink and must not mutate the
-	// event. The fan-out passes the event by value, so mutation of the
-	// struct is impossible; this pins that a payload pointer swap inside one
-	// observer stays invisible to the emitter and to later observers.
+	// event. The fan-out passes the event by value, so reassigning a payload
+	// pointer inside one observer stays invisible to the emitter and to
+	// later observers. (Mutating THROUGH the shared payload pointer would be
+	// visible; that is prohibited by the Observer doc, not enforced here.)
 	var seenBySecond Event
-	ev := Event{Kind: KindExec, Exec: &Exec{Backend: "docker"}}
+	ev := Event{Kind: KindExec, Exec: &ExecEvent{Backend: "docker"}}
 	chain := Observers(
-		ObserverFunc(func(_ context.Context, e Event) { e.Exec = &Exec{Backend: "hijacked"} }),
+		ObserverFunc(func(_ context.Context, e Event) { e.Exec = &ExecEvent{Backend: "hijacked"} }),
 		ObserverFunc(func(_ context.Context, e Event) { seenBySecond = e }),
 	)
 	chain.Observe(context.Background(), ev)
@@ -690,5 +706,252 @@ func TestObserverMustNotSeeMutatedEvent(t *testing.T) {
 	}
 	if ev.Exec.Backend != "docker" {
 		t.Fatalf("emitter's event was mutated: %+v", ev.Exec)
+	}
+}
+
+// The decide package imports root, so this test file cannot import decide.
+// The mirrors below restate exactly the decide vocabulary the conversion
+// layer (llmkit-1sx.3) will translate: if DecisionEvent cannot carry a
+// decide fact, TestDecisionMirrorRoundTrip fails instead of the conversion
+// silently losing it.
+
+type mirrorQuestion interface {
+	mirrorID() string
+	instructions() any
+}
+
+type mirrorNoul struct {
+	ID           string
+	Instructions any
+	True, False  any
+}
+
+func (q mirrorNoul) mirrorID() string { return q.ID }
+
+type mirrorChoice struct {
+	ID           string
+	Instructions any
+	Options      map[string]any
+}
+
+func (q mirrorChoice) mirrorID() string { return q.ID }
+
+type mirrorScore struct {
+	ID           string
+	Instructions any
+	Levels       []any
+}
+
+func (q mirrorScore) mirrorID() string { return q.ID }
+
+type mirrorChoiceAnswer struct {
+	Choice        string
+	Probabilities map[string]float64
+	Confidence    float64
+}
+
+type mirrorScoreAnswer struct {
+	Score         float64
+	Levels        []string
+	Probabilities []float64
+	Confidence    float64
+}
+
+type mirrorResponse struct {
+	Model   string
+	Nouls   map[string]float64
+	Choices map[string]mirrorChoiceAnswer
+	Scores  map[string]mirrorScoreAnswer
+	Usage   Usage
+}
+
+// rawToAny decodes raw with json.Number preserved so integers survive the
+// round-trip exactly (the real conversion layer must do the same).
+func rawToAny(t *testing.T, raw json.RawMessage) any {
+	t.Helper()
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		t.Fatalf("decode raw %s: %v", raw, err)
+	}
+	return v
+}
+
+func mirrorToDecisionEvent(t *testing.T, state any, qs []mirrorQuestion, resp mirrorResponse) Event {
+	t.Helper()
+	raw := func(v any) json.RawMessage {
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("marshal mirror value: %v", err)
+		}
+		return b
+	}
+	questions := make([]DecisionQuestion, 0, len(qs))
+	for _, q := range qs {
+		dq := DecisionQuestion{ID: q.mirrorID(), Kind: kindOf(q), Instructions: raw(q.instructions())}
+		switch q := q.(type) {
+		case mirrorNoul:
+			dq.True, dq.False = raw(q.True), raw(q.False)
+		case mirrorChoice:
+			dq.Options = map[string]json.RawMessage{}
+			for k, v := range q.Options {
+				dq.Options[k] = raw(v)
+			}
+		case mirrorScore:
+			for _, lv := range q.Levels {
+				dq.Levels = append(dq.Levels, raw(lv))
+			}
+		}
+		questions = append(questions, dq)
+	}
+	sort.Slice(questions, func(i, j int) bool { return questions[i].ID < questions[j].ID })
+
+	answers := make([]DecisionAnswer, 0, len(qs))
+	for _, q := range qs {
+		id := q.mirrorID()
+		switch q.(type) {
+		case mirrorNoul:
+			belief := resp.Nouls[id]
+			answers = append(answers, DecisionAnswer{ID: id, Belief: &belief})
+		case mirrorChoice:
+			a := resp.Choices[id]
+			answers = append(answers, DecisionAnswer{ID: id, Choice: a.Choice, Probabilities: a.Probabilities, Confidence: a.Confidence})
+		case mirrorScore:
+			a := resp.Scores[id]
+			answers = append(answers, DecisionAnswer{ID: id, Score: &a.Score, Levels: a.Levels, LevelProbabilities: a.Probabilities, Confidence: a.Confidence})
+		}
+	}
+	sort.Slice(answers, func(i, j int) bool { return answers[i].ID < answers[j].ID })
+
+	return Event{
+		Kind: KindDecision, Time: goldTime, SchemaVersion: EventSchemaVersion,
+		Decision: &DecisionEvent{
+			Backend: "typesafe", Model: resp.Model, State: raw(state),
+			Questions: questions, Answers: answers, Usage: resp.Usage,
+		},
+	}
+}
+
+func kindOf(q mirrorQuestion) string {
+	switch q.(type) {
+	case mirrorNoul:
+		return "noul"
+	case mirrorChoice:
+		return "choice"
+	case mirrorScore:
+		return "score"
+	}
+	panic("unknown mirror question")
+}
+
+func (q mirrorNoul) instructions() any   { return q.Instructions }
+func (q mirrorChoice) instructions() any { return q.Instructions }
+func (q mirrorScore) instructions() any  { return q.Instructions }
+
+func decisionToMirror(t *testing.T, ev Event) (any, []mirrorQuestion, mirrorResponse) {
+	t.Helper()
+	d := ev.Decision
+	state := rawToAny(t, d.State)
+	var qs []mirrorQuestion
+	for _, dq := range d.Questions {
+		ins := rawToAny(t, dq.Instructions)
+		switch dq.Kind {
+		case "noul":
+			qs = append(qs, mirrorNoul{ID: dq.ID, Instructions: ins, True: rawToAny(t, dq.True), False: rawToAny(t, dq.False)})
+		case "choice":
+			opts := map[string]any{}
+			for k, v := range dq.Options {
+				opts[k] = rawToAny(t, v)
+			}
+			qs = append(qs, mirrorChoice{ID: dq.ID, Instructions: ins, Options: opts})
+		case "score":
+			var levels []any
+			for _, lv := range dq.Levels {
+				levels = append(levels, rawToAny(t, lv))
+			}
+			qs = append(qs, mirrorScore{ID: dq.ID, Instructions: ins, Levels: levels})
+		default:
+			t.Fatalf("unknown question kind %q", dq.Kind)
+		}
+	}
+	resp := mirrorResponse{Model: d.Model, Nouls: map[string]float64{}, Choices: map[string]mirrorChoiceAnswer{}, Scores: map[string]mirrorScoreAnswer{}, Usage: d.Usage}
+	for _, da := range d.Answers {
+		switch {
+		case da.Belief != nil:
+			resp.Nouls[da.ID] = *da.Belief
+		case da.Score != nil:
+			resp.Scores[da.ID] = mirrorScoreAnswer{Score: *da.Score, Levels: da.Levels, Probabilities: da.LevelProbabilities, Confidence: da.Confidence}
+		case da.Choice != "":
+			resp.Choices[da.ID] = mirrorChoiceAnswer{Choice: da.Choice, Probabilities: da.Probabilities, Confidence: da.Confidence}
+		default:
+			t.Fatalf("answer %q carries no kind group", da.ID)
+		}
+	}
+	return state, qs, resp
+}
+
+// TestDecisionMirrorRoundTrip converts a hand-built decide-shaped Ask
+// (noul with criteria, choice, score) to DecisionEvent, through the JSON
+// wire, and back, requiring equality: the root vocabulary can carry every
+// fact the decide conversion layer must round-trip.
+func TestDecisionMirrorRoundTrip(t *testing.T) {
+	origState := map[string]any{"host": "db-1", "errors": json.Number("42")}
+	origQuestions := []mirrorQuestion{
+		mirrorNoul{ID: "risky", Instructions: "is this risky?", True: "clearly risky", False: "clearly safe"},
+		mirrorChoice{ID: "next_action", Instructions: "stay or go?", Options: map[string]any{"go": "leave", "stay": "remain"}},
+		mirrorScore{ID: "severity", Instructions: "rate it", Levels: []any{"low", "mid", "high"}},
+	}
+	origResponse := mirrorResponse{
+		Model: "jev-1.13.0",
+		Nouls: map[string]float64{"risky": 0.25},
+		Choices: map[string]mirrorChoiceAnswer{
+			"next_action": {Choice: "go", Probabilities: map[string]float64{"go": 0.7, "stay": 0.3}, Confidence: 0.8},
+		},
+		Scores: map[string]mirrorScoreAnswer{
+			"severity": {Score: 2.09, Levels: []string{"high"}, Probabilities: []float64{0.1, 0.4, 0.5}, Confidence: 0.6},
+		},
+		Usage: Usage{InputTokens: 540, OutputTokens: 80},
+	}
+
+	ev := mirrorToDecisionEvent(t, origState, origQuestions, origResponse)
+
+	// Through the wire, like a durable sink and a replay source would.
+	data, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back Event
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatalf("unmarshal: %v\njson: %s", err, data)
+	}
+	if !reflect.DeepEqual(ev, back) {
+		t.Fatalf("decision event did not survive the wire\nwant: %#v\ngot:  %#v", ev, back)
+	}
+
+	backState, backQuestions, backResponse := decisionToMirror(t, back)
+	if !reflect.DeepEqual(origState, backState) {
+		t.Fatalf("state lost: orig %v back %v", origState, backState)
+	}
+	if !reflect.DeepEqual(origResponse, backResponse) {
+		t.Fatalf("response lost:\norig: %+v\nback: %+v", origResponse, backResponse)
+	}
+	if len(backQuestions) != len(origQuestions) {
+		t.Fatalf("question count %d, want %d", len(backQuestions), len(origQuestions))
+	}
+	// decisionToMirror returns questions in encoded (ID-sorted) order; the
+	// originals are compared as a set with type-sensitive equality.
+	byID := map[string]mirrorQuestion{}
+	for _, q := range backQuestions {
+		byID[q.mirrorID()] = q
+	}
+	for _, q := range origQuestions {
+		got, ok := byID[q.mirrorID()]
+		if !ok {
+			t.Fatalf("question %q missing after round-trip", q.mirrorID())
+		}
+		if !reflect.DeepEqual(q, got) {
+			t.Fatalf("question %q lost:\norig: %+v\nback: %+v", q.mirrorID(), q, got)
+		}
 	}
 }
