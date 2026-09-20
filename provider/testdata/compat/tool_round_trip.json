@@ -19,25 +19,25 @@
   "request_check": "response_only",
   "inputs": [
     {
-      "System": "",
-      "Messages": [
+      "system": "",
+      "messages": [
         {
-          "Role": "user",
-          "Content": [
+          "role": "user",
+          "content": [
             {
               "kind": "text",
               "text": "Read the file poetry.txt using the read_file tool, then quote its second line verbatim as your final answer."
             }
           ],
-          "ToolCalls": null,
-          "ToolCallID": "",
-          "IsError": false
+          "tool_calls": null,
+          "tool_call_id": "",
+          "is_error": false
         }
       ],
-      "Tools": [
+      "tools": [
         {
-          "Name": "read_file",
-          "Description": "Reads a text file and returns its contents.",
+          "name": "read_file",
+          "description": "Reads a text file and returns its contents.",
           "Parameters": {
             "type": "object",
             "properties": {
@@ -52,67 +52,67 @@
           }
         }
       ],
-      "MaxTokens": 768,
-      "Temperature": null,
-      "Thinking": null,
-      "ToolChoice": {
-        "Mode": "",
-        "Name": ""
+      "max_tokens": 768,
+      "temperature": null,
+      "thinking": null,
+      "tool_choice": {
+        "mode": "",
+        "name": ""
       },
-      "StopSequences": null,
-      "TopP": null,
-      "TopK": null,
-      "Seed": null,
-      "ResponseSchema": null,
-      "ResponseSchemaName": ""
+      "stop_sequences": null,
+      "top_p": null,
+      "top_k": null,
+      "seed": null,
+      "response_schema": null,
+      "response_schema_name": ""
     },
     {
-      "System": "",
-      "Messages": [
+      "system": "",
+      "messages": [
         {
-          "Role": "user",
-          "Content": [
+          "role": "user",
+          "content": [
             {
               "kind": "text",
               "text": "Read the file poetry.txt using the read_file tool, then quote its second line verbatim as your final answer."
             }
           ],
-          "ToolCalls": null,
-          "ToolCallID": "",
-          "IsError": false
+          "tool_calls": null,
+          "tool_call_id": "",
+          "is_error": false
         },
         {
-          "Role": "assistant",
-          "Content": null,
-          "ToolCalls": [
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [
             {
-              "ID": "call_01a0b791b4477722a72006e4",
-              "Name": "read_file",
-              "Arguments": {
+              "id": "call_01a0b791b4477722a72006e4",
+              "name": "read_file",
+              "arguments": {
                 "path": "poetry.txt"
               }
             }
           ],
-          "ToolCallID": "",
-          "IsError": false
+          "tool_call_id": "",
+          "is_error": false
         },
         {
-          "Role": "tool-result",
-          "Content": [
+          "role": "tool-result",
+          "content": [
             {
               "kind": "text",
               "text": "line one\nshall I compare thee to a summer's day\nline three"
             }
           ],
-          "ToolCalls": null,
-          "ToolCallID": "call_01a0b791b4477722a72006e4",
-          "IsError": false
+          "tool_calls": null,
+          "tool_call_id": "call_01a0b791b4477722a72006e4",
+          "is_error": false
         }
       ],
-      "Tools": [
+      "tools": [
         {
-          "Name": "read_file",
-          "Description": "Reads a text file and returns its contents.",
+          "name": "read_file",
+          "description": "Reads a text file and returns its contents.",
           "Parameters": {
             "type": "object",
             "properties": {
@@ -127,19 +127,19 @@
           }
         }
       ],
-      "MaxTokens": 768,
-      "Temperature": null,
-      "Thinking": null,
-      "ToolChoice": {
-        "Mode": "",
-        "Name": ""
+      "max_tokens": 768,
+      "temperature": null,
+      "thinking": null,
+      "tool_choice": {
+        "mode": "",
+        "name": ""
       },
-      "StopSequences": null,
-      "TopP": null,
-      "TopK": null,
-      "Seed": null,
-      "ResponseSchema": null,
-      "ResponseSchemaName": ""
+      "stop_sequences": null,
+      "top_p": null,
+      "top_k": null,
+      "seed": null,
+      "response_schema": null,
+      "response_schema_name": ""
     }
   ],
   "exchanges": [
@@ -226,10 +226,10 @@
     "text": "\u003cthink\u003e\nThe user asked me to read the file and quote the second line verbatim. The second line is \"shall I compare thee to a summer's day\".\n\u003c/think\u003e\n\nshall I compare thee to a summer's day",
     "stop_reason": "end_turn",
     "usage": {
-      "InputTokens": 494,
-      "OutputTokens": 42,
-      "CacheReadInputTokens": 493,
-      "CacheCreationInputTokens": 0
+      "input_tokens": 494,
+      "output_tokens": 42,
+      "cache_read_input_tokens": 493,
+      "cache_creation_input_tokens": 0
     }
   }
 }

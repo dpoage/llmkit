@@ -19,35 +19,35 @@
   "request_check": "strict",
   "inputs": [
     {
-      "System": "",
-      "Messages": [
+      "system": "",
+      "messages": [
         {
-          "Role": "user",
-          "Content": [
+          "role": "user",
+          "content": [
             {
               "kind": "text",
               "text": "Reply with exactly: OK"
             }
           ],
-          "ToolCalls": null,
-          "ToolCallID": "",
-          "IsError": false
+          "tool_calls": null,
+          "tool_call_id": "",
+          "is_error": false
         }
       ],
-      "Tools": null,
-      "MaxTokens": 768,
-      "Temperature": null,
-      "Thinking": null,
-      "ToolChoice": {
-        "Mode": "",
-        "Name": ""
+      "tools": null,
+      "max_tokens": 768,
+      "temperature": null,
+      "thinking": null,
+      "tool_choice": {
+        "mode": "",
+        "name": ""
       },
-      "StopSequences": null,
-      "TopP": null,
-      "TopK": null,
-      "Seed": null,
-      "ResponseSchema": null,
-      "ResponseSchemaName": ""
+      "stop_sequences": null,
+      "top_p": null,
+      "top_k": null,
+      "seed": null,
+      "response_schema": null,
+      "response_schema_name": ""
     }
   ],
   "exchanges": [
@@ -95,10 +95,10 @@
     "text": "\u003cthink\u003e\nThe user wants me to reply with exactly \"OK\".\n\u003c/think\u003e\n\nOK",
     "stop_reason": "end_turn",
     "usage": {
-      "InputTokens": 181,
-      "OutputTokens": 13,
-      "CacheReadInputTokens": 128,
-      "CacheCreationInputTokens": 0
+      "input_tokens": 181,
+      "output_tokens": 13,
+      "cache_read_input_tokens": 128,
+      "cache_creation_input_tokens": 0
     }
   }
 }

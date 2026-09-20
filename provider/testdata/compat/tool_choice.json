@@ -19,25 +19,25 @@
   "request_check": "response_only",
   "inputs": [
     {
-      "System": "",
-      "Messages": [
+      "system": "",
+      "messages": [
         {
-          "Role": "user",
-          "Content": [
+          "role": "user",
+          "content": [
             {
               "kind": "text",
               "text": "Call the add tool with a=2 and b=3."
             }
           ],
-          "ToolCalls": null,
-          "ToolCallID": "",
-          "IsError": false
+          "tool_calls": null,
+          "tool_call_id": "",
+          "is_error": false
         }
       ],
-      "Tools": [
+      "tools": [
         {
-          "Name": "add",
-          "Description": "Adds two numbers.",
+          "name": "add",
+          "description": "Adds two numbers.",
           "Parameters": {
             "type": "object",
             "properties": {
@@ -55,40 +55,40 @@
           }
         }
       ],
-      "MaxTokens": 768,
-      "Temperature": null,
-      "Thinking": null,
-      "ToolChoice": {
-        "Mode": "none",
-        "Name": ""
+      "max_tokens": 768,
+      "temperature": null,
+      "thinking": null,
+      "tool_choice": {
+        "mode": "none",
+        "name": ""
       },
-      "StopSequences": null,
-      "TopP": null,
-      "TopK": null,
-      "Seed": null,
-      "ResponseSchema": null,
-      "ResponseSchemaName": ""
+      "stop_sequences": null,
+      "top_p": null,
+      "top_k": null,
+      "seed": null,
+      "response_schema": null,
+      "response_schema_name": ""
     },
     {
-      "System": "",
-      "Messages": [
+      "system": "",
+      "messages": [
         {
-          "Role": "user",
-          "Content": [
+          "role": "user",
+          "content": [
             {
               "kind": "text",
               "text": "Call the add tool with a=2 and b=3."
             }
           ],
-          "ToolCalls": null,
-          "ToolCallID": "",
-          "IsError": false
+          "tool_calls": null,
+          "tool_call_id": "",
+          "is_error": false
         }
       ],
-      "Tools": [
+      "tools": [
         {
-          "Name": "add",
-          "Description": "Adds two numbers.",
+          "name": "add",
+          "description": "Adds two numbers.",
           "Parameters": {
             "type": "object",
             "properties": {
@@ -106,40 +106,40 @@
           }
         }
       ],
-      "MaxTokens": 768,
-      "Temperature": null,
-      "Thinking": null,
-      "ToolChoice": {
-        "Mode": "required",
-        "Name": ""
+      "max_tokens": 768,
+      "temperature": null,
+      "thinking": null,
+      "tool_choice": {
+        "mode": "required",
+        "name": ""
       },
-      "StopSequences": null,
-      "TopP": null,
-      "TopK": null,
-      "Seed": null,
-      "ResponseSchema": null,
-      "ResponseSchemaName": ""
+      "stop_sequences": null,
+      "top_p": null,
+      "top_k": null,
+      "seed": null,
+      "response_schema": null,
+      "response_schema_name": ""
     },
     {
-      "System": "",
-      "Messages": [
+      "system": "",
+      "messages": [
         {
-          "Role": "user",
-          "Content": [
+          "role": "user",
+          "content": [
             {
               "kind": "text",
               "text": "Call the add tool with a=2 and b=3."
             }
           ],
-          "ToolCalls": null,
-          "ToolCallID": "",
-          "IsError": false
+          "tool_calls": null,
+          "tool_call_id": "",
+          "is_error": false
         }
       ],
-      "Tools": [
+      "tools": [
         {
-          "Name": "add",
-          "Description": "Adds two numbers.",
+          "name": "add",
+          "description": "Adds two numbers.",
           "Parameters": {
             "type": "object",
             "properties": {
@@ -157,19 +157,19 @@
           }
         }
       ],
-      "MaxTokens": 768,
-      "Temperature": null,
-      "Thinking": null,
-      "ToolChoice": {
-        "Mode": "tool",
-        "Name": "add"
+      "max_tokens": 768,
+      "temperature": null,
+      "thinking": null,
+      "tool_choice": {
+        "mode": "tool",
+        "name": "add"
       },
-      "StopSequences": null,
-      "TopP": null,
-      "TopK": null,
-      "Seed": null,
-      "ResponseSchema": null,
-      "ResponseSchemaName": ""
+      "stop_sequences": null,
+      "top_p": null,
+      "top_k": null,
+      "seed": null,
+      "response_schema": null,
+      "response_schema_name": ""
     }
   ],
   "exchanges": [
@@ -295,9 +295,9 @@
     "text": "\u003cthink\u003e\nThe user wants me to call the add tool with a=2 and b=3\n\u003c/think\u003e\n\n.",
     "tool_calls": [
       {
-        "ID": "call_2757a8d214bb4fccbd1d9613",
-        "Name": "add",
-        "Arguments": {
+        "id": "call_2757a8d214bb4fccbd1d9613",
+        "name": "add",
+        "arguments": {
           "a": 2,
           "b": 3
         }
@@ -305,10 +305,10 @@
     ],
     "stop_reason": "tool_use",
     "usage": {
-      "InputTokens": 407,
-      "OutputTokens": 53,
-      "CacheReadInputTokens": 256,
-      "CacheCreationInputTokens": 0
+      "input_tokens": 407,
+      "output_tokens": 53,
+      "cache_read_input_tokens": 256,
+      "cache_creation_input_tokens": 0
     }
   }
 }
