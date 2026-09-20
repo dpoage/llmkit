@@ -2,7 +2,7 @@ package embed
 
 import (
 	"fmt"
-	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/retry"
 	"net/http"
 	"os"
 	"strconv"
@@ -69,15 +69,15 @@ type Config struct {
 	CacheSize int
 
 	// Retry tunes transient-failure retries via the shared
-	// llmkit.RetryConfig. Unset knobs (<= 0) resolve at backend
+	// retry.Config. Unset knobs (<= 0) resolve at backend
 	// construction: MaxAttempts to 3 and RequestTimeout to 60s, the embed
 	// bounds, because embeddings are lighter and retried less than LLM
 	// completions. BaseDelay and MaxDelay fall back to
-	// llmkit.DefaultRetryConfig. Jitter is taken literally: 0 means no
+	// retry.Default. Jitter is taken literally: 0 means no
 	// jitter, and values outside [0, 1] are rejected by Validate.
 	// LoadConfig seeds the kit default 20% jitter so env-driven configs
 	// jitter unless overridden.
-	Retry llmkit.RetryConfig
+	Retry retry.Config
 }
 
 // defaults returns a Config with sensible local-first defaults.
@@ -86,10 +86,10 @@ func defaults() Config {
 		Embedder:     "ollama",
 		Model:        "nomic-embed-text",
 		CacheEnabled: false,
-		Retry: llmkit.RetryConfig{
-			BaseDelay: llmkit.DefaultRetryConfig().BaseDelay,
-			MaxDelay:  llmkit.DefaultRetryConfig().MaxDelay,
-			Jitter:    llmkit.DefaultRetryConfig().Jitter,
+		Retry: retry.Config{
+			BaseDelay: retry.Default().BaseDelay,
+			MaxDelay:  retry.Default().MaxDelay,
+			Jitter:    retry.Default().Jitter,
 		},
 	}
 }
@@ -192,7 +192,7 @@ func (c Config) Validate() error {
 }
 
 // httpClient returns the injected client as-is, or a plain client with no
-// Timeout. With the plain client, internal/retry bounds each round trip
+// Timeout. With the plain client, retry.Do bounds each round trip
 // with the per-attempt Retry.RequestTimeout deadline. An injected client
 // keeps its own Timeout, which can end an attempt earlier. Callers must
 // treat the returned client as read-only.
@@ -208,11 +208,11 @@ func (c Config) httpClient() *http.Client {
 // RequestTimeout (embeddings retry less often and each attempt is far lighter
 // than an LLM completion, so the kit's 4 / 5m defaults are tightened; worst
 // case before giving up is roughly 3 * (60s + backoff)). BaseDelay and
-// MaxDelay fall back to llmkit.DefaultRetryConfig. Jitter is left literal so
+// MaxDelay fall back to retry.Default. Jitter is left literal so
 // explicit 0 means no jitter; LoadConfig seeds the kit default 20% jitter.
-func (c Config) retryPolicy() llmkit.RetryConfig {
+func (c Config) retryPolicy() retry.Config {
 	p := c.Retry
-	def := llmkit.DefaultRetryConfig()
+	def := retry.Default()
 	if p.MaxAttempts <= 0 {
 		p.MaxAttempts = defaultEmbedMaxAttempts
 	}

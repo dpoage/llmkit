@@ -8,6 +8,38 @@ entry below is marked.
 
 ## [Unreleased]
 
+### Added
+
+- `llmkit/retry`: a leaf package (standard library only) holding the shared
+  retry loop: `retry.Config`, `retry.Default`, `retry.Do`, and
+  `retry.ParseRetryAfter`. `Do` runs any operation — not just an
+  `llmkit.Client` — under the same policy as `WithRetry`: exponential
+  backoff with jitter, server `Retry-After` precedence capped at `MaxDelay`,
+  and a per-attempt `RequestTimeout` deadline. A caller-supplied classifier
+  decides which errors are transient and carries the header's delay and
+  presence; presence with a zero delay means an immediate retry, absence
+  means the exponential schedule. `Do` clamps `MaxAttempts`,
+  `RequestTimeout`, and `Jitter` to usable values. `Config.Sleep` and
+  `Config.Rand` are exported hooks — nil means a real timer and the
+  package-level random source — so tests can pin the schedule
+  deterministically.
+
+### Changed
+
+- **Breaking:** the retry vocabulary moved from the root package into
+  `llmkit/retry`: `llmkit.RetryConfig` is now `retry.Config`,
+  `llmkit.DefaultRetryConfig` is `retry.Default`, and
+  `llmkit.DefaultRequestTimeout` is `retry.DefaultRequestTimeout`.
+  `WithRetry` takes a `retry.Config`, and `provider.Options.Retry`,
+  `embed.Config.Retry`, and `decide.Config.Retry` are `retry.Config`.
+  There are no compatibility aliases.
+- `internal/retry` is deleted. Its loop and header parser now live in the
+  `llmkit/retry` leaf package; `embed`, `decide`, and `internal/adapter`
+  call them there. Internal package; no caller-facing change; retry
+  behavior is unchanged except that every in-tree loop now applies
+  `internal/retry`'s stricter negative-`Retry-After` and overflow clamps,
+  which no in-tree config could reach.
+
 ## [0.5.0] - 2026-09-20
 
 ### Added

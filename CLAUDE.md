@@ -86,6 +86,7 @@ Read [docs/design.md](docs/design.md) for the layering and the decision records.
 | Package | Reference |
 |---|---|
 | root vocabulary | `go doc github.com/dpoage/llmkit` |
+| shared retry loop | `go doc github.com/dpoage/llmkit/retry` |
 | client construction | `go doc github.com/dpoage/llmkit/provider` |
 | agent loop | `go doc github.com/dpoage/llmkit/agent` |
 | sandbox | `go doc github.com/dpoage/llmkit/sandbox` |

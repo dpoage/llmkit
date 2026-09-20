@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/retry"
 )
 
 // echoClient is a programmable Client that returns scripted responses and
@@ -103,7 +104,7 @@ func ExampleWithRetry() {
 			{Text: "recovered", StopReason: llmkit.StopEndTurn},
 		},
 	}
-	wrapped := llmkit.WithRetry(c, llmkit.RetryConfig{
+	wrapped := llmkit.WithRetry(c, retry.Config{
 		MaxAttempts:    3,
 		BaseDelay:      time.Millisecond,
 		MaxDelay:       time.Millisecond,

@@ -1,11 +1,12 @@
 # Decide
 
-The `decide` package evaluates decisions with TypeSafe's Jev decision model
-(the System One API). One `Client.Ask` call sends a state plus a set of typed
-questions, and returns calibrated beliefs and probability distributions.
+The `decide` package evaluates decisions with TypeSafe's Jev decision
+model (the System One API). One `Client.Ask` call sends a state plus a
+set of typed questions and returns calibrated beliefs and probability
+distributions.
 
-Jev is not a chat model. It has no messages, no tools, no streaming, and no
-text output. The package therefore does not implement `llmkit.Client` and does
+Jev is not a chat model. It has no messages, no tools, no streaming, and
+no text output. The package does not implement `llmkit.Client` and does
 not go through `provider.New`; see
 [decision models are not Clients](design.md#decision-models-are-not-clients)
 for that decision. The API reference is canonical:
@@ -37,9 +38,9 @@ func main() {
 ```
 
 `New` validates the config and performs no network I/O and no environment
-lookups, so construction is hermetic and testable with a placeholder key. An
-invalid field returns an error wrapping `llmkit.ErrInvalidRequest`; the error
-never echoes the key.
+lookups, so construction is hermetic and testable with a placeholder key.
+An invalid field returns an error wrapping `llmkit.ErrInvalidRequest`;
+the error never echoes the key.
 
 | Field | Required | Effect and default |
 |---|---|---|
@@ -47,7 +48,7 @@ never echoes the key.
 | `Model` | Yes | A versioned id (`jev-1.13.0`) or alias (`jev-latest`, `jev-preview`). There is no default alias. |
 | `BaseURL` | No | Endpoint root for tests and gateways. Default: `https://api.typesafe.ai`; the path `/v1/systemone` is appended. |
 | `HTTPClient` | No | Used as-is, including its `Timeout`. Default: a plain client with no `http.Client.Timeout`, so the per-attempt `RequestTimeout` is the only bound. |
-| `Retry` | No | Unset knobs resolve at construction: 3 attempts, 30 s per-attempt timeout. `BaseDelay` (500 ms) and `MaxDelay` (30 s) come from `llmkit.DefaultRetryConfig`. `Jitter` is literal: 0 means no jitter. |
+| `Retry` | No | Unset knobs resolve at construction: 3 attempts, 30 s per-attempt timeout. `BaseDelay` (500 ms) and `MaxDelay` (30 s) come from `retry.Default`. `Jitter` is literal: 0 means no jitter. |
 | `Recorder` | No | Receives one `llmkit.UsageEvent` per successful `Ask` through its `Record(llmkit.UsageEvent)` method. Default: nil (no recording). |
 
 ## The three question types
@@ -203,12 +204,12 @@ func main() {
 	}
 }
 ```
-
 ### One Ask with all three types
 
-One `Ask` evaluates every question against the state in one logical request;
-only retries put more HTTP requests on the wire. A mixed set needs no second
-call from you.
+One `Ask` evaluates every question against the state in one logical
+request; only retries put more HTTP requests on the wire. A mixed set
+needs no second call from you.
+
 
 ```go
 package main
@@ -327,13 +328,14 @@ number or boolean where only text kinds are accepted.
 An unknown model arrives as a 400 in the live lane (observed 2026-09-20);
 the vendor's API doc reserves 422 for validation failures. Both map to
 `ErrInvalidRequest`.
-
 The client parses the `Retry-After` header on every status. On a retried
-status (429 and every 5xx, 529 included), a server-supplied delay replaces the
-exponential backoff for the sleep. The sleep is capped at
-`RetryConfig.MaxDelay` (30 s by default); `APIError.RetryAfter` carries the
-raw server value. If a present header clamps to zero — a zero value or a past
-HTTP-date — the client retries immediately. Every other status is terminal.
+status (429 and every 5xx, 529 included), a server-supplied delay
+replaces the exponential backoff for the sleep. The sleep is capped at
+`retry.Config.MaxDelay` (30 s by default); `APIError.RetryAfter` carries
+the raw server value. A present header that clamps to zero — a zero
+value or a past HTTP-date — retries immediately. Every other status is
+terminal.
+
 
 Error messages carry the vendor body text, truncated to 200 characters plus
 an appended `...`. llmkit never places the API key into an error.

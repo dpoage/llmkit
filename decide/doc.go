@@ -84,7 +84,7 @@
 // # Retries
 //
 // Ask retries HTTP 429, every 5xx (529 included), and timeout-classified
-// transport errors through the shared internal loop. Each attempt runs
+// transport errors through the shared retry loop, [retry.Do]. Each attempt runs
 // under a per-attempt RequestTimeout deadline, and parent cancellation
 // is always terminal. The client parses the Retry-After header for
 // every status. When a status is retried, a server-supplied delay
@@ -97,7 +97,7 @@
 //
 // Unset knobs resolve at construction to the decide defaults:
 // 3 attempts and a 30s per-attempt timeout (Jev answers in under a
-// second). BaseDelay and MaxDelay come from [llmkit.DefaultRetryConfig],
+// second). BaseDelay and MaxDelay come from [retry.Default],
 // and Jitter is taken literally (explicit 0 means no jitter).
 //
 // # Vendor limits and jaggedness

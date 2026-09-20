@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/internal/adapter"
-	"github.com/dpoage/llmkit/internal/retry"
+	"github.com/dpoage/llmkit/retry"
 	"io"
 	"net/http"
 	"strconv"
