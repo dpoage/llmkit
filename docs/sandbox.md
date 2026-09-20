@@ -132,6 +132,17 @@ flowchart TD
 
 `InfraKilled` is true when either `TimedOut` or `WorkspaceQuotaExceeded` is set. The two flags are mutually exclusive: `TimedOut` covers the absolute timeout and the idle-stall kill; `WorkspaceQuotaExceeded` covers only the workspace-growth ceiling. Both report `ExitCode == -1`.
 
+## Observing executions
+
+`sandbox.Observe` wraps any backend so every `Exec` reports one `llmkit.Event` (kind `exec`) to an `llmkit.Observer` — the kit's run-correlated event stream — and otherwise behaves exactly like the backend it wraps: the `Result`, any error, and `MaterializeWorkspace` pass through unchanged. The event carries the backend name (`cli`, `bwrap`, `host`, or `mock` — the same names `UnsupportedSpecError` uses; any other implementation is named by its Go type), `Spec.Cmd`, the exit code, the captured byte counts per stream, whether either stream was truncated, the run's `Result.Duration`, and the infrastructure error when there was one. The exit code is `-1` exactly when the process never ran to an exit — an infrastructure error (`Err` non-empty) or a watchdog kill — so the event mirrors [Classifying a Result](#classifying-a-result): a non-zero exit is the command's own verdict and arrives with `Err` empty, and a kill needs `Result.InfraKilled` on the returned `Result` to be named (v1 events are a summary; kill reasons and captured files are not recorded). `RunID` and `SpanID` come from the call's context, so executions correlate with the rest of a run's events.
+
+```go
+sb := sandbox.Observe(sandbox.NewBwrap(), obs) // obs is your llmkit.Observer
+res, err := sb.Exec(ctx, sandbox.Spec{Cmd: []string{"go", "test", "./..."}})
+```
+
+`Close` (CLI and Bwrap) is not on the `Sandbox` interface, so keep the concrete backend reference to call it. The package's `ExampleObserve` shows a complete run.
+
 ## Workspaces and symlink hardening
 
 By default `Exec` copies the repository snapshot into a fresh temporary directory; it never works in the live checkout. With `Spec.Workspace` set, `Exec` uses that caller-owned directory directly instead of copying.
