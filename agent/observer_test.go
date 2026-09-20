@@ -1206,63 +1206,403 @@ func (c *completedSignalClient) Complete(ctx context.Context, req llmkit.Request
 	return resp, err
 }
 
-// TestObserver_CancelledCallsRecordNotRun pins M18/M19: a run cancelled
-// while calls await authorization records them as IsError with the
-// "not run" rendering — under WithParallelTools and a policy — and never
-// with the Denied mark.
+// TestObserver_CancelledCallsRecordNotRun pins M18/M19, deterministically:
+// the policy cancels the run inside its own FIRST invocation, so the second
+// call of the turn is never authorized — it records IsError with the
+// "not run" rendering and never the Denied mark, while the call authorized
+// before the cancellation ran normally.
 func TestObserver_CancelledCallsRecordNotRun(t *testing.T) {
 	dir := t.TempDir()
 	recorder := JSONL(dir, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	// The policy blocks until the test releases it, so the calls sit in the
-	// authorize pre-pass when the cancellation lands.
-	policyGate := make(chan struct{})
-	policy := ToolPolicyFunc(func(_ context.Context, _ *llmkit.ToolCall) error {
-		<-policyGate
+	var once sync.Once
+	policy := ToolPolicyFunc(func(_ context.Context, call *llmkit.ToolCall) error {
+		if call.Name == "t1" {
+			once.Do(func() { cancel() })
+		}
 		return nil
 	})
 	calls := []llmkit.ToolCall{
 		{ID: "t1", Name: "t1", Arguments: json.RawMessage(`{}`)},
 		{ID: "t2", Name: "t2", Arguments: json.RawMessage(`{}`)},
 	}
-	hit := make(chan struct{})
-	cl := &completedSignalClient{
-		inner: newFakeClient(toolCallsResp(calls...)),
-		hit:   hit,
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	r := NewRunner(cl, []Tool{echoTool{name: "t1"}, echoTool{name: "t2"}}, "sys",
-		WithToolPolicy(policy), WithParallelTools(), WithObserver(recorder))
+	r := NewRunner(newFakeClient(toolCallsResp(calls...)), []Tool{
+		echoTool{name: "t1"}, echoTool{name: "t2"},
+	}, "sys", WithToolPolicy(policy), WithParallelTools(), WithObserver(recorder))
 
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_, _ = r.Run(ctx, "task", WithRunID("cancelled-1"))
-	}()
-	<-hit             // the turn-1 completion is in; calls await authorization
-	cancel()          // cancel while the policy blocks
-	close(policyGate) // let the pre-pass observe the cancellation
-	<-done
+	// The loop's post-turn ctx check returns the cancellation; the transcript
+	// still holds both tool events.
+	_, _ = r.Run(ctx, "task", WithRunID("cancelled-1"))
 
 	evs, err := recorder.Events(context.Background(), "cancelled-1")
 	if err != nil {
 		t.Fatalf("Events: %v", err)
 	}
-	saw := 0
-	for _, ev := range evs {
-		if ev.Kind != llmkit.KindToolRun || ev.ToolRun == nil {
-			continue
-		}
-		saw++
-		if ev.ToolRun.Denied {
-			t.Errorf("cancelled call %s recorded as Denied; a cancelled run is not a policy decision", ev.ToolRun.Call.Name)
-		}
-		if !ev.ToolRun.IsError || !strings.Contains(ev.ToolRun.Result, "not run: context canceled") {
-			t.Errorf("cancelled call %s = %+v, want IsError with the not-run rendering", ev.ToolRun.Call.Name, ev.ToolRun)
+	byID := map[string]*llmkit.Event{}
+	for i := range evs {
+		ev := &evs[i]
+		if ev.Kind == llmkit.KindToolRun && ev.ToolRun != nil {
+			byID[ev.ToolRun.Call.ID] = ev
 		}
 	}
-	if saw == 0 {
-		t.Fatal("no tool_run events for the cancelled calls")
+	t1, t2 := byID["t1"], byID["t2"]
+	if t1 == nil || t2 == nil {
+		t.Fatalf("tool events missing: t1=%v t2=%v", t1 != nil, t2 != nil)
+	}
+	if t1.ToolRun.Denied || t1.ToolRun.IsError {
+		t.Errorf("t1 ran after its own authorize cancelled: %+v, want a normal result", t1.ToolRun)
+	}
+	if t2.ToolRun.Denied {
+		t.Error("t2 recorded as Denied; a cancelled run is not a policy decision")
+	}
+	if !t2.ToolRun.IsError || !strings.Contains(t2.ToolRun.Result, "not run: context canceled") {
+		t.Errorf("t2 = %+v, want IsError with the not-run rendering", t2.ToolRun)
+	}
+}
+
+// --- round-3 discriminating tests: each named mutant dies ------------------
+
+// TestObserver_DuplicateStartRefusalDetails pins M15/M6/M7/M32/M39: the
+// duplicate-Start refusal names the run, and the poisoned entry's fd is
+// closed (nil) — no orphan handle survives the poisoning.
+func TestObserver_DuplicateStartRefusalDetails(t *testing.T) {
+	dir := t.TempDir()
+	var mu sync.Mutex
+	var msgs []string
+	sink := JSONL(dir, func(err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		msgs = append(msgs, err.Error())
+	})
+	ctx := context.Background()
+	start := func() llmkit.Event {
+		ev := llmkit.NewEvent(llmkit.WithRun(ctx, "dup-x"), llmkit.KindStart)
+		ev.Start = &llmkit.StartEvent{Task: "t"}
+		return ev
+	}
+	sink.Observe(ctx, start())
+	sink.Observe(ctx, start()) // duplicate
+
+	mu.Lock()
+	defer mu.Unlock()
+	joined := strings.Join(msgs, "\n")
+	if !strings.Contains(joined, "duplicate Start") || !strings.Contains(joined, "dup-x") {
+		t.Errorf("refusal messages = %v, want a duplicate-Start report naming the run", msgs)
+	}
+	sink.mu.Lock()
+	entry := sink.runs["dup-x"]
+	sink.mu.Unlock()
+	if entry == nil {
+		t.Fatal("duplicate-Start entry vanished; want a poisoned entry")
+	}
+	entry.mu.Lock()
+	fdNil := entry.file == nil
+	disabled := entry.disabled
+	entry.mu.Unlock()
+	if !fdNil || !disabled {
+		t.Errorf("poisoned entry file=%v disabled=%v, want nil/true", fdNil, disabled)
+	}
+}
+
+// TestObserver_EventsRejectsDegenerateRecords pins M20/M10/M22/M3/M4/M5: a
+// 2-Start record, a wholly-foreign record, and a 0-byte record all fail.
+func TestObserver_EventsRejectsDegenerateRecords(t *testing.T) {
+	ctx := context.Background()
+	write := func(t *testing.T, name, content string) string {
+		t.Helper()
+		dir := t.TempDir()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	line := func(run llmkit.RunID, kind llmkit.EventKind) string {
+		ev := llmkit.NewEvent(llmkit.WithRun(ctx, run), kind)
+		ev.SchemaVersion = llmkit.EventSchemaVersion
+		if kind == llmkit.KindStart {
+			ev.Start = &llmkit.StartEvent{Task: "t"}
+		}
+		b, _ := json.Marshal(ev)
+		return string(b) + "\n"
+	}
+
+	t.Run("two starts", func(t *testing.T) {
+		dir := write(t, "r-1.jsonl", line("r-1", llmkit.KindStart)+line("r-1", llmkit.KindStart))
+		_, err := JSONL(dir, nil).Events(ctx, "r-1")
+		if err == nil || !strings.Contains(err.Error(), "holds 2 runs") {
+			t.Errorf("err = %v, want the two-run record error", err)
+		}
+	})
+	t.Run("wholly foreign record", func(t *testing.T) {
+		dir := write(t, "r-2.jsonl", line("other", llmkit.KindStart))
+		_, err := JSONL(dir, nil).Events(ctx, "r-2")
+		if err == nil || !strings.Contains(err.Error(), "line 1") || !strings.Contains(err.Error(), `"other"`) {
+			t.Errorf("err = %v, want a file+line error naming the foreign id", err)
+		}
+	})
+	t.Run("zero-byte record", func(t *testing.T) {
+		dir := write(t, "r-3.jsonl", "")
+		_, err := JSONL(dir, nil).Events(ctx, "r-3")
+		if !errors.Is(err, ErrUnknownRun) {
+			t.Errorf("err = %v, want ErrUnknownRun", err)
+		}
+	})
+}
+
+// TestObserver_UnsafeIDCreatesNothingAnywhere pins M40/M9: an unsafe RunID
+// never creates a file under the sink dir OR its parent (the test root).
+func TestObserver_UnsafeIDCreatesNothingAnywhere(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "sink")
+	var mu sync.Mutex
+	var errs []error
+	sink := JSONL(dir, func(err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		errs = append(errs, err)
+	})
+	ctx := context.Background()
+	for _, id := range []llmkit.RunID{"../escape", "sub/../../climb", "..", "."} {
+		ev := llmkit.NewEvent(llmkit.WithRun(ctx, id), llmkit.KindStart)
+		ev.Start = &llmkit.StartEvent{Task: "t"}
+		sink.Observe(ctx, ev)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(errs) != 4 {
+		t.Errorf("onErr fired %d times, want 4 (one per unsafe id)", len(errs))
+	}
+	for _, rootDir := range []string{dir, root} {
+		entries, err := os.ReadDir(rootDir)
+		if err != nil {
+			continue // a directory that was never created is fine
+		}
+		for _, e := range entries {
+			if strings.HasSuffix(e.Name(), ".jsonl") {
+				t.Errorf("unsafe id escaped: %s/%s exists", rootDir, e.Name())
+			}
+		}
+	}
+}
+
+// TestObserver_FdCountFlatAcrossFinalizedRuns pins M42: 200 runs opened and
+// finalized leave the process fd count flat — every fd is closed at
+// Finalize.
+func TestObserver_FdCountFlatAcrossFinalizedRuns(t *testing.T) {
+	countFDs := func() int {
+		entries, err := os.ReadDir("/proc/self/fd")
+		if err != nil {
+			return -1 // non-Linux: skip below
+		}
+		return len(entries)
+	}
+	dir := t.TempDir()
+	sink := JSONL(dir, nil)
+	ctx := context.Background()
+	before := countFDs()
+	for i := range 200 {
+		id := llmkit.RunID(fmt.Sprintf("fd-%d", i))
+		ev := llmkit.NewEvent(llmkit.WithRun(ctx, id), llmkit.KindStart)
+		ev.Start = &llmkit.StartEvent{Task: "t"}
+		sink.Observe(ctx, ev)
+		fin := llmkit.NewEvent(llmkit.WithRun(ctx, id), llmkit.KindFinalize)
+		fin.Finalize = &llmkit.FinalizeEvent{}
+		sink.Observe(ctx, fin)
+	}
+	after := countFDs()
+	if before < 0 || after < 0 {
+		t.Skip("/proc/self/fd unavailable")
+	}
+	if after > before+4 { // small slack for test-framework churn; a per-run leak would be +200
+		t.Errorf("fd count grew from %d to %d across 200 finalized runs; an fd leaked", before, after)
+	}
+}
+
+// TestObserver_PostFinalizeEventsEachReport pins M33/M10: N events after a
+// run's Finalize produce N onErr reports — every occurrence is loud.
+func TestObserver_PostFinalizeEventsEachReport(t *testing.T) {
+	dir := t.TempDir()
+	var mu sync.Mutex
+	var errs []error
+	sink := JSONL(dir, func(err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		errs = append(errs, err)
+	})
+	ctx := context.Background()
+	ev := llmkit.NewEvent(llmkit.WithRun(ctx, "p-1"), llmkit.KindStart)
+	ev.Start = &llmkit.StartEvent{Task: "t"}
+	sink.Observe(ctx, ev)
+	fin := llmkit.NewEvent(llmkit.WithRun(ctx, "p-1"), llmkit.KindFinalize)
+	fin.Finalize = &llmkit.FinalizeEvent{}
+	sink.Observe(ctx, fin)
+	for range 5 {
+		sink.Observe(ctx, fin)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(errs) != 5 {
+		t.Errorf("onErr fired %d times for 5 post-finalize events, want 5", len(errs))
+	}
+}
+
+// TestObserver_StructureAndExhaustionWrapSentinel pins M29/M30/M13/M14:
+// both wire-structure divergence paths wrap ErrReplayDiverged AND record it
+// on the client.
+func TestObserver_StructureAndExhaustionWrapSentinel(t *testing.T) {
+	tr := NewTranscript()
+	tr.RunID = "s-1"
+	tr.Record = append(tr.Record,
+		llmkit.Event{Kind: llmkit.KindToolRun, RunID: "s-1", Step: 1, SchemaVersion: 1,
+			ToolRun: &llmkit.ToolRunEvent{Call: llmkit.ToolCall{ID: "c1", Name: "echo"}, Result: "x"}},
+		llmkit.Event{Kind: llmkit.KindCompletion, RunID: "s-1", Step: 2, SchemaVersion: 1,
+			Completion: &llmkit.CompletionEvent{Response: llmkit.Response{Text: "final"}}},
+	)
+	rc, err := NewReplayClient(tr, "s-1", llmkit.Capabilities{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Structure mismatch: the request carries no preceding tool result.
+	_, err = rc.Complete(context.Background(), llmkit.Request{
+		Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "seed")},
+	})
+	if !errors.Is(err, ErrReplayDiverged) || !strings.Contains(err.Error(), "at step 1") {
+		t.Errorf("structure err = %v, want ErrReplayDiverged naming step 1", err)
+	}
+	if rc.Err() == nil {
+		t.Error("structure divergence not recorded on the client")
+	}
+	// Exhaustion needs a record whose completions carry no tool-result
+	// expectations: two bare completions, then a third Complete.
+	tr2 := NewTranscript()
+	tr2.RunID = "s-2"
+	for step := 1; step <= 2; step++ {
+		tr2.Record = append(tr2.Record, llmkit.Event{Kind: llmkit.KindCompletion, RunID: "s-2", Step: step, SchemaVersion: 1,
+			Completion: &llmkit.CompletionEvent{Response: llmkit.Response{Text: "ok"}}})
+	}
+	rc2, err := NewReplayClient(tr2, "s-2", llmkit.Capabilities{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if _, err := rc2.Complete(context.Background(), llmkit.Request{}); err != nil {
+			t.Fatalf("serving the record: %v", err)
+		}
+	}
+	_, err = rc2.Complete(context.Background(), llmkit.Request{})
+	if !errors.Is(err, ErrReplayDiverged) || !strings.Contains(err.Error(), "after step 2") {
+		t.Errorf("exhaustion err = %v, want ErrReplayDiverged naming the served step", err)
+	}
+	if rc2.Err() == nil {
+		t.Error("exhaustion not recorded on the client")
+	}
+}
+
+// TestObserver_ReplayedDenialReproducesText pins M36: a recorded policy
+// denial replays to the byte-identical model-visible denial text.
+func TestObserver_ReplayedDenialReproducesText(t *testing.T) {
+	policy := ToolPolicyFunc(func(_ context.Context, call *llmkit.ToolCall) error {
+		if call.Name == "denied_tool" {
+			return errors.New("manual approval required")
+		}
+		return nil
+	})
+	rec := NewRunner(newFakeClient(
+		toolResp("c1", "denied_tool", `{}`, 1, 1),
+		textResp("final", 1, 1),
+	), []Tool{echoTool{name: "denied_tool"}}, "sys", WithToolPolicy(policy))
+	out, err := rec.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("record run: %v", err)
+	}
+	const want = "ERROR: tool denied_tool denied: manual approval required"
+	sawRecorded := false
+	for _, m := range out.Messages {
+		if m.Role == llmkit.RoleToolResult && m.Text() == want {
+			sawRecorded = true
+		}
+	}
+	if !sawRecorded {
+		t.Fatalf("recorded run lost the denial text: %+v", out.Messages)
+	}
+
+	rc, err := NewReplayClient(out.Transcript, out.RunID, llmkit.Capabilities{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := NewRunner(rc, rc.Tools(), "sys").Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("replay run: %v", err)
+	}
+	if rc.Err() != nil {
+		t.Fatalf("denial replay diverged: %v", rc.Err())
+	}
+	sawReplayed := false
+	for _, m := range replayed.Messages {
+		if m.Role == llmkit.RoleToolResult && m.Text() == want {
+			sawReplayed = true
+		}
+	}
+	if !sawReplayed {
+		t.Errorf("replayed denial text differs: %+v", replayed.Messages)
+	}
+}
+
+// TestObserver_ExtraCallSetsErr pins M26/M1b: a tool call beyond the record
+// sets rc.Err() via the extra-call path, naming the last recorded step.
+func TestObserver_ExtraCallSetsErr(t *testing.T) {
+	fc := newFakeClient(toolResp("c1", "echo", `{"text":"hi"}`, 1, 1))
+	rec := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys")
+	out, err := rec.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, err := NewReplayClient(out.Transcript, out.RunID, llmkit.Capabilities{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools := rc.Tools()
+	if _, err := tools[0].Run(context.Background(), json.RawMessage(`{"text":"hi"}`)); err != nil {
+		t.Fatalf("recorded call mismatched: %v", err)
+	}
+	if rc.Err() != nil {
+		t.Fatalf("first (recorded) call set Err: %v", rc.Err())
+	}
+	_, err = tools[0].Run(context.Background(), json.RawMessage(`{"text":"hi"}`))
+	if !errors.Is(err, ErrReplayDiverged) || !strings.Contains(err.Error(), "at step 1") {
+		t.Errorf("extra call err = %v, want ErrReplayDiverged naming step 1", err)
+	}
+	if !errors.Is(rc.Err(), ErrReplayDiverged) {
+		t.Error("extra-call divergence not recorded on the client")
+	}
+}
+
+// TestObserver_ToolsReturnsCopy pins M35/M12: mutating the returned slice
+// cannot touch the client's bound tools.
+func TestObserver_ToolsReturnsCopy(t *testing.T) {
+	fc := newFakeClient(toolResp("c1", "echo", `{"text":"hi"}`, 1, 1))
+	rec := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys")
+	out, err := rec.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, err := NewReplayClient(out.Transcript, out.RunID, llmkit.Capabilities{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools := rc.Tools()
+	if tools == nil || len(tools) != 1 {
+		t.Fatalf("Tools = %v, want one bound tool", tools)
+	}
+	tools[0] = nil // clobber the caller's copy
+	if _, err := rc.Tools()[0].Run(context.Background(), json.RawMessage(`{"text":"hi"}`)); err != nil {
+		t.Errorf("client's bound tool damaged through the returned slice: %v", err)
+	}
+	scripted := NewReplayClientFromResponses([]llmkit.Response{{Text: "x"}}, llmkit.Capabilities{})
+	if got := scripted.Tools(); got == nil || len(got) != 0 {
+		t.Errorf("scripted Tools = %v, want a non-nil empty slice", got)
 	}
 }

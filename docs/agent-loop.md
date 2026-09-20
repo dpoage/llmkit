@@ -215,7 +215,7 @@ A real recorded run (weather tool, two turns) looks like this — timestamps and
 {"kind":"finalize","run_id":"1789933747392-c107dc1d30048f48","step":2,"time":"2026-09-20T19:49:07.393034362Z","schema_version":1,"finalize":{"iterations":2,"usage":{"input_tokens":647,"output_tokens":36}}}
 ```
 
-The omitted `completion` lines each carry the full request–response round-trip under `completion.request` / `completion.response`, which is what replay reads. The JSONL sink names each file `<RunID>-<task-slug>.jsonl` — pin the id with `WithRunID` when a caller generates stable identifiers up front and must recover the exact file later (the id must be a safe filename component: no path separators, never `..`; the slug lowercases the task, maps non-alphanumerics to `-`, and caps at 48 characters). The file name is exactly `<RunID>.jsonl` — one RunID is one file, created exclusively at the run's `start` event and closed at its `finalize`. A leftover file, a duplicate Start for a live run, or an id that is not a safe filename component is refused through `onErr` and that run's events are dropped; a single record holding two runs does not read back. The sink is best-effort: it never fails a run, and every failure flows to the `onErr` callback given at construction. Calling `WithObserver` twice is last-wins: a Runner has exactly one durable sink.
+The omitted `completion` lines each carry the full request–response round-trip under `completion.request` / `completion.response`, which is what replay reads. The file name is exactly `<RunID>.jsonl` — one RunID is one file, created exclusively at the run's `start` event and closed at its `finalize` — so pin the id with `WithRunID` when a caller generates stable identifiers up front and must recover the exact file later. The id must be a safe filename component: non-empty, not `.` or `..`, no path separators, no NUL. A leftover file, a duplicate Start for a live run, or an unsafe id is refused through `onErr` and that run's events are dropped; a single record holding two runs does not read back. The sink is best-effort: it never fails a run, and every failure flows to the `onErr` callback given at construction. Calling `WithObserver` twice is last-wins: a Runner has exactly one durable sink.
 
 `Transcript.SaveJSONL` and `LoadJSONL` serialize the in-memory view; `LoadJSONL` errors on a line without `schema_version` — pre-schema recordings are unsupported. Both read sides meet at one interface:
 
@@ -229,10 +229,19 @@ type Source interface {
 
 ```go
 rc, err := agent.NewReplayClient(src, runID, llmkit.Capabilities{})
-replayed, err := agent.NewRunner(rc, rc.Tools(), "sys").Run(ctx, "task")
-if err2 := rc.Err(); err2 != nil {
-	// the replay diverged from its record — the evaluation failed
+if err != nil {
+	return err
 }
+replayed, err := agent.NewRunner(rc, rc.Tools(), "sys").Run(ctx, "task")
+if err != nil {
+	// a mid-run divergence fails Run with an ErrReplayDiverged error
+	return err
+}
+if err := rc.Err(); err != nil {
+	// a divergence in the run's final tool turn surfaces only here
+	return err
+}
+_ = replayed
 ```
 
 When to use: record a run once, then replay it deterministically against modified harness code — the building block for offline evaluation. `EstimateHistoryTokens` and `SimulateCompaction` export the compaction decision so replay tooling reproduces it exactly.
