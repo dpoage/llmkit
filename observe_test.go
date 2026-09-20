@@ -175,7 +175,7 @@ func goldEvents() []struct {
 		{
 			name: "finalize",
 			ev: Event{
-				Kind: KindFinalize, RunID: goldRun, ParentRunID: goldParent, Step: 2,
+				Kind: KindFinalize, RunID: goldRun, ParentRunID: goldParent, Step: 8,
 				Time: goldTime, Duration: time.Minute, SchemaVersion: EventSchemaVersion,
 				Finalize: &FinalizeEvent{
 					TruncationReason: "max_steps",
@@ -459,7 +459,7 @@ func TestEventGoldenJSON(t *testing.T) {
   "kind": "finalize",
   "run_id": "1758366600000-deadbeef00112233",
   "parent_run_id": "1758366500000-cafebabefeedface",
-  "step": 2,
+  "step": 8,
   "time": "2026-09-20T12:30:00Z",
   "duration": 60000000000,
   "schema_version": 1,

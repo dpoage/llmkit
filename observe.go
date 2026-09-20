@@ -222,9 +222,9 @@ type CompletionEvent struct {
 // serializer — so the CompletionEvent's Response may differ from it where
 // the serializer truncated. A failed attempt carries the error text and
 // the zero Response; when that error is an [*APIError], StatusCode and
-// RetryAfter carry its HTTP status and the server-suggested delay the
-// retry classifier read (both zero on success and for unclassified
-// transport failures). Event.SpanID joins it to its logical completion.
+// RetryAfter carry its HTTP status and the server-suggested delay as the
+// server sent it (both zero on success and for unclassified transport
+// failures). Event.SpanID joins it to its logical completion.
 type AttemptEvent struct {
 	// Attempt is the 1-based attempt number within the logical completion.
 	Attempt  int      `json:"attempt"`
