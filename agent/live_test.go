@@ -340,7 +340,10 @@ func TestLiveAgentPreservesInlineThink(t *testing.T) {
 
 	// Premise-gated preservation: the harness keeps raw text, so a think
 	// span the model emitted must survive verbatim in FinalText. When no
-	// attempt carried a span the premise is unavailable — skip.
+	// attempt carried a span the premise is unavailable — skip. The
+	// contract itself is pinned hermetically by
+	// TestRun_FinalTextPreservesInlineThink; this live case re-checks it
+	// end to end whenever the vendor emits a span.
 	if out == nil {
 		sess.Logf(t, "premise unavailable after 3 attempts: no run had both a visible answer and a think span; raw=%.200q", answered.FinalText)
 		t.Skipf("MiniMax-M3 never produced a visible answer and an inline <think> span in the same run (last visible answer %q); nothing to preserve",
@@ -546,14 +549,18 @@ func TestLiveAgentToolPolicyDeny(t *testing.T) {
 
 // TestLiveAgentDeltaHook pins the Hooks.Delta seam end to end against the
 // live lane: the hook fires at least once, every delta reports a positive
-// step, and the LAST completion's text deltas concatenate exactly to
-// FinalText. The concatenation is scoped per step (the hook's step
-// argument) because a run may span several completions — a think-only turn
-// makes the Runner nudge and loop again — while FinalText is only the last
-// completion's text. A final turn with no visible text after three
-// differently-phrased attempts is a premise failure. With today's adapters
-// the [llmkit.Stream] fallback synthesizes one delta per content block; as
-// adapter streaming lands the count rises — only >= 1 is pinned here.
+// step, and the streamed text reconstructs the run's final answer. On a
+// single-completion run the text deltas must equal FinalText byte for
+// byte. A run may span several completions — a think-only turn makes the
+// Runner nudge and loop again, and a max-tokens stop appends ONE
+// continuation completion under its own hook step, stitched onto the
+// final answer — so with multiple steps the contract relaxes to FinalText
+// ending with the last step's text deltas: the stitch trims only the
+// overlap the continuation re-emitted. A final turn with no visible text
+// after three differently-phrased attempts is a premise failure. With
+// today's adapters the [llmkit.Stream] fallback synthesizes one delta per
+// content block; as adapter streaming lands the count rises — only >= 1
+// is pinned here.
 func TestLiveAgentDeltaHook(t *testing.T) {
 	ctx, cl, _ := newLiveAgentClient(t)
 
@@ -621,12 +628,22 @@ func TestLiveAgentDeltaHook(t *testing.T) {
 	if deltas == 0 {
 		t.Fatal("Hooks.Delta never fired; want at least one delta")
 	}
+	// Single text-bearing step: the deltas must reconstruct FinalText byte
+	// for byte. Multiple steps: the run spanned nudged turns or a
+	// max-tokens continuation (which consumes its own hook step and is
+	// stitched into the final answer), so FinalText must END with the last
+	// step's text deltas — the stitch trims only the overlap the
+	// continuation re-emitted.
 	var got string
 	if b := textByStep[lastTextStep]; b != nil {
 		got = b.String()
 	}
-	if got != out.FinalText {
-		t.Fatalf("last completion's text deltas %q != FinalText %q", got, out.FinalText)
+	if len(textByStep) == 1 {
+		if got != out.FinalText {
+			t.Fatalf("text deltas %q != FinalText %q (single text-bearing step must reconstruct it exactly)", got, out.FinalText)
+		}
+	} else if got == "" || !strings.HasSuffix(out.FinalText, got) {
+		t.Fatalf("FinalText %q does not end with the last completion's text deltas %q", out.FinalText, got)
 	}
 }
 
