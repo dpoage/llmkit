@@ -3,6 +3,7 @@
 package google
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -448,12 +449,14 @@ func googleAssistantParts(m llmkit.Message) ([]*genai.Part, error) {
 				continue
 			}
 			// A thinking block whose Raw was lost (nil) or decodes to
-			// nothing ("null", "{}") contributes no wire content: skip it
-			// instead of forwarding an empty part. Unlike anthropic — whose
-			// signed thinking replay is mandatory, making a missing Raw a
-			// hard error — a decoded-to-empty genai Part carries nothing
-			// Gemini requires on later turns.
-			if len(b.Raw) == 0 || string(b.Raw) == "null" || string(b.Raw) == "{}" {
+			// nothing ("null", "{}", with or without surrounding
+			// whitespace) contributes no wire content: skip it instead of
+			// forwarding an empty part. Unlike anthropic — whose signed
+			// thinking replay is mandatory, making a missing Raw a hard
+			// error — a decoded-to-empty genai Part carries nothing Gemini
+			// requires on later turns.
+			trimmed := bytes.TrimSpace(b.Raw)
+			if len(trimmed) == 0 || string(trimmed) == "null" || string(trimmed) == "{}" {
 				continue
 			}
 			var p genai.Part
