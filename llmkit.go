@@ -91,7 +91,8 @@
 // Three wrappers compose around any [Client]:
 //
 //   - [WithRetry] retries transient failures (429, 5xx, transport timeouts)
-//     with exponential backoff and honors Retry-After.
+//     with exponential backoff and honors Retry-After. [Retry] runs the same
+//     loop over any error source; [ParseRetryAfter] decodes the header.
 //   - [WithRecorder] reports each successful completion's usage to a
 //     [Recorder].
 //   - [WithSerializedToolCalls] truncates multi-tool-call responses to the

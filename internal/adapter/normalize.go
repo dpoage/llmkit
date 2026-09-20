@@ -5,9 +5,7 @@ package adapter
 
 import (
 	"net/http"
-	"strconv"
 	"strings"
-	"time"
 
 	"github.com/dpoage/llmkit"
 )
@@ -57,29 +55,4 @@ func LooksLikeContextLength(msg string) bool {
 		}
 	}
 	return false
-}
-
-// ParseRetryAfter reads the Retry-After header from an HTTP response, returning
-// the suggested delay or 0 if absent / unparseable. Supports both integer
-// seconds and HTTP-date forms.
-func ParseRetryAfter(resp *http.Response) time.Duration {
-	if resp == nil {
-		return 0
-	}
-	v := resp.Header.Get("Retry-After")
-	if v == "" {
-		return 0
-	}
-	if secs, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
-		if secs < 0 {
-			return 0
-		}
-		return time.Duration(secs) * time.Second
-	}
-	if t, err := http.ParseTime(v); err == nil {
-		if d := time.Until(t); d > 0 {
-			return d
-		}
-	}
-	return 0
 }
