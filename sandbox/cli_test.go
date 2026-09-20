@@ -8,7 +8,11 @@ import (
 )
 
 func TestNewCLIRequiresImage(t *testing.T) {
-	if _, err := NewCLI(WithRuntime("podman")); err == nil {
+	rt, ok := Detect()
+	if !ok {
+		t.Skip("no container runtime detected; NewCLI needs one")
+	}
+	if _, err := NewCLI(WithRuntime(rt)); err == nil {
 		t.Fatal("expected error when no image is configured")
 	}
 }
@@ -100,11 +104,12 @@ func TestRandTokenUnique(t *testing.T) {
 // TestOptionsConfigureCLI pins the shared Option set's effect on the CLI
 // backend's defaults, through the real constructor.
 func TestOptionsConfigureCLI(t *testing.T) {
-	if _, ok := Detect(); !ok {
+	rt, ok := Detect()
+	if !ok {
 		t.Skip("no container runtime detected; NewCLI needs one")
 	}
 	s, err := NewCLI(
-		WithRuntime("podman"), WithImage("img"),
+		WithRuntime(rt), WithImage("img"),
 		WithCPUs(4), WithMemoryMB(1024), WithTimeout(5*time.Second),
 		WithNetwork(NetworkBridge), WithPidsLimit(64), WithMaxOutputBytes(2048),
 		WithScratchSizeMB(256), WithWorkspaceGrowthCeilingMB(1024),
@@ -112,6 +117,17 @@ func TestOptionsConfigureCLI(t *testing.T) {
 	)
 	if err != nil {
 		t.Fatalf("NewCLI: %v", err)
+	}
+
+	// exercise the auto-detect path too: no WithRuntime override.
+	auto, err := NewCLI(
+		WithImage("img"), WithCPUs(4), WithMemoryMB(1024),
+	)
+	if err != nil {
+		t.Fatalf("NewCLI (auto-detect): %v", err)
+	}
+	if auto.runtime != rt {
+		t.Errorf("auto-detected runtime = %q, want %q", auto.runtime, rt)
 	}
 	if s.defaultCPUs != 4 || s.defaultMemory != 1024 || s.defaultTimeout != 5*time.Second {
 		t.Fatalf("options not applied: %+v", s)
