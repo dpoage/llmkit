@@ -247,11 +247,6 @@ func (s *JSONLSink) startRun(ev llmkit.Event) {
 		return
 	}
 	run.mu.Lock()
-	if run.disabled {
-		run.mu.Unlock()
-		_ = f.Close()
-		return
-	}
 	run.file = f
 	run.enc = json.NewEncoder(f)
 	err = run.enc.Encode(&ev)
@@ -342,11 +337,12 @@ func safeRunID(id llmkit.RunID) bool {
 // replays from the sink exactly as from a [Transcript]; the caller owns the
 // returned slice.
 //
-// The exact path "<dir>/<RunID>.jsonl" is opened; a missing file wraps
-// [ErrUnknownRun]. Every decoded event must carry run, a file mixing run ids
-// is an error naming file and line, an empty record wraps [ErrUnknownRun],
-// and a record holding more than one Start is an error naming the run — one
-// RunID is one run.
+// The exact path "<dir>/<RunID>.jsonl" is opened (an id that is not a safe
+// filename component is refused with [ErrUnknownRun] before any open); a
+// missing file wraps [ErrUnknownRun]. Every decoded event must carry run, a
+// file mixing run ids is an error naming file and line, an empty record
+// wraps [ErrUnknownRun], and a record holding more than one Start is an
+// error naming the run — one RunID is one run.
 func (s *JSONLSink) Events(_ context.Context, run llmkit.RunID) ([]llmkit.Event, error) {
 	if !safeRunID(run) {
 		return nil, fmt.Errorf("agent: run id %q is not a safe filename component: %w", run, ErrUnknownRun)
