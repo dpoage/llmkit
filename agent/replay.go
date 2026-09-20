@@ -165,10 +165,13 @@ func (rc *ReplayClient) Complete(ctx context.Context, req llmkit.Request) (llmki
 	defer rc.mu.Unlock()
 
 	if rc.diverged != nil {
-		return llmkit.Response{}, fmt.Errorf("agent: replay diverged on a previous tool turn: %w", rc.diverged)
+		// Already recorded: refuse to serve past it.
+		return llmkit.Response{}, rc.diverged
 	}
 	if rc.idx >= len(rc.responses) {
-		return llmkit.Response{}, fmt.Errorf("agent: %w: replay exhausted after %d responses; request sequence diverged (extra completion call)", ErrReplayDiverged, len(rc.responses))
+		err := fmt.Errorf("%w after step %d: replay exhausted after %d response(s); request sequence diverged (extra completion call)", ErrReplayDiverged, rc.idx, len(rc.responses))
+		rc.diverged = err
+		return llmkit.Response{}, err
 	}
 	step := rc.responses[rc.idx]
 
@@ -177,6 +180,7 @@ func (rc *ReplayClient) Complete(ctx context.Context, req llmkit.Request) (llmki
 	if step.expectToolIDs != nil {
 		got := trailingToolResultIDs(req.Messages, len(step.expectToolIDs))
 		if err := matchToolIDs(rc.idx, step.expectToolIDs, got); err != nil {
+			rc.diverged = err
 			return llmkit.Response{}, err
 		}
 	}
@@ -204,12 +208,12 @@ func trailingToolResultIDs(msgs []llmkit.Message, n int) []string {
 // a descriptive divergence error if they differ.
 func matchToolIDs(step int, want, got []string) error {
 	if len(want) != len(got) {
-		return fmt.Errorf("agent: %w at step %d: expected %d preceding tool result(s) %v, got %d %v",
+		return fmt.Errorf("%w at step %d: expected %d preceding tool result(s) %v, got %d %v",
 			ErrReplayDiverged, step+1, len(want), want, len(got), got)
 	}
 	for i := range want {
 		if want[i] != got[i] {
-			return fmt.Errorf("agent: %w at step %d: tool result %d was %q, recorded %q",
+			return fmt.Errorf("%w at step %d: tool result %d was %q, recorded %q",
 				ErrReplayDiverged, step+1, i, got[i], want[i])
 		}
 	}
@@ -293,7 +297,18 @@ func (ts *replayToolSet) tools(rc *ReplayClient) []Tool {
 // [ReplayClient.Err]) and is returned as the tool's error — the harness
 // renders it as data, and the next Complete refuses to serve.
 func (rc *ReplayClient) Tools() []Tool {
+	if rc.tools == nil {
+		return []Tool{}
+	}
 	return slices.Clone(rc.tools)
+}
+
+// recordDiverged records the first divergence; later ones keep the first.
+// The caller holds rc.mu.
+func (rc *ReplayClient) recordDiverged(err error) {
+	if rc.diverged == nil {
+		rc.diverged = err
+	}
 }
 
 // Err returns the replay's first divergence, or nil when the replay matched
@@ -359,13 +374,17 @@ func (rc *ReplayClient) serveCall(name string, args json.RawMessage) (string, er
 			rec := &g.calls[unconsumed]
 			err := fmt.Errorf("%w at step %d: tool %q called with arguments %s, recorded %s",
 				ErrReplayDiverged, rec.step, name, argsString(args), argsString(rec.call.Arguments))
-			rc.diverged = err
+			rc.recordDiverged(err)
 			return "", err
 		}
 		set.gi++
 	}
-	err := fmt.Errorf("%w: extra tool call to %q with arguments %s; every recorded call is served", ErrReplayDiverged, name, argsString(args))
-	rc.diverged = err
+	lastStep := 0
+	if n := len(set.groups); n > 0 {
+		lastStep = set.groups[n-1].step
+	}
+	err := fmt.Errorf("%w at step %d: extra tool call to %q with arguments %s; every recorded call is served", ErrReplayDiverged, lastStep, name, argsString(args))
+	rc.recordDiverged(err)
 	return "", err
 }
 

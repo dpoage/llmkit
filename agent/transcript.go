@@ -237,7 +237,21 @@ func (s *JSONLSink) startRun(ev llmkit.Event) {
 		}
 		return
 	}
+	// Re-verify admission: a concurrent duplicate Start may have poisoned or
+	// replaced this entry while the open was in flight. Close the orphan.
+	s.mu.Lock()
+	admitted := s.runs[ev.RunID] == run
+	s.mu.Unlock()
+	if !admitted {
+		_ = f.Close()
+		return
+	}
 	run.mu.Lock()
+	if run.disabled {
+		run.mu.Unlock()
+		_ = f.Close()
+		return
+	}
 	run.file = f
 	run.enc = json.NewEncoder(f)
 	err = run.enc.Encode(&ev)
@@ -334,6 +348,9 @@ func safeRunID(id llmkit.RunID) bool {
 // and a record holding more than one Start is an error naming the run — one
 // RunID is one run.
 func (s *JSONLSink) Events(_ context.Context, run llmkit.RunID) ([]llmkit.Event, error) {
+	if !safeRunID(run) {
+		return nil, fmt.Errorf("agent: run id %q is not a safe filename component: %w", run, ErrUnknownRun)
+	}
 	path := filepath.Join(s.dir, string(run)+".jsonl")
 	f, err := os.Open(path)
 	if err != nil {

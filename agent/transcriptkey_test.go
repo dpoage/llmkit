@@ -10,11 +10,11 @@ import (
 )
 
 // TestWithRunID_PinnedFilename verifies WithRunID pins the run's identity AND
-// the durable sink's filename: the JSONL file is named after the run id
-// ("<RunID>-<task-slug>.jsonl"), so a caller that generates stable
-// identifiers up front (the motivation WithTranscriptKey served before the
-// cutover) recovers the exact transcript file later by exact name instead of
-// guessing from a timestamp window. Events carry the pinned id too.
+// the durable sink's filename: the JSONL file is named exactly
+// "<RunID>.jsonl" (identity is the RunID alone — the task rides the Start
+// event), so a caller that generates stable identifiers up front (the
+// motivation WithTranscriptKey served before the cutover) recovers the exact
+// transcript file later by exact name. Events carry the pinned id too.
 func TestWithRunID_PinnedFilename(t *testing.T) {
 	dir := t.TempDir()
 	fc := newFakeClient(textResp("done", 1, 1))
