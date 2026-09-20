@@ -19,15 +19,16 @@ flowchart TD
     AGENT --> ROOT
     EMBED["embed"] --> ROOT
     DECIDE["decide"] --> ROOT
-    EMBED --> RETRY["internal/retry"]
-    DECIDE --> RETRY
+    DECIDE --> IA
+    DECIDE --> RETRY["internal/retry"]
     SANDBOX["sandbox"]
     FSROOT["fsroot"]
 ```
 
 `sandbox` and `fsroot` import no other kit package. `embed` imports the root,
 for `RetryConfig`, and `internal/retry`, the shared backoff loop it once
-owned. `decide` imports the same two; like `embed`, it bypasses `provider`
+owned. `decide` imports the root, `internal/adapter` for status
+classification, and `internal/retry`; like `embed`, it bypasses `provider`
 entirely. `agent` drives any `llmkit.Client`, so a `Runner`
 runs against a provider client, a replay client, or your own implementation.
 The diagram omits test-only packages: `internal/livetest` backs the `live`

@@ -48,7 +48,7 @@ never echoes the key.
 | `BaseURL` | No | Endpoint root for tests and gateways. Default: `https://api.typesafe.ai`; the path `/v1/systemone` is appended. |
 | `HTTPClient` | No | Used as-is, including its `Timeout`. Default: a plain client with no `http.Client.Timeout`, so the per-attempt `RequestTimeout` is the only bound. |
 | `Retry` | No | Unset knobs resolve at construction: 3 attempts, 30 s per-attempt timeout. `BaseDelay` (500 ms) and `MaxDelay` (30 s) come from `llmkit.DefaultRetryConfig`. `Jitter` is literal: 0 means no jitter. |
-| `Recorder` | No | Receives one `llmkit.UsageEvent` per successful `Ask`. Default: nil (no recording). |
+| `Recorder` | No | Receives one `llmkit.UsageEvent` per successful `Ask` through its `Record(llmkit.UsageEvent)` method. Default: nil (no recording). |
 
 ## The three question types
 
@@ -320,9 +320,9 @@ question, a sparse legend — is a server contract violation: `ErrServer` with
 `StatusCode` 200, returned after the first attempt without retrying.
 
 A refused pre-wire request also returns `ErrInvalidRequest` before any network
-call: nil state, empty question id, nil instructions, a `Choice` without
-options, a `Score` with fewer than two levels, or a JSON number or boolean
-where only text kinds are accepted.
+call: nil state, empty questions, empty question id, nil instructions, a
+`Choice` without options, a `Score` with fewer than two levels, or a JSON
+number or boolean where only text kinds are accepted.
 
 An unknown model arrives as a 400 in the live lane (observed 2026-09-20);
 the vendor's API doc reserves 422 for validation failures. Both map to
@@ -330,12 +330,13 @@ the vendor's API doc reserves 422 for validation failures. Both map to
 
 The `Retry-After` header is parsed on every status. On a retried status (429
 and every 5xx, 529 included) a server-supplied delay replaces the exponential
-backoff and is capped at `RetryConfig.MaxDelay` (30 s by default). A present
+backoff for the sleep and is capped at `RetryConfig.MaxDelay` (30 s by
+default); `APIError.RetryAfter` carries the raw server value. A present
 header whose delay clamps to zero — a zero value or a past HTTP-date — means
 an immediate retry. Every other status is terminal.
 
-Error messages carry the vendor body text, truncated to 200 characters.
-llmkit never places the API key into an error.
+Error messages carry the vendor body text, truncated to 200 characters plus
+an appended `...`. llmkit never places the API key into an error.
 
 ## Usage and the Recorder
 
