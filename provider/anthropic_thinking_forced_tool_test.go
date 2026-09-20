@@ -5,14 +5,16 @@ package provider_test
 // tool_choice "results in an error"
 // (https://platform.claude.com/docs/en/build-with-claude/thinking, section
 // "Thinking with tool use"; the page the brief cites as
-// docs.claude.com/en/docs/build-with-claude/extended-thinking). The adapter's
-// structured-output path forces tool_choice to the synthetic tool, so
-// Thinking + ResponseSchema is a guaranteed remote 400 — llmkit refuses it
-// pre-wire with ErrInvalidRequest instead. This test drives the production
-// construction chain (provider.New) over an httptest stub that counts wire
-// hits, for both Complete and the native Stream path, and pins the two legal
-// neighbors (ResponseSchema alone still forces tool_choice; Thinking alone
-// still forwards).
+// docs.claude.com/en/docs/build-with-claude/extended-thinking). llmkit only
+// ever emits thinking type "enabled" (manual mode), so any forced
+// tool_choice — the synthetic structured-output tool (ResponseSchema) or a
+// caller-supplied ToolChoice of required or a named tool — makes the request
+// a guaranteed remote 400; llmkit refuses it pre-wire with ErrInvalidRequest
+// instead. These tests drive the production construction chain
+// (provider.New) over an httptest stub that counts wire hits, for both
+// Complete and the native Stream path, and pin the legal neighbors
+// (single-feature requests still forward; caps.Thinking=false drops the
+// config and keeps the combination legal).
 
 import (
 	"context"
@@ -308,6 +310,16 @@ func newAnthropicClientWithCaps(t *testing.T, base string, caps func(llmkit.Capa
 // that a profile with Thinking=false drops the config, keeping the
 // combination legal.
 func TestAnthropicThinkingForcedToolChoiceRejectedPreWire(t *testing.T) {
+	// lookupTool backs the two refusal scenarios below: on the real API a
+	// forced tool_choice also requires a tools entry, so keeping those
+	// requests otherwise valid isolates the thinking interaction this guard
+	// owns. The forwarding scenarios deliberately omit tools — the stub
+	// does not validate tool presence, and llmkit does not gate on it.
+	lookupTool := llmkit.ToolDef{
+		Name:        "lookup",
+		Description: "test tool",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
+	}
 	baseReq := func() llmkit.Request {
 		return llmkit.Request{
 			System:    "you are a test",
@@ -330,6 +342,7 @@ func TestAnthropicThinkingForcedToolChoiceRejectedPreWire(t *testing.T) {
 			req: func() llmkit.Request {
 				r := baseReq()
 				r.ToolChoice = llmkit.ToolChoice{Mode: llmkit.ToolChoiceRequired}
+				r.Tools = []llmkit.ToolDef{lookupTool}
 				return r
 			},
 			wantErr:   true,
@@ -340,6 +353,7 @@ func TestAnthropicThinkingForcedToolChoiceRejectedPreWire(t *testing.T) {
 			req: func() llmkit.Request {
 				r := baseReq()
 				r.ToolChoice = llmkit.ToolChoice{Mode: llmkit.ToolChoiceTool, Name: "lookup"}
+				r.Tools = []llmkit.ToolDef{lookupTool}
 				return r
 			},
 			wantErr:   true,

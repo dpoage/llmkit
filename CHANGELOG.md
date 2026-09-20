@@ -57,8 +57,8 @@ entry below is marked.
   supports `tool_choice` auto or none).
 - Anthropic adapter: a replayed thinking block whose `Raw` decodes to
   thinking text without a `signature` now fails locally with
-  `ErrInvalidRequest`; previously the unsigned block was forwarded and the
-  API, which verifies thinking signatures on replay, rejected it remotely.
+  `ErrInvalidRequest`; previously the unsigned block was forwarded even
+  though the API verifies thinking signatures on replay.
 
 ## [0.4.0] - 2026-09-19
 

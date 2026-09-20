@@ -152,8 +152,10 @@ func (a *anthropicAdapter) buildParams(req llmkit.Request) (anthropic.MessageNew
 	// enforces budget < MaxTokens and its 1024 floor server-side. Gated on
 	// the capability profile: extended thinking exists only on Claude 3.7+
 	// (see anthropicCapabilities), and the documented contract for a false
-	// feature is a silent drop rather than a server 400.
-	if req.Thinking != nil && a.caps.Thinking {
+	// feature is a silent drop rather than a server 400. thinkingSent is
+	// reused by the forced-tool-use refusal below.
+	thinkingSent := req.Thinking != nil && a.caps.Thinking
+	if thinkingSent {
 		if req.Thinking.BudgetTokens <= 0 {
 			return anthropic.MessageNewParams{}, &llmkit.APIError{
 				Kind:     llmkit.ErrInvalidRequest,
@@ -217,7 +219,8 @@ func (a *anthropicAdapter) buildParams(req llmkit.Request) (anthropic.MessageNew
 	// model returns a tool_use block whose `input` is the schema-conformant
 	// JSON, which Complete surfaces as Response.Text. Only valid when the
 	// caller didn't supply user tools (structuredOutputToolName gates this).
-	if toolName, ok := structuredOutputToolName(req, a.caps); ok {
+	synthTool, syntheticOutput := structuredOutputToolName(req, a.caps)
+	if syntheticOutput {
 		// Mirror toAnthropicTool's schema unwrapping via the shared helper
 		// so the synthetic tool gets the same ToolInputSchemaParam shape
 		// the SDK would receive for a user tool.
@@ -235,39 +238,42 @@ func (a *anthropicAdapter) buildParams(req llmkit.Request) (anthropic.MessageNew
 			Required:   required,
 		}
 		params.Tools = append(params.Tools, anthropic.ToolUnionParam{OfTool: &anthropic.ToolParam{
-			Name:        toolName,
+			Name:        synthTool,
 			InputSchema: schema,
 			Description: anthropic.String("Emit the final answer that conforms to the response schema."),
 		}})
-		params.ToolChoice = anthropic.ToolChoiceParamOfTool(toolName)
+		params.ToolChoice = anthropic.ToolChoiceParamOfTool(synthTool)
 	}
 
-	// Forced tool use cannot coexist with extended thinking: "tool use with
-	// manual extended thinking ... only supports tool_choice auto or none
-	// ... Using tool_choice: {"type": "any"} or tool_choice: {"type":
-	// "tool", "name": "..."} results in an error"
+	// Forced tool use cannot coexist with manual extended thinking: "tool
+	// use with manual extended thinking ... only supports tool_choice auto
+	// or none ... Using tool_choice: {"type": "any"} or tool_choice:
+	// {"type": "tool", "name": "..."} results in an error"
 	// (https://platform.claude.com/docs/en/build-with-claude/thinking,
-	// "Thinking with tool use"). The forcing may come from the caller
+	// "Thinking with tool use"). The scope is manual mode — adaptive
+	// thinking supports forced tool use — and llmkit only ever emits
+	// thinking {type: "enabled"} (the gate above), so the refusal is exact
+	// for llmkit's surface today. The forcing may come from the caller
 	// (ToolChoice required or a named tool) or from the synthetic
 	// structured-output tool above, which overwrites whatever the caller
-	// mapped — so the built params below are the one place both sources are
+	// mapped — so the built params here are the one place both sources are
 	// visible, and one predicate covers both. A guaranteed remote 400 is
 	// refused locally, naming the field that did the forcing. When
 	// caps.Thinking is false the thinking config is dropped earlier and the
 	// combination stays legal.
-	if req.Thinking != nil && a.caps.Thinking &&
+	if thinkingSent &&
 		(params.ToolChoice.OfAny != nil || params.ToolChoice.OfTool != nil) {
 		forcing := "ToolChoice.Mode=required forces tool_choice any"
 		if params.ToolChoice.OfTool != nil {
 			forcing = "ToolChoice.Mode=tool forces tool_choice to the " + params.ToolChoice.OfTool.Name + " tool"
 		}
-		if toolName, synthetic := structuredOutputToolName(req, a.caps); synthetic {
-			forcing = "ResponseSchema forces tool_choice to the " + toolName + " tool"
+		if syntheticOutput {
+			forcing = "ResponseSchema forces tool_choice to the " + synthTool + " tool"
 		}
 		return anthropic.MessageNewParams{}, &llmkit.APIError{
 			Kind:     llmkit.ErrInvalidRequest,
 			Provider: "anthropic",
-			Message:  "Thinking cannot be combined with forced tool use: tool use with thinking only supports tool_choice auto or none, and " + forcing,
+			Message:  "Thinking cannot be combined with forced tool use: manual extended thinking only supports tool_choice auto or none, and " + forcing,
 		}
 	}
 
