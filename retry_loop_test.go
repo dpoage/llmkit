@@ -317,6 +317,7 @@ func TestRetryLoop_DelayAgreement(t *testing.T) {
 		{"first delay caps at MaxDelay", RetryConfig{BaseDelay: time.Minute, MaxDelay: 30 * time.Second, Jitter: 0}, 1, 0, false, 30 * time.Second, nil},
 		{"third exponential delay is four times BaseDelay", RetryConfig{BaseDelay: base, MaxDelay: 30 * time.Second, Jitter: 0}, 3, 0, false, 2 * time.Second, nil},
 		{"schedule caps at MaxDelay", RetryConfig{BaseDelay: 20 * time.Second, MaxDelay: 30 * time.Second, Jitter: 0}, 2, 0, false, 30 * time.Second, nil},
+		{"MaxDelay zero leaves the schedule uncapped", RetryConfig{BaseDelay: base, MaxDelay: 0, Jitter: 0}, 10, 0, false, 256 * time.Second, nil},
 		{"sequence grows then caps", RetryConfig{BaseDelay: 20 * time.Second, MaxDelay: 30 * time.Second, Jitter: 0}, 3, 0, false, 30 * time.Second,
 			[]time.Duration{20 * time.Second, 30 * time.Second, 30 * time.Second}},
 		{"doubling past int64 clamps instead of overflowing", RetryConfig{BaseDelay: time.Duration(1) << 62, MaxDelay: 0, Jitter: 0}, 2, 0, false, time.Duration(1) << 62, nil},
@@ -441,5 +442,39 @@ func TestRetry_PanicReleasesAttemptContext(t *testing.T) {
 	}
 	if ps.streamCtx.Err() != context.Canceled {
 		t.Errorf("Stream attempt ctx after panic: err = %v, want context.Canceled", ps.streamCtx.Err())
+	}
+}
+
+// TestRetry_CancelsEachAttemptBeforeTheNext pins that the loop holds no
+// accumulated defers: by the time attempt N runs, attempt N-1's context
+// already reads context.Canceled — cancel runs at the end of each attempt,
+// not when Retry returns.
+func TestRetry_CancelsEachAttemptBeforeTheNext(t *testing.T) {
+	var ctxs []context.Context
+	var prevErrs []error
+	cfg := RetryConfig{MaxAttempts: 3, BaseDelay: time.Millisecond, Jitter: 0}
+	err := Retry(context.Background(), cfg, retryAny, func(ctx context.Context) error {
+		if prev := len(ctxs) - 1; prev >= 0 {
+			prevErrs = append(prevErrs, ctxs[prev].Err())
+		}
+		ctxs = append(ctxs, ctx)
+		if len(ctxs) < 3 {
+			return errors.New("transient")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Retry: %v", err)
+	}
+	if len(ctxs) != 3 {
+		t.Fatalf("attempts = %d, want 3", len(ctxs))
+	}
+	if len(prevErrs) != 2 {
+		t.Fatalf("observed %d predecessor contexts, want 2", len(prevErrs))
+	}
+	for i, e := range prevErrs {
+		if e != context.Canceled {
+			t.Errorf("attempt %d's ctx while attempt %d ran: err = %v, want context.Canceled (cancel must not accumulate until Retry returns)", i+1, i+2, e)
+		}
 	}
 }
