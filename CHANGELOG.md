@@ -27,6 +27,11 @@ entry below is marked.
   `Response.Blocks` carries no text block; previously a Complete-only client
   returning a text-only response — including `agent.ReplayClient` replaying a
   recorded run — fired `Hooks.Delta` zero times for the reply text.
+- `agent.RunJSON`: errors wrapping `ErrUnparseableOutput` no longer carry a
+  doubled `agent: agent:` prefix.
+- Google adapter: an assistant thinking block whose `Raw` is `null` or `{}`
+  padded with JSON whitespace is skipped on replay instead of being sent as
+  an empty part.
 
 ## [0.4.0] - 2026-09-19
 
