@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/dpoage/llmkit/retry"
 )
 
 // simpleRequest is the minimal completion request used across the root
@@ -41,16 +43,37 @@ func (b *blockingClient) Complete(ctx context.Context, req Request) (Response, e
 	return Response{Text: "ok", StopReason: StopEndTurn}, nil
 }
 
+// probingClient records each attempt's context deadline, fails transiently
+// for the first probeAttempts attempts, then succeeds.
+type probingClient struct {
+	probeAttempts int
+	calls         int
+	deadline      time.Time
+	hasDeadline   bool
+}
+
+func (p *probingClient) Capabilities() Capabilities { return Capabilities{} }
+
+func (p *probingClient) Complete(ctx context.Context, req Request) (Response, error) {
+	i := p.calls
+	p.calls++
+	p.deadline, p.hasDeadline = ctx.Deadline()
+	if i < p.probeAttempts {
+		return Response{}, errors.New("transient")
+	}
+	return Response{Text: "ok", StopReason: StopEndTurn}, nil
+}
+
 // TestRetry_PerAttemptTimeout_ReturnsFast asserts that a single attempt whose
 // inner Complete never returns is bounded by RequestTimeout: Complete returns
 // within roughly the timeout (times MaxAttempts) rather than blocking forever,
 // and surfaces a deadline-exceeded-flavored error.
 func TestRetry_PerAttemptTimeout_ReturnsFast(t *testing.T) {
 	inner := &blockingClient{blockAttempts: 100} // always blocks
-	cfg := DefaultRetryConfig()
+	cfg := retry.Default()
 	cfg.MaxAttempts = 2
 	cfg.RequestTimeout = 50 * time.Millisecond
-	cfg.sleep = func(ctx context.Context, d time.Duration) error { return nil } // skip backoff
+	cfg.Sleep = func(ctx context.Context, d time.Duration) error { return nil } // skip backoff
 
 	client := WithRetry(inner, cfg)
 
@@ -84,10 +107,10 @@ func TestRetry_PerAttemptTimeout_ReturnsFast(t *testing.T) {
 // succeeds, and Complete returns the success.
 func TestRetry_PerAttemptTimeout_IsRetryable(t *testing.T) {
 	inner := &blockingClient{blockAttempts: 1} // first attempt blocks, then succeeds
-	cfg := DefaultRetryConfig()
+	cfg := retry.Default()
 	cfg.MaxAttempts = 3
 	cfg.RequestTimeout = 50 * time.Millisecond
-	cfg.sleep = func(ctx context.Context, d time.Duration) error { return nil }
+	cfg.Sleep = func(ctx context.Context, d time.Duration) error { return nil }
 
 	client := WithRetry(inner, cfg)
 	resp, err := client.Complete(context.Background(), simpleRequest())
@@ -108,10 +131,10 @@ func TestRetry_PerAttemptTimeout_IsRetryable(t *testing.T) {
 // — retryable, so the loop recovers on a later success.
 func TestRetry_PerAttemptTimeout_WrappedAsServerError(t *testing.T) {
 	inner := &wrappingBlockClient{blockAttempts: 1}
-	cfg := DefaultRetryConfig()
+	cfg := retry.Default()
 	cfg.MaxAttempts = 3
 	cfg.RequestTimeout = 50 * time.Millisecond
-	cfg.sleep = func(ctx context.Context, d time.Duration) error { return nil }
+	cfg.Sleep = func(ctx context.Context, d time.Duration) error { return nil }
 
 	client := WithRetry(inner, cfg)
 	resp, err := client.Complete(context.Background(), simpleRequest())
@@ -156,10 +179,10 @@ func (w *wrappingBlockClient) Complete(ctx context.Context, req Request) (Respon
 // per-attempt deadline.
 func TestRetry_ParentCancelStillAbortsImmediately(t *testing.T) {
 	inner := &blockingClient{blockAttempts: 100} // always blocks until ctx done
-	cfg := DefaultRetryConfig()
+	cfg := retry.Default()
 	cfg.MaxAttempts = 4
 	cfg.RequestTimeout = 10 * time.Second // long: the parent cancel must win, not the timeout
-	cfg.sleep = func(ctx context.Context, d time.Duration) error { return nil }
+	cfg.Sleep = func(ctx context.Context, d time.Duration) error { return nil }
 
 	ctx, cancel := context.WithCancel(context.Background())
 	client := WithRetry(inner, cfg)
@@ -194,60 +217,154 @@ func TestRetry_ParentCancelStillAbortsImmediately(t *testing.T) {
 	}
 }
 
-// TestWithRetry_DefaultsRequestTimeout asserts the backstop: a caller-supplied
-// RetryConfig that leaves RequestTimeout zero still gets DefaultRequestTimeout,
-// so no construction path can produce a client with an unbounded request.
+// TestWithRetry_DefaultsRequestTimeout asserts the backstop observably: a
+// caller-supplied retry.Config that leaves RequestTimeout zero still gives
+// every attempt the retry.DefaultRequestTimeout deadline, so no construction path
+// can produce a client with an unbounded request.
 func TestWithRetry_DefaultsRequestTimeout(t *testing.T) {
-	rc, ok := WithRetry(&fakeClient{}, RetryConfig{MaxAttempts: 2}).(*retryClient)
-	if !ok {
-		t.Fatal("WithRetry did not return a *retryClient")
+	inner := &probingClient{probeAttempts: 1}
+	cfg := retry.Config{MaxAttempts: 2} // RequestTimeout zero
+	client := WithRetry(inner, cfg)
+	if _, err := client.Complete(context.Background(), simpleRequest()); err != nil {
+		t.Fatalf("Complete: %v", err)
 	}
-	if rc.cfg.RequestTimeout != DefaultRequestTimeout {
-		t.Errorf("RequestTimeout = %v, want default %v", rc.cfg.RequestTimeout, DefaultRequestTimeout)
+	if !inner.hasDeadline {
+		t.Fatal("attempt context has no deadline; want retry.DefaultRequestTimeout")
+	}
+	if remaining := time.Until(inner.deadline); remaining > retry.DefaultRequestTimeout || remaining < retry.DefaultRequestTimeout-time.Minute {
+		t.Errorf("attempt deadline in %v, want ≈ %v (zero RequestTimeout resolves to DefaultRequestTimeout)", remaining, retry.DefaultRequestTimeout)
 	}
 }
 
-// TestWithRetry_JitterClamped verifies that WithRetry clamps Jitter to [0,1].
+// TestWithRetry_JitterClamped verifies observably that WithRetry applies the
+// [0,1] Jitter clamp: negative Jitter behaves as 0 (no jitter), Jitter above
+// 1 behaves as 1, and in-range values are preserved. Every case runs two
+// attempts with Rand pinned to 0.75 (jitter factor 1.5 at Jitter 1) and the
+// recorded sleeps assert the effective schedule.
 func TestWithRetry_JitterClamped(t *testing.T) {
 	tests := []struct {
 		name  string
 		input float64
-		want  float64
+		want  time.Duration
 	}{
-		{"negative clamped to 0", -0.5, 0},
-		{"above 1 clamped to 1", 1.5, 1},
-		{"zero preserved", 0, 0},
-		{"one preserved", 1, 1},
-		{"valid mid-range preserved", 0.2, 0.2},
+		{"negative clamped to 0", -0.5, 100 * time.Millisecond},
+		{"above 1 clamped to 1", 1.5, 150 * time.Millisecond},
+		{"zero preserved", 0, 100 * time.Millisecond},
+		{"one preserved", 1, 150 * time.Millisecond},
+		{"valid mid-range preserved", 0.2, 110 * time.Millisecond},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			rc, ok := WithRetry(&fakeClient{}, RetryConfig{MaxAttempts: 1, Jitter: tc.input}).(*retryClient)
-			if !ok {
-				t.Fatal("WithRetry did not return a *retryClient")
+			inner := &probingClient{probeAttempts: 1}
+			cfg := retry.Config{MaxAttempts: 2, BaseDelay: 100 * time.Millisecond, Jitter: tc.input}
+			cfg.Rand = func() float64 { return 0.75 }
+			var slept []time.Duration
+			cfg.Sleep = func(ctx context.Context, d time.Duration) error { slept = append(slept, d); return nil }
+			client := WithRetry(inner, cfg)
+			if _, err := client.Complete(context.Background(), simpleRequest()); err != nil {
+				t.Fatalf("Complete: %v", err)
 			}
-			if rc.cfg.Jitter != tc.want {
-				t.Errorf("Jitter = %v, want %v", rc.cfg.Jitter, tc.want)
+			if len(slept) != 1 {
+				t.Fatalf("slept = %v, want exactly one backoff sleep", slept)
+			}
+			if slept[0] != tc.want {
+				t.Errorf("Jitter %v slept %v, want %v", tc.input, slept[0], tc.want)
 			}
 		})
 	}
 }
 
-// TestWithRetry_PreservesExplicitRequestTimeout asserts that a RetryConfig
+// TestWithRetry_PreservesExplicitRequestTimeout asserts that a retry.Config
 // the caller supplies (as provider.New does after applying its
-// zero-MaxAttempts default) must survive WithRetry unchanged.
+// zero-MaxAttempts default) survives WithRetry unchanged: the explicit
+// RequestTimeout bounds the attempt and the default MaxAttempts still runs
+// all four attempts.
 func TestWithRetry_PreservesExplicitRequestTimeout(t *testing.T) {
 	want := 42 * time.Second
-	cfg := DefaultRetryConfig()
+	inner := &probingClient{probeAttempts: 3} // fails 3 times, succeeds on the 4th
+	cfg := retry.Default()
 	cfg.RequestTimeout = want
-	rc, ok := WithRetry(&fakeClient{}, cfg).(*retryClient)
-	if !ok {
-		t.Fatal("WithRetry did not return a *retryClient")
+	client := WithRetry(inner, cfg)
+	resp, err := client.Complete(context.Background(), simpleRequest())
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
 	}
-	if rc.cfg.RequestTimeout != want {
-		t.Errorf("explicit RequestTimeout = %v, want %v", rc.cfg.RequestTimeout, want)
+	if resp.Text != "ok" {
+		t.Errorf("Text = %q, want ok", resp.Text)
 	}
-	if rc.cfg.MaxAttempts != DefaultRetryConfig().MaxAttempts {
-		t.Errorf("MaxAttempts = %d, want default %d", rc.cfg.MaxAttempts, DefaultRetryConfig().MaxAttempts)
+	if inner.calls != retry.Default().MaxAttempts {
+		t.Errorf("calls = %d, want %d (MaxAttempts preserved)", inner.calls, retry.Default().MaxAttempts)
+	}
+	if !inner.hasDeadline {
+		t.Fatal("attempt context has no deadline")
+	}
+	if remaining := time.Until(inner.deadline); remaining > want || remaining < want-time.Second {
+		t.Errorf("attempt deadline in %v, want ≈ %v (explicit RequestTimeout preserved)", remaining, want)
+	}
+}
+
+// panicClient captures the attempt context, then panics: the loop must
+// release that context even on the panic path.
+type panicClient struct {
+	completeCtx context.Context
+	streamCtx   context.Context
+}
+
+func (p *panicClient) Capabilities() Capabilities { return Capabilities{} }
+
+func (p *panicClient) Complete(ctx context.Context, req Request) (Response, error) {
+	p.completeCtx = ctx
+	panic("inner complete panic")
+}
+
+func (p *panicClient) Stream(ctx context.Context, req Request, fn func(Delta) error) (Response, error) {
+	p.streamCtx = ctx
+	panic("inner stream panic")
+}
+
+// recovered runs fn, swallows a panic, and reports whether one happened.
+func recovered(fn func()) (panicked bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			panicked = true
+		}
+	}()
+	fn()
+	return false
+}
+
+// TestWithRetry_PanicReleasesAttemptContext pins the per-attempt cleanup
+// through the wrapper: the inner panic propagates, and the attempt context
+// is still cancelled — its cancel runs via defer during the unwind, never an
+// inline call a panic could skip. (The same guarantee for a bare retry.Do
+// call is pinned in the retry package.)
+func TestWithRetry_PanicReleasesAttemptContext(t *testing.T) {
+	// Complete path. RequestTimeout is an hour, so an un-released context
+	// would still report Err() == nil here.
+	cfg := retry.Config{MaxAttempts: 3, RequestTimeout: time.Hour}
+	cfg.Sleep = func(ctx context.Context, d time.Duration) error { return nil }
+	pc := &panicClient{}
+	if !recovered(func() { _, _ = WithRetry(pc, cfg).Complete(context.Background(), simpleRequest()) }) {
+		t.Error("expected the inner panic to propagate through WithRetry Complete")
+	}
+	if pc.completeCtx == nil {
+		t.Fatal("inner Complete never saw an attempt context")
+	}
+	if pc.completeCtx.Err() != context.Canceled {
+		t.Errorf("Complete attempt ctx after panic: err = %v, want context.Canceled", pc.completeCtx.Err())
+	}
+
+	// Stream path.
+	ps := &panicClient{}
+	if !recovered(func() {
+		_, _ = Stream(context.Background(), WithRetry(ps, cfg), simpleRequest(), func(Delta) error { return nil })
+	}) {
+		t.Error("expected the inner panic to propagate through WithRetry Stream")
+	}
+	if ps.streamCtx == nil {
+		t.Fatal("inner Stream never saw an attempt context")
+	}
+	if ps.streamCtx.Err() != context.Canceled {
+		t.Errorf("Stream attempt ctx after panic: err = %v, want context.Canceled", ps.streamCtx.Err())
 	}
 }

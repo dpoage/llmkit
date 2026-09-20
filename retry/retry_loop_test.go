@@ -1,4 +1,4 @@
-package llmkit
+package retry
 
 import (
 	"context"
@@ -22,10 +22,10 @@ func retryAny(err error) (time.Duration, bool, bool) {
 // BaseDelay stays zero (immediate retry), never mistaken for int64
 // overflow.
 func TestBackoffDelay_RetryAfterCappedAtMaxDelay(t *testing.T) {
-	def := DefaultRetryConfig()
+	def := Default()
 	// Normalized retry policy: explicit MaxAttempts, kit-default delays,
 	// embed's 60s per-attempt timeout.
-	p := RetryConfig{MaxAttempts: 5, BaseDelay: def.BaseDelay, MaxDelay: def.MaxDelay, RequestTimeout: 60 * time.Second}
+	p := Config{MaxAttempts: 5, BaseDelay: def.BaseDelay, MaxDelay: def.MaxDelay, RequestTimeout: 60 * time.Second}
 
 	after := backoffDelay(p, 1, time.Hour, true)
 	if after != def.MaxDelay {
@@ -36,7 +36,7 @@ func TestBackoffDelay_RetryAfterCappedAtMaxDelay(t *testing.T) {
 		t.Errorf("exponential backoff = %v, want in (0, %v]", d, def.MaxDelay)
 	}
 
-	if d := backoffDelay(RetryConfig{BaseDelay: 0}, 3, 0, false); d != 0 {
+	if d := backoffDelay(Config{BaseDelay: 0}, 3, 0, false); d != 0 {
 		t.Errorf("backoffDelay with zero BaseDelay = %v, want 0", d)
 	}
 }
@@ -44,35 +44,35 @@ func TestBackoffDelay_RetryAfterCappedAtMaxDelay(t *testing.T) {
 // TestBackoffDelay_JitterZeroDeterministic pins that explicit Jitter 0
 // means no jitter: attempt 2 doubles BaseDelay exactly.
 func TestBackoffDelay_JitterZeroDeterministic(t *testing.T) {
-	if d := backoffDelay(RetryConfig{BaseDelay: 100 * time.Millisecond, Jitter: 0}, 2, 0, false); d != 200*time.Millisecond {
+	if d := backoffDelay(Config{BaseDelay: 100 * time.Millisecond, Jitter: 0}, 2, 0, false); d != 200*time.Millisecond {
 		t.Errorf("backoffDelay with Jitter 0 = %v, want exact 200ms (deterministic)", d)
 	}
 }
 
-// TestRetry_RetriesTransientThenSucceeds pins the loop: a transient failure is
+// TestDo_RetriesTransientThenSucceeds pins the loop: a transient failure is
 // retried, and success on a later attempt returns nil.
-func TestRetry_RetriesTransientThenSucceeds(t *testing.T) {
+func TestDo_RetriesTransientThenSucceeds(t *testing.T) {
 	var calls atomic.Int32
-	err := Retry(context.Background(), RetryConfig{MaxAttempts: 3, BaseDelay: time.Millisecond, Jitter: 0}, retryAny, func(ctx context.Context) error {
+	err := Do(context.Background(), Config{MaxAttempts: 3, BaseDelay: time.Millisecond, Jitter: 0}, retryAny, func(ctx context.Context) error {
 		if calls.Add(1) < 3 {
 			return errors.New("transient")
 		}
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("Retry: %v", err)
+		t.Fatalf("Do: %v", err)
 	}
 	if got := calls.Load(); got != 3 {
 		t.Errorf("calls = %d, want 3", got)
 	}
 }
 
-// TestRetry_GivesUpAfterMaxAttempts pins that Retry returns the last error
+// TestDo_GivesUpAfterMaxAttempts pins that Do returns the last error
 // after MaxAttempts attempts, not one more.
-func TestRetry_GivesUpAfterMaxAttempts(t *testing.T) {
+func TestDo_GivesUpAfterMaxAttempts(t *testing.T) {
 	var calls atomic.Int32
 	want := errors.New("always transient")
-	err := Retry(context.Background(), RetryConfig{MaxAttempts: 3, BaseDelay: time.Millisecond, Jitter: 0}, retryAny, func(ctx context.Context) error {
+	err := Do(context.Background(), Config{MaxAttempts: 3, BaseDelay: time.Millisecond, Jitter: 0}, retryAny, func(ctx context.Context) error {
 		calls.Add(1)
 		return want
 	})
@@ -84,11 +84,11 @@ func TestRetry_GivesUpAfterMaxAttempts(t *testing.T) {
 	}
 }
 
-// TestRetry_UnclassifiedTerminal pins that a classify miss returns immediately
+// TestDo_UnclassifiedTerminal pins that a classify miss returns immediately
 // without a second attempt.
-func TestRetry_UnclassifiedTerminal(t *testing.T) {
+func TestDo_UnclassifiedTerminal(t *testing.T) {
 	var calls atomic.Int32
-	err := Retry(context.Background(), RetryConfig{MaxAttempts: 3, BaseDelay: time.Millisecond}, func(error) (time.Duration, bool, bool) {
+	err := Do(context.Background(), Config{MaxAttempts: 3, BaseDelay: time.Millisecond}, func(error) (time.Duration, bool, bool) {
 		return 0, false, false
 	}, func(ctx context.Context) error {
 		calls.Add(1)
@@ -102,13 +102,13 @@ func TestRetry_UnclassifiedTerminal(t *testing.T) {
 	}
 }
 
-// TestRetry_RetryAfterReplacesBackoff pins that a classified Retry-After delay
+// TestDo_RetryAfterReplacesBackoff pins that a classified Retry-After delay
 // replaces the exponential schedule: with a 1h BaseDelay and no cap, only the
 // server's 1ms delay can let this test finish.
-func TestRetry_RetryAfterReplacesBackoff(t *testing.T) {
+func TestDo_RetryAfterReplacesBackoff(t *testing.T) {
 	var calls atomic.Int32
 	start := time.Now()
-	err := Retry(context.Background(), RetryConfig{MaxAttempts: 2, BaseDelay: time.Hour, Jitter: 0},
+	err := Do(context.Background(), Config{MaxAttempts: 2, BaseDelay: time.Hour, Jitter: 0},
 		func(error) (time.Duration, bool, bool) { return time.Millisecond, true, true },
 		func(ctx context.Context) error {
 			calls.Add(1)
@@ -118,24 +118,24 @@ func TestRetry_RetryAfterReplacesBackoff(t *testing.T) {
 			return nil
 		})
 	if err != nil {
-		t.Fatalf("Retry: %v", err)
+		t.Fatalf("Do: %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("Retry took %v; Retry-After delay was not used instead of backoff", elapsed)
+		t.Fatalf("Do took %v; Retry-After delay was not used instead of backoff", elapsed)
 	}
 	if got := calls.Load(); got != 2 {
 		t.Errorf("calls = %d, want 2", got)
 	}
 }
 
-// TestRetry_ParentCancelTerminal pins that cancellation of the parent context
+// TestDo_ParentCancelTerminal pins that cancellation of the parent context
 // ends the loop immediately with the last error — cancellation is never
 // retried and never swallowed.
-func TestRetry_ParentCancelTerminal(t *testing.T) {
+func TestDo_ParentCancelTerminal(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var calls atomic.Int32
 	want := errors.New("boom")
-	err := Retry(ctx, RetryConfig{MaxAttempts: 5, BaseDelay: time.Hour, Jitter: 0}, retryAny, func(ctx context.Context) error {
+	err := Do(ctx, Config{MaxAttempts: 5, BaseDelay: time.Hour, Jitter: 0}, retryAny, func(ctx context.Context) error {
 		calls.Add(1)
 		cancel() // cancel the parent mid-attempt
 		return want
@@ -148,12 +148,12 @@ func TestRetry_ParentCancelTerminal(t *testing.T) {
 	}
 }
 
-// TestRetry_PerAttemptTimeout pins the per-attempt deadline: a fn that
+// TestDo_PerAttemptTimeout pins the per-attempt deadline: a fn that
 // outlives cfg.RequestTimeout sees its context expire, and the
 // timeout-classified failure is retried rather than blocking forever.
-func TestRetry_PerAttemptTimeout(t *testing.T) {
+func TestDo_PerAttemptTimeout(t *testing.T) {
 	var calls atomic.Int32
-	err := Retry(context.Background(), RetryConfig{MaxAttempts: 2, BaseDelay: time.Millisecond, Jitter: 0, RequestTimeout: 20 * time.Millisecond}, retryAny, func(ctx context.Context) error {
+	err := Do(context.Background(), Config{MaxAttempts: 2, BaseDelay: time.Millisecond, Jitter: 0, RequestTimeout: 20 * time.Millisecond}, retryAny, func(ctx context.Context) error {
 		calls.Add(1)
 		select {
 		case <-time.After(200 * time.Millisecond):
@@ -170,12 +170,12 @@ func TestRetry_PerAttemptTimeout(t *testing.T) {
 	}
 }
 
-// TestRetry_ZeroConfigIsOneAttempt pins the MaxAttempts clamp: the zero
-// RetryConfig means exactly one attempt and no retries, never a zero-value
+// TestDo_ZeroConfigIsOneAttempt pins the MaxAttempts clamp: the zero
+// Config means exactly one attempt and no retries, never a zero-value
 // panic or an unbounded loop.
-func TestRetry_ZeroConfigIsOneAttempt(t *testing.T) {
+func TestDo_ZeroConfigIsOneAttempt(t *testing.T) {
 	var calls atomic.Int32
-	err := Retry(context.Background(), RetryConfig{}, retryAny, func(ctx context.Context) error {
+	err := Do(context.Background(), Config{}, retryAny, func(ctx context.Context) error {
 		calls.Add(1)
 		return errors.New("transient")
 	})
@@ -187,14 +187,14 @@ func TestRetry_ZeroConfigIsOneAttempt(t *testing.T) {
 	}
 }
 
-// TestRetry_RetryDefaultsRequestTimeout pins the RequestTimeout clamp: a zero
+// TestDo_DefaultsRequestTimeout pins the RequestTimeout clamp: a zero
 // or negative RequestTimeout gives every attempt the DefaultRequestTimeout
 // deadline.
-func TestRetry_RetryDefaultsRequestTimeout(t *testing.T) {
-	for _, cfg := range []RetryConfig{{}, {MaxAttempts: 2, RequestTimeout: -time.Second}} {
+func TestDo_DefaultsRequestTimeout(t *testing.T) {
+	for _, cfg := range []Config{{}, {MaxAttempts: 2, RequestTimeout: -time.Second}} {
 		var ok bool
 		var deadline time.Time
-		_ = Retry(context.Background(), cfg, retryAny, func(ctx context.Context) error {
+		_ = Do(context.Background(), cfg, retryAny, func(ctx context.Context) error {
 			deadline, ok = ctx.Deadline()
 			return errors.New("transient")
 		})
@@ -207,15 +207,15 @@ func TestRetry_RetryDefaultsRequestTimeout(t *testing.T) {
 	}
 }
 
-// TestRetry_JitterClampedInRetry pins the Jitter clamp on the Retry entry
+// TestDo_JitterClamped pins the Jitter clamp on the Do entry
 // point: negative Jitter behaves as 0 (exact doubling), and Jitter above 1
-// behaves as 1 (with rng pinned to 0 the wait is 0, not the negative delay
+// behaves as 1 (with Rand pinned to 0 the wait is 0, not the negative delay
 // unclamped jitter would compute).
-func TestRetry_JitterClampedInRetry(t *testing.T) {
+func TestDo_JitterClamped(t *testing.T) {
 	var slept []time.Duration
-	cfg := RetryConfig{MaxAttempts: 3, BaseDelay: 100 * time.Millisecond, Jitter: -1}
-	cfg.sleep = func(ctx context.Context, d time.Duration) error { slept = append(slept, d); return nil }
-	_ = Retry(context.Background(), cfg, retryAny, func(ctx context.Context) error {
+	cfg := Config{MaxAttempts: 3, BaseDelay: 100 * time.Millisecond, Jitter: -1}
+	cfg.Sleep = func(ctx context.Context, d time.Duration) error { slept = append(slept, d); return nil }
+	_ = Do(context.Background(), cfg, retryAny, func(ctx context.Context) error {
 		return errors.New("transient")
 	})
 	if len(slept) != 2 || slept[0] != 100*time.Millisecond || slept[1] != 200*time.Millisecond {
@@ -223,26 +223,26 @@ func TestRetry_JitterClampedInRetry(t *testing.T) {
 	}
 
 	slept = nil
-	cfg = RetryConfig{MaxAttempts: 2, BaseDelay: 100 * time.Millisecond, Jitter: 3}
-	cfg.rng = func() float64 { return 0 }
-	cfg.sleep = func(ctx context.Context, d time.Duration) error { slept = append(slept, d); return nil }
-	_ = Retry(context.Background(), cfg, retryAny, func(ctx context.Context) error {
+	cfg = Config{MaxAttempts: 2, BaseDelay: 100 * time.Millisecond, Jitter: 3}
+	cfg.Rand = func() float64 { return 0 }
+	cfg.Sleep = func(ctx context.Context, d time.Duration) error { slept = append(slept, d); return nil }
+	_ = Do(context.Background(), cfg, retryAny, func(ctx context.Context) error {
 		return errors.New("transient")
 	})
 	if len(slept) != 1 || slept[0] != 0 {
-		t.Errorf("Jitter 3 sleeps = %v, want [0] (clamped to 1: factor 0 at rng 0, never negative)", slept)
+		t.Errorf("Jitter 3 sleeps = %v, want [0] (clamped to 1: factor 0 at Rand 0, never negative)", slept)
 	}
 }
 
-// TestRetry_ZeroRetryAfterMeansImmediateRetry pins the presence-bit semantics:
+// TestDo_ZeroRetryAfterMeansImmediateRetry pins the presence-bit semantics:
 // hasRetryAfter with a zero delay is a server-supplied "retry now", distinct
 // from absence, which would schedule the 1h exponential backoff.
-func TestRetry_ZeroRetryAfterMeansImmediateRetry(t *testing.T) {
+func TestDo_ZeroRetryAfterMeansImmediateRetry(t *testing.T) {
 	var calls atomic.Int32
 	var slept []time.Duration
-	cfg := RetryConfig{MaxAttempts: 2, BaseDelay: time.Hour, Jitter: 0}
-	cfg.sleep = func(ctx context.Context, d time.Duration) error { slept = append(slept, d); return nil }
-	err := Retry(context.Background(), cfg, func(error) (time.Duration, bool, bool) {
+	cfg := Config{MaxAttempts: 2, BaseDelay: time.Hour, Jitter: 0}
+	cfg.Sleep = func(ctx context.Context, d time.Duration) error { slept = append(slept, d); return nil }
+	err := Do(context.Background(), cfg, func(error) (time.Duration, bool, bool) {
 		return 0, true, true
 	}, func(ctx context.Context) error {
 		calls.Add(1)
@@ -252,7 +252,7 @@ func TestRetry_ZeroRetryAfterMeansImmediateRetry(t *testing.T) {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("Retry: %v", err)
+		t.Fatalf("Do: %v", err)
 	}
 	if got := calls.Load(); got != 2 {
 		t.Errorf("calls = %d, want 2", got)
@@ -293,7 +293,7 @@ func TestParseRetryAfter(t *testing.T) {
 
 // TestRetryLoop_DelayAgreement pins the one delay schedule every retry entry
 // point now shares: a table of (cfg, attempt, after, hasAfter) cases run
-// through Retry's own sleep hook with a deterministic rng, asserting exact
+// through Do's own sleep hook with a deterministic Rand, asserting exact
 // delays including the clamp edges — negative Retry-After, BaseDelay*2^k
 // overflow, MaxDelay 0 meaning uncapped, and BaseDelay above MaxDelay on the
 // first retry (the post-loop cap is the only clamp that reaches it).
@@ -301,40 +301,40 @@ func TestRetryLoop_DelayAgreement(t *testing.T) {
 	base := 500 * time.Millisecond
 	cases := []struct {
 		name     string
-		cfg      RetryConfig
+		cfg      Config
 		attempt  int
 		after    time.Duration
 		hasAfter bool
 		want     time.Duration
 		wantAll  []time.Duration // set: assert the full sleep sequence
 	}{
-		{"retry-after capped at MaxDelay", RetryConfig{BaseDelay: base, MaxDelay: 30 * time.Second, Jitter: 0}, 1, time.Hour, true, 30 * time.Second, nil},
-		{"retry-after under cap wins over backoff", RetryConfig{BaseDelay: base, MaxDelay: 30 * time.Second, Jitter: 0}, 1, 2 * time.Second, true, 2 * time.Second, nil},
-		{"negative retry-after clamps to zero", RetryConfig{BaseDelay: base, MaxDelay: 30 * time.Second, Jitter: 0}, 1, -5 * time.Second, true, 0, nil},
-		{"zero retry-after with presence waits nothing", RetryConfig{BaseDelay: base, MaxDelay: 30 * time.Second, Jitter: 0}, 1, 0, true, 0, nil},
-		{"MaxDelay zero leaves retry-after uncapped", RetryConfig{BaseDelay: base, MaxDelay: 0, Jitter: 0}, 1, time.Hour, true, time.Hour, nil},
-		{"retry-after without presence is ignored", RetryConfig{BaseDelay: base, MaxDelay: 30 * time.Second, Jitter: 0}, 1, 5 * time.Second, false, 500 * time.Millisecond, nil},
-		{"first delay caps at MaxDelay", RetryConfig{BaseDelay: time.Minute, MaxDelay: 30 * time.Second, Jitter: 0}, 1, 0, false, 30 * time.Second, nil},
-		{"third exponential delay is four times BaseDelay", RetryConfig{BaseDelay: base, MaxDelay: 30 * time.Second, Jitter: 0}, 3, 0, false, 2 * time.Second, nil},
-		{"schedule caps at MaxDelay", RetryConfig{BaseDelay: 20 * time.Second, MaxDelay: 30 * time.Second, Jitter: 0}, 2, 0, false, 30 * time.Second, nil},
-		{"MaxDelay zero leaves the schedule uncapped", RetryConfig{BaseDelay: base, MaxDelay: 0, Jitter: 0}, 10, 0, false, 256 * time.Second, nil},
-		{"sequence grows then caps", RetryConfig{BaseDelay: 20 * time.Second, MaxDelay: 30 * time.Second, Jitter: 0}, 3, 0, false, 30 * time.Second,
+		{"retry-after capped at MaxDelay", Config{BaseDelay: base, MaxDelay: 30 * time.Second, Jitter: 0}, 1, time.Hour, true, 30 * time.Second, nil},
+		{"retry-after under cap wins over backoff", Config{BaseDelay: base, MaxDelay: 30 * time.Second, Jitter: 0}, 1, 2 * time.Second, true, 2 * time.Second, nil},
+		{"negative retry-after clamps to zero", Config{BaseDelay: base, MaxDelay: 30 * time.Second, Jitter: 0}, 1, -5 * time.Second, true, 0, nil},
+		{"zero retry-after with presence waits nothing", Config{BaseDelay: base, MaxDelay: 30 * time.Second, Jitter: 0}, 1, 0, true, 0, nil},
+		{"MaxDelay zero leaves retry-after uncapped", Config{BaseDelay: base, MaxDelay: 0, Jitter: 0}, 1, time.Hour, true, time.Hour, nil},
+		{"retry-after without presence is ignored", Config{BaseDelay: base, MaxDelay: 30 * time.Second, Jitter: 0}, 1, 5 * time.Second, false, 500 * time.Millisecond, nil},
+		{"first delay caps at MaxDelay", Config{BaseDelay: time.Minute, MaxDelay: 30 * time.Second, Jitter: 0}, 1, 0, false, 30 * time.Second, nil},
+		{"third exponential delay is four times BaseDelay", Config{BaseDelay: base, MaxDelay: 30 * time.Second, Jitter: 0}, 3, 0, false, 2 * time.Second, nil},
+		{"schedule caps at MaxDelay", Config{BaseDelay: 20 * time.Second, MaxDelay: 30 * time.Second, Jitter: 0}, 2, 0, false, 30 * time.Second, nil},
+		{"MaxDelay zero leaves the schedule uncapped", Config{BaseDelay: base, MaxDelay: 0, Jitter: 0}, 10, 0, false, 256 * time.Second, nil},
+		{"sequence grows then caps", Config{BaseDelay: 20 * time.Second, MaxDelay: 30 * time.Second, Jitter: 0}, 3, 0, false, 30 * time.Second,
 			[]time.Duration{20 * time.Second, 30 * time.Second, 30 * time.Second}},
-		{"doubling past int64 clamps instead of overflowing", RetryConfig{BaseDelay: time.Duration(1) << 62, MaxDelay: 0, Jitter: 0}, 2, 0, false, time.Duration(1) << 62, nil},
-		{"zero BaseDelay stays zero", RetryConfig{BaseDelay: 0, MaxDelay: 30 * time.Second, Jitter: 0}, 3, 0, false, 0, nil},
-		{"jitter scales with the rng source", RetryConfig{BaseDelay: base, MaxDelay: 30 * time.Second, Jitter: 0.2}, 1, 0, false, 550 * time.Millisecond, nil},
+		{"doubling past int64 clamps instead of overflowing", Config{BaseDelay: time.Duration(1) << 62, MaxDelay: 0, Jitter: 0}, 2, 0, false, time.Duration(1) << 62, nil},
+		{"zero BaseDelay stays zero", Config{BaseDelay: 0, MaxDelay: 30 * time.Second, Jitter: 0}, 3, 0, false, 0, nil},
+		{"jitter scales with the Rand source", Config{BaseDelay: base, MaxDelay: 30 * time.Second, Jitter: 0.2}, 1, 0, false, 550 * time.Millisecond, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var slept []time.Duration
 			cfg := tc.cfg
 			cfg.MaxAttempts = tc.attempt + 1
-			cfg.rng = func() float64 { return 0.75 } // jitter factor 1.1 when Jitter > 0
-			cfg.sleep = func(ctx context.Context, d time.Duration) error {
+			cfg.Rand = func() float64 { return 0.75 } // jitter factor 1.1 when Jitter > 0
+			cfg.Sleep = func(ctx context.Context, d time.Duration) error {
 				slept = append(slept, d)
 				return nil
 			}
-			err := Retry(context.Background(), cfg, func(error) (time.Duration, bool, bool) {
+			err := Do(context.Background(), cfg, func(error) (time.Duration, bool, bool) {
 				return tc.after, tc.hasAfter, true
 			}, func(ctx context.Context) error {
 				return errors.New("always transient")
@@ -363,25 +363,6 @@ func TestRetryLoop_DelayAgreement(t *testing.T) {
 	}
 }
 
-// panicClient captures the attempt context, then panics: the loop must
-// release that context even on the panic path.
-type panicClient struct {
-	completeCtx context.Context
-	streamCtx   context.Context
-}
-
-func (p *panicClient) Capabilities() Capabilities { return Capabilities{} }
-
-func (p *panicClient) Complete(ctx context.Context, req Request) (Response, error) {
-	p.completeCtx = ctx
-	panic("inner complete panic")
-}
-
-func (p *panicClient) Stream(ctx context.Context, req Request, fn func(Delta) error) (Response, error) {
-	p.streamCtx = ctx
-	panic("inner stream panic")
-}
-
 // recovered runs fn, swallows a panic, and reports whether one happened.
 func recovered(fn func()) (panicked bool) {
 	defer func() {
@@ -393,20 +374,19 @@ func recovered(fn func()) (panicked bool) {
 	return false
 }
 
-// TestRetry_PanicReleasesAttemptContext pins the per-attempt cleanup: fn's
+// TestDo_PanicReleasesAttemptContext pins the per-attempt cleanup: fn's
 // panic propagates, and the attempt context is still cancelled — its cancel
 // runs via defer during the unwind, never an inline call a panic could skip.
-func TestRetry_PanicReleasesAttemptContext(t *testing.T) {
-	// Directly through Retry.
+func TestDo_PanicReleasesAttemptContext(t *testing.T) {
 	var attemptCtx context.Context
 	panicked := recovered(func() {
-		_ = Retry(context.Background(), RetryConfig{RequestTimeout: time.Hour}, retryAny, func(ctx context.Context) error {
+		_ = Do(context.Background(), Config{RequestTimeout: time.Hour}, retryAny, func(ctx context.Context) error {
 			attemptCtx = ctx
 			panic("fn panic")
 		})
 	})
 	if !panicked {
-		t.Fatal("expected fn's panic to propagate out of Retry")
+		t.Fatal("expected fn's panic to propagate out of Do")
 	}
 	if attemptCtx == nil {
 		t.Fatal("fn never saw an attempt context")
@@ -414,46 +394,17 @@ func TestRetry_PanicReleasesAttemptContext(t *testing.T) {
 	if attemptCtx.Err() != context.Canceled {
 		t.Errorf("attempt ctx after panic: err = %v, want context.Canceled (cancel ran during unwind)", attemptCtx.Err())
 	}
-
-	// Through WithRetry's Complete path. RequestTimeout is an hour, so an
-	// un-released context would still report Err() == nil here.
-	cfg := RetryConfig{MaxAttempts: 3, RequestTimeout: time.Hour}
-	cfg.sleep = func(ctx context.Context, d time.Duration) error { return nil }
-	pc := &panicClient{}
-	if !recovered(func() { _, _ = WithRetry(pc, cfg).Complete(context.Background(), simpleRequest()) }) {
-		t.Error("expected the inner panic to propagate through WithRetry Complete")
-	}
-	if pc.completeCtx == nil {
-		t.Fatal("inner Complete never saw an attempt context")
-	}
-	if pc.completeCtx.Err() != context.Canceled {
-		t.Errorf("Complete attempt ctx after panic: err = %v, want context.Canceled", pc.completeCtx.Err())
-	}
-
-	// Through WithRetry's Stream path.
-	ps := &panicClient{}
-	if !recovered(func() {
-		_, _ = Stream(context.Background(), WithRetry(ps, cfg), simpleRequest(), func(Delta) error { return nil })
-	}) {
-		t.Error("expected the inner panic to propagate through WithRetry Stream")
-	}
-	if ps.streamCtx == nil {
-		t.Fatal("inner Stream never saw an attempt context")
-	}
-	if ps.streamCtx.Err() != context.Canceled {
-		t.Errorf("Stream attempt ctx after panic: err = %v, want context.Canceled", ps.streamCtx.Err())
-	}
 }
 
-// TestRetry_CancelsEachAttemptBeforeTheNext pins that the loop holds no
+// TestDo_CancelsEachAttemptBeforeTheNext pins that the loop holds no
 // accumulated defers: by the time attempt N runs, attempt N-1's context
 // already reads context.Canceled — cancel runs at the end of each attempt,
-// not when Retry returns.
-func TestRetry_CancelsEachAttemptBeforeTheNext(t *testing.T) {
+// not when Do returns.
+func TestDo_CancelsEachAttemptBeforeTheNext(t *testing.T) {
 	var ctxs []context.Context
 	var prevErrs []error
-	cfg := RetryConfig{MaxAttempts: 3, BaseDelay: time.Millisecond, Jitter: 0}
-	err := Retry(context.Background(), cfg, retryAny, func(ctx context.Context) error {
+	cfg := Config{MaxAttempts: 3, BaseDelay: time.Millisecond, Jitter: 0}
+	err := Do(context.Background(), cfg, retryAny, func(ctx context.Context) error {
 		if prev := len(ctxs) - 1; prev >= 0 {
 			prevErrs = append(prevErrs, ctxs[prev].Err())
 		}
@@ -464,7 +415,7 @@ func TestRetry_CancelsEachAttemptBeforeTheNext(t *testing.T) {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("Retry: %v", err)
+		t.Fatalf("Do: %v", err)
 	}
 	if len(ctxs) != 3 {
 		t.Fatalf("attempts = %d, want 3", len(ctxs))
@@ -474,7 +425,7 @@ func TestRetry_CancelsEachAttemptBeforeTheNext(t *testing.T) {
 	}
 	for i, e := range prevErrs {
 		if e != context.Canceled {
-			t.Errorf("attempt %d's ctx while attempt %d ran: err = %v, want context.Canceled (cancel must not accumulate until Retry returns)", i+1, i+2, e)
+			t.Errorf("attempt %d's ctx while attempt %d ran: err = %v, want context.Canceled (cancel must not accumulate until Do returns)", i+1, i+2, e)
 		}
 	}
 }

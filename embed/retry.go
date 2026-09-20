@@ -3,7 +3,7 @@ package embed
 import (
 	"errors"
 	"fmt"
-	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/retry"
 	"net"
 	"net/http"
 	"time"
@@ -34,7 +34,7 @@ func (e *statusError) retryAfterDuration() (time.Duration, bool) {
 // Retry-After header value, if any.
 func newStatusError(backend string, status int, retryAfterHeader, body string) *statusError {
 	se := &statusError{backend: backend, status: status, body: truncate(body, 200)}
-	if d, ok := llmkit.ParseRetryAfter(retryAfterHeader, time.Now()); ok {
+	if d, ok := retry.ParseRetryAfter(retryAfterHeader, time.Now()); ok {
 		se.retryAfter, se.hasRetryAfter = d, true
 	}
 	return se

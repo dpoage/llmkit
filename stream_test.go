@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dpoage/llmkit/retry"
 )
 
 // scriptedStreamClient implements StreamingClient with a canned delta
@@ -54,15 +56,15 @@ func (s *scriptedStreamClient) Stream(ctx context.Context, req Request, fn func(
 	return s.resp, nil
 }
 
-// countedRetryConfig returns a fast RetryConfig whose backoff sleeps are
+// countedRetryConfig returns a fast retry.Config whose backoff sleeps are
 // counted, so tests observe retry behavior without real waiting.
-func countedRetryConfig(maxAttempts int, timeout time.Duration, sleeps *int) RetryConfig {
-	return RetryConfig{
+func countedRetryConfig(maxAttempts int, timeout time.Duration, sleeps *int) retry.Config {
+	return retry.Config{
 		MaxAttempts:    maxAttempts,
 		BaseDelay:      time.Millisecond,
 		MaxDelay:       time.Millisecond,
 		RequestTimeout: timeout,
-		sleep:          func(context.Context, time.Duration) error { *sleeps++; return nil },
+		Sleep:          func(context.Context, time.Duration) error { *sleeps++; return nil },
 	}
 }
 

@@ -47,7 +47,7 @@ never echoes the key.
 | `Model` | Yes | A versioned id (`jev-1.13.0`) or alias (`jev-latest`, `jev-preview`). There is no default alias. |
 | `BaseURL` | No | Endpoint root for tests and gateways. Default: `https://api.typesafe.ai`; the path `/v1/systemone` is appended. |
 | `HTTPClient` | No | Used as-is, including its `Timeout`. Default: a plain client with no `http.Client.Timeout`, so the per-attempt `RequestTimeout` is the only bound. |
-| `Retry` | No | Unset knobs resolve at construction: 3 attempts, 30 s per-attempt timeout. `BaseDelay` (500 ms) and `MaxDelay` (30 s) come from `llmkit.DefaultRetryConfig`. `Jitter` is literal: 0 means no jitter. |
+| `Retry` | No | Unset knobs resolve at construction: 3 attempts, 30 s per-attempt timeout. `BaseDelay` (500 ms) and `MaxDelay` (30 s) come from `retry.Default`. `Jitter` is literal: 0 means no jitter. |
 | `Recorder` | No | Receives one `llmkit.UsageEvent` per successful `Ask` through its `Record(llmkit.UsageEvent)` method. Default: nil (no recording). |
 
 ## The three question types
@@ -331,7 +331,7 @@ the vendor's API doc reserves 422 for validation failures. Both map to
 The client parses the `Retry-After` header on every status. On a retried
 status (429 and every 5xx, 529 included), a server-supplied delay replaces the
 exponential backoff for the sleep. The sleep is capped at
-`RetryConfig.MaxDelay` (30 s by default); `APIError.RetryAfter` carries the
+`retry.Config.MaxDelay` (30 s by default); `APIError.RetryAfter` carries the
 raw server value. If a present header clamps to zero — a zero value or a past
 HTTP-date — the client retries immediately. Every other status is terminal.
 

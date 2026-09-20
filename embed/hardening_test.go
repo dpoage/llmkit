@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/retry"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-var fastRetry = llmkit.RetryConfig{
+var fastRetry = retry.Config{
 	MaxAttempts: 3,
 	BaseDelay:   time.Millisecond,
 	MaxDelay:    5 * time.Millisecond,
@@ -36,7 +36,7 @@ func TestOllamaEmbedder_RequestTimeoutEnforced(t *testing.T) {
 		Embedder: "ollama",
 		Model:    "m",
 		URL:      srv.URL,
-		Retry:    llmkit.RetryConfig{MaxAttempts: 1, RequestTimeout: 50 * time.Millisecond},
+		Retry:    retry.Config{MaxAttempts: 1, RequestTimeout: 50 * time.Millisecond},
 	})
 	if err != nil {
 		t.Fatalf("NewOllamaEmbedder: %v", err)
@@ -73,7 +73,7 @@ func TestOpenAIEmbedder_RequestTimeoutEnforced(t *testing.T) {
 		Embedder: "openai-compatible",
 		Model:    "m",
 		URL:      srv.URL,
-		Retry:    llmkit.RetryConfig{MaxAttempts: 1, RequestTimeout: 50 * time.Millisecond},
+		Retry:    retry.Config{MaxAttempts: 1, RequestTimeout: 50 * time.Millisecond},
 	})
 	if err != nil {
 		t.Fatalf("NewOpenAICompatibleEmbedder: %v", err)
@@ -187,7 +187,7 @@ func TestOllamaEmbedder_RetryAfterSeconds_Honored(t *testing.T) {
 		Embedder: "ollama",
 		Model:    "m",
 		URL:      srv.URL,
-		Retry:    llmkit.RetryConfig{MaxAttempts: 3, BaseDelay: 30 * time.Second, MaxDelay: 30 * time.Second},
+		Retry:    retry.Config{MaxAttempts: 3, BaseDelay: 30 * time.Second, MaxDelay: 30 * time.Second},
 	})
 	if err != nil {
 		t.Fatalf("NewOllamaEmbedder: %v", err)
@@ -221,7 +221,7 @@ func TestOpenAIEmbedder_RetryAfterHTTPDate_Honored(t *testing.T) {
 		Embedder: "openai-compatible",
 		Model:    "m",
 		URL:      srv.URL,
-		Retry:    llmkit.RetryConfig{MaxAttempts: 3, BaseDelay: 30 * time.Second, MaxDelay: 30 * time.Second},
+		Retry:    retry.Config{MaxAttempts: 3, BaseDelay: 30 * time.Second, MaxDelay: 30 * time.Second},
 	})
 	if err != nil {
 		t.Fatalf("NewOpenAICompatibleEmbedder: %v", err)
@@ -292,7 +292,7 @@ func TestOllamaEmbedder_EmbedBatch_Chunking(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	emb, err := NewOllamaEmbedder(Config{Embedder: "ollama", Model: "m", URL: srv.URL, MaxBatch: 2, Retry: llmkit.RetryConfig{MaxAttempts: 1}})
+	emb, err := NewOllamaEmbedder(Config{Embedder: "ollama", Model: "m", URL: srv.URL, MaxBatch: 2, Retry: retry.Config{MaxAttempts: 1}})
 	if err != nil {
 		t.Fatalf("NewOllamaEmbedder: %v", err)
 	}
@@ -347,7 +347,7 @@ func TestOpenAIEmbedder_EmbedBatch_Chunking(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	emb, err := NewOpenAICompatibleEmbedder(Config{Embedder: "openai-compatible", Model: "m", URL: srv.URL, MaxBatch: 2, Retry: llmkit.RetryConfig{MaxAttempts: 1}})
+	emb, err := NewOpenAICompatibleEmbedder(Config{Embedder: "openai-compatible", Model: "m", URL: srv.URL, MaxBatch: 2, Retry: retry.Config{MaxAttempts: 1}})
 	if err != nil {
 		t.Fatalf("NewOpenAICompatibleEmbedder: %v", err)
 	}
@@ -393,7 +393,7 @@ func TestOllamaEmbedder_EmbedBatch_ChunkFailureFailsWholeCall(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	emb, err := NewOllamaEmbedder(Config{Embedder: "ollama", Model: "m", URL: srv.URL, MaxBatch: 2, Retry: llmkit.RetryConfig{MaxAttempts: 1}})
+	emb, err := NewOllamaEmbedder(Config{Embedder: "ollama", Model: "m", URL: srv.URL, MaxBatch: 2, Retry: retry.Config{MaxAttempts: 1}})
 	if err != nil {
 		t.Fatalf("NewOllamaEmbedder: %v", err)
 	}
@@ -526,7 +526,7 @@ func TestOllamaEmbedder_DimensionMismatch_Configured(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	emb, err := NewOllamaEmbedder(Config{Embedder: "ollama", Model: "m", URL: srv.URL, Dimensions: 3, Retry: llmkit.RetryConfig{MaxAttempts: 1}})
+	emb, err := NewOllamaEmbedder(Config{Embedder: "ollama", Model: "m", URL: srv.URL, Dimensions: 3, Retry: retry.Config{MaxAttempts: 1}})
 	if err != nil {
 		t.Fatalf("NewOllamaEmbedder: %v", err)
 	}
@@ -557,7 +557,7 @@ func TestOpenAIEmbedder_DimensionMismatch_AutoDetect(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	emb, err := NewOpenAICompatibleEmbedder(Config{Embedder: "openai-compatible", Model: "m", URL: srv.URL, Retry: llmkit.RetryConfig{MaxAttempts: 1}})
+	emb, err := NewOpenAICompatibleEmbedder(Config{Embedder: "openai-compatible", Model: "m", URL: srv.URL, Retry: retry.Config{MaxAttempts: 1}})
 	if err != nil {
 		t.Fatalf("NewOpenAICompatibleEmbedder: %v", err)
 	}
@@ -624,7 +624,7 @@ func TestOpenAIEmbedder_EmbedBatch_CountMismatch(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			emb, err := NewOpenAICompatibleEmbedder(Config{Embedder: "openai-compatible", Model: "m", URL: srv.URL, Retry: llmkit.RetryConfig{MaxAttempts: 1}})
+			emb, err := NewOpenAICompatibleEmbedder(Config{Embedder: "openai-compatible", Model: "m", URL: srv.URL, Retry: retry.Config{MaxAttempts: 1}})
 			if err != nil {
 				t.Fatalf("NewOpenAICompatibleEmbedder: %v", err)
 			}
@@ -651,7 +651,7 @@ func TestOpenAIEmbedder_HTTPClientInjection(t *testing.T) {
 	defer srv1.Close()
 	emb1, err := NewOpenAICompatibleEmbedder(Config{
 		Embedder: "openai-compatible", Model: "m", URL: srv1.URL,
-		HTTPClient: timedClient, Retry: llmkit.RetryConfig{MaxAttempts: 1, RequestTimeout: 5 * time.Second},
+		HTTPClient: timedClient, Retry: retry.Config{MaxAttempts: 1, RequestTimeout: 5 * time.Second},
 	})
 	if err != nil {
 		t.Fatalf("NewOpenAICompatibleEmbedder: %v", err)
@@ -668,7 +668,7 @@ func TestOpenAIEmbedder_HTTPClientInjection(t *testing.T) {
 	defer srv2.Close()
 	emb2, err := NewOpenAICompatibleEmbedder(Config{
 		Embedder: "openai-compatible", Model: "m", URL: srv2.URL,
-		HTTPClient: untimedClient, Retry: llmkit.RetryConfig{MaxAttempts: 1, RequestTimeout: 50 * time.Millisecond},
+		HTTPClient: untimedClient, Retry: retry.Config{MaxAttempts: 1, RequestTimeout: 50 * time.Millisecond},
 	})
 	if err != nil {
 		t.Fatalf("NewOpenAICompatibleEmbedder: %v", err)
@@ -809,7 +809,7 @@ func TestOllamaEmbedder_EmbedBatch_CountMismatch(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			emb, err := NewOllamaEmbedder(Config{Embedder: "ollama", Model: "m", URL: srv.URL, Retry: llmkit.RetryConfig{MaxAttempts: 1}})
+			emb, err := NewOllamaEmbedder(Config{Embedder: "ollama", Model: "m", URL: srv.URL, Retry: retry.Config{MaxAttempts: 1}})
 			if err != nil {
 				t.Fatalf("NewOllamaEmbedder: %v", err)
 			}
@@ -830,7 +830,7 @@ func TestOllamaEmbedder_EmbedBatch_CountMismatch(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	emb, err := NewOllamaEmbedder(Config{Embedder: "ollama", Model: "m", URL: srv.URL, Retry: llmkit.RetryConfig{MaxAttempts: 1}})
+	emb, err := NewOllamaEmbedder(Config{Embedder: "ollama", Model: "m", URL: srv.URL, Retry: retry.Config{MaxAttempts: 1}})
 	if err != nil {
 		t.Fatalf("NewOllamaEmbedder: %v", err)
 	}
@@ -876,7 +876,7 @@ func TestRetry_MaxAttemptsOnlyPolicy_Bounded(t *testing.T) {
 		Embedder: "ollama",
 		Model:    "m",
 		URL:      srv.URL,
-		Retry:    llmkit.RetryConfig{MaxAttempts: 4},
+		Retry:    retry.Config{MaxAttempts: 4},
 	})
 	if err != nil {
 		t.Fatalf("NewOllamaEmbedder: %v", err)
@@ -895,13 +895,13 @@ func TestRetry_MaxAttemptsOnlyPolicy_Bounded(t *testing.T) {
 }
 
 func TestRetry_PolicyNormalization(t *testing.T) {
-	p := Config{Retry: llmkit.RetryConfig{MaxAttempts: 5}}.retryPolicy()
-	def := llmkit.DefaultRetryConfig()
+	p := Config{Retry: retry.Config{MaxAttempts: 5}}.retryPolicy()
+	def := retry.Default()
 	if p.MaxAttempts != 5 {
 		t.Errorf("explicit MaxAttempts = %d, want 5 (kept)", p.MaxAttempts)
 	}
 	if p.BaseDelay != def.BaseDelay || p.MaxDelay != def.MaxDelay {
-		t.Errorf("MaxAttempts-only policy = %+v, want unset delays filled from llmkit defaults", p)
+		t.Errorf("MaxAttempts-only policy = %+v, want unset delays filled from retry.Default", p)
 	}
 	if p.RequestTimeout != 60*time.Second {
 		t.Errorf("RequestTimeout = %v, want 60s (embed default)", p.RequestTimeout)
@@ -941,7 +941,7 @@ func TestOllamaEmbedder_TimeoutRetriedAsTransient(t *testing.T) {
 		Embedder: "ollama",
 		Model:    "m",
 		URL:      srv.URL,
-		Retry:    llmkit.RetryConfig{MaxAttempts: 2, BaseDelay: time.Millisecond, RequestTimeout: 30 * time.Millisecond},
+		Retry:    retry.Config{MaxAttempts: 2, BaseDelay: time.Millisecond, RequestTimeout: 30 * time.Millisecond},
 	})
 	if err != nil {
 		t.Fatalf("NewOllamaEmbedder: %v", err)
@@ -1021,7 +1021,7 @@ func TestOllamaEmbedder_EmptyVector_AutoDetectRejected(t *testing.T) {
 		Embedder: "ollama",
 		Model:    "m",
 		URL:      srv.URL,
-		Retry:    llmkit.RetryConfig{MaxAttempts: 1},
+		Retry:    retry.Config{MaxAttempts: 1},
 	})
 	if err != nil {
 		t.Fatalf("NewOllamaEmbedder: %v", err)
@@ -1058,7 +1058,7 @@ func TestConfig_JitterTriState(t *testing.T) {
 	base := Config{Embedder: "ollama", Model: "m", URL: "http://localhost"}
 
 	zero := base
-	zero.Retry = llmkit.RetryConfig{MaxAttempts: 2}
+	zero.Retry = retry.Config{MaxAttempts: 2}
 	if err := zero.Validate(); err != nil {
 		t.Fatalf("Validate with Jitter 0: %v", err)
 	}
@@ -1066,13 +1066,13 @@ func TestConfig_JitterTriState(t *testing.T) {
 		t.Errorf("retryPolicy Jitter = %v, want 0 (explicit zero = no jitter)", got)
 	}
 	neg := base
-	neg.Retry = llmkit.RetryConfig{Jitter: -0.5}
+	neg.Retry = retry.Config{Jitter: -0.5}
 	if err := neg.Validate(); err == nil {
 		t.Error("negative Jitter must be rejected by Validate")
 	}
 
 	big := base
-	big.Retry = llmkit.RetryConfig{Jitter: 1.5}
+	big.Retry = retry.Config{Jitter: 1.5}
 	if err := big.Validate(); err == nil {
 		t.Error("Jitter above 1 must be rejected by Validate")
 	}
@@ -1081,14 +1081,14 @@ func TestConfig_JitterTriState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if cfg.Retry.Jitter != llmkit.DefaultRetryConfig().Jitter {
-		t.Errorf("LoadConfig Jitter = %v, want kit default %v", cfg.Retry.Jitter, llmkit.DefaultRetryConfig().Jitter)
+	if cfg.Retry.Jitter != retry.Default().Jitter {
+		t.Errorf("LoadConfig Jitter = %v, want kit default %v", cfg.Retry.Jitter, retry.Default().Jitter)
 	}
 	p := cfg.retryPolicy()
 	if p.MaxAttempts != 3 || p.RequestTimeout != 60*time.Second {
 		t.Errorf("LoadConfig resolved attempts/timeout = %d/%v, want 3/60s (embed bounds)", p.MaxAttempts, p.RequestTimeout)
 	}
-	if p.BaseDelay != llmkit.DefaultRetryConfig().BaseDelay || p.MaxDelay != llmkit.DefaultRetryConfig().MaxDelay {
+	if p.BaseDelay != retry.Default().BaseDelay || p.MaxDelay != retry.Default().MaxDelay {
 		t.Errorf("LoadConfig resolved delays = %v/%v, want kit defaults", p.BaseDelay, p.MaxDelay)
 	}
 }

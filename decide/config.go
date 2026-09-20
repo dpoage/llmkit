@@ -3,6 +3,7 @@ package decide
 import (
 	"fmt"
 	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/retry"
 	"net/http"
 	"strings"
 	"time"
@@ -58,9 +59,9 @@ type Config struct {
 	// Retry tunes the shared retry policy. Unset knobs (<= 0) resolve at
 	// construction to the decide defaults: 3 attempts and a 30s per-attempt
 	// RequestTimeout, with BaseDelay and MaxDelay from
-	// llmkit.DefaultRetryConfig. Jitter is taken literally: explicit 0 means
+	// retry.Default. Jitter is taken literally: explicit 0 means
 	// no jitter.
-	Retry llmkit.RetryConfig
+	Retry retry.Config
 
 	// Recorder is optional. A non-nil Recorder receives exactly one
 	// UsageEvent per successful Ask — Provider "typesafe", the response's
@@ -111,7 +112,7 @@ type Client struct {
 	model    string
 	endpoint string
 	client   *http.Client
-	retry    llmkit.RetryConfig
+	retry    retry.Config
 	recorder llmkit.Recorder
 }
 
@@ -129,9 +130,9 @@ func (c Config) httpClient() *http.Client {
 
 // retryPolicy resolves the decide defaults for unset knobs. Jitter is left
 // literal so an explicit 0 means no jitter.
-func (c Config) retryPolicy() llmkit.RetryConfig {
+func (c Config) retryPolicy() retry.Config {
 	p := c.Retry
-	def := llmkit.DefaultRetryConfig()
+	def := retry.Default()
 	if p.MaxAttempts <= 0 {
 		p.MaxAttempts = defaultMaxAttempts
 	}

@@ -6,7 +6,7 @@ reference is [pkg.go.dev](https://pkg.go.dev/github.com/dpoage/llmkit).
 
 ## The layering
 
-Seven packages face the caller; the vendor adapters do not. The import graph
+Eight packages face the caller; the vendor adapters do not. The import graph
 is a DAG rooted at the `llmkit` package, and nothing imports upward:
 
 ```mermaid
@@ -21,13 +21,18 @@ flowchart TD
     EMBED["embed"] --> ROOT
     DECIDE["decide"] --> ROOT
     DECIDE --> IA
+    RETRY["retry"]
+    ROOT --> RETRY
+    IA --> RETRY
+    EMBED --> RETRY
+    DECIDE --> RETRY
     SANDBOX["sandbox"]
     FSROOT["fsroot"]
 ```
 
-`sandbox` and `fsroot` import no other kit package. `embed` and `decide`
-import the root for `RetryConfig`, `Retry` — the shared backoff loop — and
-`ParseRetryAfter`; `decide` also imports `internal/adapter` for status
+`sandbox`, `fsroot`, and `retry` import no other kit package; `retry` is the
+import for `Config`, `Do`, and `ParseRetryAfter`. `decide` also imports
+`internal/adapter` for status
 classification. Like `embed`, `decide` bypasses `provider` entirely. `agent`
 drives any `llmkit.Client`, so a `Runner`
 runs against a provider client, a replay client, or your own implementation.
@@ -148,7 +153,7 @@ relative path stays inside a root. The packages share no code on purpose.
 ## embed stays dependency-light
 
 `embed` offers two HTTP backends, Ollama and OpenAI-compatible. It uses
-the shared retry loop, root `llmkit.Retry`, and a content-hash
+the shared retry loop, `retry.Do`, and a content-hash
 least-recently-used (LRU) cache. Local Open Neural
 Network Exchange (ONNX) inference is deliberately excluded; it would drag
 the ONNX and GoMLX dependency trees.
@@ -170,8 +175,8 @@ path. `embed` is the precedent for a non-chat sibling package.
 - **What it buys:** an honest surface. A decision answer cannot masquerade as
   chat text, and no `Capabilities` field lies about streaming or tools.
   Callers share the common vocabulary where it fits: the sentinel errors,
-  `RetryConfig`, `Usage`, and the recorder. The retry loop lives in one
-  place, root `llmkit.Retry`.
+  `retry.Config`, `Usage`, and the recorder. The retry loop lives in one
+  place, the `retry` package's `Do`.
 - **What it costs:** a second construction path outside the `provider.New`
   gate. Code that targets `llmkit.Client` cannot take a `decide` client. The
   two surfaces share errors and usage, not a request type.

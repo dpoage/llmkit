@@ -65,7 +65,7 @@
 // match it with errors.Is. Rate-limit and overload errors carry the server's
 // Retry-After when the adapter can read the response header (Anthropic and
 // OpenAI; the Google SDK hides response headers, so Google reports none), and
-// a Retry-After above [RetryConfig.MaxDelay] is truncated to MaxDelay.
+// a Retry-After above [retry.Config.MaxDelay] is truncated to MaxDelay.
 // Unclassifiable transport failures (timeouts, connection resets) surface as
 // [ErrServer]. See docs/providers.md for the HTTP-status-to-sentinel table.
 //
@@ -91,8 +91,9 @@
 // Three wrappers compose around any [Client]:
 //
 //   - [WithRetry] retries transient failures (429, 5xx, transport timeouts)
-//     with exponential backoff and honors Retry-After. [Retry] runs the same
-//     loop over any error source; [ParseRetryAfter] decodes the header.
+//     with exponential backoff and honors Retry-After. Non-Client callers run
+//     the same loop with [retry.Do]; [retry.ParseRetryAfter] decodes the
+//     header.
 //   - [WithRecorder] reports each successful completion's usage to a
 //     [Recorder].
 //   - [WithSerializedToolCalls] truncates multi-tool-call responses to the
