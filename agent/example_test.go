@@ -1,12 +1,12 @@
 package agent_test
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"strconv"
 
 	"github.com/dpoage/llmkit"
@@ -48,8 +48,8 @@ func ExampleNewRunner() {
 		log.Fatal(err)
 	}
 	toolCalls := 0
-	for _, ev := range outcome.Transcript.Events {
-		if ev.Kind == agent.EventToolResult {
+	for _, ev := range outcome.Transcript.Record {
+		if ev.Kind == llmkit.KindToolRun {
 			toolCalls++
 		}
 	}
@@ -149,13 +149,13 @@ func ExampleWithToolPolicy() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	for _, ev := range outcome.Transcript.Events {
-		if ev.Kind == agent.EventToolResult {
-			fmt.Printf("%s -> %s (isError: %v)\n", ev.ToolName, ev.Result, ev.IsError)
+	for _, ev := range outcome.Transcript.Record {
+		if ev.Kind == llmkit.KindToolRun {
+			fmt.Printf("%s -> %s (denied: %v)\n", ev.ToolRun.Call.Name, ev.ToolRun.DenyReason, ev.ToolRun.Denied)
 		}
 	}
 	// Output:
-	// delete_file -> ERROR: tool delete_file denied: deletes require manual approval (isError: true)
+	// delete_file -> deletes require manual approval (denied: true)
 }
 
 // ExampleWithRequestPolicy caps output tokens on every request. The policy
@@ -284,10 +284,18 @@ func ExampleSteering() {
 	// undelivered: 0
 }
 
-// ExampleLoadJSONL saves a run's transcript as JSONL, loads it back, and
-// walks the events. The record order per step is the request, the assistant
-// turn, then each tool result.
-func ExampleLoadJSONL() {
+// ExampleSource records a run into the durable JSONL sink, then reads it
+// back through the Source interface — the same read side NewReplayClient
+// replays from. Every event a Runner emits lands in the file: start, one
+// completion per model turn, one tool_run per executed call, and the
+// closing finalize.
+func ExampleSource() {
+	dir, err := os.MkdirTemp("", "llmkit-example")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
 	tick := agent.Func("tick", "return one tick",
 		func(_ context.Context, _ struct{}) (string, error) {
 			return "tick", nil
@@ -308,28 +316,45 @@ func ExampleLoadJSONL() {
 		},
 	}, llmkit.Capabilities{})
 
-	runner := agent.NewRunner(client, []agent.Tool{tick}, "Tick once.")
+	runner := agent.NewRunner(client, []agent.Tool{tick}, "Tick once.",
+		agent.WithObserver(agent.JSONL(dir, nil)))
 
-	outcome, err := runner.Run(context.Background(), "Tick")
+	if _, err := runner.Run(context.Background(), "Tick", agent.WithRunID("demo-run")); err != nil {
+		log.Fatal(err)
+	}
+
+	// The sink reads back any recorded run by id — the Source seam replay
+	// builds on.
+	src := agent.JSONL(dir, nil)
+	events, err := src.Events(context.Background(), "demo-run")
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	var buf bytes.Buffer
-	if err := outcome.Transcript.SaveJSONL(&buf); err != nil {
-		log.Fatal(err)
-	}
-	loaded, err := agent.LoadJSONL(&buf)
-	if err != nil {
-		log.Fatal(err)
-	}
-	for _, ev := range loaded.Events {
+	for _, ev := range events {
 		fmt.Printf("step %d: %s\n", ev.Step, ev.Kind)
 	}
+
+	// Replay the recorded run offline: the client's bound tools serve the
+	// recorded results, and Err() must be nil — a non-nil value means the
+	// replay diverged from its record.
+	rc, err := agent.NewReplayClient(src, "demo-run", llmkit.Capabilities{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	replayed, err := agent.NewRunner(rc, rc.Tools(), "Tick once.").
+		Run(context.Background(), "Tick")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := rc.Err(); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(replayed.FinalText)
 	// Output:
-	// step 1: request
-	// step 1: assistant
-	// step 1: tool_result
-	// step 2: request
-	// step 2: assistant
+	// step 0: start
+	// step 1: completion
+	// step 1: tool_run
+	// step 2: completion
+	// step 2: finalize
+	// finished
 }

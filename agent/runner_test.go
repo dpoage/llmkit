@@ -52,9 +52,9 @@ func TestRun_CleanFinish(t *testing.T) {
 	if out.Usage.InputTokens != 10 || out.Usage.OutputTokens != 5 {
 		t.Errorf("Usage = %+v, want {10 5}", out.Usage)
 	}
-	// Transcript should have a request + assistant event.
-	if got := len(out.Transcript.Events); got != 2 {
-		t.Errorf("transcript events = %d, want 2", got)
+	// Transcript should have a start + completion + finalize event.
+	if got := len(out.Transcript.Record); got != 3 {
+		t.Errorf("transcript events = %d, want 3 (start, completion, finalize)", got)
 	}
 	// A normal text-only final turn must not trigger the
 	// empty-turn nudge: zero nudges, no nudge message in the conversation.
@@ -666,6 +666,36 @@ func TestRun_TextAfterToolsReplacesFinalText(t *testing.T) {
 	}
 	if out.FinalText != "final answer" {
 		t.Errorf("FinalText = %q, want the LAST completion's text", out.FinalText)
+	}
+}
+
+// TestAssistantMessage_ToolOnlyTurnHasNoEmptyTextBlock pins llmkit-ly5's
+// second half: a tool-call-only turn's assistant history message carries NO
+// content blocks — no {"kind":"text"} with empty content is invented.
+func TestAssistantMessage_ToolOnlyTurnHasNoEmptyTextBlock(t *testing.T) {
+	fc := newFakeClient(
+		toolResp("c1", "echo", `{}`, 1, 1),
+		textResp("done", 1, 1),
+	)
+	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys")
+	out, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	sawToolOnlyTurn := false
+	for _, m := range out.Messages {
+		if m.Role != llmkit.RoleAssistant {
+			continue
+		}
+		if len(m.ToolCalls) > 0 {
+			sawToolOnlyTurn = true
+			if len(m.Content) != 0 {
+				t.Errorf("tool-call-only assistant turn carries content %v; want none (no empty text block)", m.Content)
+			}
+		}
+	}
+	if !sawToolOnlyTurn {
+		t.Fatal("no tool-call-only assistant turn in the history")
 	}
 }
 

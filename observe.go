@@ -69,8 +69,8 @@ type EventKind string
 
 const (
 	// KindStart opens a run. The agent Runner emits it as the first event of
-	// every run so a sink can open its run record (a task slug for a JSONL
-	// filename, a row for a runs table) before the first Completion. Payload:
+	// every run so a sink can open its run record (a JSONL filename, a row
+	// for a runs table) before the first Completion. Payload:
 	// [StartEvent]. Step 0; ParentRunID rides here on continued runs.
 	KindStart EventKind = "start"
 	// KindCompletion records one logical completion — the request, the final

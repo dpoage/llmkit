@@ -15,12 +15,12 @@ import (
 //
 //   - BeforeCompletion / AfterCompletion around EVERY client.Complete — the
 //     main loop turn, a max-tokens continuation turn, a forced-finalization
-//     turn, and a RunJSON repair turn. step is the 1-based transcript step
-//     the completion is recorded under — the SAME base every hook family
-//     uses: ToolEvent.Step, CompactionEvent.Step, and the transcript's
-//     Event.Step all carry this number for the same turn, so consumers can
-//     join on Step. req is the FINAL wire request — the exact request
-//     client.Complete receives and the transcript's request event records —
+//     turn, and a RunJSON repair turn. step is the 1-based turn number —
+//     the SAME base every hook family uses: ToolEvent.Step,
+//     CompactionEvent.Step, and the step the Runner stamps on the run's
+//     llmkit.Event values all carry this number for the same turn, so
+//     consumers can join on Step. req is the FINAL wire request — the exact request
+//     client.Complete receives and the completion event's request records —
 //     already passed through [RequestPolicy.PrepareRequest] when one is
 //     registered. Observe it only: mutating req here is undefined, and
 //     request shaping (messages, sampling, tool choice) belongs to
@@ -42,7 +42,7 @@ import (
 //     hook fires for it. A panicking Tool.Run is recovered by the harness in
 //     BOTH dispatch modes and ToolEnd fires with the rendered panic result
 //     ("ERROR: tool <name> panicked: …", IsError=true). Step matches the
-//     transcript's tool-result event.
+//     tool_run event.
 //
 // Hook functions are part of the harness, not the model conversation: a
 // panic raised INSIDE any Hooks callback is a harness bug. It is never
@@ -61,8 +61,6 @@ import (
 //   - Repair at the start of RunJSON's single repair pass.
 //   - Finalize when the reserved forced-finalization turn is taken; reason is
 //     the stop condition (a Trunc* constant) that triggered it.
-//   - TranscriptError on transcript streaming write/encode/open failures.
-//     Streaming stays best-effort — the failure never fails the run.
 //
 // Invocation is synchronous: each hook runs inline on the goroutine that
 // reaches the fire point (the loop goroutine, or the per-call goroutine for
@@ -95,8 +93,6 @@ type Hooks struct {
 	Repair func(ctx context.Context)
 	// Finalize fires when the reserved forced-finalization turn is taken.
 	Finalize func(ctx context.Context, reason TruncationReason)
-	// TranscriptError fires on transcript streaming open/encode/write failures.
-	TranscriptError func(err error)
 }
 
 // ToolEvent is one tool call's lifecycle, as delivered to [Hooks.ToolStart]
