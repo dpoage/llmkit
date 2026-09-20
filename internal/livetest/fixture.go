@@ -149,10 +149,9 @@ func writeFixture(path string, f *Fixture, secret string) error {
 	return writeSecretFree(path, f, secret)
 }
 
-// writeSecretFree serializes v as pretty-printed JSON and writes it to path,
-// refusing first any recording that contains the lane credential, an sk- key
-// or bearer token, or an apikey_ key prefix (TypeSafe-shaped): a fixture
-// that leaks is not written at all.
+// writeSecretFree serializes v as pretty-printed JSON and writes it to
+// path, refusing first any recording that contains the lane credential,
+// an sk- key or bearer token, or an apikey_ key prefix.
 func writeSecretFree(path string, v any, secret string) error {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {

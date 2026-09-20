@@ -1,9 +1,9 @@
 package livetest
 
-// The decide-package twin of Fixture (fixture.go): the recorded artifact of
-// one live decide case. The two formats share the sanitized Exchange wire
-// truth and the write-time secret refusal; they differ on the input and
-// outcome halves, which are Ask-shaped rather than llmkit.Request-shaped.
+// The decide-package twin of Fixture (fixture.go): the recorded artifact
+// of one live decide case. The two formats share the sanitized Exchange
+// wire truth and the write-time secret refusal; they differ on the input
+// and outcome halves, which are Ask-shaped rather than llmkit.Request-shaped.
 //
 // A decide.Question is a sealed Go interface — it cannot be unmarshalled
 // from wire JSON — so the recorder stores each question's kind and raw-JSON
@@ -19,14 +19,15 @@ import (
 	"github.com/dpoage/llmkit/decide"
 )
 
-//   - State and Questions are the Ask inputs; replay re-issues them through
-//     decide.New.
+// DecideFixture documents each field:
+//   - State and Questions are the Ask inputs; replay re-issues them
+//     through decide.New.
 //   - Exchanges is the sanitized wire truth — what the vendor actually
 //     received and returned, one per HTTP request (a retried Ask records
 //     several); replay serves them from an httptest server.
-//   - Normalized is the Ask's final outcome: the normalized decide.Response,
-//     or the sentinel error kind; replay asserts the client still produces
-//     it from the recorded truth.
+//   - Normalized is the Ask's final outcome: the normalized
+//     decide.Response, or the sentinel error kind; replay asserts the
+//     client still produces it from the recorded truth.
 type DecideFixture struct {
 	Case  string `json:"case"`
 	Lane  string `json:"lane"`
@@ -190,11 +191,11 @@ func ReadDecideFixture(path string) (*DecideFixture, error) {
 	return &f, nil
 }
 
-// NormalizeDecideFixture compacts every json.RawMessage embedded in f — the
-// state and each recorded question's fields. Fixture files are
-// pretty-printed, which re-indents embedded RawMessage bytes; anyone
-// re-issuing a fixture's Ask MUST compact them back first, or the client's
-// wire bytes drift from the recording.
+// NormalizeDecideFixture compacts every json.RawMessage embedded in f —
+// the state and each recorded question's fields. Fixture files are
+// pretty-printed, which re-indents embedded RawMessage bytes; the
+// re-issuer MUST compact them back first, or the client's wire bytes drift
+// from the recording.
 func NormalizeDecideFixture(f *DecideFixture) {
 	f.State = compactRaw(f.State)
 	for id, spec := range f.Questions {

@@ -95,7 +95,7 @@ Each fixture declares a `request_check` mode for the request side:
 
 A fixture without the field replays as `strict` when it holds exactly one exchange and `response_only` otherwise.
 
-The `decide` package replays the same way. `decide/fixture_replay_test.go` runs in plain `go test ./...` with no tag, no network, and no credentials: for every fixture under `decide/testdata/`, an `httptest` server serves the recorded exchange, the replay re-issues the recorded `Ask` through `decide.New`, and the normalized `Response` — or the recorded error's sentinel, matched with `errors.Is` — must equal the recording. The fixtures come from the same secret-free writer as the provider fixtures.
+The `decide` package replays the same way. `decide/fixture_replay_test.go` runs in plain `go test ./...` with no tag, no network, and no credentials. For every fixture under `decide/testdata/`, an `httptest` server serves the recorded exchange. The replay re-issues the recorded `Ask` through `decide.New`, and the normalized `Response` — or the recorded error's sentinel, matched with `errors.Is` — must equal the recording. The fixtures come from the same secret-free writer as the provider fixtures.
 
 The fixture writer is secret-free by construction: it refuses to write any fixture containing the lane credential or any `sk-` substring. The nightly `Live` workflow runs the suite without `-update`, so the live matrix's assertions against real responses are the vendor-drift gate; editing a fixture's recorded response text fails the replay test, and so does adapter wire drift on the request side.
 

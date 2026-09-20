@@ -3,8 +3,7 @@
 llmkit is a Go toolkit for LLM applications. It ships a provider-agnostic
 completion client, a tool-calling agent loop, sandboxed command execution,
 embeddings, and TypeSafe Jev decisions. One normalized vocabulary covers
-Anthropic, OpenAI, Google Gemini,
-and any OpenAI-compatible endpoint.
+Anthropic, OpenAI, Google Gemini, and any OpenAI-compatible endpoint.
 
 ## Install
 
@@ -30,8 +29,8 @@ export LLMKIT_API_KEY=ollama                       # any non-empty placeholder
 The programs under `examples/` are the runnable counterparts of the first
 two snippets; run them once the variables are set.
 
-Decisions are a separate, non-chat surface: the `decide` package asks TypeSafe
-Jev questions about a state. See [decide](docs/decide.md).
+Decisions are a separate, non-chat surface. The `decide` package asks
+TypeSafe Jev questions about a state. See [decide](docs/decide.md).
 
 ### Complete a request
 
@@ -123,10 +122,10 @@ Five runnable programs live under `examples/`:
 - `examples/chat` — a multi-turn read–eval–print loop (REPL) with mid-run steering.
 - `examples/decide` — one mixed `Ask` (noul, choice, score) against TypeSafe Jev.
 
-The first four read `LLMKIT_PROVIDER`, `LLMKIT_MODEL`, and `LLMKIT_API_KEY`
-(`LLMKIT_BASE_URL` is required for `openai-compatible`, optional otherwise);
-`examples/decide` reads `LLMKIT_TYPESAFE_API_KEY` and `LLMKIT_TYPESAFE_MODEL`,
-with `LLMKIT_TYPESAFE_BASE_URL` optional. With a required variable unset, an
+The first four read `LLMKIT_PROVIDER`, `LLMKIT_MODEL`, and `LLMKIT_API_KEY`.
+`LLMKIT_BASE_URL` is required for `openai-compatible` and optional otherwise.
+`examples/decide` reads `LLMKIT_TYPESAFE_API_KEY` and `LLMKIT_TYPESAFE_MODEL`.
+`LLMKIT_TYPESAFE_BASE_URL` is optional. If a required variable is unset, an
 example prints its usage and exits 1 without touching the network.
 
 ```bash

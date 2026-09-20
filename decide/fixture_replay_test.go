@@ -2,15 +2,14 @@ package decide_test
 
 // Hermetic replay of the recorded decide fixtures: for every file under
 // decide/testdata, an httptest server serves the recorded exchanges in
-// order and the recorded Ask is re-issued through decide.New (the
-// production construction path). The re-issued request must equal the
-// recorded one — method, path, and body compared as parsed JSON; headers
-// excluded — and the outcome must equal the recording: the whole normalized
-// decide.Response, or the sentinel error kind. Editing a recorded
-// probability fails this test; so does client wire drift on the request
-// side.
+// order and the recorded Ask is re-issued through decide.New. The
+// re-issued request must equal the recorded one — method, path, and body
+// compared as parsed JSON; headers excluded — and the outcome must equal
+// the recording: the whole normalized decide.Response, or the sentinel
+// error kind. Editing a recorded probability fails this test; so does
+// client wire drift on the request side.
 //
-// No tag, no network, no credentials: this runs in plain `go test ./...`.
+// No tag, no network, no credentials: runs in plain `go test ./...`.
 
 import (
 	"context"
@@ -76,10 +75,9 @@ func replayDecideFixture(t *testing.T, f *livetest.DecideFixture) {
 			return
 		}
 		ex := f.Exchanges[i]
-		// Every decide fixture replays strict: an Ask's request side is
-		// fully caller-determined (no model-generated ids are ever echoed
-		// back into a later request), so method, path, and body are all
-		// gated.
+		// An Ask's request side is fully caller-determined (no model-generated ids
+		// are ever echoed back into a later request), so method, path, and body
+		// are all gated.
 		if ex.Request.Method != "" && r.Method != ex.Request.Method {
 			t.Errorf("replay step %d: request method %q, fixture recorded %q", i+1, r.Method, ex.Request.Method)
 			w.WriteHeader(http.StatusInternalServerError)
@@ -105,9 +103,8 @@ func replayDecideFixture(t *testing.T, f *livetest.DecideFixture) {
 
 		for k, v := range ex.Response.Headers {
 			if k == "content-length" {
-				// Recomputed by net/http for the served body; echoing the
-				// recorded length would truncate any body whose size
-				// differs.
+				// Recomputed by net/http for the served body; echoing the recorded length
+				// would truncate any body whose size differs.
 				continue
 			}
 			w.Header().Set(k, v)

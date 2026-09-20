@@ -48,16 +48,16 @@ func Update() bool { return *update }
 
 // Lane describes one vendor lane: which environment variables it reads
 // (EnvPrefix + _API_KEY / _MODEL / _BASE_URL), which model to assume when
-// the operator set none, and — for the chat lanes — which provider.Type its
-// clients build through provider.New.
+// the operator set none, and — for the chat lanes — which provider.Type
+// its clients build through provider.New.
 type Lane struct {
 	Name      string
 	EnvPrefix string
 	// Type is the provider.Type the lane's clients build through
-	// provider.New. It is empty for lanes that construct a different client
-	// kind: the typesafe decision lane (DecideLane) has no provider.Type
-	// because Jev is not an llmkit.Client, so it is resolved by
-	// ResolveDecide and its clients built by Session.DecideClient.
+	// provider.New. It is empty for lanes that construct a different
+	// client kind (DecideLane): Jev is not an llmkit.Client, so its lane
+	// is resolved by ResolveDecide and its clients built by
+	// Session.DecideClient.
 	Type provider.Type
 	// DefaultModel fills Model when <prefix>_MODEL is unset. Empty means the
 	// model is required (the compat lane: an arbitrary endpoint has no
@@ -76,10 +76,10 @@ var lanes = []Lane{
 	{Name: "google", EnvPrefix: "LLMKIT_LIVE_GOOGLE", Type: provider.TypeGoogle, DefaultModel: "gemini-2.5-flash-lite"},
 }
 
-// DecideLane is the TypeSafe Jev (System One) decision lane. It deliberately
-// stays out of lanes: every lane there is dispatched by provider's live
-// matrix through provider.New(Lane.Type), and Jev has no provider.Type — its
-// live tests go through ResolveDecide and Session.DecideClient instead.
+// DecideLane is the TypeSafe Jev decision lane. It stays out of lanes:
+// every lane there is dispatched by provider's live matrix through
+// provider.New(Lane.Type), and Jev has no provider.Type — its live tests
+// go through ResolveDecide and Session.DecideClient instead.
 var DecideLane = Lane{
 	Name:            "typesafe",
 	EnvPrefix:       "LLMKIT_LIVE_TYPESAFE",
@@ -105,9 +105,9 @@ type Session struct {
 	Lane  Lane
 	Model string
 	Key   string
-	// BaseURL is an explicit endpoint override: required for the compat lane
-	// (an arbitrary endpoint has no default), optional for lanes with
-	// OptionalBaseURL (the typesafe lane), empty for the rest.
+	// BaseURL is an explicit endpoint override: required for the compat
+	// lane (an arbitrary endpoint has no default), optional for lanes with
+	// OptionalBaseURL, empty for the rest.
 	BaseURL string
 }
 
@@ -158,9 +158,8 @@ func Resolve(t testing.TB, name string) *Session {
 
 // ResolveDecide resolves the typesafe decide lane (DecideLane) from the
 // environment, skipping the test with a message that names every missing
-// variable — with the lane's default model and optional base URL, only
-// LLMKIT_LIVE_TYPESAFE_API_KEY can be missing. Use it at the lane level so
-// a keyless lane skips once, not per case.
+// variable. With the lane's default model and optional base URL, only
+// LLMKIT_LIVE_TYPESAFE_API_KEY can be missing.
 func ResolveDecide(t testing.TB) *Session {
 	s, missing := DecideLane.resolve()
 	if len(missing) > 0 {
@@ -289,11 +288,10 @@ func (s *Session) Client(ctx context.Context, t testing.TB, tr *Transport, mutat
 	return cl
 }
 
-// DecideClient builds the typesafe lane's decide client through decide.New —
-// the production construction path — with the recording transport injected
-// via Config.HTTPClient and the run-wide token tally as Config.Recorder.
-// mutate, when non-nil, adjusts the Config last (e.g. an intentionally bad
-// key or model for the error-normalization cases).
+// DecideClient builds the typesafe lane's decide client through
+// decide.New, with the recording transport injected via Config.HTTPClient
+// and the run-wide token tally as Config.Recorder. mutate, when non-nil,
+// adjusts the Config last.
 func (s *Session) DecideClient(ctx context.Context, t testing.TB, tr *Transport, mutate func(*decide.Config)) *decide.Client {
 	cfg := decide.Config{
 		APIKey:     s.Key,

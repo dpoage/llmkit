@@ -1,12 +1,11 @@
 //go:build live
 
 // Live acceptance suite for the decide package: TypeSafe's Jev (System One)
-// decision API through decide.New — the production construction path, retry
-// policy included. Every case asserts STRUCTURAL invariants only (ranges,
-// argmax consistency, legend alignment, usage accounting); exact
-// probabilities are the vendor's business and are never asserted. Fixtures
-// are recorded into decide/testdata/<case>.json under -update and replayed
-// hermetically by fixture_replay_test.go.
+// decision API through decide.New. Every case asserts structural invariants
+// only (ranges, argmax consistency, legend alignment, usage accounting); exact
+// probabilities are the vendor's business. Fixtures are recorded under
+// -update into decide/testdata/<case>.json and replayed hermetically by
+// fixture_replay_test.go.
 //
 // Environment (see docs/testing.md):
 //
@@ -15,13 +14,12 @@
 //	LLMKIT_LIVE_TYPESAFE_BASE_URL  (optional gateway override)
 //
 // A keyless lane skips at the lane level, naming its variable. TypeSafe
-// bills input tokens only and Jev answers in under a second, so the whole
-// lane costs a handful of tokens. Run with
+// bills input tokens only; the whole lane costs a handful. Run with
 //
 //	go test -tags live -count=1 ./decide/ -v
 //
-// and add -update to re-record fixtures. Keys are never logged; every raw
-// body log goes through livetest's redacting logger.
+// adding -update to re-record fixtures. Keys are never logged; raw body
+// logs go through livetest's redacting logger.
 package decide_test
 
 import (
@@ -45,16 +43,14 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// badKey is the intentionally wrong credential for the ErrAuth case. It
-// carries no sk- prefix so it can never collide with the fixture writer's
-// secret refusals.
+// badKey is the intentionally wrong credential for the ErrAuth case; no
+// sk- prefix so it cannot collide with the fixture writer's secret refusals.
 const badKey = "llmkit-live-intentionally-invalid-key"
 
-// badModel is the intentionally unknown model for the ErrInvalidRequest
-// case.
+// badModel is the intentionally unknown model for the ErrInvalidRequest case.
 const badModel = "llmkit-no-such-model-x9"
 
-// ticketState is the mixed case's state: one prose ticket summary.
+// ticketState is the prose ticket summary used as the state across cases.
 const ticketState = "Customer reports a paper jam error on a networked office printer. " +
 	"They removed the jammed sheet and restarted the device, but the error returns within " +
 	"minutes and the duplex unit sounds like it is grinding."
@@ -67,8 +63,8 @@ var ticketLevels = []any{
 	"Blocking a team, with data loss or a security angle.",
 }
 
-// ticketQuestions builds the shared question set: one Noul, one Choice, one
-// Score, keyed by stable ids the response echoes back.
+// ticketQuestions returns the shared question set: one Noul, one Choice,
+// one Score, keyed by stable ids the response echoes back.
 func ticketQuestions() decide.Questions {
 	return decide.Questions{
 		"hardware_fault": decide.Noul{
@@ -91,8 +87,8 @@ func ticketQuestions() decide.Questions {
 	}
 }
 
-// decideCase is the per-case handle: a fresh recording transport, a
-// decide.New client, and the Ask inputs a fixture needs.
+// decideCase holds a fresh recording transport, the client, and the Ask
+// inputs a fixture needs.
 type decideCase struct {
 	t         *testing.T
 	sess      *livetest.Session
@@ -112,10 +108,9 @@ func newDecideCase(t *testing.T, sess *livetest.Session, name string) *decideCas
 	return dc
 }
 
-// variant returns a sibling case built from the same session with a mutated
-// Config (its own transport and input log), for the error-normalization
-// cases. The variant's effective model is captured for the fixture, so a
-// case that mutates Config.Model records the model actually sent.
+// variant returns a sibling case with a mutated Config and its own
+// transport/input log. The effective model is captured for the fixture, so
+// mutating Config.Model records the model actually sent.
 func (dc *decideCase) variant(mutate func(*decide.Config)) *decideCase {
 	ctx, _ := livetest.Ctx(dc.t)
 	v := &decideCase{t: dc.t, sess: dc.sess, tr: livetest.NewTransport(dc.sess.Key), ctx: ctx, caseName: dc.caseName, model: dc.model}
@@ -132,8 +127,8 @@ func (dc *decideCase) ask(state any, questions decide.Questions) (decide.Respons
 	return dc.cl.Ask(dc.ctx, state, questions)
 }
 
-// finish records the case fixture when -update is set: the Ask inputs, the
-// sanitized wire exchanges, and the normalized outcome (or error kind).
+// finish records the Ask inputs, sanitized wire exchanges, and the
+// normalized outcome (or error kind) when -update is set.
 func (dc *decideCase) finish(resp decide.Response, err error) {
 	if !livetest.Update() {
 		return
@@ -167,8 +162,8 @@ func (dc *decideCase) finish(resp decide.Response, err error) {
 	livetest.WriteDecideFixture(dc.t, filepath.Join("testdata", dc.caseName+".json"), f, dc.sess.Key)
 }
 
-// TestLiveDecide resolves the typesafe lane once and runs every acceptance
-// case under it; the lane-level skip names LLMKIT_LIVE_TYPESAFE_API_KEY.
+// TestLiveDecide resolves the typesafe lane once and runs every case under
+// it; the lane-level skip names LLMKIT_LIVE_TYPESAFE_API_KEY.
 func TestLiveDecide(t *testing.T) {
 	sess := livetest.ResolveDecide(t)
 
@@ -248,8 +243,8 @@ func caseMixedQuestions(t *testing.T, sess *livetest.Session) {
 	dc.finish(resp, err)
 }
 
-// caseStructuredState proves object-shaped state and object instructions —
-// the docs' "Advanced: structure" forms — reach the vendor and normalize.
+// caseStructuredState proves object-shaped state and instructions — the
+// docs' "Advanced: structure" forms — reach the vendor and normalize.
 func caseStructuredState(t *testing.T, sess *livetest.Session) {
 	state := map[string]any{
 		"ticket": map[string]any{
@@ -296,10 +291,9 @@ func caseErrorBadKey(t *testing.T, sess *livetest.Session) {
 	bad.finish(decide.Response{}, err)
 }
 
-// caseErrorBadModel asserts the Kind only, per the contract: an unknown
-// model is vendor validation (422 or another 4xx), so docs/providers.md's
-// status table maps it to ErrInvalidRequest whatever the exact status. The
-// observed status is logged for the round record.
+// caseErrorBadModel asserts the Kind only: an unknown model is vendor
+// validation (422 or another 4xx), so docs/providers.md's status table maps
+// it to ErrInvalidRequest whatever the exact status.
 func caseErrorBadModel(t *testing.T, sess *livetest.Session) {
 	base := newDecideCase(t, sess, "error_bad_model")
 	bad := base.variant(func(c *decide.Config) { c.Model = badModel })

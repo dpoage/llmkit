@@ -145,4 +145,4 @@ A refused pre-wire request (a `Capabilities` violation, a malformed block, an un
 
 Two `Retry-After` rules apply across the table. First, only Anthropic and OpenAI surface the header: the Google SDK hides response headers, so Google errors carry `RetryAfter` 0 and the retry wrapper falls back to exponential backoff. Second, a `Retry-After` above `RetryConfig.MaxDelay` is truncated to `MaxDelay` (30 s by default).
 
-The `decide` package parses `Retry-After` on every status and honors it on 429 and every 5xx; its exact semantics are in [decide](decide.md).
+The `decide` package parses `Retry-After` on every status and honors it on 429 and every 5xx. Its exact semantics are in [decide](decide.md).

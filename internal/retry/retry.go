@@ -1,9 +1,8 @@
-// Package retry holds the backoff loop shared by llmkit's non-chat packages
-// (embed, decide): exponential backoff with jitter, server Retry-After
-// precedence capped at MaxDelay, a per-attempt RequestTimeout deadline, and
+// Package retry holds the backoff loop shared by llmkit's non-chat
+// packages. Exponential backoff with jitter, server Retry-After precedence
+// capped at MaxDelay, a per-attempt RequestTimeout deadline, and
 // parent-cancellation-is-terminal semantics. Each caller supplies the
-// classifier that decides which of its own errors are transient, so the
-// packages keep their native error types.
+// classifier that decides which of its own errors are transient.
 package retry
 
 import (
@@ -16,20 +15,15 @@ import (
 	"time"
 )
 
-// Do runs fn up to cfg.MaxAttempts times, retrying transient failures with
-// Retry-After-aware exponential backoff. Each attempt runs under a child
-// context carrying the cfg.RequestTimeout deadline — the same per-attempt
-// bound llmkit.WithRetry applies to provider calls — so a stalled round-trip
-// aborts as a timeout-classified error and is retried instead of blocking
-// forever. The parent ctx is never modified: once it is done, Do returns the
-// last error immediately — cancellation is never retried.
+// Do runs fn up to cfg.MaxAttempts times, retrying transient failures
+// under a per-attempt RequestTimeout child context — a stalled round-trip
+// aborts as a timeout-classified error and is retried. The parent ctx is
+// never modified: once it is done, Do returns the last error immediately.
 //
-// classify reports whether err is worth retrying. When ok is true, after and
-// hasAfter carry a server-supplied Retry-After delay that replaces the
-// computed backoff for that sleep. cfg must be normalized by the caller:
-// MaxAttempts and RequestTimeout must be positive (the embed and decide
-// retryPolicy methods do this; llmkit.DefaultRetryConfig is a valid
-// starting point).
+// classify reports whether err is worth retrying. When ok is true, after
+// and hasAfter carry a server-supplied Retry-After delay that replaces
+// the computed backoff for that sleep. cfg must be normalized by the
+// caller: MaxAttempts and RequestTimeout must be positive.
 func Do(ctx context.Context, cfg llmkit.RetryConfig, classify func(error) (after time.Duration, hasAfter, ok bool), fn func(context.Context) error) error {
 	var err error
 	for attempt := 1; ; attempt++ {
