@@ -143,7 +143,7 @@ func TestNewRunIDLexicallyMonotonicAcrossTick(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	second := NewRunID()
-	if !(first < second) {
+	if first >= second {
 		t.Fatalf("ids not lexically monotonic across a tick: %q !< %q", first, second)
 	}
 	if strings.Compare(string(first), string(second)) >= 0 {
