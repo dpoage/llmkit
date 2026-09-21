@@ -55,8 +55,8 @@ entry below is marked.
   non-zero exit code is the command's verdict, not an error, exactly like
   the `Sandbox` contract.
   Both wrappers pass results and errors through
-  unchanged and take `RunID`/`SpanID` from the call's context; the sandbox
-  wrapper emits nothing from `MaterializeWorkspace`. Either wrapper
+  unchanged and take `RunID`/`SpanID`/`Step` from the call's context; the
+  sandbox wrapper emits nothing from `MaterializeWorkspace`. Either wrapper
   returns its input unchanged for a nil observer.
 
 - `llmkit`: `Observe(c, obs, provider, model)` wraps any `Client` so each
