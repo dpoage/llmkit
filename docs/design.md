@@ -186,28 +186,41 @@ them is durable.
 
 ## The observation vocabulary lives in the root package
 
-`Observer`, `Event` with its ten payload types, and the run/span/step identity
-that rides the context are declared in `llmkit` itself, not in a
-`llmkit/observe` leaf package. The alternative was measured before the question
-was closed: moving the vocabulary rewrites 619 references across root, agent,
-provider, embed, sandbox, and decide (28 exported symbols) and buys a naming
-improvement, nothing functional. The requirement that motivated the vocabulary
-is already met where it sits: `store/sqlite` (a later round) persists events
-without importing `agent`, because the event types are root-owned, and the
-import graph stays a DAG with nothing importing upward. A leaf package would
-not sit below the other packages anyway — agent, provider, embed, sandbox, and
-decide all already depend on the types, so a leaf would be one more package at
-root's depth, with root re-exporting or callers importing two places.
+`Observer`, `Event` with its ten payload types, and the run/span/step
+identity that rides the context are declared in `llmkit` itself, not in a
+`llmkit/observe` leaf package. Moving them was measured before the question
+was closed: ~610 occurrences of observe.go's 28 exported symbols in
+comment-stripped Go code across root, agent, provider (adapters included),
+embed, and sandbox — tests included, which is most of the weight, because
+the suites pin the vocabulary; ~140 excluding tests. (The rule:
+word-boundary occurrences, `//`-comment lines removed; `decide` contributes
+zero — it sits on the `Recorder` seam, and becomes an Observer consumer
+only if the deferred Recorder fold-in happens.)
 
-- **What it buys:** every component — agent, provider, embed, sandbox,
-  decide, and the future store — speaks one event shape from the package it
-  already imports for `Request`/`Response`; no sink translates between
-  vocabularies and no store imports the agent loop to read its telemetry.
+The decisive reason a leaf cannot work is the direction of the type
+dependency, not taste. The payloads embed root's own wire types —
+`CompletionEvent` carries a `Request` and a `Response`, `AttemptEvent`
+too, `ToolRunEvent` a `ToolCall`, `SteerEvent` a `Message`,
+`EmbedEvent` and `DecisionEvent` a `Usage` — so a `llmkit/observe` leaf
+would have to import root. Root's `Observe`, `WithRetryObserver`, and
+`Observers` construct and carry `Event`, so root would have to import the
+leaf. The leaf can only sit above root, and then every consumer imports
+two packages for one vocabulary. `llmkit/retry` is the extracted-package
+counterexample that works, and shows the difference: `retry` is
+self-contained (root imports it; it imports no kit package), so extracting
+it costs nothing. The event vocabulary has no such cut to extract along —
+every payload is root's wire types re-exposed.
+
+- **What it buys:** every component that emits or persists events — agent,
+  provider, embed, sandbox, and the future store — speaks one event shape
+  from the package it already imports for `Request`/`Response`; no sink
+  translates between vocabularies and no store imports the agent loop to
+  read its telemetry.
 - **What it costs:** the root package now carries agent-shaped kinds —
   start, compaction, steer, finalize — beside the wire vocabulary, so the
   package that documents the client's provider-free surface also holds the
-  loop's concepts. A reader looking for only the client vocabulary finds run
-  bookkeeping next to it.
+  loop's concepts. A reader looking for only the client vocabulary finds
+  run bookkeeping next to it.
 
 ## The sandbox refuses; it never drops
 

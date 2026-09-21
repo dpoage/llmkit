@@ -1041,7 +1041,7 @@ func TestLoadJSONL_RecoversRunIdentity(t *testing.T) {
 	}
 	var mixed bytes.Buffer
 	mixed.Write(orig)
-	mixed.WriteString(`{"kind":"start","run_id":"sneaky","schema_version":1}` + "\n")
+	mixed.WriteString(`{"kind":"start","run_id":"sneaky","schema_version":1,"start":{"task":"t"}}` + "\n")
 	if _, err := LoadJSONL(&mixed); err == nil || !strings.Contains(err.Error(), "run id") {
 		t.Errorf("mixed-id file loaded: %v", err)
 	}

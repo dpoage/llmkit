@@ -334,6 +334,9 @@ func New(ctx context.Context, spec Spec, opts Options) (llmkit.Client, error) {
 // wrapping a New-built client with [llmkit.Observe] must pass this same
 // value as the provider argument, so one span never carries two provider
 // identities.
+//
+// Tag validates nothing: for a spec [New] would refuse (an unknown Type
+// included) it returns Options.Provider, or string(spec.Type) verbatim.
 func Tag(spec Spec, opts Options) string {
 	if opts.Provider != "" {
 		return opts.Provider

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -163,7 +162,10 @@ type Event struct {
 	// explicitly on every event it emits; decorator-emitted events inside a
 	// Runner turn — the retry stage's Attempt, a decision, a sandbox Exec or
 	// embedding from a tool — inherit it from the context ([WithStep]) via
-	// [NewEvent]. 0 outside a Runner turn.
+	// [NewEvent]. 0 outside a Runner turn. On [KindFinalize] Step is the
+	// count of COMPLETED turns, not a turn number: it is 0 when no turn
+	// completed, so a finalize can carry Step 0 inside a run whose first
+	// completion failed (beside that completion's own Step 1).
 	Step int `json:"step,omitempty"`
 	// Time is when the observed operation ended, set by the emitter. Sinks
 	// never re-stamp it.
@@ -433,17 +435,20 @@ func (ev Event) Validate() error {
 	if ev.SchemaVersion == 0 {
 		return fmt.Errorf("llmkit: %s event has SchemaVersion 0 (build events with NewEvent, or set EventSchemaVersion)", ev.Kind)
 	}
-	set := ev.setPayloadFields()
-	switch len(set) {
+	// Count the non-nil payloads and remember the first two names; no
+	// []string is built, so a well-formed event validates without
+	// allocating (the names feed only the error text).
+	n, first, second := ev.scanPayloads()
+	switch n {
 	case 1:
-		if set[0] != want {
-			return fmt.Errorf("llmkit: %s event carries payload field %s, want %s", ev.Kind, set[0], want)
+		if first != want {
+			return fmt.Errorf("llmkit: %s event carries payload field %s, want %s", ev.Kind, first, want)
 		}
 		return nil
 	case 0:
 		return fmt.Errorf("llmkit: %s event carries no payload, want %s", ev.Kind, want)
 	default:
-		return fmt.Errorf("llmkit: %s event carries payload fields %s, want exactly %s", ev.Kind, strings.Join(set, " and "), want)
+		return fmt.Errorf("llmkit: %s event carries %d payload fields (%s and %s, ...), want exactly %s", ev.Kind, n, first, second, want)
 	}
 }
 
@@ -463,39 +468,48 @@ var kindPayloadField = map[EventKind]string{
 	KindExec:       "Exec",
 }
 
-// setPayloadFields lists the payload pointers that are non-nil, in struct
-// order.
-func (ev Event) setPayloadFields() []string {
-	var set []string
+// scanPayloads counts the non-nil payload pointers, in struct order, and
+// names the first two. It allocates nothing: the names feed only Validate's
+// error text, and the closure stays on the stack.
+func (ev Event) scanPayloads() (n int, first, second string) {
+	seen := func(field string) {
+		switch n {
+		case 0:
+			first = field
+		case 1:
+			second = field
+		}
+		n++
+	}
 	if ev.Start != nil {
-		set = append(set, "Start")
+		seen("Start")
 	}
 	if ev.Completion != nil {
-		set = append(set, "Completion")
+		seen("Completion")
 	}
 	if ev.Attempt != nil {
-		set = append(set, "Attempt")
+		seen("Attempt")
 	}
 	if ev.ToolRun != nil {
-		set = append(set, "ToolRun")
+		seen("ToolRun")
 	}
 	if ev.Compaction != nil {
-		set = append(set, "Compaction")
+		seen("Compaction")
 	}
 	if ev.Steer != nil {
-		set = append(set, "Steer")
+		seen("Steer")
 	}
 	if ev.Finalize != nil {
-		set = append(set, "Finalize")
+		seen("Finalize")
 	}
 	if ev.Decision != nil {
-		set = append(set, "Decision")
+		seen("Decision")
 	}
 	if ev.Embed != nil {
-		set = append(set, "Embed")
+		seen("Embed")
 	}
 	if ev.Exec != nil {
-		set = append(set, "Exec")
+		seen("Exec")
 	}
-	return set
+	return n, first, second
 }

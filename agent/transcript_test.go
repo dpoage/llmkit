@@ -312,9 +312,11 @@ func TestSaveJSONL_FlushesPrefixOnEncodeError(t *testing.T) {
 
 // TestLoadJSONL_RejectsPreSchemaLines pins the standing ruling (llmkit-ly5):
 // a line without schema_version is a pre-schema recording — unsupported. The
-// load must ERROR naming the line, never silently load zero values.
+// load runs every line through llmkit.Event.Validate, so the load must ERROR
+// naming the line, never silently load zero values.
 func TestLoadJSONL_RejectsPreSchemaLines(t *testing.T) {
-	// A valid event line, then a hand-written pre-schema line.
+	// A valid event line, then a hand-written line whose shape is fine but
+	// which carries no schema_version.
 	valid := NewTranscript()
 	valid.Record = append(valid.Record, llmkit.Event{
 		Kind:          llmkit.KindToolRun,
@@ -326,14 +328,14 @@ func TestLoadJSONL_RejectsPreSchemaLines(t *testing.T) {
 	if err := valid.SaveJSONL(&buf); err != nil {
 		t.Fatalf("SaveJSONL: %v", err)
 	}
-	buf.WriteString(`{"kind":"request","step":1,"messages":[]}` + "\n")
+	buf.WriteString(`{"kind":"tool_run","step":1,"tool_run":{"call":{"id":"c9","name":"echo"}}}` + "\n")
 
 	_, err := LoadJSONL(&buf)
 	if err == nil {
 		t.Fatal("LoadJSONL accepted a pre-schema line; want an error")
 	}
-	if !strings.Contains(err.Error(), "line 2") || !strings.Contains(err.Error(), "schema_version") {
-		t.Errorf("error = %v, want it to name line 2 and schema_version", err)
+	if !strings.Contains(err.Error(), "line 2") || !strings.Contains(err.Error(), "SchemaVersion") {
+		t.Errorf("error = %v, want it to name line 2 and the missing SchemaVersion", err)
 	}
 }
 
