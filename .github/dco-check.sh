@@ -65,7 +65,5 @@ Add it, then force-push your branch:
     git commit --amend --signoff
     # every commit on the branch
     git rebase --signoff $base
-    # every future commit in this clone
-    git config format.signOff true
 EOF
 exit 1

@@ -45,7 +45,17 @@ The trailer must carry the same email as the commit author:
 Signed-off-by: Jane Doe <jane@example.com>
 ```
 
-To sign off every commit in your clone, run `git config format.signOff true`.
+Git has no configuration that adds the trailer for you, so pass `-s` every
+time. A hook can add it instead. Write this to `.git/hooks/prepare-commit-msg`
+in your clone and run `chmod +x` on it:
+
+```sh
+#!/bin/sh
+name="$(git config user.name)"
+mail="$(git config user.email)"
+grep -qs "^Signed-off-by: $name <$mail>$" "$1" ||
+	printf '\nSigned-off-by: %s <%s>\n' "$name" "$mail" >>"$1"
+```
 
 The `DCO` check fails the pull request when a commit has no matching trailer.
 Fix the last commit with `git commit --amend --signoff`. Fix a whole branch
