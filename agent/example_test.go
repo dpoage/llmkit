@@ -294,7 +294,7 @@ func ExampleSource() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 
 	tick := agent.Func("tick", "return one tick",
 		func(_ context.Context, _ struct{}) (string, error) {
