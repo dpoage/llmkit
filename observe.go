@@ -28,8 +28,9 @@ import (
 // SpanID as its Completion — Attempts join on SpanID, not on time windows,
 // and nested completions (a tool calling the model) get their own span.
 //
-// Run identity: events carry the run's [RunID] (from the context, see
-// [WithRun]); only the agent Runner stamps ParentRunID and Step.
+// Run identity: events carry the run's [RunID] from the context (see
+// [WithRun]); ParentRunID is stamped only by the agent Runner, and Step
+// follows the context ([WithStep]) wherever a Runner turn is in scope.
 type Observer interface {
 	Observe(ctx context.Context, ev Event)
 }
@@ -84,7 +85,8 @@ const (
 	// KindAttempt records one provider attempt inside a completion, including
 	// failed ones. Emitted only from the provider retry stage; replay
 	// consumes Completion, not Attempt. Carries the Completion's Event.SpanID.
-	// Payload: [AttemptEvent]. Step 0.
+	// Payload: [AttemptEvent]. Step is the enclosing turn when emitted inside
+	// a Runner turn, else 0.
 	KindAttempt EventKind = "attempt"
 	// KindToolRun records one tool call: the model's call, the textual
 	// result, and whether it errored. A policy denial is the same kind with
@@ -107,15 +109,17 @@ const (
 	// KindDecision records one decision-model call: the judged state, the
 	// questions asked and the answers returned (or the error). The payload
 	// mirrors the decide package's vocabulary in root-owned structs so the
-	// root package never imports decide. Payload: [DecisionEvent]. Step 0.
+	// root package never imports decide. Payload: [DecisionEvent]. Step is the
+	// enclosing turn when emitted inside a Runner turn, else 0.
 	KindDecision EventKind = "decision"
 	// KindEmbed records one embedding call: model, input count, resulting
-	// dimensions, cache hits, usage, or the error. Payload: [EmbedEvent].
-	// Step 0.
+	// dimensions, cache hits, usage, or the error. Payload: [EmbedEvent]. Step
+	// is the enclosing turn when emitted inside a Runner turn, else 0.
 	KindEmbed EventKind = "embed"
 	// KindExec records one sandbox execution: backend, command, exit code,
 	// captured byte counts, whether output was truncated, or the error.
-	// Payload: [ExecEvent]. Step 0.
+	// Payload: [ExecEvent]. Step is the enclosing turn when emitted inside a
+	// Runner turn, else 0.
 	KindExec EventKind = "exec"
 )
 
@@ -148,8 +152,11 @@ type Event struct {
 	// the client in the context, the retry stage inherits it, so an Attempt
 	// joins its Completion on SpanID. A nested completion gets its own span.
 	SpanID SpanID `json:"span_id,omitempty"`
-	// Step is the 1-based model turn within an agent run, set only on events
-	// the Runner emits; 0 on decorator-emitted events.
+	// Step is the 1-based model turn within an agent run. The Runner sets it
+	// explicitly on every event it emits; decorator-emitted events inside a
+	// Runner turn — the retry stage's Attempt, a decision, a sandbox Exec or
+	// embedding from a tool — inherit it from the context ([WithStep]) via
+	// [NewEvent]. 0 outside a Runner turn.
 	Step int `json:"step,omitempty"`
 	// Time is when the observed operation ended, set by the emitter. Sinks
 	// never re-stamp it.
@@ -276,11 +283,17 @@ type SteerEvent struct {
 // Iterations counts the model turns the run took; Usage totals the run's
 // completions; Finalized marks that a forced-finalization turn fired (a
 // fact about the run's shape that is not derivable from the event stream).
+// FinalText is the run's answer as the agent Runner's Outcome carries it —
+// stitched across a max-tokens continuation — recorded so a store can
+// persist the answer without re-deriving the stitch.
 type FinalizeEvent struct {
 	TruncationReason string `json:"truncation_reason,omitempty"`
 	Finalized        bool   `json:"finalized,omitempty"`
 	Iterations       int    `json:"iterations"`
 	Usage            Usage  `json:"usage"`
+	// FinalText is the run's final answer text; empty when the run produced
+	// none (a first-completion failure, for instance).
+	FinalText string `json:"final_text,omitempty"`
 }
 
 // DecisionEvent records one decision-model call ([KindDecision]). The

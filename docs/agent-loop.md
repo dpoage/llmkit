@@ -196,7 +196,7 @@ When to use: cap the total spend of a fan-out (many runners, one ceiling) withou
 
 Every run emits `llmkit.Event` values through one observer chain: the in-memory `agent.Transcript` first (it always exists and backs `Outcome.Transcript`), then the single durable sink installed with `WithObserver` — `agent.JSONL(dir, onErr)` streams one JSON line per event to a file per run. The chain is built with `llmkit.Observers`, and the events are the same ones bare clients see; a Runner already emits the `completion` event for every completion it makes, so never wrap a Runner's client with `llmkit.Observe` — that would double it.
 
-Each event carries `run_id` (minted per run, or pinned with the `WithRunID` run option), `schema_version`, and — on Runner-emitted kinds — the 1-based turn as `step`. A run continued with `Continue` stamps `parent_run_id` on every event, so a sink can reconstruct the whole lineage.
+Each event carries `run_id` (minted per run, or pinned with the `WithRunID` run option), `schema_version`, and — on Runner-emitted kinds — the 1-based turn as `step`. A run continued with `Continue` stamps `parent_run_id` on every event, so a sink can reconstruct the whole lineage. Decorator-emitted kinds this table does not list — a provider `attempt`, and the `decision`/`embed`/`exec` events a tool's decorators emit — carry the same enclosing turn as `step` when they fire inside a Runner turn: the Runner places the turn in the context (`llmkit.WithStep`) those emitters read.
 
 | Kind | Step | Records |
 |---|---|---|
@@ -205,7 +205,7 @@ Each event carries `run_id` (minted per run, or pinned with the `WithRunID` run 
 | `tool_run` | turn | the model's call, the result verbatim as fed to the model; `Denied` + `deny_reason` for policy denials, `is_error` for failures |
 | `compaction` | next turn | token totals before/after and the prune count; only when something was actually pruned |
 | `steer` | next turn | a delivered steering message; `follow_up` marks follow-up turns |
-| `finalize` | completed turns | why the run stopped (`truncation_reason`), iterations, total usage, whether forced finalization fired; emitted on every run end, including error returns; a failed completion does not advance the step, so a run whose only completion failed reports step 0 |
+| `finalize` | completed turns | why the run stopped (`truncation_reason`), iterations, total usage, the run's answer (`final_text`), whether forced finalization fired; emitted on every run end, including error returns; a failed completion does not advance the step, so a run whose only completion failed reports step 0 |
 
 A real recorded run (weather tool, two turns) looks like this — timestamps and ids are the only things that change between runs:
 

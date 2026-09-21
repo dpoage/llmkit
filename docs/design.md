@@ -145,7 +145,12 @@ tool run, a compaction pass, a steering injection, run finalization, a
 decision, an embedding, a sandbox execution — emits one typed `llmkit.Event`
 to an `llmkit.Observer`, a single-method data sink. A `RunID` minted per run
 rides the context (`llmkit.WithRun`), so tool implementations, policies, and
-decorators stamp the same correlation key the runner does. Replay reads the
+decorators stamp the same correlation key the runner does. The turn
+number rides the context the same way (`llmkit.WithStep`), so events
+decorators emit inside a Runner turn — retry attempts, decisions, sandbox
+executions — join the Runner's own events on `step`;
+`FinalizeEvent.FinalText` likewise records the run's stitched answer so a
+store persists it without re-deriving the stitch. Replay reads the
 same stream back: a Completion event carries the full request/response
 round-trip, which is why deterministic replay consumes Completion events
 only.

@@ -214,9 +214,10 @@ func (r *Runner) begin(ctx context.Context, cfg runConfig, task string) (context
 // emitFinalize closes the run with the Finalize event — emitted on EVERY run
 // end, including error returns: why the run stopped (the truncation reason,
 // when a limit ended it), how many model iterations it took, the run's total
-// usage, and whether a forced-finalization turn fired. Step is the number of
-// completed turns (Outcome.Iterations); a failed completion does not advance
-// it, so a run whose only completion failed reports Step 0.
+// usage, the run's answer (Outcome.FinalText, stitched across a max-tokens
+// continuation), and whether a forced-finalization turn fired. Step is the
+// number of completed turns (Outcome.Iterations); a failed completion does
+// not advance it, so a run whose only completion failed reports Step 0.
 func (r *Runner) emitFinalize(ctx context.Context, em runEmitter, o *Outcome) {
 	if o == nil {
 		// The run panicked mid-turn (a hook bug): no outcome exists. Still
@@ -231,6 +232,7 @@ func (r *Runner) emitFinalize(ctx context.Context, em runEmitter, o *Outcome) {
 		Finalized:        o.Finalized,
 		Iterations:       o.Iterations,
 		Usage:            o.Usage,
+		FinalText:        o.FinalText,
 	}
 	em.emit(ctx, ev)
 }
@@ -964,6 +966,12 @@ func (r *Runner) complete(ctx context.Context, em runEmitter, messages []llmkit.
 	// incremented only after the call returns, keeping the hook pair's step
 	// identical.
 	step := outcome.Iterations + 1
+	// The turn's Step rides the context for everything this completion
+	// touches — the request policy, the hooks, and the client, whose retry
+	// stage reads it into its Attempt events — so decorator-emitted events
+	// join the Runner's own on Step, not just on SpanID. Placed before the
+	// span mint below because the policy and BeforeCompletion fire first.
+	ctx = llmkit.WithStep(ctx, step)
 	// The clone isolates the loop's history from slice-level edits by the
 	// policy; the post-policy slice is what the wire and the transcript see.
 	if r.requestPolicy != nil {
@@ -1173,6 +1181,12 @@ type toolResult struct {
 // the same panic value in both modes.
 func (r *Runner) executeTools(ctx context.Context, outcome *Outcome, calls []llmkit.ToolCall) []toolResult {
 	results := make([]toolResult, len(calls))
+	// The turn's Step rides the whole tool phase's context — the ToolPolicy
+	// (and any decision observer inside one), the ToolStart/ToolEnd hooks,
+	// and Tool.Run itself, hence any decorator a tool calls through — so
+	// decorator-emitted events carry the same turn the Runner's own ToolRun
+	// events name.
+	ctx = llmkit.WithStep(ctx, outcome.Iterations)
 	// Every call of the turn is authorized before the first Tool.Run, in
 	// both modes, so an interactive policy never overlaps the fan-out.
 	dispatch, denied := r.authorizeCalls(ctx, calls, results)

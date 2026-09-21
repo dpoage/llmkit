@@ -214,3 +214,72 @@ func TestNewEventRoundTripsDeepEqual(t *testing.T) {
 		t.Fatalf("stamped event did not survive the wire\nwant: %#v\ngot:  %#v", ev, back)
 	}
 }
+
+func TestStepFromContextAbsent(t *testing.T) {
+	if got := StepFromContext(context.Background()); got != 0 {
+		t.Fatalf("StepFromContext(absent) = %d, want 0", got)
+	}
+}
+
+func TestWithStepRoundTrip(t *testing.T) {
+	ctx := WithStep(context.Background(), 3)
+	if got := StepFromContext(ctx); got != 3 {
+		t.Fatalf("StepFromContext = %d, want the stored step", got)
+	}
+}
+
+// TestWithStepNonPositivePreservesOuter pins the documented contract: step
+// <= 0 returns ctx unchanged, mirroring WithRun's empty-id rule, so a caller
+// with no turn in scope can pass 0 unconditionally without erasing an
+// enclosing step.
+func TestWithStepNonPositivePreservesOuter(t *testing.T) {
+	outer := WithStep(context.Background(), 2)
+	for _, step := range []int{0, -1} {
+		if got := StepFromContext(WithStep(outer, step)); got != 2 {
+			t.Fatalf("WithStep(outer, %d) read back %d, want the enclosing 2", step, got)
+		}
+	}
+	if got := StepFromContext(WithStep(context.Background(), 0)); got != 0 {
+		t.Fatalf("WithStep(absent, 0) read back %d, want 0", got)
+	}
+}
+
+func TestWithStepOverwrite(t *testing.T) {
+	ctx := WithStep(WithStep(context.Background(), 2), 5)
+	if got := StepFromContext(ctx); got != 5 {
+		t.Fatalf("StepFromContext = %d, want the innermost 5", got)
+	}
+}
+
+// TestRunSpanStepKeysAreIndependent: one context carries all three header
+// facts — run, span, and step — which is how a decorator-emitted event
+// inside a Runner turn joins on every axis at once.
+func TestRunSpanStepKeysAreIndependent(t *testing.T) {
+	ctx := WithStep(WithSpan(WithRun(context.Background(), RunID("run-1")), SpanID("span-1")), 4)
+	if got := RunFromContext(ctx); got != "run-1" {
+		t.Errorf("RunFromContext = %q, want run-1", got)
+	}
+	if got := SpanFromContext(ctx); got != "span-1" {
+		t.Errorf("SpanFromContext = %q, want span-1", got)
+	}
+	if got := StepFromContext(ctx); got != 4 {
+		t.Errorf("StepFromContext = %d, want 4", got)
+	}
+}
+
+// TestNewEventStampsStepFromContext pins the NewEvent half: the step rides
+// the header like RunID/SpanID, stays 0 outside a Runner turn, and an
+// emitter's explicit assignment still wins over the context's value.
+func TestNewEventStampsStepFromContext(t *testing.T) {
+	if ev := NewEvent(WithStep(context.Background(), 3), KindToolRun); ev.Step != 3 {
+		t.Errorf("NewEvent Step = %d, want 3 from the context", ev.Step)
+	}
+	if ev := NewEvent(context.Background(), KindToolRun); ev.Step != 0 {
+		t.Errorf("NewEvent Step outside a turn = %d, want 0", ev.Step)
+	}
+	explicit := NewEvent(WithStep(context.Background(), 3), KindToolRun)
+	explicit.Step = 9
+	if explicit.Step != 9 {
+		t.Errorf("explicit Step assignment lost: got %d, want 9", explicit.Step)
+	}
+}
