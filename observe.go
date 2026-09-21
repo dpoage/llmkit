@@ -433,7 +433,7 @@ func (ev Event) Validate() error {
 		return fmt.Errorf("llmkit: unknown event kind %q", string(ev.Kind))
 	}
 	if ev.SchemaVersion == 0 {
-		return fmt.Errorf("llmkit: %s event has SchemaVersion 0 (build events with NewEvent, or set EventSchemaVersion)", ev.Kind)
+		return fmt.Errorf("llmkit: %s event has schema_version 0 (set Event.SchemaVersion from EventSchemaVersion, or build events with NewEvent)", ev.Kind)
 	}
 	// Count the non-nil payloads and remember the first two names; no
 	// []string is built, so a well-formed event validates without
@@ -448,7 +448,11 @@ func (ev Event) Validate() error {
 	case 0:
 		return fmt.Errorf("llmkit: %s event carries no payload, want %s", ev.Kind, want)
 	default:
-		return fmt.Errorf("llmkit: %s event carries %d payload fields (%s and %s, ...), want exactly %s", ev.Kind, n, first, second, want)
+		fields := fmt.Sprintf("%s and %s", first, second)
+		if n > 2 {
+			fields += ", ..."
+		}
+		return fmt.Errorf("llmkit: %s event carries %d payload fields (%s), want exactly %s", ev.Kind, n, fields, want)
 	}
 }
 

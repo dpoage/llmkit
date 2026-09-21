@@ -1130,13 +1130,14 @@ func TestEventValidate(t *testing.T) {
 
 	t.Run("schema version zero", func(t *testing.T) {
 		// A hand-built Event that skipped NewEvent carries 0 and must fail,
-		// even with an otherwise-perfect kind/payload pair.
+		// even with an otherwise-perfect kind/payload pair. The error names
+		// the wire spelling schema_version, so a JSONL debugger can grep it.
 		ev := Event{Kind: KindSteer, SchemaVersion: 0, Steer: &SteerEvent{}}
 		err := ev.Validate()
 		if err == nil {
 			t.Fatal("Validate on SchemaVersion 0 = nil, want an error")
 		}
-		for _, want := range []string{string(KindSteer), "SchemaVersion"} {
+		for _, want := range []string{string(KindSteer), "schema_version"} {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("error %q does not name %q", err, want)
 			}
@@ -1173,14 +1174,16 @@ func TestGoldenEventsValidate(t *testing.T) {
 }
 
 // TestEventPayloadMappingGuard is the mechanical guard for the kind→payload
-// mapping. The mapping lives in four code sites beside the constants (the
-// Kind-constant and Event-field docs, kindPayloadField, scanPayloads) plus
-// payloadSlots here; adding an Event payload field without updating every
-// one must fail THIS test, not silently change what Validate accepts —
-// without the guard, a kind added to kindPayloadField but forgotten in
-// scanPayloads accepts a two-payload event AND rejects its own well-formed
-// event with the whole suite green. Same class of check
-// provider/live_registry_test.go applies to Capabilities.
+// mapping. The mapping lives in four code sites beside the constants; this
+// test mechanically checks two of them — the kindPayloadField map (both
+// directions: every payload field mapped, every map value a real field) and
+// scanPayloads (behaviorally: each field's own kind must validate) — and
+// the failure messages name the remaining sites (the Kind-constant and
+// Event-field docs, payloadSlots here) for manual wiring. Without the
+// guard, a kind added to kindPayloadField but forgotten in scanPayloads
+// accepts a two-payload event AND rejects its own well-formed event with
+// the whole suite green. Same class of check provider/live_registry_test.go
+// applies to Capabilities.
 func TestEventPayloadMappingGuard(t *testing.T) {
 	et := reflect.TypeOf(Event{})
 
