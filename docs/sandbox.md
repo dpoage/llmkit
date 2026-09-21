@@ -132,6 +132,23 @@ flowchart TD
 
 `InfraKilled` is true when either `TimedOut` or `WorkspaceQuotaExceeded` is set. The two flags are mutually exclusive: `TimedOut` covers the absolute timeout and the idle-stall kill; `WorkspaceQuotaExceeded` covers only the workspace-growth ceiling. Both report `ExitCode == -1`.
 
+## Observing executions
+
+`sandbox.Observe` wraps any backend so every `Exec` reports one `llmkit.Event` (kind `exec`) to an `llmkit.Observer` — the kit's run-correlated event stream — and otherwise behaves exactly like the backend it wraps: the `Result`, any error, and `MaterializeWorkspace` pass through unchanged. The event mirrors [Classifying a Result](#classifying-a-result): the backend name (`cli`, `bwrap`, and `host` match `UnsupportedSpecError.Backend`; `mock` is the package's own name for the backend that refuses nothing; any other implementation is named by its Go type), `Spec.Cmd` (copied), the exit code, captured byte counts, truncation, `Result.Duration`, and the infrastructure error — so a non-zero exit arrives as the command's verdict with `Err` empty, and `-1` means the process never ran to an exit. `RunID` and `SpanID` come from the call's context. The full field contract — including what stays zero — is the [`Observe` reference](https://pkg.go.dev/github.com/dpoage/llmkit/sandbox#Observe); this page does not restate it.
+
+```go
+b, err := sandbox.NewBwrap()
+if err != nil {
+	return err // or skip: no bwrap on this host
+}
+defer func() { _ = b.Close() }() // Close is not on the Sandbox interface
+
+sb := sandbox.Observe(b, obs) // obs is your llmkit.Observer
+res, err := sb.Exec(ctx, sandbox.Spec{Cmd: []string{"go", "test", "./..."}})
+```
+
+The package's `ExampleObserve` shows a complete run against the Mock backend.
+
 ## Workspaces and symlink hardening
 
 By default `Exec` copies the repository snapshot into a fresh temporary directory; it never works in the live checkout. With `Spec.Workspace` set, `Exec` uses that caller-owned directory directly instead of copying.

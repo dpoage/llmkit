@@ -427,15 +427,15 @@ func TestLiveAgentAttachImageOnTaskTurn(t *testing.T) {
 	}
 
 	var seed *llmkit.Message
-	for i := range out.Transcript.Events {
-		ev := &out.Transcript.Events[i]
-		if ev.Kind == agent.EventRequest && len(ev.Messages) > 0 {
-			seed = &ev.Messages[0]
+	for i := range out.Transcript.Record {
+		ev := &out.Transcript.Record[i]
+		if ev.Kind == llmkit.KindCompletion && ev.Completion != nil && len(ev.Completion.Request.Messages) > 0 {
+			seed = &ev.Completion.Request.Messages[0]
 			break
 		}
 	}
 	if seed == nil {
-		t.Fatal("transcript has no request event with messages")
+		t.Fatal("transcript has no completion event with request messages")
 	}
 	found := false
 	for _, b := range seed.Content {
@@ -530,15 +530,15 @@ func TestLiveAgentToolPolicyDeny(t *testing.T) {
 	if !sawMsg {
 		t.Fatalf("Outcome.Messages lost the deny tool result %q", want)
 	}
-	// The transcript records the same tool_result event.
+	// The transcript records the same denial ToolRun event.
 	sawEvent := false
-	for _, ev := range out.Transcript.Events {
-		if ev.Kind == agent.EventToolResult && ev.IsError && ev.Result == want {
+	for _, ev := range out.Transcript.Record {
+		if ev.Kind == llmkit.KindToolRun && ev.ToolRun != nil && ev.ToolRun.Denied && ev.ToolRun.Call.Name == "add" {
 			sawEvent = true
 		}
 	}
 	if !sawEvent {
-		t.Fatal("transcript lost the deny tool_result event")
+		t.Fatal("transcript lost the denial tool_run event")
 	}
 
 	// The run continued past the denial and reached a final answer.

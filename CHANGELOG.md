@@ -23,9 +23,104 @@ entry below is marked.
   `Config.Rand` are exported hooks — nil means a real timer and the
   package-level random source — so tests can pin the schedule
   deterministically.
+- `llmkit`: the observability seam. `Observer` receives a typed `Event` per
+  nondeterministic boundary — one `Observe(ctx, Event)` method, with
+  `ObserverFunc` as the closure adapter and `Observers` as an
+  order-preserving fan-out that skips nil Observer interface values. `Event`
+  is one Kind-discriminated struct with snake_case tags and a
+  `schema_version` on every encoding; the kinds are start, completion,
+  attempt, tool_run (policy denials ride its `Denied` field), compaction,
+  steer, finalize, decision, embed, and exec, each carried by a payload
+  type: `StartEvent`, `CompletionEvent`, `AttemptEvent`, `ToolRunEvent`,
+  `CompactionEvent`, `SteerEvent`, `FinalizeEvent`, `DecisionEvent`,
+  `EmbedEvent`, and `ExecEvent`. Run identity travels the context: `RunID`,
+  `WithRun`, `RunFromContext`, and `NewRunID`, whose ids sort lexically in
+  mint order.
+  Spans join attempts to their completion: the Completion emitter mints a
+  `SpanID` per logical completion (`WithSpan`, `SpanFromContext`,
+  `NewSpanID`) and the retry stage's Attempt events inherit it.
+  A Completion event is emitted once per logical completion by the outermost
+  layer; Attempt events come only from the provider retry stage, and replay
+  consumes Completion only. `Recorder` is unchanged; folding it into the
+  stream is deferred.
+- `llmkit/embed` and `llmkit/sandbox`: `Observe` decorators at the last two
+  unobserved nondeterministic boundaries. `embed.Observe(e, obs)` emits one
+  Embed event per `Embed`/`EmbedBatch` call — model, requested input count,
+  vector dimensions, duration, and the error; `CacheHits` and `Usage` stay
+  zero because the `Embedder` interface exposes neither per-call cache
+  attribution nor token usage. `sandbox.Observe(s, obs)` emits one Exec
+  event per `Exec` — backend name, command, exit code (`-1` when the
+  process never ran to an exit), captured byte counts per stream,
+  truncation, the run's measured duration, and the infrastructure error; a
+  non-zero exit code is the command's verdict, not an error, exactly like
+  the `Sandbox` contract.
+  Both wrappers pass results and errors through
+  unchanged and take `RunID`/`SpanID`/`Step` from the call's context; the
+  sandbox wrapper emits nothing from `MaterializeWorkspace`. Either wrapper
+  returns its input unchanged for a nil observer.
+
+- `llmkit`: `Observe(c, obs, provider, model)` wraps any `Client` so each
+  logical completion — one `Complete` or `Stream` call, success or error —
+  emits exactly one `Completion` event: the request as received, the final
+  response (on the stream path assembled through the same synthesis
+  `llmkit.Stream` performs) or the error text, tagged with the provider and
+  model arguments. It mints a fresh span per call and stamps it into the
+  client's context, so provider `Attempt` events join it; a nil observer
+  returns the client unchanged.
+- `llmkit`: `WithRetryObserver(c, cfg, obs, provider, model)` — the retry
+  stage emitting one `Attempt` event per attempt, failures included,
+  numbered 1..N by the loop, span inherited from the context, duration
+  covering just that attempt. `WithRetry` keeps its signature and emits
+  nothing.
+- `provider`: `Options.Observer` plumbs an `llmkit.Observer` into `New`'s
+  retry stage; `New` emits Attempt events only and never `Completion`
+  events — wrap its result with `llmkit.Observe` (or run it under the agent
+  Runner, which emits its own) to capture completions, and never both for
+  the same client.
+- `llmkit/agent`: run identity and durable observation on the tool loop.
+  `WithObserver(obs)` installs the Runner's single durable event sink (last-wins — a second call replaces the first, never a second history) behind the always-present in-memory `Transcript`, which now stores `llmkit.Event` values in `Transcript.Record` and carries `RunID`/`ParentRunID`. `JSONL(dir, onErr)` streams one JSON line per event to one `<RunID>.jsonl` file per run — created exclusively at the run's start, closed at its finalize, refusals reported through `onErr` and never failing the run — and reads them back through the same `Source` interface replay builds on. The Runner emits `start`, `completion` (one per logical completion, span-minted per C2), `tool_run` (with `Denied`/`deny_reason` for policy denials), `compaction`, `steer`, and `finalize` (on every run end including error returns). `WithRunID(id)` pins a run's identity; `Outcome.RunID` is exported; `Continue` chains carry `ParentRunID`.
+- `llmkit/agent`: the read side of recording. `Source` is a single-method interface (`Events(ctx, run)`) implemented by `Transcript` and the JSONL sink; `NewReplayClient(src, run, caps)` replays a recorded run from any Source, `ReplayClient.Tools` serves the recorded tool results instead of executing them (a fully offline replay, deterministic under parallel dispatch), and `ReplayClient.Err` reports a diverged replay. The sentinels `ErrUnknownRun` (a Source has no record of the run) and `ErrReplayDiverged` (a replay no longer matches its record) support errors.Is.
+- `llmkit`: `WithStep(ctx, step)` and `StepFromContext(ctx)` — the 1-based
+  turn number in the context, mirroring `WithRun`'s empty-id rule (step <= 0
+  is absent). `NewEvent` stamps `Event.Step` from it, so decorator-emitted
+  events inside a Runner turn — the retry stage's Attempt events, a decision
+  observed inside a ToolPolicy, the sandbox Exec and embed events a tool's
+  decorators emit — carry the enclosing turn; Runner-emitted events keep
+  setting Step explicitly. The agent Runner places the turn in the contexts
+  it passes to the client, policies, hooks, and tools.
+- `llmkit`: `FinalizeEvent.FinalText` (`final_text`, omitted when empty) —
+  the run's answer as the Runner stitched it across a max-tokens
+  continuation, so a store persists it without re-deriving the stitch.
+  Additive; no schema version bump.
+- `llmkit`: `Event.Validate()` — a shape check for sinks, stores, and
+  tests: the Kind must be a declared constant, exactly one payload pointer
+  must be non-nil and be the one the Kind names, and `SchemaVersion` must
+  be non-zero (any non-zero value passes — a newer schema is the sink's
+  business). It never runs on the emission path and does not gate
+  encoding.
+- `provider`: `Tag(spec, opts)` — the provider tag `New` puts on usage and
+  Attempt events (`Options.Provider` when set, else `string(spec.Type)`),
+  exported and called by `New` itself, so `llmkit.Observe` callers pass
+  the same value instead of restating the rule.
 
 ### Changed
 
+- **Breaking:** `FinalizeEvent` loses `Iterations` — `Event.Step` on the
+  finalize event already carries the completed-turn count (the Runner set
+  both from the same value on every exit path). Old recordings still
+  decode: the `iterations` key is ignored. No compatibility aliases.
+  This is a removal at the same schema version (still 1), not a bump —
+  safe only because no store exists yet to branch on the field, which is
+  why it lands before the store round (llmkit-2or.1) freezes the schema.
+- `agent.LoadJSONL` validates every line with `llmkit.Event.Validate`
+  instead of checking only `schema_version`: the load now errors — naming
+  the line — on any line that is not a valid Event: an undeclared kind, a
+  missing payload, a foreign or doubled payload, or a zero
+  `schema_version`. A payload-less `start` line loaded before; it fails
+  now. The rule is forward-compatible on the version (a future
+  `schema_version` still loads) but not on kinds: one unknown kind fails
+  the whole load.
+- **Breaking:** the agent transcript is the new event stream. `agent.Event`/`EventKind` and the `request`/`assistant`/`tool_result` kinds are deleted in favor of `llmkit.Event` (`Transcript.Events` is now `Transcript.Record`, of `llmkit.Event`); `WithTranscriptDir` and `WithTranscriptKey` are removed in favor of `WithObserver(agent.JSONL(dir, onErr))` (the key's motivation moved to `WithRunID`); `Hooks.TranscriptError` is removed (sink failures go to the callback the sink was constructed with); `NewReplayClient` takes `(src Source, run llmkit.RunID, caps)`. There are no compatibility aliases. A tool-call-only assistant turn no longer invents an empty text block in history (llmkit-ly5).
 - **Breaking:** the retry vocabulary moved from the root package into
   `llmkit/retry`: `llmkit.RetryConfig` is now `retry.Config`,
   `llmkit.DefaultRetryConfig` is `retry.Default`, and
@@ -33,6 +128,15 @@ entry below is marked.
   `WithRetry` takes a `retry.Config`, and `provider.Options.Retry`,
   `embed.Config.Retry`, and `decide.Config.Retry` are `retry.Config`.
   There are no compatibility aliases.
+- **Breaking:** the root wire types now carry snake_case `json` tags:
+  `Message`, `ToolDef`, `ToolCall`, `ThinkingConfig`, `ToolChoice`,
+  `Request`, `Response`, and `Usage` previously serialized with Go field
+  names (`InputTokens`, `ToolCallID`, ...). Transcript JSONL and any JSON
+  recorded before this change no longer round-trips — per the standing
+  ruling, pre-tag recordings are unsupported and must be re-recorded.
+  Unmarshaling is unaffected for single-word keys (encoding/json matches
+  case-insensitively), but multi-word keys such as `InputTokens` or
+  `MaxTokens` silently drop.
 - `internal/retry` is deleted. Its loop and header parser now live in the
   `llmkit/retry` leaf package; `embed`, `decide`, and `internal/adapter`
   call them there. Internal package; no caller-facing change; retry

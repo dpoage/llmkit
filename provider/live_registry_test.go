@@ -34,6 +34,7 @@ var liveCases = []liveCase{
 	{Name: "error_bad_key", Doc: "an invalid credential normalizes to ErrAuth"},
 	{Name: "error_bad_model", Doc: "an unknown model normalizes to ErrInvalidRequest"},
 	{Name: "usage_recorded", Doc: "WithRecorder emits one UsageEvent for a successful completion"},
+	{Name: "attempt_events", Doc: "Options.Observer receives one Attempt event per wire call from the retry stage and no Completion event"},
 
 	// Capability-keyed cases: one per llmkit.Capabilities field.
 	{Name: "context_window", Gate: "ContextWindow", Doc: "an oversize prompt yields ErrContextTooLong when the window is known"},

@@ -209,7 +209,7 @@ func TestDelta_StreamsEveryCompletionKind(t *testing.T) {
 			{2, llmkit.Delta{Kind: llmkit.DeltaText, Text: `{"path":"f.go","note":"final"}`}},
 		}
 		if !reflect.DeepEqual(rec.hits, want) {
-			t.Errorf("deltas = %+v, want %+v", rec.hits, want)
+			t.Errorf("finalization deltas = %+v, want %+v", rec.hits, want)
 		}
 		if !out.Finalized {
 			t.Error("Finalized = false, want true (finalization turn was taken)")
@@ -262,7 +262,7 @@ func TestDelta_StreamingTranscriptMatchesComplete(t *testing.T) {
 
 	plain := newFakeClient(script()...)
 	rp := NewRunner(plain, tools, "sys")
-	outPlain, err := rp.Run(context.Background(), "task")
+	outPlain, err := rp.Run(context.Background(), "task", WithRunID("parity"))
 	if err != nil {
 		t.Fatalf("plain Run: %v", err)
 	}
@@ -270,7 +270,7 @@ func TestDelta_StreamingTranscriptMatchesComplete(t *testing.T) {
 	sf := &streamFakeClient{fakeClient: newFakeClient(script()...)}
 	rec := &deltaRecorder{}
 	rs := NewRunner(sf, tools, "sys", WithHooks(rec.hooks()))
-	outStream, err := rs.Run(context.Background(), "task")
+	outStream, err := rs.Run(context.Background(), "task", WithRunID("parity"))
 	if err != nil {
 		t.Fatalf("streaming Run: %v", err)
 	}
@@ -281,6 +281,8 @@ func TestDelta_StreamingTranscriptMatchesComplete(t *testing.T) {
 	if !reflect.DeepEqual(outPlain.Messages, outStream.Messages) {
 		t.Errorf("Messages differ:\nplain=%+v\nstream=%+v", outPlain.Messages, outStream.Messages)
 	}
+	spanInvariant(t, outPlain.Transcript)
+	spanInvariant(t, outStream.Transcript)
 	if !reflect.DeepEqual(eventsWithoutTimes(outPlain.Transcript), eventsWithoutTimes(outStream.Transcript)) {
 		t.Errorf("transcripts differ:\nplain=%+v\nstream=%+v",
 			eventsWithoutTimes(outPlain.Transcript), eventsWithoutTimes(outStream.Transcript))
@@ -299,14 +301,43 @@ func TestDelta_StreamingTranscriptMatchesComplete(t *testing.T) {
 	}
 }
 
-// eventsWithoutTimes returns the transcript's events with timestamps zeroed,
-// so two runs of the same script compare DeepEqual.
-func eventsWithoutTimes(tr *Transcript) []Event {
-	evs := slices.Clone(tr.Events)
+// eventsWithoutTimes returns the transcript's events with the varying fields
+// zeroed — Time and Duration — so two runs pinned to the same RunID compare
+// DeepEqual. SpanIDs are checked separately (see spanInvariant): each is
+// minted per logical completion, so the two runs' values differ by design.
+func eventsWithoutTimes(tr *Transcript) []llmkit.Event {
+	evs := slices.Clone(tr.Record)
 	for i := range evs {
 		evs[i].Time = time.Time{}
+		evs[i].Duration = 0
+		evs[i].SpanID = ""
 	}
 	return evs
+}
+
+// spanInvariant pins C2's mint on a recorded stream: every completion event
+// carries a fresh, pairwise-distinct SpanID — present (never inherited from
+// an enclosing span) — and the count matches the completions.
+func spanInvariant(t *testing.T, tr *Transcript) {
+	t.Helper()
+	seen := map[llmkit.SpanID]bool{}
+	completions := 0
+	for _, ev := range tr.Record {
+		if ev.Kind != llmkit.KindCompletion {
+			continue
+		}
+		completions++
+		if ev.SpanID == "" {
+			t.Fatalf("completion at step %d carries no SpanID", ev.Step)
+		}
+		if seen[ev.SpanID] {
+			t.Fatalf("completion at step %d reuses span %q; each logical completion mints a fresh one", ev.Step, ev.SpanID)
+		}
+		seen[ev.SpanID] = true
+	}
+	if len(seen) != completions {
+		t.Fatalf("distinct spans = %d, completions = %d", len(seen), completions)
+	}
 }
 
 // TestDelta_SynthesizedFromCompleteOnlyClient pins the fallback: a client

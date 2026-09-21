@@ -230,6 +230,7 @@ var liveCaseBodies = map[string]func(t *testing.T, lc *liveClient){
 	"error_bad_key":       caseErrorBadKey,
 	"error_bad_model":     caseErrorBadModel,
 	"usage_recorded":      caseUsageRecorded,
+	"attempt_events":      caseAttemptEvents,
 	"context_window":      caseContextWindow,
 	"parallel_tool_calls": caseParallelToolCalls,
 	"prompt_caching":      casePromptCaching,
@@ -382,6 +383,69 @@ func caseUsageRecorded(t *testing.T, lc *liveClient) {
 	}
 	if ev := events[0]; ev.Model != lc.model || ev.Usage.InputTokens <= 0 || ev.Usage.OutputTokens <= 0 {
 		t.Fatalf("usage event = %+v, want this lane's model with accounted tokens", ev)
+	}
+	lc.finish(resp, err)
+}
+
+// eventObserver collects llmkit events for the attempt_events case.
+type eventObserver struct {
+	mu     sync.Mutex
+	events []llmkit.Event
+}
+
+func (o *eventObserver) Observe(_ context.Context, ev llmkit.Event) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.events = append(o.events, ev)
+}
+
+// caseAttemptEvents pins the Options.Observer wiring through the production
+// construction path: the retry stage reports its attempt (the success lane
+// makes exactly one wire call) and New never emits a Completion event. The
+// client is built here rather than via sess.Client because the observer is
+// wired at construction, inside the retry stage.
+func caseAttemptEvents(t *testing.T, lc *liveClient) {
+	obs := &eventObserver{}
+	spec := provider.Spec{
+		Type:    lc.sess.Lane.Type,
+		Model:   lc.sess.Model,
+		BaseURL: lc.sess.BaseURL,
+		Secret:  lc.sess.Key,
+	}
+	if spec.Secret == "" {
+		spec.Secret = "llmkit-live-placeholder"
+	}
+	if o := lc.sess.CapsOverride(t); o != nil {
+		spec.Capabilities = o
+	}
+	cl, err := provider.New(lc.ctx, spec, provider.Options{
+		HTTPClient: &http.Client{Transport: lc.tr},
+		Recorder:   livetest.DefaultTally(),
+		Observer:   obs,
+	})
+	if err != nil {
+		redFatal(t, lc.sess, "provider.New with Options.Observer: %v", err)
+	}
+	resp, err := lc.completeVia(cl, llmkit.Request{
+		Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "Reply with exactly: OK")},
+	})
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	attempts := 0
+	for _, ev := range obs.events {
+		switch ev.Kind {
+		case llmkit.KindAttempt:
+			attempts++
+			if ev.Attempt == nil || ev.Attempt.Attempt != attempts {
+				t.Fatalf("attempt event %+v: want sequential 1-based numbering", ev)
+			}
+		case llmkit.KindCompletion:
+			t.Fatal("provider.New emitted a Completion event; New emits Attempts only")
+		}
+	}
+	if attempts != 1 {
+		t.Fatalf("Options.Observer received %d Attempt events, want 1 for a single wire call", attempts)
 	}
 	lc.finish(resp, err)
 }

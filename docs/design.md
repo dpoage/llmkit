@@ -18,7 +18,8 @@ flowchart TD
     ADAPTERS --> ROOT
     PROV --> ROOT
     AGENT --> ROOT
-    EMBED["embed"]
+    EMBED["embed"] --> ROOT
+    SANDBOX["sandbox"] --> ROOT
     DECIDE["decide"] --> ROOT
     DECIDE --> IA
     RETRY["retry"]
@@ -27,15 +28,15 @@ flowchart TD
     PROV --> RETRY
     EMBED --> RETRY
     DECIDE --> RETRY
-    SANDBOX["sandbox"]
     FSROOT["fsroot"]
 ```
 
-`retry`, `sandbox`, and `fsroot` import no other kit package. `retry` holds
-the backoff loop: `retry.Config`, `retry.Do`, and `retry.ParseRetryAfter`.
-The root package, the adapter layer, `provider`, `embed`, and `decide` all
-import it directly. `embed` imports only `retry`; `decide` imports the root
-vocabulary, `internal/adapter` for status classification, and `retry`.
+`retry` and `fsroot` import no other kit package. `retry` holds the
+backoff loop: `retry.Config`, `retry.Do`, and `retry.ParseRetryAfter`.
+The root package, the adapter layer, `provider`, `embed`, and `decide`
+all import it directly. `embed` imports the root vocabulary and
+`retry`; `decide` imports the root vocabulary, `internal/adapter` for
+status classification, and `retry`.
 Neither goes through `provider`. `agent` drives any `llmkit.Client`, so a
 `Runner` runs against a provider client, a replay client, or your own
 implementation. The diagram omits test-only packages: `internal/livetest`
@@ -87,12 +88,21 @@ deltas from the response (`stream.go`).
 The order fixes who sees what. The tool-call serializer truncates a
 multi-call response to one before your loop sees it. The recorder books usage
 only for the final successful attempt. The retry wrapper sees raw adapter
-errors, so its classification and `Retry-After` handling stay accurate.
+errors, so its classification and `Retry-After` handling stay accurate —
+and it is the only layer that sees attempt boundaries, which is why
+`Options.Observer` wires its Attempt events there: one event per wire call,
+failures included, joined to the completion's span.
 
 - **What it buys:** each wrapper has one job and one viewpoint; usage is
-  never double-counted across attempts.
-- **What it costs:** the order is fixed. A caller cannot record every
-  attempt, and the serializer cannot inspect post-retry results.
+  never double-counted across attempts, and a sink can watch per-attempt
+  flakiness without double-counting spend.
+- **What it costs:** the order is fixed. `New` never emits `Completion`
+  events — the outermost layer owns those: the agent Runner for agent runs,
+  or wrap the returned client with `llmkit.Observe` for bare clients (never
+  both for the same client). And because Attempt events sit below the
+  serializer, a sink correlating them with the Completion must account for
+  the truncation itself: the Attempt carries the raw response, the
+  Completion the truncated one your loop sees.
 
 ## Honest capabilities
 
@@ -127,6 +137,99 @@ when you want one and a type when you need state.
   ignorant of any specific guardrail.
 - **What it costs:** cross-cutting rules span two seams. A rule about both
   requests and tools needs two policies or a `Tool` wrapper.
+
+## Observability and replay
+
+Every nondeterministic boundary — a completion, a provider retry attempt, a
+tool run, a compaction pass, a steering injection, run finalization, a
+decision, an embedding, a sandbox execution — emits one typed `llmkit.Event`
+to an `llmkit.Observer`, a single-method data sink. A `RunID` minted per run
+rides the context (`llmkit.WithRun`), so tool implementations, policies, and
+decorators stamp the same correlation key the runner does. The turn
+number rides the context the same way (`llmkit.WithStep`), so events
+decorators emit inside a Runner turn — retry attempts, decisions, sandbox
+executions — join the Runner's own events on `step`;
+`FinalizeEvent.FinalText` likewise records the run's stitched answer so a
+store persists it without re-deriving the stitch. Replay reads the
+same stream back: a Completion event carries the full request/response
+round-trip, which is why deterministic replay consumes Completion events
+only.
+
+The emission rule keeps the record honest: a Completion event is emitted
+exactly once per logical completion by the outermost harness layer — the
+agent Runner (with its Step) or, for bare clients, the `llmkit.Observe`
+decorator — never both. Attempt events come only from inside the provider
+retry stage, so a sink can see flakiness without double-counting spend.
+Policy denials are ToolRun events with `Denied` set, not a separate kind:
+what happened at the boundary is one fact with one shape.
+
+Attempts join their Completion on a span id, not a time window: the
+Completion emitter mints a fresh `SpanID` per logical completion and puts
+it in the context it passes to the client, so concurrent or nested
+completions (a tool calling the model) stay separable in the record.
+
+A run has exactly ONE durable sink. JSONL transcripts and a SQLite store
+never coexist as a split history of the same run (user ruling, 2026-09-20):
+the transcript is a view of the event stream, not a second record, and the
+Runner's in-memory `Outcome.Transcript` stays that same view, not a store.
+Sinks that fan out compose through `llmkit.Observers`, but at most one of
+them is durable.
+
+- **What it buys:** one correlation key and one wire shape across five
+  components; offline replay and evaluation from any sink; a panicking
+  observer is visible as a harness bug instead of silently dropping data.
+- **What it costs:** event fields are contract — a rename changes every
+  sink's format, so the per-kind wire shapes are pinned by golden-literal
+  tests. `llmkit.Recorder` stays the usage-ledger hook for now; folding it
+  into the Observer stream is deferred because the cutover touches
+  provider, decide, embed, and bugbot in one change.
+
+## The observation vocabulary lives in the root package
+
+`Observer`, `Event` with its ten payload types, and the run/span/step
+identity that rides the context are declared in `llmkit` itself, not in a
+`llmkit/observe` leaf package. Moving them was measured before the question
+was closed: ~610 occurrences of the event vocabulary's 28 counted symbols —
+observe.go's 27 exported declarations plus the `Event.Validate` method —
+in comment-stripped Go code across root, agent, provider (adapters
+included), embed, and sandbox; tests included, which is most of the
+weight, because the suites pin the vocabulary; ~140 excluding tests. The
+counted set is narrower than this section's own definition of the
+vocabulary: adding the run/span/step identity it names (`RunID`, `SpanID`,
+`WithRun`, `RunFromContext`, `WithSpan`, `SpanFromContext`, `WithStep`,
+`StepFromContext`, `NewEvent`, and `EventSchemaVersion` from run.go)
+spans 38 symbols and measures ~1120 with tests, ~250 without, under the
+same rule — the decision is insensitive to the counting rule. (`decide`
+contributes zero in every variant: it sits on the `Recorder` seam, and
+becomes an Observer consumer only if the deferred Recorder fold-in
+happens.)
+
+The decisive reason a leaf cannot work is the direction of the type
+dependency, not taste. The payloads embed root's own wire types —
+`CompletionEvent` carries a `Request` and a `Response`, `AttemptEvent`
+too, `ToolRunEvent` a `ToolCall`, `SteerEvent` a `Message`,
+`EmbedEvent` and `DecisionEvent` a `Usage` — so a `llmkit/observe` leaf
+would have to import root. Root's `Observe`, `WithRetryObserver`, and
+`Observers` construct and carry `Event`, so root would have to import the
+leaf. The leaf can only sit above root, and then most consumers (sandbox
+is the exception: its entire llmkit surface is the event vocabulary) import
+two packages for one vocabulary. `llmkit/retry` is the extracted-package
+counterexample that works, and shows the difference: `retry` is
+self-contained (root imports it; it imports no kit package), so extracting
+it costs nothing. The event vocabulary has no such cut to extract along —
+every payload is root's wire types re-exposed.
+
+- **What it buys:** most components that emit or persist events — agent,
+  provider, embed, and the future store (sandbox touches only the event
+  vocabulary itself) — speak one event shape from the package they already
+  import for `Request`/`Response`; no sink
+  translates between vocabularies and no store imports the agent loop to
+  read its telemetry.
+- **What it costs:** the root package now carries agent-shaped kinds —
+  start, compaction, steer, finalize — beside the wire vocabulary, so the
+  package that documents the client's provider-free surface also holds the
+  loop's concepts. A reader looking for only the client vocabulary finds
+  run bookkeeping next to it.
 
 ## The sandbox refuses; it never drops
 

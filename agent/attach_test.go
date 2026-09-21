@@ -154,12 +154,12 @@ func TestAttach_ContinueComposesAfterSeed(t *testing.T) {
 		llmkit.Text("second task"), attachPNG)
 }
 
-// TestAttach_TranscriptRoundTripsAndReplays pins that the autosaved JSONL carries the image block (MediaType and Data survive the base64 round-trip) and NewReplayClient replays the same Run+Attach to the same FinalText.
+// TestAttach_TranscriptRoundTripsAndReplays pins that the durable JSONL carries the image block (MediaType and Data survive the base64 round-trip) and NewReplayClient replays the same Run+Attach to the same FinalText.
 func TestAttach_TranscriptRoundTripsAndReplays(t *testing.T) {
 	const task = "describe the diagram"
 	dir := t.TempDir()
 	fc := newFakeClient(textResp("the answer", 5, 5))
-	r := NewRunner(fc, nil, "sys", WithTranscriptDir(dir))
+	r := NewRunner(fc, nil, "sys", WithObserver(JSONL(dir, nil)))
 
 	out, err := r.Run(context.Background(), task, Attach(attachPNG))
 	if err != nil {
@@ -183,23 +183,22 @@ func TestAttach_TranscriptRoundTripsAndReplays(t *testing.T) {
 		t.Fatalf("LoadJSONL: %v", err)
 	}
 
-	var reqEvent *Event
-	for i := range loaded.Events {
-		if loaded.Events[i].Kind == EventRequest {
-			reqEvent = &loaded.Events[i]
+	var reqMsg *llmkit.Message
+	for i := range loaded.Record {
+		ev := &loaded.Record[i]
+		if ev.Kind == llmkit.KindCompletion && ev.Completion != nil && len(ev.Completion.Request.Messages) > 0 {
+			m := ev.Completion.Request.Messages[0]
+			reqMsg = &m
 			break
 		}
 	}
-	if reqEvent == nil {
-		t.Fatal("transcript has no request event")
+	if reqMsg == nil {
+		t.Fatal("transcript has no completion event with messages")
 	}
-	if len(reqEvent.Messages) == 0 {
-		t.Fatal("request event carries no messages")
-	}
-	assertMessageBlocks(t, "round-tripped seed", reqEvent.Messages[0],
+	assertMessageBlocks(t, "round-tripped seed", *reqMsg,
 		llmkit.Text(task), attachPNG)
 
-	replay, err := NewReplayClient(loaded, llmkit.Capabilities{})
+	replay, err := NewReplayClient(loaded, loaded.RunID, llmkit.Capabilities{})
 	if err != nil {
 		t.Fatalf("NewReplayClient: %v", err)
 	}

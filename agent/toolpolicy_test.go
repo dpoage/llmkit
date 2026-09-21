@@ -216,13 +216,16 @@ func TestRun_ToolPolicy_DenySkipsToolAndFeedsModelError(t *testing.T) {
 		t.Errorf("model saw tool result %q isError=%t, want %q isError=true", got.text, got.isError, wantText)
 	}
 	sawEvent := false
-	for _, ev := range out.Transcript.Events {
-		if ev.Kind == EventToolResult && ev.ToolCallID == "c1" && ev.IsError && ev.Result == wantText {
+	for _, ev := range out.Transcript.Record {
+		// The event records the DENIAL (Denied + DenyReason, no result); the
+		// rendered denial text rides the conversation, asserted above.
+		if ev.Kind == llmkit.KindToolRun && ev.ToolRun != nil &&
+			ev.ToolRun.Call.ID == "c1" && ev.ToolRun.Denied && ev.ToolRun.DenyReason == "not on my watch" {
 			sawEvent = true
 		}
 	}
 	if !sawEvent {
-		t.Fatal("transcript lost the deny tool_result event")
+		t.Fatal("transcript lost the denial ToolRun event")
 	}
 }
 
@@ -621,7 +624,7 @@ func TestRun_ToolPolicy_CancelInsideAuthorizeDeniesRemainderInBothModes(t *testi
 				t.Errorf("c1 result = %+v, want %q isError=true", byID["c1"], want)
 			}
 			for id, name := range map[string]string{"c2": "t2", "c3": "t3"} {
-				if want := "ERROR: tool " + name + " denied: context canceled"; byID[id].text != want || !byID[id].isError {
+				if want := "ERROR: tool " + name + " not run: context canceled"; byID[id].text != want || !byID[id].isError {
 					t.Errorf("%s result = %+v, want %q isError=true", id, byID[id], want)
 				}
 			}

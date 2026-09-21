@@ -21,7 +21,9 @@ import (
 // error path.
 //
 // ctx is the run's context. If ctx is cancelled, the run aborts: calls not
-// yet authorized are denied with the context error and never dispatched.
+// yet authorized are never dispatched; each renders
+// "ERROR: tool <name> not run: <context error>" so the record never mistakes
+// a cancelled run for a policy denial.
 // [WithToolTimeout] applies to Tool.Run only, not to Authorize; a policy
 // that blocks must honor ctx itself.
 //
@@ -35,7 +37,8 @@ import (
 // receives the tool result "ERROR: tool <name> denied: <err>" with IsError
 // set, and the run continues. The error text is sent to the model
 // verbatim. ToolStart, ToolEnd, and ToolHealth do not fire for a denied
-// call; the transcript still records the tool result.
+// call; the run still records the denial as a ToolRun event (Denied with
+// the reason, no result).
 //
 // A Runner is safe for concurrent Run calls, so a policy shared across
 // runs is called concurrently and must synchronize its own state. The
@@ -88,11 +91,13 @@ func (r *Runner) authorizeCalls(ctx context.Context, calls []llmkit.ToolCall, re
 			continue
 		}
 		if ctx.Err() != nil {
-			// Deny with the context error so the slice stays full-length and
-			// no call past this point can be authorized or dispatched.
+			// Never authorized: render "not run", not "denied" — a cancelled
+			// run is not a policy decision. The slice stays full-length and
+			// the event carries IsError with the context error text, without
+			// the Denied mark (that mark is for Authorize refusals only).
 			denied[i] = true
 			results[i] = toolResult{
-				result: toolError(fmt.Errorf("tool %s denied: %w", calls[i].Name, ctx.Err())),
+				result: toolError(fmt.Errorf("tool %s not run: %w", calls[i].Name, ctx.Err())),
 				isErr:  true,
 			}
 			continue
@@ -100,8 +105,10 @@ func (r *Runner) authorizeCalls(ctx context.Context, calls []llmkit.ToolCall, re
 		if err := r.toolPolicy.Authorize(ctx, &dispatch[i]); err != nil {
 			denied[i] = true
 			results[i] = toolResult{
-				result: toolError(fmt.Errorf("tool %s denied: %w", calls[i].Name, err)),
-				isErr:  true,
+				result:     toolError(fmt.Errorf("tool %s denied: %w", calls[i].Name, err)),
+				isErr:      true,
+				denied:     true,
+				denyReason: err.Error(),
 			}
 			continue
 		}
