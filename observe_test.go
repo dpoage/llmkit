@@ -182,6 +182,7 @@ func goldEvents() []struct {
 					Finalized:        true,
 					Iterations:       8,
 					Usage:            Usage{InputTokens: 1000, OutputTokens: 200},
+					FinalText:        "Answer: 42.",
 				},
 			},
 		},
@@ -470,7 +471,8 @@ func TestEventGoldenJSON(t *testing.T) {
     "usage": {
       "input_tokens": 1000,
       "output_tokens": 200
-    }
+    },
+    "final_text": "Answer: 42."
   }
 }`,
 		"decision": `{

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/retry"
 )
 
 // --- scripted client + tools for the event-kind coverage run ---------------
@@ -2160,5 +2161,156 @@ func TestObserver_ReentrantOnErrDoesNotDeadlock(t *testing.T) {
 	defer mu.Unlock()
 	if reentries < 5 {
 		t.Errorf("only %d reports re-entered the sink (of %d); the test proved nothing", reentries, reports)
+	}
+}
+
+// --- 4qh.7: decorator-emitted events inside a Runner turn carry the Step --
+
+// TestObserver_DecoratorAttemptCarriesTurnStep pins the retry-stage half of
+// llmkit.WithStep: a Runner driving a retry-wrapped client hands the turn's
+// Step in the completion context, so the retry stage's Attempt events —
+// built by llmkit.NewEvent from that context — carry the enclosing turn and
+// join the Runner's own Completion events on Step as well as SpanID.
+func TestObserver_DecoratorAttemptCarriesTurnStep(t *testing.T) {
+	var mu sync.Mutex
+	var attempts []llmkit.Event
+	fc := newFakeClient(
+		scriptStep{err: &llmkit.APIError{Kind: llmkit.ErrRateLimited, StatusCode: 429, Provider: "fake", Message: "429"}},
+		textResp("done", 1, 1),
+	)
+	client := llmkit.WithRetryObserver(fc, retry.Config{
+		MaxAttempts: 2,
+		BaseDelay:   time.Millisecond,
+		MaxDelay:    time.Millisecond,
+	}, llmkit.ObserverFunc(func(_ context.Context, ev llmkit.Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		attempts = append(attempts, ev)
+	}), "fake", "m")
+	r := NewRunner(client, nil, "sys")
+	out, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(attempts) != 2 {
+		t.Fatalf("attempt events = %d, want 2 (one failure, one success)", len(attempts))
+	}
+	for i, ev := range attempts {
+		if ev.Kind != llmkit.KindAttempt {
+			t.Fatalf("event %d = %s, want attempt", i, ev.Kind)
+		}
+		if ev.Step != 1 {
+			t.Errorf("attempt %d Step = %d, want 1 (the enclosing turn)", i, ev.Step)
+		}
+		if ev.RunID != out.RunID {
+			t.Errorf("attempt %d RunID = %q, want %q", i, ev.RunID, out.RunID)
+		}
+	}
+}
+
+// observeTool mimics a decorator-wrapped boundary (sandbox.Observe,
+// embed.Observe): its Run builds its event with llmkit.NewEvent from the
+// context it was handed, exactly the way the decorators emit.
+type observeTool struct {
+	name   string
+	mu     sync.Mutex
+	events []llmkit.Event
+}
+
+func (t *observeTool) Def() llmkit.ToolDef {
+	return llmkit.ToolDef{Name: t.name, Description: "emits an event", Parameters: json.RawMessage(`{"type":"object"}`)}
+}
+
+func (t *observeTool) Run(ctx context.Context, _ json.RawMessage) (string, error) {
+	ev := llmkit.NewEvent(ctx, llmkit.KindExec)
+	ev.Exec = &llmkit.ExecEvent{Backend: "fake", Command: []string{"true"}}
+	t.mu.Lock()
+	t.events = append(t.events, ev)
+	t.mu.Unlock()
+	return "ok", nil
+}
+
+// TestObserver_DecoratorEventInsideToolCarriesTurnStep pins the tool-phase
+// half of llmkit.WithStep: a decorator-style event emitted from inside
+// Tool.Run carries the turn whose tool ran, read from the context the
+// Runner extends for the whole tool phase.
+func TestObserver_DecoratorEventInsideToolCarriesTurnStep(t *testing.T) {
+	tool := &observeTool{name: "observe_me"}
+	fc := newFakeClient(
+		toolResp("c1", "observe_me", `{}`, 1, 1),
+		textResp("done", 1, 1),
+	)
+	r := NewRunner(fc, []Tool{tool}, "sys")
+	out, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	tool.mu.Lock()
+	defer tool.mu.Unlock()
+	if len(tool.events) != 1 {
+		t.Fatalf("tool-emitted events = %d, want 1", len(tool.events))
+	}
+	ev := tool.events[0]
+	if ev.Step != 1 {
+		t.Errorf("tool-emitted event Step = %d, want 1 (the turn whose tool ran)", ev.Step)
+	}
+	if ev.RunID != out.RunID {
+		t.Errorf("tool-emitted event RunID = %q, want %q", ev.RunID, out.RunID)
+	}
+}
+
+// TestObserver_FinalizeCarriesFinalText pins the FinalizeEvent.FinalText
+// contract: the Finalize event carries the run's answer as the Outcome saw
+// it — the STITCHED text after a max-tokens continuation, which a sink
+// cannot re-derive from the stream because stitchContinuation is unexported.
+func TestObserver_FinalizeCarriesFinalText(t *testing.T) {
+	fc := newFakeClient(
+		maxTokensResp("half an", 10, 5),
+		textResp("answer", 10, 5),
+	)
+	r := NewRunner(fc, nil, "sys")
+	out, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out.FinalText != "half answer" {
+		t.Fatalf("Outcome.FinalText = %q, want the stitched %q", out.FinalText, "half answer")
+	}
+	final := out.Transcript.Record[len(out.Transcript.Record)-1]
+	if final.Kind != llmkit.KindFinalize {
+		t.Fatalf("last event = %s, want finalize", final.Kind)
+	}
+	if final.Finalize.FinalText != out.FinalText {
+		t.Errorf("Finalize.FinalText = %q, want the Outcome's %q", final.Finalize.FinalText, out.FinalText)
+	}
+}
+
+// TestObserver_RunJSONRepairFinalizeCarriesFinalText extends FinalText to
+// the repair path: when RunJSON's answer needed the repair round-trip, the
+// deferred Finalize reports the REPAIR completion's text — the run's last
+// word, which is what a store must persist.
+func TestObserver_RunJSONRepairFinalizeCarriesFinalText(t *testing.T) {
+	fc := newFakeClient(
+		textResp("here is the answer: not json at all", 5, 5),
+		textResp(`{"path":"c.go","note":"fixed"}`, 5, 5),
+	)
+	r := NewRunner(fc, nil, "sys")
+	var got item
+	out, err := r.RunJSON(context.Background(), "task", json.RawMessage(`{"type":"object"}`), &got)
+	if err != nil {
+		t.Fatalf("RunJSON: %v", err)
+	}
+	want := `{"path":"c.go","note":"fixed"}`
+	if out.FinalText != want {
+		t.Fatalf("Outcome.FinalText = %q, want the repair completion %q", out.FinalText, want)
+	}
+	final := out.Transcript.Record[len(out.Transcript.Record)-1]
+	if final.Kind != llmkit.KindFinalize {
+		t.Fatalf("last event = %s, want finalize", final.Kind)
+	}
+	if final.Finalize.FinalText != want {
+		t.Errorf("Finalize.FinalText = %q, want the repaired final text %q", final.Finalize.FinalText, want)
 	}
 }

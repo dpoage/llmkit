@@ -25,11 +25,13 @@ type RunID string
 // RunID, the zero value means "no span" and is never serialized.
 type SpanID string
 
-// runIDContextKey and spanIDContextKey are the unexported context keys.
-// Distinct unexported types keep other packages from colliding with them.
+// runIDContextKey, spanIDContextKey, and stepContextKey are the unexported
+// context keys. Distinct unexported types keep other packages from colliding
+// with them.
 type (
 	runIDContextKey  struct{}
 	spanIDContextKey struct{}
+	stepContextKey   struct{}
 )
 
 // WithRun returns a context carrying the run id id. Downstream emitters —
@@ -68,6 +70,28 @@ func SpanFromContext(ctx context.Context) SpanID {
 	return id
 }
 
+// WithStep returns a context carrying the 1-based model turn number step.
+// The agent Runner places it in the context it passes to the client, tools,
+// policies, and hooks for each turn, so events decorators emit inside a
+// Runner turn — the retry stage's Attempt events, a decision observed
+// inside a ToolPolicy, sandbox executions and embeddings from a tool —
+// carry the turn as Event.Step ([NewEvent]) and join the Runner's own
+// events. Passing step <= 0 returns ctx unchanged: an unset step never
+// erases an enclosing one, mirroring [WithRun]'s empty-id rule.
+func WithStep(ctx context.Context, step int) context.Context {
+	if step <= 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, stepContextKey{}, step)
+}
+
+// StepFromContext returns the turn number stored by [WithStep], or 0 when
+// the context carries none.
+func StepFromContext(ctx context.Context) int {
+	step, _ := ctx.Value(stepContextKey{}).(int)
+	return step
+}
+
 // newID mints "<unix-millis>-<hex>": the current time as 13 zero-padded
 // decimal digits plus 16 lowercase hex characters (8 bytes from
 // crypto/rand, which never returns an error and always fills b entirely).
@@ -99,14 +123,17 @@ const EventSchemaVersion = 1
 // filled in: Kind, Time (now, UTC, monotonic clock reading stripped, so a
 // decoded event is DeepEqual to the emitted one), RunID and SpanID (read
 // from ctx via [RunFromContext] and [SpanFromContext]; empty outside a
-// run), and SchemaVersion ([EventSchemaVersion]). The caller fills exactly
-// one payload pointer and passes the result to an [Observer]. Duration and
-// the per-kind payload fields are the emitter's to set after construction.
+// run), Step (from [StepFromContext]; 0 outside a Runner turn), and
+// SchemaVersion ([EventSchemaVersion]). The caller fills exactly one
+// payload pointer and passes the result to an [Observer]. Duration and the
+// per-kind payload fields are the emitter's to set after construction — an
+// emitter that assigns Event.Step explicitly overrides the context's value.
 func NewEvent(ctx context.Context, kind EventKind) Event {
 	return Event{
 		Kind:          kind,
 		RunID:         RunFromContext(ctx),
 		SpanID:        SpanFromContext(ctx),
+		Step:          StepFromContext(ctx),
 		Time:          time.Now().Round(0).UTC(),
 		SchemaVersion: EventSchemaVersion,
 	}
