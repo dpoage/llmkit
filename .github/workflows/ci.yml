@@ -1,7 +1,11 @@
 name: CI
 
 on:
+  # Branch pushes reach CI through their pull request. Running on every push
+  # as well would report each required check twice on a maintainer's own
+  # branch, and a duplicated context is an ambiguous merge gate.
   push:
+    branches: [master]
   pull_request:
 
 permissions:
