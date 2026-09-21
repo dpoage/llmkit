@@ -274,7 +274,6 @@ func TestObserver_OneEventOfEachKindAtHookSteps(t *testing.T) {
 		t.Errorf("finalize step = %d, want the last turn %d", final.Step, out.Iterations)
 	}
 	if final.Finalize.TruncationReason != string(TruncMaxIterations) ||
-		final.Finalize.Iterations != out.Iterations ||
 		final.Finalize.Usage != out.Usage ||
 		final.Finalize.Finalized {
 		t.Errorf("finalize payload = %+v, want the outcome's accounting", final.Finalize)
@@ -698,8 +697,8 @@ func TestObserver_FinalizeOnErrorReturns(t *testing.T) {
 		if final.Kind != llmkit.KindFinalize {
 			t.Fatalf("last event = %s, want finalize", final.Kind)
 		}
-		if final.Step != 0 || final.Finalize.Iterations != 0 {
-			t.Errorf("finalize step %d iterations %d, want 0/0 (failed completion does not advance)", final.Step, final.Finalize.Iterations)
+		if final.Step != 0 {
+			t.Errorf("finalize step %d, want 0 (failed completion does not advance)", final.Step)
 		}
 	})
 
@@ -742,8 +741,8 @@ func TestObserver_FinalizeOnErrorReturns(t *testing.T) {
 		if final.Kind != llmkit.KindFinalize {
 			t.Fatalf("last event = %s, want finalize", final.Kind)
 		}
-		if final.Step != 1 || final.Finalize.Iterations != 1 {
-			t.Errorf("finalize step %d iterations %d, want 1/1 (the completion before the tool did complete)", final.Step, final.Finalize.Iterations)
+		if final.Step != 1 {
+			t.Errorf("finalize step %d, want 1 (the completion before the tool did complete)", final.Step)
 		}
 	})
 

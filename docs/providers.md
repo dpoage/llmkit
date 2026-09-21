@@ -131,10 +131,11 @@ var events []llmkit.Event
 obs := llmkit.ObserverFunc(func(ctx context.Context, ev llmkit.Event) {
     events = append(events, ev)
 })
-client, err := provider.New(ctx, spec, provider.Options{Observer: obs})
-// Pass the same tags New derives, so one span never carries two provider
-// identities: Options.Provider when set, string(spec.Type) otherwise.
-observed := llmkit.Observe(client, obs, string(spec.Type), spec.Model)
+opts := provider.Options{Observer: obs}
+client, err := provider.New(ctx, spec, opts)
+// provider.Tag(spec, opts) is the tag New itself derives, so one span never
+// carries two provider identities.
+observed := llmkit.Observe(client, obs, provider.Tag(spec, opts), spec.Model)
 ```
 
 `llmkit.Observe` mints a fresh span per logical completion and stamps it into the context it hands the client, so every `Attempt` event joins its `Completion` event on `ev.SpanID`; a nested completion (a tool calling the model) gets its own span. Because the observer sits below the serializer, an `Attempt` event shows the raw adapter response while the `Completion` event shows the truncated response your loop sees.

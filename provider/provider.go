@@ -316,10 +316,7 @@ func New(ctx context.Context, spec Spec, opts Options) (llmkit.Client, error) {
 	if retryCfg.MaxAttempts == 0 {
 		retryCfg = retry.Default()
 	}
-	providerTag := opts.Provider
-	if providerTag == "" {
-		providerTag = string(spec.Type)
-	}
+	providerTag := Tag(spec, opts)
 	// The attempt observer lives in the retry stage: it is the only layer
 	// that sees attempt boundaries. With the observer nil this is exactly
 	// the old WithRetry wiring.
@@ -330,4 +327,16 @@ func New(ctx context.Context, spec Spec, opts Options) (llmkit.Client, error) {
 	// providers short-circuit inside the wrapper, so this is a free check
 	// for anthropic/google/openai and the safety net for openai-compatible.
 	return llmkit.WithSerializedToolCalls(client), nil
+}
+
+// Tag resolves the provider tag that [New] puts on usage and Attempt
+// events: [Options.Provider] when set, else string(spec.Type). Callers
+// wrapping a New-built client with [llmkit.Observe] must pass this same
+// value as the provider argument, so one span never carries two provider
+// identities.
+func Tag(spec Spec, opts Options) string {
+	if opts.Provider != "" {
+		return opts.Provider
+	}
+	return string(spec.Type)
 }
