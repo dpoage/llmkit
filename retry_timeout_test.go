@@ -9,8 +9,6 @@ import (
 	"github.com/dpoage/llmkit/retry"
 )
 
-// simpleRequest is the minimal completion request used across the root
-// package tests.
 func simpleRequest() Request {
 	return Request{
 		System:    "you are a test",
@@ -20,11 +18,9 @@ func simpleRequest() Request {
 }
 
 // blockingClient blocks each Complete call until its context is done, then
-// returns ctx.Err(). The blockAttempts field configures a fixed run of
-// leading blocking attempts before later calls succeed.
+// returns ctx.Err().
 type blockingClient struct {
-	// blockAttempts is the number of leading attempts that block until their
-	// (per-attempt) context expires. Attempts beyond this succeed.
+	// blockAttempts is the number of leading attempts to block.
 	blockAttempts int
 	calls         int
 }
@@ -323,7 +319,6 @@ func (p *panicClient) Stream(ctx context.Context, req Request, fn func(Delta) er
 	panic("inner stream panic")
 }
 
-// recovered runs fn, swallows a panic, and reports whether one happened.
 func recovered(fn func()) (panicked bool) {
 	defer func() {
 		if r := recover(); r != nil {

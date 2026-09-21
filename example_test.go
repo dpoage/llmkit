@@ -13,8 +13,8 @@ import (
 
 // echoClient is a programmable Client that returns scripted responses and
 // errors in order. It implements only llmkit.Client — no Stream method — so
-// llmkit.Stream exercises its delta-synthesis path. A real client comes from
-// the provider package; this one exists to make the examples hermetic.
+// llmkit.Stream exercises its delta-synthesis path; this exists to make the
+// examples hermetic.
 type echoClient struct {
 	responses []llmkit.Response
 	errs      []error

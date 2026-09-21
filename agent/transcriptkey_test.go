@@ -9,12 +9,8 @@ import (
 	"github.com/dpoage/llmkit"
 )
 
-// TestWithRunID_PinnedFilename verifies WithRunID pins the run's identity AND
-// the durable sink's filename: the JSONL file is named exactly
-// "<RunID>.jsonl" (identity is the RunID alone — the task rides the Start
-// event), so a caller that generates stable identifiers up front (the
-// motivation WithTranscriptKey served before the cutover) recovers the exact
-// transcript file later by exact name. Events carry the pinned id too.
+// TestWithRunID_PinnedFilename pins that WithRunID names the JSONL file
+// "<RunID>.jsonl" and tags every event with the pinned id.
 func TestWithRunID_PinnedFilename(t *testing.T) {
 	dir := t.TempDir()
 	fc := newFakeClient(textResp("done", 1, 1))
@@ -55,10 +51,9 @@ func TestWithRunID_PinnedFilename(t *testing.T) {
 	}
 }
 
-// TestJSONL_RefusesPostFinalizeEvents pins the one-file-one-run rule: once a
-// run's Finalize closed its file and dropped its admission entry, a late
-// event for the same RunID finds no live run — it is reported through onErr
-// and never appended, never swallowed.
+// TestJSONL_RefusesPostFinalizeEvents pins that after a run's Finalize
+// closes its file and drops its admission entry, a late event for the
+// same RunID is reported through onErr and never appended.
 func TestJSONL_RefusesPostFinalizeEvents(t *testing.T) {
 	dir := t.TempDir()
 	var mu sync.Mutex

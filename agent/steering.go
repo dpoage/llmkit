@@ -61,9 +61,8 @@ type queuedTurn struct {
 // ([StopReasonError]) returns before the would-be-finish drain: queued
 // turns stay pending and the refusal is never papered over. A steer already
 // queued delivers at the pre-completion boundary, before the refusing
-// completion. At an empty turn the queued
-// content replaces the synthetic nudge and does not consume a nudge
-// attempt (see [maxEmptyTurnNudges]).
+// completion. At an empty turn the queued content replaces the synthetic
+// nudge and does not consume a nudge attempt (see [maxEmptyTurnNudges]).
 //
 // A Steering serves one run at a time. Passing it to a second concurrent
 // run fails that run with [ErrSteeringInUse]; sequential runs —

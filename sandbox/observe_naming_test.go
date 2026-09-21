@@ -2,11 +2,11 @@ package sandbox
 
 import "testing"
 
-// TestBackendNamePinned pins the llmkit.ExecEvent.Backend names for the
-// package's own backends. cli, bwrap, and host must keep matching
-// UnsupportedSpecError.Backend; mock is this package's own name for the
-// backend that refuses nothing. Typed nils resolve the type switch
-// without touching a receiver.
+// TestBackendNamePinned pins the backend names this package uses for
+// ExecEvent.Backend. cli, bwrap, and host must keep matching
+// UnsupportedSpecError.Backend; mock is this package's name for the
+// refusing-nothing backend. Typed nils resolve the type switch without
+// touching a receiver.
 func TestBackendNamePinned(t *testing.T) {
 	cases := []struct {
 		s    Sandbox

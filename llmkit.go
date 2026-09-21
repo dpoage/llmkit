@@ -114,15 +114,16 @@
 // typed [Event] per boundary, correlated by a [RunID] the caller mints with
 // [NewRunID] and places in the context with [WithRun]. Observers are data
 // sinks: they never affect the caller's result, and a panicking observer is
-// a harness bug that propagates. Emission rule: a Completion event is
-// emitted exactly once per logical completion by the outermost harness
-// layer — the agent Runner (with Step) for agent runs, or the
-// llmkit.Observe decorator for bare clients — never by both. The emitter
-// mints a fresh [SpanID] per logical completion ([WithSpan]) so the retry
-// stage's Attempt events join it. Attempt events
-// come only from the provider retry stage, and deterministic replay
-// consumes Completion events only. [Recorder] remains the usage-ledger
-// hook; folding it into the Observer stream is deferred.
+// a harness bug that propagates. [Recorder] is the separate usage-ledger
+// hook.
+//
+// Emission rule: the outermost harness layer emits a Completion event
+// exactly once per logical completion — the agent Runner (with Step) for
+// agent runs, or the [Observe] decorator for bare clients, never both.
+// That emitter mints a fresh [SpanID] per logical completion ([WithSpan]),
+// so the retry stage's Attempt events join it. Attempt events come only
+// from the provider retry stage, and deterministic replay consumes
+// Completion events only.
 //
 // # Streaming
 //

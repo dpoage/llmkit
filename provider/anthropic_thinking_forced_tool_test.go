@@ -1,20 +1,15 @@
 package provider_test
 
-// The Anthropic vendor constraint under test: "tool use with manual extended
-// thinking ... only supports tool_choice auto or none" and any forced
-// tool_choice "results in an error"
+// Anthropic's documented constraint: "tool use with manual extended thinking
+// ... only supports tool_choice auto or none", and any forced tool_choice
+// "results in an error"
 // (https://platform.claude.com/docs/en/build-with-claude/thinking, section
-// "Thinking with tool use"; the page the brief cites as
-// docs.claude.com/en/docs/build-with-claude/extended-thinking). llmkit only
-// ever emits thinking type "enabled" (manual mode), so any forced
-// tool_choice — the synthetic structured-output tool (ResponseSchema) or a
-// caller-supplied ToolChoice of required or a named tool — makes the request
-// a guaranteed remote 400; llmkit refuses it pre-wire with ErrInvalidRequest
-// instead. These tests drive the production construction chain
-// (provider.New) over an httptest stub that counts wire hits, for both
-// Complete and the native Stream path, and pin the legal neighbors
-// (single-feature requests still forward; caps.Thinking=false drops the
-// config and keeps the combination legal).
+// "Thinking with tool use"). llmkit only ever emits thinking type "enabled"
+// (manual mode), so any forced tool_choice — the synthetic structured-output
+// tool (ResponseSchema) or a caller-supplied ToolChoice of required or a
+// named tool — is refused pre-wire with ErrInvalidRequest instead. The tests
+// drive provider.New over an httptest stub that counts wire hits, for both
+// Complete and the native Stream path, and pin the legal neighbors.
 
 import (
 	"context"
@@ -32,15 +27,14 @@ import (
 	"github.com/dpoage/llmkit/provider"
 )
 
-// thinkingSchema is a small, valid JSON Schema for the structured-output
-// cases.
+// thinkingSchema is the JSON Schema used by the structured-output cases.
 var thinkingSchema = json.RawMessage(`{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}`)
 
 // anthropicTextBody is a successful text-only non-streaming response.
 const anthropicTextBody = `{"id":"msg_1","type":"message","role":"assistant","model":"claude-test","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}`
 
-// anthropicStreamEvents is a successful text-only SSE stream: the minimal
-// event sequence the Anthropic SDK accumulates into a message.
+// anthropicStreamEvents is the minimal text-only SSE sequence the Anthropic
+// SDK accumulates into a message.
 var anthropicStreamEvents = []struct{ name, data string }{
 	{"message_start", `{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-test","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}`},
 	{"content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`},
@@ -50,8 +44,7 @@ var anthropicStreamEvents = []struct{ name, data string }{
 	{"message_stop", `{"type":"message_stop"}`},
 }
 
-// wireStub counts every request the client makes and records each decoded
-// request body.
+// wireStub counts requests and records each decoded request body.
 type wireStub struct {
 	mu     sync.Mutex
 	hits   int
@@ -73,9 +66,10 @@ func (s *wireStub) lastBody() map[string]any {
 	return s.bodies[len(s.bodies)-1]
 }
 
-// newAnthropicStub starts an httptest server that counts requests and replies
-// with a successful Anthropic response — SSE when sse is true (the Stream
-// path), JSON otherwise (Complete).
+// newAnthropicStub starts an httptest server that counts requests and
+// replies with a successful Anthropic response — SSE when sse is true
+// (Stream), JSON otherwise (Complete).
+
 func newAnthropicStub(t *testing.T, sse bool) (*wireStub, string) {
 	t.Helper()
 	st := &wireStub{}
@@ -125,7 +119,7 @@ func newAnthropicClient(t *testing.T, base string) llmkit.Client {
 // TestAnthropicThinkingStructuredOutputRejectedPreWire pins the pre-wire
 // refusal of Thinking + ResponseSchema on the Anthropic adapter — through
 // provider.New, over both Complete and the native Stream path — and the two
-// legal single-feature requests. The refusal case must make ZERO wire hits;
+// legal single-feature requests. The refusal case must make zero wire hits;
 // each legal case forwards exactly once with the expected wire shape.
 func TestAnthropicThinkingStructuredOutputRejectedPreWire(t *testing.T) {
 	thinkingOnly := func() llmkit.Request {
@@ -285,8 +279,7 @@ func TestAnthropicThinkingStructuredOutputRejectedPreWire(t *testing.T) {
 	})
 }
 
-// newAnthropicClientWithCaps is newAnthropicClient with a Spec.Capabilities
-// override, for profiles the model table would not produce.
+// newAnthropicClientWithCaps is newAnthropicClient with a Spec.Capabilities override.
 func newAnthropicClientWithCaps(t *testing.T, base string, caps func(llmkit.Capabilities) llmkit.Capabilities) llmkit.Client {
 	t.Helper()
 	cl, err := provider.New(context.Background(), provider.Spec{
@@ -303,18 +296,17 @@ func newAnthropicClientWithCaps(t *testing.T, base string, caps func(llmkit.Capa
 }
 
 // TestAnthropicThinkingForcedToolChoiceRejectedPreWire pins the general
-// refusal: ANY forced tool_choice combined with Thinking is refused pre-wire
+// refusal: any forced tool_choice combined with Thinking is refused pre-wire
 // — whether the force comes from a caller-supplied ToolChoice (required or a
 // named tool) or from the synthetic structured-output tool — while auto,
 // none, and single-feature requests still forward. The caps-off case pins
 // that a profile with Thinking=false drops the config, keeping the
 // combination legal.
 func TestAnthropicThinkingForcedToolChoiceRejectedPreWire(t *testing.T) {
-	// lookupTool backs the two refusal scenarios below: on the real API a
-	// forced tool_choice also requires a tools entry, so keeping those
-	// requests otherwise valid isolates the thinking interaction this guard
-	// owns. The forwarding scenarios deliberately omit tools — the stub
-	// does not validate tool presence, and llmkit does not gate on it.
+	// lookupTool makes the two forced tool_choice refusal scenarios otherwise
+	// valid (the real API requires a tools entry for forced tool_choice),
+	// isolating the thinking interaction this guard owns. Forwarding
+	// scenarios deliberately omit tools; llmkit does not gate on tool presence.
 	lookupTool := llmkit.ToolDef{
 		Name:        "lookup",
 		Description: "test tool",

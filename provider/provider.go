@@ -24,11 +24,12 @@
 // # Credentials
 //
 // [Spec.Auth] selects the credential mode: [AuthAPIKey] (the zero value)
-// sends Secret as the provider's standard API-key credential; [AuthOAuthToken]
-// sends it as an OAuth bearer token and is Anthropic-only. [Spec.Secret] must be a non-empty value
-// without surrounding whitespace. New never reads the environment for
-// credentials and never logs the Secret. A credential-less endpoint (a local
-// Ollama or vLLM server) takes any non-empty placeholder.
+// sends Secret as the provider's standard API-key credential;
+// [AuthOAuthToken] sends it as an OAuth bearer token and is Anthropic-only.
+// [Spec.Secret] must be a non-empty value without surrounding whitespace.
+// New never reads the environment for credentials and never logs the Secret.
+// A credential-less endpoint (a local Ollama or vLLM server) takes any
+// non-empty placeholder.
 //
 // # Capability profiles
 //
@@ -42,12 +43,10 @@
 // # Construction
 //
 // [New] validates the spec and returns an error wrapping
-// llmkit.ErrInvalidRequest on: an unknown Auth value, AuthOAuthToken on a
-// non-Anthropic Type, an empty Model, a Secret that is empty, whitespace
-// only, or whitespace-padded, an empty BaseURL on TypeOpenAICompatible, and
-// an unknown Type. New performs no network I/O and no environment lookups of
-// its own (see [Spec.BaseURL] for the SDK-level env fallbacks), so
-// construction is hermetic.
+// llmkit.ErrInvalidRequest for a malformed Auth, Model, Secret, BaseURL, or
+// Type; [New] lists the exact rejections. New performs no network I/O and no
+// environment lookups of its own (see [Spec.BaseURL] for the SDK-level env
+// fallbacks), so construction is hermetic.
 //
 // The returned client is decorated, outer to inner:
 //
@@ -226,12 +225,17 @@ type Options struct {
 // spec.Secret is the resolved credential (callers obtain it via their own
 // config); New performs no network I/O and no environment lookups of its
 // own, so construction is hermetic and testable without real keys.
-// spec.Auth routes the secret
-// to the right credential field; unknown Auth values, AuthOAuthToken on
-// a non-Anthropic Type, an empty spec.Model, a spec.Secret that is
-// empty, whitespace-only, or differs from its own strings.TrimSpace, an
-// empty spec.BaseURL on TypeOpenAICompatible, and an unknown spec.Type
-// are errors wrapping ErrInvalidRequest.
+// spec.Auth routes the secret to the right credential field.
+//
+// New returns an error wrapping ErrInvalidRequest for any of:
+//
+//   - an unknown spec.Auth value;
+//   - AuthOAuthToken on a non-Anthropic spec.Type;
+//   - an empty spec.Model;
+//   - a spec.Secret that is empty, whitespace-only, or differs from its own
+//     strings.TrimSpace;
+//   - an empty spec.BaseURL on TypeOpenAICompatible;
+//   - an unknown spec.Type.
 func New(ctx context.Context, spec Spec, opts Options) (llmkit.Client, error) {
 	switch spec.Auth {
 	case AuthAPIKey, AuthOAuthToken:
@@ -318,8 +322,8 @@ func New(ctx context.Context, spec Spec, opts Options) (llmkit.Client, error) {
 	}
 	providerTag := Tag(spec, opts)
 	// The attempt observer lives in the retry stage: it is the only layer
-	// that sees attempt boundaries. With the observer nil this is exactly
-	// the old WithRetry wiring.
+	// that sees attempt boundaries. A nil observer makes this exactly
+	// WithRetry.
 	client := llmkit.WithRetryObserver(adapter, retryCfg, opts.Observer, providerTag, spec.Model)
 	client = llmkit.WithRecorder(client, opts.Recorder, providerTag, spec.Model)
 	// Outermost: force at-most-one tool call per response when the backend

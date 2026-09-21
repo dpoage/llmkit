@@ -8,15 +8,14 @@ import (
 )
 
 // Question is the sealed set of System One questions: [Noul], [Choice], and
-// [Score]. The unexported method keeps the set closed — code outside this
-// package cannot add a question kind — and the wire "type" discriminator is
-// derived from the Go type, so callers never write it.
+// [Score]. The unexported method keeps the set closed to code outside this
+// package; the wire "type" discriminator is derived from the Go type.
 type Question interface{ question() }
 
 // Noul asks a binary belief question: how strongly the state supports the
-// True description over the False one. Instructions is required and must be
-// a string, object, or array. True and False are optional criteria; a nil
-// side omits its key, and both nil omit the whole criteria object.
+// True description over the False one. Instructions is required (string,
+// object, or array). True and False are optional; a nil side omits its key
+// and both nil omit the whole criteria object.
 type Noul struct {
 	Instructions any
 	True, False  any
@@ -43,7 +42,7 @@ func (Choice) question() {}
 func (Score) question()  {}
 
 // wireQuestion is the JSON body of one question. Instructions and Criteria
-// carry pre-validated raw JSON so the marshalled bytes are exactly what the
+// hold pre-validated raw JSON so the marshalled bytes are exactly what the
 // kind checks approved.
 type wireQuestion struct {
 	Type         string `json:"type"`
@@ -51,16 +50,16 @@ type wireQuestion struct {
 	Criteria     any    `json:"criteria,omitempty"`
 }
 
-// noulCriteria is the optional noul criteria object; nil sides are omitted.
+// noulCriteria omits any side that is nil.
 type noulCriteria struct {
 	True  json.RawMessage `json:"true,omitempty"`
 	False json.RawMessage `json:"false,omitempty"`
 }
 
 // buildRequest validates the state and every question pre-wire and returns
-// the complete request body. No network I/O happens on this path: every
-// failure is an *llmkit.APIError wrapping llmkit.ErrInvalidRequest with a
-// message naming the field path.
+// the complete request body. Every failure is an *llmkit.APIError wrapping
+// llmkit.ErrInvalidRequest with a message naming the field path; no network
+// I/O happens on this path.
 func buildRequest(state any, model string, questions Questions) ([]byte, error) {
 	stateRaw, err := marshalStructured(state, "state")
 	if err != nil {
@@ -166,9 +165,8 @@ func buildScore(path string, q Score) (json.RawMessage, error) {
 
 // marshalStructured validates that v marshals to one of the vendor's
 // structured text kinds — string, object, or array — and returns the
-// marshalled bytes. Numbers, booleans, and null are rejected: state and
-// instructions carry prose, and a mis-typed value must fail in the caller's
-// process, not as a vendor 422.
+// marshalled bytes. Numbers, booleans, and null are rejected so a mis-typed
+// value fails in the caller's process, not as a vendor 422.
 func marshalStructured(v any, path string) (json.RawMessage, error) {
 	raw, err := json.Marshal(v)
 	if err != nil {
@@ -188,8 +186,7 @@ func marshalStructured(v any, path string) (json.RawMessage, error) {
 
 // marshalDescription validates that v marshals to one of the vendor's
 // description kinds — string, object, array, or null — and returns the
-// marshalled bytes. Only numbers and booleans are rejected; null is a legal
-// description.
+// marshalled bytes. Only numbers and booleans are rejected; null is legal.
 func marshalDescription(v any, path string) (json.RawMessage, error) {
 	raw, err := json.Marshal(v)
 	if err != nil {
@@ -205,9 +202,9 @@ func marshalDescription(v any, path string) (json.RawMessage, error) {
 	}
 }
 
-// kindByte returns the first non-whitespace byte of a JSON document — its
-// kind: '"' string, '{' object, '[' array, 'n' null, 't'/'f' boolean,
-// digit/'-' number.
+// kindByte returns the first non-whitespace byte of a JSON document: its
+// kind ('"' string, '{' object, '[' array, 'n' null, 't'/'f' boolean,
+// digit/'-' number).
 func kindByte(raw json.RawMessage) byte {
 	for _, b := range raw {
 		switch b {
@@ -221,8 +218,8 @@ func kindByte(raw json.RawMessage) byte {
 }
 
 // invalidRequest builds the pre-wire validation error: an *llmkit.APIError
-// wrapping llmkit.ErrInvalidRequest, StatusCode 0 (nothing reached the
-// network), naming the offending field path.
+// wrapping llmkit.ErrInvalidRequest with StatusCode 0 (nothing reached the
+// network) and a message naming the offending field path.
 func invalidRequest(path, problem string) error {
 	return &llmkit.APIError{
 		Kind:     llmkit.ErrInvalidRequest,

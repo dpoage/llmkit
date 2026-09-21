@@ -15,15 +15,15 @@ import (
 //
 //   - BeforeCompletion / AfterCompletion around EVERY client.Complete — the
 //     main loop turn, a max-tokens continuation turn, a forced-finalization
-//     turn, and a RunJSON repair turn. step is the 1-based turn number —
+//     turn, and a RunJSON repair turn. step is the 1-based turn number and
 //     the SAME base every hook family uses: ToolEvent.Step,
 //     CompactionEvent.Step, and the step the Runner stamps on the run's
 //     llmkit.Event values all carry this number for the same turn, so
-//     consumers can join on Step. req is the FINAL wire request — the exact request
-//     client.Complete receives and the completion event's request records —
-//     already passed through [RequestPolicy.PrepareRequest] when one is
-//     registered. Observe it only: mutating req here is undefined, and
-//     request shaping (messages, sampling, tool choice) belongs to
+//     consumers can join on Step. req is the FINAL wire request — the exact
+//     request client.Complete receives and the completion event's request
+//     records — already passed through [RequestPolicy.PrepareRequest] when
+//     one is registered. Observe it only: mutating req here is undefined,
+//     and request shaping (messages, sampling, tool choice) belongs to
 //     [RequestPolicy]. AfterCompletion receives resp == nil together with
 //     a non-nil err when the completion failed.
 //   - Delta, when set, fires once per incremental fragment of every
@@ -43,14 +43,6 @@ import (
 //     BOTH dispatch modes and ToolEnd fires with the rendered panic result
 //     ("ERROR: tool <name> panicked: …", IsError=true). Step matches the
 //     tool_run event.
-//
-// Hook functions are part of the harness, not the model conversation: a
-// panic raised INSIDE any Hooks callback is a harness bug. It is never
-// rendered to the model as a tool result. Sequential dispatch propagates it
-// inline; under WithParallelTools the per-call goroutine recovers it and the
-// loop re-panics with the original value after all sibling calls finish —
-// the run aborts with that panic in both modes.
-//
 //   - ToolHealth when a tool returns a *ToolHealthError (a genuine
 //     harness/infra failure) — but not for ordinary model-recoverable tool
 //     errors, and never for a failure caused by an already-cancelled context.
@@ -66,6 +58,12 @@ import (
 // reaches the fire point (the loop goroutine, or the per-call goroutine for
 // ToolStart/ToolEnd under WithParallelTools). A slow hook stalls the run —
 // and, under WithParallelTools, the tool call it wraps.
+//
+// Hook panics are harness bugs, never tool data: a panic inside any callback
+// is never rendered as a tool result. Sequential dispatch propagates it
+// inline; under WithParallelTools the per-call goroutine recovers it and
+// the loop re-panics with the original value after all sibling calls
+// finish — the run aborts with that panic in both modes.
 //
 // Concurrency: with WithParallelTools set, ToolStart/ToolEnd fire
 // concurrently from the per-call goroutines; with concurrent Run calls on one

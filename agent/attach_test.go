@@ -19,7 +19,7 @@ var (
 	attachSpec = llmkit.DocumentURL("https://example.com/spec.pdf", "spec")
 )
 
-// assertMessageBlocks pins msg.Content to want block-for-block so order and payload bytes — including images and documents — are asserted.
+// assertMessageBlocks pins msg.Content to want block-for-block so order and payload bytes are asserted, including images and documents.
 func assertMessageBlocks(t *testing.T, label string, msg llmkit.Message, want ...llmkit.Block) {
 	t.Helper()
 	if !reflect.DeepEqual(msg.Content, want) {

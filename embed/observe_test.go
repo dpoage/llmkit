@@ -12,8 +12,8 @@ import (
 	"github.com/dpoage/llmkit/embed"
 )
 
-// scriptedEmbedder is a fake embed.Embedder for observer tests: it returns
-// the scripted vector or error verbatim.
+// scriptedEmbedder is a fake [embed.Embedder] for observer tests; returns the
+// scripted vector verbatim (or the scripted error).
 type scriptedEmbedder struct {
 	vec  []float32
 	err  error
@@ -44,8 +44,8 @@ func (f *scriptedEmbedder) Dimensions() int {
 
 func (f *scriptedEmbedder) ModelName() string { return "fake-model" }
 
-// eventLog is an llmkit.Observer collecting events for assertions. It is
-// safe for concurrent use.
+// eventLog is a concurrent-safe [llmkit.Observer] collecting events for assertions.
+
 type eventLog struct {
 	mu  sync.Mutex
 	evs []llmkit.Event
@@ -259,8 +259,9 @@ func TestObserveConcurrentEmbeds(t *testing.T) {
 }
 
 // ExampleObserve wraps a fake backend with an observer and reads the one
-// Embed event back. Real use points Observe at a backend from NewEmbedder
-// or NewCachedEmbedder; the fake keeps the example hermetic.
+// Embed event back. The fake keeps the example hermetic; real use points
+// Observe at [embed.NewEmbedder] or [embed.NewCachedEmbedder].
+
 func ExampleObserve() {
 	log := &eventLog{}
 	emb := embed.Observe(&scriptedEmbedder{vec: []float32{0.1, 0.2, 0.3}}, log)

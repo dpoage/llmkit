@@ -25,8 +25,8 @@ import (
 // concatenation of the streamed fragments exactly.
 
 type sseEvent struct {
-	name string // the SSE event: name
-	data string // the JSON payload
+	name string
+	data string
 }
 
 func sseHandler(events []sseEvent) http.HandlerFunc {
@@ -106,8 +106,8 @@ func streamToolEvents() []sseEvent {
 
 // toolBody is the non-streaming equivalent of streamToolEvents; each input
 // is byte-identical to the concatenation of that call's partial_json
-// fragments (the adapter re-marshals accumulated blocks, so the raw
-// arguments must round-trip through the SDK unchanged).
+// fragments — the adapter re-marshals accumulated blocks, so the raw
+// arguments must round-trip through the SDK unchanged.
 const toolBody = `{"id":"msg_2","type":"message","role":"assistant","model":"claude-test",` +
 	`"content":[{"type":"text","text":"Checking "},` +
 	`{"type":"tool_use","id":"toolu_a","name":"get_weather","input": {"city":"Paris"}},` +
@@ -280,8 +280,7 @@ func TestAnthropicStreamMatchesComplete(t *testing.T) {
 			assertThinkingRawDecodedEqual(t, completeResp, streamResp)
 
 			// The synthetic tool's fragments must surface as text, never
-			// as tool-call fragments, and join to the Response.Text
-			// finalize produces.
+			// as tool-call fragments, and join to the Response.Text finalize produces.
 			if tt.name == "structured_output" {
 				want := []llmkit.Delta{
 					{Kind: llmkit.DeltaText, Text: `{"answer":`},
@@ -604,22 +603,21 @@ func TestAnthropicStreamServerToolDropped(t *testing.T) {
 }
 
 // TestAnthropicThinkingRawPadding pins the thinking replay guard's Raw
-// handling. Raw that carries nothing the API accepts on replay — nil, plain
-// "null" or whitespace-only (padded with the bytes JSON permits as space),
-// or a JSON object that DECODES to an empty payload ({}, {"type":"thinking"})
-// — must fail with a local ErrInvalidRequest BEFORE anything reaches the
-// wire: a padded form would otherwise bypass the guard, no-op through
-// json.Unmarshal, and emit {"signature":"","thinking":"","type":"thinking"}
-// which the API rejects remotely. A payload that decodes to thinking text
-// without a signature ({"type":"thinking","thinking":"why"}, with or without
-// an explicit empty signature) is rejected too: the API verifies the
-// signature when thinking blocks are passed back
-// (https://platform.claude.com/docs/en/build-with-claude/thinking,
-// "Thinking encryption"), so an unsigned block fails remotely. Padding JSON
-// does not permit (U+00A0) stays malformed, and valid thinking/redacted
-// payloads — padded or not — still replay verbatim, including a
-// signature-only block (the display "omitted" wire shape: empty thinking,
-// live signature).
+// handling. Raw that carries nothing the API accepts on replay — nil,
+// plain "null" or whitespace-only (padded with the bytes JSON permits
+// as space), or a JSON object that DECODES to an empty payload ({},
+// {"type":"thinking"}) — must fail with a local ErrInvalidRequest BEFORE
+// anything reaches the wire: a padded form would otherwise bypass the
+// guard, no-op through json.Unmarshal, and emit
+// {"signature":"","thinking":"","type":"thinking"} which the API rejects
+// remotely. A payload that decodes to thinking text without a signature
+// ({"type":"thinking","thinking":"why"}, with or without an explicit
+// empty signature) is rejected too: the API verifies the signature on
+// replay (https://platform.claude.com/docs/en/build-with-claude/thinking,
+// "Thinking encryption"). Padding JSON does not permit (U+00A0) stays
+// malformed, and valid thinking/redacted payloads — padded or not —
+// still replay verbatim, including a signature-only block (the display
+// "omitted" wire shape: empty thinking, live signature).
 func TestAnthropicThinkingRawPadding(t *testing.T) {
 	valid := `{"type":"thinking","thinking":"why","signature":"sig-1"}`
 	// wsOnly is a payload of exactly the bytes JSON permits as space:

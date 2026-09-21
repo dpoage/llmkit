@@ -6,8 +6,8 @@ set of typed questions and returns calibrated beliefs and probability
 distributions.
 
 Jev is not a chat model. It has no messages, no tools, no streaming, and
-no text output. The package does not implement `llmkit.Client` and does
-not go through `provider.New`; see
+no text output. The package does not implement `llmkit.Client`; it does
+not go through `provider.New`. See
 [decision models are not Clients](design.md#decision-models-are-not-clients)
 for that decision. The API reference is canonical:
 [pkg.go.dev/github.com/dpoage/llmkit/decide](https://pkg.go.dev/github.com/dpoage/llmkit/decide).
@@ -38,9 +38,9 @@ func main() {
 ```
 
 `New` validates the config and performs no network I/O and no environment
-lookups, so construction is hermetic and testable with a placeholder key.
-An invalid field returns an error wrapping `llmkit.ErrInvalidRequest`;
-the error never echoes the key.
+lookups. Construction is therefore hermetic and testable with a
+placeholder key. An invalid field returns an error wrapping
+`llmkit.ErrInvalidRequest`; the error never echoes the key.
 
 | Field | Required | Effect and default |
 |---|---|---|
@@ -56,8 +56,9 @@ the error never echoes the key.
 `Question` is a sealed interface with three implementations. The wire `type`
 discriminator comes from the Go type; callers never write it. The state,
 instructions, and descriptions accept a Go string, anything that marshals to a
-JSON object or array, and — for descriptions and criteria — JSON null. The
-client rejects a JSON number or boolean before it sends the request.
+JSON object, or a JSON array. JSON null is allowed for descriptions and
+criteria. The client rejects a JSON number or boolean before sending the
+request.
 
 ### Noul
 
@@ -210,7 +211,6 @@ One `Ask` evaluates every question against the state in one logical
 request; only retries put more HTTP requests on the wire. A mixed set
 needs no second call from you.
 
-
 ```go
 package main
 
@@ -277,22 +277,25 @@ func main() {
 - `Response.Scores` maps a score question id to a `ScoreAnswer`: the numeric
   `Score`, the server's `Levels` legend, `Probabilities`, and `Confidence`.
 
-A map stays nil when the `Ask` included no question of that kind. In
-`ScoreAnswer`, `Probabilities` is index-aligned with `Levels`; both follow the
-server's legend order (`"0"` to `"n-1"`, with `n` equal to the levels asked
-for). Probabilities pass through exactly as reported: `decide` renormalizes
-nothing and recomputes no argmax.
+A map stays nil when the `Ask` included no question of that kind.
+
+`ScoreAnswer` carries `Probabilities` index-aligned with `Levels`. Both
+follow the server's legend order, from `"0"` to `"n-1"` with `n` equal
+to the levels asked for. `decide` passes them through verbatim: it
+renormalizes nothing and recomputes no argmax.
 
 ### Confidence and probabilities
 
-Every `Choice` and `Score` answer carries both. `Probabilities` is the full
-distribution. Its shape — concentrated on one outcome or spread out — is the
-model's uncertainty. `Confidence` is a vendor-computed statistic that collapses
-that shape into one number in [0, 1]. Threshold on `Confidence` when you do
-not want to compute a spread yourself. A `Noul` answer carries no confidence;
-the belief is the number. See the vendor page
-[Confidence](https://docs.typesafe.ai/confidence.md) (no vendor review date on
-the page; verified 2026-09-19).
+Every `Choice` and `Score` answer carries both. `Probabilities` is the
+full distribution. Its shape — concentrated on one outcome or spread out
+— describes the model's uncertainty. `Confidence` is a vendor-computed
+statistic that collapses that shape into one number in [0, 1]. Threshold
+on `Confidence` when you do not want to compute a spread yourself.
+
+A `Noul` answer carries no confidence; the belief is the number. See the
+vendor page
+[Confidence](https://docs.typesafe.ai/confidence.md) (no vendor review
+date on the page; verified 2026-09-19).
 
 ## Errors
 
@@ -315,27 +318,30 @@ marked:
 | Transport failure (timeout, connection reset) | `ErrServer` (`StatusCode` 0) | Yes |
 | 200 body that violates the answer contract | `ErrServer` (`StatusCode` 200) | No (decide row: terminal) |
 
-A 200 response that violates the answer contract — a missing model or usage
-block, a missing or extra answer, an answer type that does not match its
-question, a sparse legend — is a server contract violation: `ErrServer` with
-`StatusCode` 200, returned after the first attempt without retrying.
+A 200 response that violates the answer contract is a server contract
+violation. The client returns `ErrServer` with `StatusCode` 200 after the
+first attempt without retrying. Violations are: a missing model or usage
+block; a missing or extra answer; an answer type that does not match its
+question; a sparse legend.
 
-A refused pre-wire request also returns `ErrInvalidRequest` before any network
-call: nil state, empty questions, empty question id, nil instructions, a
-`Choice` without options, a `Score` with fewer than two levels, or a JSON
-number or boolean where only text kinds are accepted.
+A refused pre-wire request also returns `ErrInvalidRequest` before any
+network call. The client rejects: nil state; empty questions; empty
+question id; nil instructions; a `Choice` without options; a `Score`
+with fewer than two levels; a JSON number or boolean where only text
+kinds are accepted.
 
-An unknown model arrives as a 400 in the live lane (observed 2026-09-20);
-the vendor's API doc reserves 422 for validation failures. Both map to
+An unknown model arrives as a 400 in the live lane (observed 2026-09-20).
+The vendor's API doc reserves 422 for validation failures. Both map to
 `ErrInvalidRequest`.
+
 The client parses the `Retry-After` header on every status. On a retried
 status (429 and every 5xx, 529 included), a server-supplied delay
 replaces the exponential backoff for the sleep. The sleep is capped at
 `retry.Config.MaxDelay` (30 s by default); `APIError.RetryAfter` carries
-the raw server value. A present header that clamps to zero — a zero
-value or a past HTTP-date — retries immediately. Every other status is
-terminal.
+the raw server value.
 
+A present header that clamps to zero — a zero value or a past HTTP-date
+— retries immediately. Every other status is terminal.
 
 Error messages carry the vendor body text, truncated to 200 characters plus
 an appended `...`. llmkit never places the API key into an error.
@@ -344,10 +350,12 @@ an appended `...`. llmkit never places the API key into an error.
 
 TypeSafe bills input tokens only; output tokens are free
 ([Models](https://docs.typesafe.ai/models.md); no vendor review date on the
-page; verified 2026-09-19). `Response.Usage` reports both counts. A non-nil
-`Config.Recorder` receives exactly one `llmkit.UsageEvent` per successful
-`Ask` — `Provider` `"typesafe"`, `Model` set to the versioned id the server
-reported — and nothing on failure.
+page; verified 2026-09-19). `Response.Usage` reports both counts.
+
+A non-nil `Config.Recorder` receives exactly one `llmkit.UsageEvent`
+per successful `Ask`. `Provider` is `"typesafe"` and `Model` is the
+versioned id the server reported. The recorder fires on success only
+and never on failure.
 
 ## Vendor limits and jaggedness
 

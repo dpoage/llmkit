@@ -36,8 +36,7 @@ func TestNew_ConfigValidation(t *testing.T) {
 		})
 	}
 
-	// A padded key must be refused without the key value ever reaching the
-	// error text.
+	// Padded key must be refused without its value reaching the error text.
 	_, err := New(Config{APIKey: " sk-super-secret-do-not-echo ", Model: "jev-latest"})
 	if err == nil {
 		t.Fatal("expected an error for a padded API key")

@@ -8,40 +8,37 @@ import (
 )
 
 // Observe wraps e so every Embed and EmbedBatch call reports one
-// llmkit.Event (llmkit.KindEmbed) to obs and otherwise behaves exactly like
-// e: results, errors, Dimensions, and ModelName pass through unchanged. A
-// nil obs returns e itself.
+// llmkit.Event (llmkit.KindEmbed) to obs and otherwise passes results,
+// errors, Dimensions, and ModelName through unchanged. A nil obs returns e.
 //
 // The event inherits llmkit.Event.RunID, llmkit.Event.SpanID, and
-// llmkit.Event.Step from the call's context (llmkit.NewEvent); Observe
-// never mints a span — only Completion emitters do. Populated fields:
+// llmkit.Event.Step from the call's context via llmkit.NewEvent; Observe
+// never mints a span — only Completion emitters do.
+//
+// Populated EmbedEvent fields:
 //
 //   - Model: e.ModelName().
-//   - Inputs: 1 for Embed, len(texts) for EmbedBatch — the requested input
-//     count, error or not.
-//   - Dimensions: the length of the returned vector on success; whenever
-//     the call produced no vector — an error, an empty batch, or a success
-//     returning none — e.Dimensions(), which is 0 while a backend's
-//     dimensionality is still undetected.
-//   - Duration: the call's wall time.
-//   - Err: the error's text, non-empty exactly when the call failed.
+//   - Inputs: 1 for Embed, len(texts) for EmbedBatch — the requested count,
+//     error or not.
+//   - Dimensions: length of the returned vector on success; otherwise
+//     e.Dimensions() (0 while auto-detection has not seen a vector yet).
+//   - Duration: wall time of the call.
+//   - Err: the error's text; "" on success.
 //
-// CacheHits and Usage always stay zero — the honest-capabilities rule. The
-// Embedder interface carries no per-call cache attribution: a
-// *CachedEmbedder exposes only lifetime counters (read CachedEmbedder.Stats
-// yourself for hit counts), and a before/after delta would attribute a
-// concurrent call's hit to this call. No Embedder in this module exposes
-// token usage either. Input texts and vectors are not recorded; v1 embed
-// events are a summary, so replaying this boundary is not possible today.
+// CacheHits and Usage stay zero. Embedder carries no per-call cache
+// attribution (*CachedEmbedder exposes lifetime counters only) and no
+// Embedder in this module exposes token usage. Input texts and vectors
+// are not recorded; v1 embed events are a summary, so replaying this
+// boundary is not possible today.
 //
-// Placement around a cache is the honest per-call attribution:
-// NewCachedEmbedder(Observe(inner, obs), n) emits exactly one event per
-// cache miss (a hit never reaches the observer);
-// Observe(NewCachedEmbedder(inner, n), obs) emits one event per call, with
-// CacheHits 0.
+// Placement around a cache changes attribution:
+// NewCachedEmbedder(Observe(inner, obs), n) emits one event per cache miss
+// (a hit never reaches the observer);
+// Observe(NewCachedEmbedder(inner, n), obs) emits one event per call,
+// always with CacheHits 0.
 //
-// Observers are synchronous data sinks: a panic in obs propagates to the
-// caller and obs never affects the returned vectors.
+// Observers are synchronous: a panic in obs propagates and obs never
+// affects the returned vectors.
 func Observe(e Embedder, obs llmkit.Observer) Embedder {
 	if obs == nil {
 		return e
@@ -49,7 +46,7 @@ func Observe(e Embedder, obs llmkit.Observer) Embedder {
 	return &observedEmbedder{inner: e, obs: obs}
 }
 
-// observedEmbedder is the Embedder Observe returns. It holds no mutable
+// observedEmbedder is the Embedder Observe returns; it holds no mutable
 // state and is safe for concurrent use as long as inner is.
 type observedEmbedder struct {
 	inner Embedder
@@ -93,9 +90,8 @@ func (w *observedEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]
 func (w *observedEmbedder) Dimensions() int   { return w.inner.Dimensions() }
 func (w *observedEmbedder) ModelName() string { return w.inner.ModelName() }
 
-// eventDimensions derives EmbedEvent.Dimensions: the length of the vector
-// the call returned when it succeeded, otherwise the embedder's own report
-// — which is 0 while dimension auto-detection has not seen a vector yet.
+// eventDimensions is the EmbedEvent.Dimensions value: length of the vector
+// the call returned on success, otherwise the embedder's own report.
 func eventDimensions(succeeded bool, first []float32, e Embedder) int {
 	if succeeded && first != nil {
 		return len(first)
@@ -103,8 +99,7 @@ func eventDimensions(succeeded bool, first []float32, e Embedder) int {
 	return e.Dimensions()
 }
 
-// firstVector returns the first of an EmbedBatch's vectors, or nil when the
-// batch returned none.
+// firstVector returns vecs[0], or nil when vecs is empty.
 func firstVector(vecs [][]float32) []float32 {
 	if len(vecs) == 0 {
 		return nil
@@ -112,7 +107,7 @@ func firstVector(vecs [][]float32) []float32 {
 	return vecs[0]
 }
 
-// errText renders an error for an event's Err field: "" on success.
+// errText returns err.Error(), or "" when err is nil.
 func errText(err error) string {
 	if err == nil {
 		return ""

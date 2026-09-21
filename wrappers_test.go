@@ -11,7 +11,6 @@ import (
 	"github.com/dpoage/llmkit/retry"
 )
 
-// fakeClient is a programmable Client for testing the wrappers in isolation.
 type fakeClient struct {
 	caps      Capabilities
 	responses []Response

@@ -147,9 +147,8 @@ func TestNew_RejectsOAuthOnNonAnthropic(t *testing.T) {
 	}
 }
 
-// zeroDialTransport counts DialContext attempts on an *http.Transport,
-// proving a refusal path never touches the network even against an
-// unroutable BaseURL that would otherwise hang the test if dialed.
+// zeroDialTransport counts DialContext attempts; the test asserts none, so a
+// refusal path must complete before any network activity.
 type zeroDialTransport struct {
 	dials int
 }
@@ -163,15 +162,11 @@ func (z *zeroDialTransport) client() *http.Client {
 	return &http.Client{Transport: &http.Transport{DialContext: z.dialContext}}
 }
 
-// TestNew_RejectsEmptySecret pins the required-Secret contract: Secret is
-// the resolved credential, so an empty or whitespace-only value is a
-// caller bug. New must refuse it for every Type with an error wrapping
-// ErrInvalidRequest, and the error must never echo the secret. The
-// zero-dial transport proves the refusal returns before any network
-// activity, even against an unroutable BaseURL. Message invariance (not
-// a per-secret substring check, which is vacuous for a secret like " "
-// that trivially matches ordinary prose) proves the error text cannot
-// carry the secret's bytes.
+// TestNew_RejectsEmptySecret pins the required-Secret contract: New must
+// refuse an empty or whitespace-only Secret for every Type with
+// ErrInvalidRequest, return before any network dial, and produce a
+// message that does not vary with the secret's bytes (so it cannot carry
+// them).
 func TestNew_RejectsEmptySecret(t *testing.T) {
 	secrets := []string{"", " ", "   ", "\t", "\n", "\t\n", " \t \n "}
 	for _, typ := range []Type{TypeAnthropic, TypeOpenAI, TypeOpenAICompatible, TypeGoogle} {
@@ -289,9 +284,8 @@ func TestNew_BaseURLRules(t *testing.T) {
 	}
 }
 
-// hostCapturingTransport records the resolved request URL then fails the
-// round trip immediately, so a test binds a Type's vendor-default host
-// with no real network I/O.
+// hostCapturingTransport records the resolved req.URL and fails the round
+// trip, so a test can bind a Type's vendor-default host with no network I/O.
 type hostCapturingTransport struct {
 	mu  sync.Mutex
 	url *url.URL
@@ -311,22 +305,15 @@ func (t *hostCapturingTransport) observed() *url.URL {
 }
 
 // TestNew_VendorHosts pins the vendor-default endpoint each Type resolves
-// to with an empty spec.BaseURL — the claim the package godoc makes. All
-// three SDKs also honor a base-URL environment variable (ANTHROPIC_BASE_URL,
-// OPENAI_BASE_URL, GOOGLE_GEMINI_BASE_URL) when BaseURL is empty, so the
-// test unsets all three first (restoring them on cleanup) to pin the
-// SDKs' compiled-in defaults regardless of the operator's own environment.
-// Setting a var to the empty string instead of unsetting it is not equivalent here — the
-// Anthropic and OpenAI SDKs key off os.LookupEnv's ok result, not the
-// value, so an empty-but-present var still overrides the default with an
-// empty base URL — which is why this uses os.Unsetenv rather than
-// t.Setenv (t.Setenv has no unset form). It binds a RoundTripper and reads
-// the resolved req.URL instead of trusting the godoc prose, so an SDK
-// bump that silently changes the default host fails this test rather
-// than only being caught by reading source.
-// Retry is capped at one attempt: the transport always fails the round
-// trip, and the shared retry wrapper would otherwise spend several
-// seconds backing off this induced failure.
+// to with an empty spec.BaseURL. The test unsets
+// ANTHROPIC_BASE_URL, OPENAI_BASE_URL, and GOOGLE_GEMINI_BASE_URL because
+// the Anthropic and OpenAI SDKs key off os.LookupEnv's ok result — an
+// empty-but-present var still overrides the default, so t.Setenv to ""
+// is not equivalent (t.Setenv has no unset form). A RoundTripper is
+// bound and the resolved req.URL is read, so an SDK bump that silently
+// changes the default host fails this test. Retry is capped at one
+// attempt since the transport always fails and the shared retry wrapper
+// would otherwise back off the induced failure.
 func TestNew_VendorHosts(t *testing.T) {
 	for _, name := range []string{"ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "GOOGLE_GEMINI_BASE_URL"} {
 		if old, had := os.LookupEnv(name); had {

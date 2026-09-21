@@ -716,11 +716,11 @@ func TestObserverPanicPropagates(t *testing.T) {
 }
 
 func TestObserverMustNotSeeMutatedEvent(t *testing.T) {
-	// Documented contract: an Observer is a data sink and must not mutate the
-	// event. The fan-out passes the event by value, so reassigning a payload
-	// pointer inside one observer stays invisible to the emitter and to
-	// later observers. (Mutating THROUGH the shared payload pointer would be
-	// visible; that is prohibited by the Observer doc, not enforced here.)
+	// Documented contract: an Observer is a data sink and must not mutate
+	// the event; the fan-out passes the event by value, so reassigning a
+	// payload pointer stays invisible to the emitter and later observers.
+	// (Mutating THROUGH the shared pointer is prohibited by the Observer
+	// doc; not enforced here.)
 	var seenBySecond Event
 	ev := Event{Kind: KindExec, Exec: &ExecEvent{Backend: "docker"}}
 	chain := Observers(
@@ -738,9 +738,9 @@ func TestObserverMustNotSeeMutatedEvent(t *testing.T) {
 
 // The decide package imports root, so this test file cannot import decide.
 // The mirrors below restate exactly the decide vocabulary the conversion
-// layer (llmkit-1sx.3) will translate: if DecisionEvent cannot carry a
-// decide fact, TestDecisionMirrorRoundTrip fails instead of the conversion
-// silently losing it.
+// layer will translate: if DecisionEvent cannot carry a decide fact,
+// TestDecisionMirrorRoundTrip fails instead of the conversion silently
+// losing it.
 
 type mirrorQuestion interface {
 	mirrorID() string
@@ -1182,21 +1182,16 @@ func TestGoldenEventsValidate(t *testing.T) {
 }
 
 // TestEventPayloadMappingGuard is the mechanical guard for the kind→payload
-// mapping. The mapping lives in four code sites beside the constants; this
-// test mechanically checks two of them — the kindPayloadField map (both
-// directions: every payload field mapped, every map value a real field) and
-// scanPayloads (behaviorally: each field's own kind must validate). The
-// failure messages point at the site to fix (payloadSlots included); the
-// Kind-constant and Event-field doc lines have no mechanical check.
+// mapping. The mapping lives in four sites beside the constants; this test
+// mechanically checks two — the kindPayloadField map (both directions, every
+// payload field mapped, every map value a real Event field) and scanPayloads
+// (behaviorally, each field's own kind must validate).
 //
-// Residual hole: a newly declared EventKind constant with no payload field
-// and no map entry is invisible here — nothing enumerates the constants.
-// Validate rejects such events as an unknown kind, so decoders fail loudly,
-// but nothing trips on the emission side. Without the guard's existing
-// coverage, a kind added to kindPayloadField but forgotten in scanPayloads
-// accepts a two-payload event AND rejects its own well-formed event with
-// the whole suite green. Same class of check
-// provider/live_registry_test.go applies to Capabilities.
+// Residual hole: a kind with no payload field and no map entry is invisible
+// here, since nothing enumerates the constants. Validate rejects such events
+// as an unknown kind, so decoders fail loudly, but nothing trips on the
+// emission side. Same class of check provider/live_registry_test.go applies
+// to Capabilities.
 func TestEventPayloadMappingGuard(t *testing.T) {
 	et := reflect.TypeOf(Event{})
 

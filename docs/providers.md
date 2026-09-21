@@ -1,6 +1,6 @@
 # Providers
 
-The `provider` package is the single construction entry point for llmkit clients: you describe an endpoint with a `Spec`, tune the wrapper stack with `Options`, and call `provider.New`. This page shows one construction per provider type, the credential rules, and how errors normalize; see the [`provider` package reference](https://pkg.go.dev/github.com/dpoage/llmkit/provider).
+The `provider` package is the single construction entry point for llmkit clients. Describe an endpoint with a `Spec`, tune the wrapper stack with `Options`, and call `provider.New`. This page shows one construction per provider type, the credential rules, and how errors normalize. See the [`provider` package reference](https://pkg.go.dev/github.com/dpoage/llmkit/provider).
 
 ## Constructing a client
 
@@ -10,7 +10,7 @@ Every construction follows the same shape:
 2. Call `provider.New(ctx, spec, opts)`.
 3. New validates the spec and returns a fully wrapped `llmkit.Client`.
 
-New performs no network I/O and no environment lookups of its own, so construction is hermetic and testable with placeholder credentials. An invalid spec returns an error wrapping `llmkit.ErrInvalidRequest`; the error never echoes the secret.
+New performs no network I/O and no environment lookups of its own. Construction is hermetic and testable with placeholder credentials. An invalid spec returns an error wrapping `llmkit.ErrInvalidRequest`; the error never echoes the secret.
 
 ### Anthropic
 
@@ -50,7 +50,18 @@ spec := provider.Spec{
 client, err := provider.New(context.Background(), spec, provider.Options{})
 ```
 
-`BaseURL` is required: the type has no vendor default, and an empty one would silently target first-party `api.openai.com/v1`. New refuses an empty `BaseURL` with an error wrapping `ErrInvalidRequest`. The endpoint is often credential-less, so pass any non-empty placeholder as `Secret` — for example the string `"ollama"`. New checks only that the secret is present, not that the backend accepts it. Because llmkit cannot know what the endpoint supports, this provider uses a conservative capability profile: no parallel tool calls, no caching, no structured output, no thinking. Override the profile with `Spec.Capabilities` — see [capabilities](capabilities.md).
+`BaseURL` is required for this type. It has no vendor default, so an empty value would silently target first-party `api.openai.com/v1`. New refuses an empty `BaseURL` with an error wrapping `ErrInvalidRequest`.
+
+The endpoint is often credential-less, so pass any non-empty placeholder as `Secret` — for example the string `"ollama"`. New checks only that the secret is present, not that the backend accepts it.
+
+Because llmkit cannot know what the endpoint supports, this provider uses a conservative capability profile:
+
+- no parallel tool calls
+- no caching
+- no structured output
+- no thinking
+
+Override the profile with `Spec.Capabilities` — see [capabilities](capabilities.md).
 
 ### Google
 
@@ -67,7 +78,7 @@ No `BaseURL` targets the vendor default, `generativelanguage.googleapis.com`.
 
 ## Base URL rules
 
-`Spec.BaseURL` overrides the endpoint for tests, proxies, and self-hosted gateways. The vendor SDKs themselves also honor `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, and `GOOGLE_GEMINI_BASE_URL` when `Spec.BaseURL` is empty, so an unset field can still route your secret to an ambient-configured host. Only `TypeOpenAICompatible` requires the field.
+`Spec.BaseURL` overrides the endpoint for tests, proxies, and self-hosted gateways. The vendor SDKs themselves also honor `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, and `GOOGLE_GEMINI_BASE_URL` when `Spec.BaseURL` is empty. An unset field can still route your secret to an ambient-configured host. Only `TypeOpenAICompatible` requires the field.
 
 ## Credentials
 
@@ -78,7 +89,9 @@ No `BaseURL` targets the vendor default, `generativelanguage.googleapis.com`.
 | `provider.AuthAPIKey` (zero value) | The provider's standard API-key credential: the `x-api-key` header on Anthropic, an `Authorization: Bearer` token on OpenAI and openai-compatible, the `x-goog-api-key` header on Google | All |
 | `provider.AuthOAuthToken` | OAuth bearer token (the `Authorization` header) | Anthropic only |
 
-New refuses `AuthOAuthToken` on any other type with an error wrapping `ErrInvalidRequest`. It also refuses any unrecognized `Auth` value. There is no silent fallback to API-key mode. `Spec.Secret` must be a non-empty value with no leading or trailing whitespace; New refuses empty, whitespace-only, or whitespace-padded values. New never logs the secret.
+New refuses `AuthOAuthToken` on any other type with an error wrapping `ErrInvalidRequest`. New also refuses any unrecognized `Auth` value. There is no silent fallback to API-key mode.
+
+`Spec.Secret` must be a non-empty value with no leading or trailing whitespace. New refuses empty, whitespace-only, or whitespace-padded values. New never logs the secret.
 
 ## Environment conventions in examples/
 
@@ -107,9 +120,8 @@ The order decides who sees what:
 - Usage is recorded only for the final successful attempt (the recorder sits outside the retry wrapper).
 - The retry wrapper sees raw adapter errors, so its classification and `Retry-After` handling stay accurate.
 - With `Options.Observer` set, the retry stage emits one `Attempt` event per wire call, failures included — it is the only layer that sees attempt boundaries.
-- Models without parallel tool calls have their multi-call responses truncated to one call before your loop sees them (`WithSerializedToolCalls` is a no-op on parallel-capable providers, so wrapping unconditionally is safe).
 
-All three decorators compose over streaming: retry stops once a delta is delivered, the recorder reports the final streamed response, and serialization drops tool-call deltas for any index beyond the first.
+All three decorators compose over streaming. Retry stops once a delta reaches the caller. The recorder reports the final streamed response. Serialization drops tool-call deltas for any index beyond the first.
 
 `Options` tunes the stack:
 
@@ -123,7 +135,15 @@ All three decorators compose over streaming: retry stops once a delta is deliver
 
 ## Observing completions and attempts
 
-`Options.Observer` puts an `llmkit.Observer` inside the retry stage: it receives one `Attempt` event per wire call — failures included — numbered from 1, so a sink can watch flakiness without counting spend twice. `New` never emits `Completion` events: the outermost layer owns that one. For a bare client, wrap the constructed client with `llmkit.Observe`, which emits exactly one `Completion` event per logical call — the request as received, the final response (on the stream path assembled from the same synthesis `llmkit.Stream` performs) or the error text:
+`Options.Observer` puts an `llmkit.Observer` inside the retry stage. The observer receives one `Attempt` event per wire call — failures included — numbered from 1.
+
+A sink can watch flakiness without counting spend twice. `New` never emits `Completion` events: the outermost layer owns that one.
+
+For a bare client, wrap the constructed client with `llmkit.Observe`. It emits exactly one `Completion` event per logical call. The event carries:
+
+- the request as received
+- the final response, or the error text
+- on the stream path, the response assembled from the same synthesis `llmkit.Stream` performs
 
 ```go
 spec := provider.Spec{Type: provider.TypeAnthropic, Model: "claude-sonnet-4-5", Secret: os.Getenv("ANTHROPIC_API_KEY")}
@@ -138,9 +158,15 @@ client, err := provider.New(ctx, spec, opts)
 observed := llmkit.Observe(client, obs, provider.Tag(spec, opts), spec.Model)
 ```
 
-`llmkit.Observe` mints a fresh span per logical completion and stamps it into the context it hands the client, so every `Attempt` event joins its `Completion` event on `ev.SpanID`; a nested completion (a tool calling the model) gets its own span. Because the observer sits below the serializer, an `Attempt` event shows the raw adapter response while the `Completion` event shows the truncated response your loop sees.
+`llmkit.Observe` mints a fresh span per logical completion and stamps it into the context it hands the client. Every `Attempt` event joins its `Completion` event on `ev.SpanID`.
 
-The attempt emitter is `llmkit.WithRetryObserver(c, cfg, obs, provider, model)`, and it works on ANY `llmkit.Client` — not only through `provider.New`. If the same client runs inside an `agent.Runner`, do not wrap it with `llmkit.Observe`: the Runner emits `Completion` events itself (with `Step` set), and double-wrapping records every completion twice. Pass the durable sink to the Runner instead.
+A nested completion (a tool calling the model) gets its own span.
+
+Because the observer sits below the serializer, an `Attempt` event shows the raw adapter response. The `Completion` event shows the truncated response your loop sees.
+
+The attempt emitter is `llmkit.WithRetryObserver(c, cfg, obs, provider, model)`. It works on ANY `llmkit.Client` — not only through `provider.New`.
+
+If the same client runs inside an `agent.Runner`, do not wrap it with `llmkit.Observe`. The Runner emits `Completion` events itself (with `Step` set), and double-wrapping records every completion twice. Pass the durable sink to the Runner instead.
 
 ## Error normalization
 
@@ -160,16 +186,16 @@ Adapters map vendor failures onto the sentinel errors in `llmkit`; match them wi
 
 Outcomes below 400 are body-parse-driven, not status-driven:
 
-- Anthropic, OpenAI, and openai-compatible: a body that decodes as the vendor's completion object returns no error (a JSON error body decodes the same way; its error field is ignored). A body that fails to parse — empty, or an HTML page — returns an `ErrServer`-class error with status code 0, at any status including 200.
+- Anthropic, OpenAI, and openai-compatible: a body that decodes as the vendor's completion object returns no error. A JSON error body decodes the same way; its error field is ignored. A body that fails to parse — empty, or an HTML page — returns an `ErrServer`-class error with status code 0, at any status including 200.
 - Google: any non-2xx status returns `ErrInvalidRequest` carrying that status (302 included). A 200 with an unparseable body (HTML) returns an `ErrServer`-class error with status code 0; an empty 200 body returns no error.
 - Anthropic SSE: a 200 stream that carries an error event returns `ErrInvalidRequest`.
 
-A refused pre-wire request (a `Capabilities` violation, a malformed block, an unknown role) also returns `ErrInvalidRequest` before any network call. See [capabilities](capabilities.md) for which profile fields refuse rather than drop, and the `llmkit` package documentation for the `APIError` fields.
+A refused pre-wire request (a `Capabilities` violation, a malformed block, an unknown role) also returns `ErrInvalidRequest` before any network call. See [capabilities](capabilities.md) for which profile fields refuse rather than drop. The `llmkit` package documentation lists the `APIError` fields.
 
-Two `Retry-After` rules apply across the table. First, only Anthropic and
-OpenAI surface the header: the Google SDK hides response headers, so
-Google errors carry `RetryAfter` 0 and the retry wrapper falls back to
-exponential backoff. Second, a `Retry-After` above `retry.Config.MaxDelay`
-is truncated to `MaxDelay` (30 s by default).
+Two `Retry-After` rules apply across the table.
+
+First, only Anthropic and OpenAI surface the header: the Google SDK hides response headers, so Google errors carry `RetryAfter` 0. The retry wrapper falls back to exponential backoff.
+
+Second, a `Retry-After` above `retry.Config.MaxDelay` is truncated to `MaxDelay` (30 s by default).
 
 The `decide` package parses `Retry-After` on every status and honors it on 429 and every 5xx. Its exact semantics are in [decide](decide.md).

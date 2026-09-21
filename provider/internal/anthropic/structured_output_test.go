@@ -11,9 +11,8 @@ import (
 	"github.com/dpoage/llmkit"
 )
 
-// schemaForTest is a small, valid JSON Schema used across the
-// structured-output tests. It declares a top-level object with a single
-// required string property.
+// schemaForTest is a small, valid JSON Schema: a top-level object with a
+// single required string property.
 var schemaForTest = json.RawMessage(`{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}`)
 
 // captureAnthropicBody starts a server that records the request body as a
@@ -206,10 +205,10 @@ func textBlockConcat(resp llmkit.Response) string {
 // invariant on the structured-output finalize path: the synthetic tool's
 // arguments surface as Text AND as a BlockText appended after any existing
 // blocks, so Text equals the concatenation of BlockText blocks — the same
-// shape the openai and google toResponse emit. Without the text block, a
-// consumer recording Blocks verbatim (the agent's assistant history) drops
-// the text whenever a thinking block precedes it, while llmkit.Stream
-// still delivers it.
+// shape the openai and google toResponse emit. Without the appended text
+// block, a consumer recording Blocks verbatim (the agent's assistant
+// history) drops the text whenever a thinking block precedes it, while
+// llmkit.Stream still delivers it.
 func TestStructuredOutput_Anthropic_MaterializesTextBlock(t *testing.T) {
 	const args = `{"answer":"42"}`
 	t.Run("tool_use_only", func(t *testing.T) {

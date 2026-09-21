@@ -9,11 +9,11 @@ import (
 type DeltaKind string
 
 const (
-	// DeltaText: Text holds a text fragment of the assistant reply.
+	// DeltaText is a text fragment of the assistant reply.
 	DeltaText DeltaKind = "text"
-	// DeltaThinking: Text holds a thinking fragment.
+	// DeltaThinking is a thinking fragment.
 	DeltaThinking DeltaKind = "thinking"
-	// DeltaToolCall: one tool call's fragment. Index is the 0-based position
+	// DeltaToolCall is one tool call's fragment. Index is the 0-based position
 	// of the call in [Response.ToolCalls] — adapters renumber vendor wire
 	// indices to this; ID and Name are set on the first fragment for that
 	// Index (and may repeat); Arguments holds a raw JSON fragment to

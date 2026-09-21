@@ -12,17 +12,15 @@ import (
 	"sync"
 )
 
-// OpenAICompatibleEmbedder produces embeddings by posting to any
-// OpenAI-compatible /v1/embeddings endpoint (OpenAI, Azure OpenAI, vLLM,
-// LiteLLM, and others).
+// OpenAICompatibleEmbedder posts to any OpenAI-compatible /v1/embeddings
+// endpoint (OpenAI, Azure OpenAI, vLLM, LiteLLM).
 //
-// Endpoint: POST <baseURL>/v1/embeddings
+// POST <baseURL>/v1/embeddings
 //
 //	Request:  {"model": "...", "input": ["...", ...]}
 //	Response: {"data": [{"embedding": [...], "index": 0}], "model": "..."}
 //
-// When Config.APIKey is set, requests carry an "Authorization: Bearer"
-// header.
+// When Config.APIKey is set, requests carry an "Authorization: Bearer" header.
 type OpenAICompatibleEmbedder struct {
 	baseURL    string
 	model      string
@@ -34,8 +32,8 @@ type OpenAICompatibleEmbedder struct {
 	mu         sync.RWMutex // guards dimensions
 }
 
-// NewOpenAICompatibleEmbedder creates an OpenAICompatibleEmbedder that
-// posts to cfg.URL. It returns an error when cfg fails Config.Validate.
+// NewOpenAICompatibleEmbedder builds an embedder that posts to cfg.URL.
+// It returns an error when cfg fails [Config.Validate].
 func NewOpenAICompatibleEmbedder(cfg Config) (*OpenAICompatibleEmbedder, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("openai-compatible config: %w", err)
@@ -92,9 +90,9 @@ func (o *OpenAICompatibleEmbedder) Embed(ctx context.Context, text string) ([]fl
 }
 
 // EmbedBatch returns embeddings for multiple texts, splitting the input into
-// requests of at most MaxBatch texts (no splitting when MaxBatch is zero).
-// Results are index-aligned with the input; a failed chunk fails the whole
-// call.
+// requests of at most MaxBatch texts (0 = no splitting). Results are
+// index-aligned; a failed chunk fails the whole call.
+
 func (o *OpenAICompatibleEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
@@ -120,8 +118,8 @@ func (o *OpenAICompatibleEmbedder) EmbedBatch(ctx context.Context, texts []strin
 	return out, nil
 }
 
-// Dimensions returns the vector dimensionality. Like OllamaEmbedder, this
-// may be auto-detected from the first response.
+// Dimensions returns the vector dimensionality. Like [OllamaEmbedder.Dimensions],
+// it may be auto-detected from the first response.
 func (o *OpenAICompatibleEmbedder) Dimensions() int {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
@@ -176,9 +174,9 @@ func (o *OpenAICompatibleEmbedder) doEmbed(ctx context.Context, texts []string) 
 		return nil, fmt.Errorf("openai-compatible: expected %d embeddings, got %d", len(texts), len(result.Data))
 	}
 
-	// Response entries may arrive out of order. Build by index, rejecting
-	// out-of-range and duplicate entries — together with the count check
-	// above this fills every slot exactly once.
+	// Response entries may arrive out of order; build by index, rejecting
+	// out-of-range and duplicate entries. Combined with the count check above,
+	// this fills every slot exactly once.
 	out := make([][]float32, len(texts))
 	for _, d := range result.Data {
 		if d.Index < 0 || d.Index >= len(texts) {

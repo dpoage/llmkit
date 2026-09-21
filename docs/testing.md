@@ -25,7 +25,7 @@ The tag-gated `go vet` steps compile the gated suites without running them. CI p
 | --- | --- | --- | --- |
 | Hermetic (default) | `go test -race -count=1 ./...` | No network, no credentials, no backends. | Needs no network or credentials. A few host-capability tests skip when the host lacks the tool: sandbox bwrap and container-CLI presence checks, platform guards, and the example builds under `-short`. |
 | Live (`live` tag) | `go test -tags live -count=1 ./provider/ ./agent/ ./examples/... ./decide/` | Vendor credentials in `LLMKIT_LIVE_*` variables. Calls real vendor APIs and costs money. | Each lane skips at the lane level and names the lane and its missing variables. |
-| Integration (`integration` tag) | `go test -tags integration -count=1 ./embed/` and `go test -tags integration -count=1 ./sandbox/` | `./embed/`: a local Ollama server (typical address `localhost:11434`). `./sandbox/`: bwrap (`bubblewrap` on Linux) and/or a container runtime (podman or docker). | Each test auto-skips when its backend is missing. CI runs the sandbox suite in a dedicated `sandbox-integration` job. |
+| Integration (`integration` tag) | `go test -tags integration -count=1 ./embed/` and `go test -tags integration -count=1 ./sandbox/` | `./embed/`: a local Ollama server (typically `localhost:11434`). `./sandbox/`: bwrap (`bubblewrap` on Linux) and/or a container runtime (podman or docker). | Each test auto-skips when its backend is missing. CI runs the sandbox suite in the `sandbox-integration` job. |
 
 ## Running the live suite locally
 
@@ -65,7 +65,23 @@ A keyless lane skips with a message naming the lane and its missing variables. E
 | `google` | `LLMKIT_LIVE_GOOGLE_API_KEY` | `LLMKIT_LIVE_GOOGLE_MODEL` | `gemini-2.5-flash-lite` |
 | `typesafe` | `LLMKIT_LIVE_TYPESAFE_API_KEY` | `LLMKIT_LIVE_TYPESAFE_MODEL`, `LLMKIT_LIVE_TYPESAFE_BASE_URL` | `jev-latest` |
 
-CI runs the live suite in its own workflow (`.github/workflows/live.yml`): nightly schedule, manual dispatch, and pushes to `master` or `round/**` that touch `provider/`, `agent/`, `decide/`, `examples/`, `internal/`, any root `*.go` file, `go.mod`, `go.sum`, or the workflow file itself. The workflow deliberately does not run on pull requests, so a PR that edits the workflow cannot read a key. The job reads the repo secret `LLMKIT_LIVE_COMPAT_API_KEY` and the repo variables `LLMKIT_LIVE_COMPAT_BASE_URL` and `LLMKIT_LIVE_COMPAT_MODEL`, and sets `LLMKIT_LIVE_COMPAT_CAPS=parallel_tool_calls,prompt_caching`. It also reads the repo secret `LLMKIT_LIVE_TYPESAFE_API_KEY` for the typesafe lane; the job's credentials gate keys on the compat key, so a missing typesafe secret skips the decide lane inside an otherwise green job. Without the compat key the job prints `no live credentials — skipped` and exits 0.
+### CI workflow
+
+CI runs the live suite in its own workflow, `.github/workflows/live.yml`. The workflow runs on:
+
+- Nightly schedule
+- Manual dispatch
+- Pushes to `master` or `round/**` that touch any of:
+  - `provider/`, `agent/`, `decide/`, `examples/`, `internal/`
+  - Any root `*.go` file
+  - `go.mod`, `go.sum`
+  - The workflow file itself
+
+The workflow deliberately does not run on pull requests. **A PR that edits the workflow cannot read a key.**
+
+The job reads the repo secret `LLMKIT_LIVE_COMPAT_API_KEY` and the repo variables `LLMKIT_LIVE_COMPAT_BASE_URL` and `LLMKIT_LIVE_COMPAT_MODEL`, and sets `LLMKIT_LIVE_COMPAT_CAPS=parallel_tool_calls,prompt_caching`. It also reads the repo secret `LLMKIT_LIVE_TYPESAFE_API_KEY` for the typesafe lane.
+
+The credentials gate keys on the compat key. A missing typesafe secret skips the decide lane inside an otherwise green job. Without the compat key, the job prints `no live credentials — skipped` and exits 0.
 
 ## LLMKIT_LIVE_COMPAT_CAPS
 
@@ -95,15 +111,19 @@ Each fixture declares a `request_check` mode for the request side:
 
 A fixture without the field replays as `strict` when it holds exactly one exchange and `response_only` otherwise.
 
-The `decide` package replays the same way. `decide/fixture_replay_test.go` runs in plain `go test ./...` with no tag, no network, and no credentials. For every fixture under `decide/testdata/`, an `httptest` server serves the recorded exchange. The replay re-issues the recorded `Ask` through `decide.New`, and the normalized `Response` — or the recorded error's sentinel, matched with `errors.Is` — must equal the recording. The fixtures come from the same secret-free writer as the provider fixtures.
+The `decide` package replays the same way. `decide/fixture_replay_test.go` runs in plain `go test ./...` with no tag, no network, and no credentials.
 
-The fixture writer is secret-free by construction: it refuses to write any fixture containing the lane credential or any `sk-` substring. The nightly `Live` workflow runs the suite without `-update`, so the live matrix's assertions against real responses are the vendor-drift gate; editing a fixture's recorded response text fails the replay test, and so does adapter wire drift on the request side.
+For every fixture under `decide/testdata/`, an `httptest` server serves the recorded exchange. The replay re-issues the recorded `Ask` through `decide.New`. The normalized `Response` — or the recorded error's sentinel, matched with `errors.Is` — must equal the recording.
+
+The fixtures come from the same secret-free writer as the provider fixtures.
+
+The fixture writer is secret-free by construction: it refuses to write any fixture containing the lane credential or any `sk-` substring. The nightly `Live` workflow runs the suite without `-update`, so the live matrix's assertions against real responses are the vendor-drift gate. Editing a fixture's recorded response text fails the replay test, and so does adapter wire drift on the request side.
 
 ## The live registry rule
 
-Contributor rule: any change to an adapter, the agent loop, or an `llmkit.Capabilities` field must name two things — its hermetic test, and its live case in the registry in `provider/live_registry_test.go`.
+Contributor rule: any change to an adapter, the agent loop, or an `llmkit.Capabilities` field must name two things. They are its hermetic test and its live case in the registry in `provider/live_registry_test.go`.
 
-`provider/live_registry_test.go` has no build tag. It reflects over `llmkit.Capabilities` and fails the plain `go test ./...` suite when any field has no registered live case, when a case gates on a nonexistent field, or when a case has no doc. A capability cannot ship without its acceptance test.
+`provider/live_registry_test.go` has no build tag. It reflects over `llmkit.Capabilities` and fails the plain `go test ./...` suite when a field has no registered live case. The same happens when a case gates on a nonexistent field, or when a case has no doc. A capability cannot ship without its acceptance test.
 
 ## Examples
 
@@ -117,4 +137,8 @@ go run ./examples/chat
 go run ./examples/decide
 ```
 
-The first four no-op with a usage message and exit code 1 unless `LLMKIT_PROVIDER`, `LLMKIT_MODEL`, and `LLMKIT_API_KEY` are set. `LLMKIT_BASE_URL` is required for `openai-compatible` and optional otherwise. `examples/decide` no-ops with a usage message and exit code 1 unless `LLMKIT_TYPESAFE_API_KEY` and `LLMKIT_TYPESAFE_MODEL` are set (`LLMKIT_TYPESAFE_BASE_URL` optional). Without credentials the examples never touch the network.
+The first four examples no-op with a usage message and exit code 1 unless `LLMKIT_PROVIDER`, `LLMKIT_MODEL`, and `LLMKIT_API_KEY` are set. `LLMKIT_BASE_URL` is required for `openai-compatible` and optional otherwise.
+
+`examples/decide` no-ops with a usage message and exit code 1 unless `LLMKIT_TYPESAFE_API_KEY` and `LLMKIT_TYPESAFE_MODEL` are set. `LLMKIT_TYPESAFE_BASE_URL` is optional.
+
+Without credentials, the examples never touch the network.
