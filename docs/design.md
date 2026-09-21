@@ -189,7 +189,7 @@ them is durable.
 `Observer`, `Event` with its ten payload types, and the run/span/step
 identity that rides the context are declared in `llmkit` itself, not in a
 `llmkit/observe` leaf package. Moving them was measured before the question
-was closed: ~610 occurrences of observe.go's 28 exported symbols in
+was closed: ~610 occurrences of the vocabulary's 28 exported symbols in
 comment-stripped Go code across root, agent, provider (adapters included),
 embed, and sandbox — tests included, which is most of the weight, because
 the suites pin the vocabulary; ~140 excluding tests. (The rule:
@@ -204,16 +204,17 @@ too, `ToolRunEvent` a `ToolCall`, `SteerEvent` a `Message`,
 `EmbedEvent` and `DecisionEvent` a `Usage` — so a `llmkit/observe` leaf
 would have to import root. Root's `Observe`, `WithRetryObserver`, and
 `Observers` construct and carry `Event`, so root would have to import the
-leaf. The leaf can only sit above root, and then every consumer imports
+leaf. The leaf can only sit above root, and then most consumers (sandbox
+is the exception: its entire llmkit surface is the event vocabulary) import
 two packages for one vocabulary. `llmkit/retry` is the extracted-package
 counterexample that works, and shows the difference: `retry` is
 self-contained (root imports it; it imports no kit package), so extracting
 it costs nothing. The event vocabulary has no such cut to extract along —
 every payload is root's wire types re-exposed.
-
-- **What it buys:** every component that emits or persists events — agent,
-  provider, embed, sandbox, and the future store — speaks one event shape
-  from the package it already imports for `Request`/`Response`; no sink
+- **What it buys:** most components that emit or persist events — agent,
+  provider, embed, and the future store (sandbox touches only the event
+  vocabulary itself) — speak one event shape from the package they already
+  import for `Request`/`Response`; no sink
   translates between vocabularies and no store imports the agent loop to
   read its telemetry.
 - **What it costs:** the root package now carries agent-shaped kinds —
