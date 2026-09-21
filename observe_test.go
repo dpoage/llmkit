@@ -180,7 +180,6 @@ func goldEvents() []struct {
 				Finalize: &FinalizeEvent{
 					TruncationReason: "max_steps",
 					Finalized:        true,
-					Iterations:       8,
 					Usage:            Usage{InputTokens: 1000, OutputTokens: 200},
 					FinalText:        "Answer: 42.",
 				},
@@ -467,7 +466,6 @@ func TestEventGoldenJSON(t *testing.T) {
   "finalize": {
     "truncation_reason": "max_steps",
     "finalized": true,
-    "iterations": 8,
     "usage": {
       "input_tokens": 1000,
       "output_tokens": 200
@@ -1022,4 +1020,237 @@ func TestEmptyPayloadRoundTrip(t *testing.T) {
 			}
 		})
 	}
+}
+
+// payloadSlots returns, in Kind-declaration order, one payload setter per
+// Event payload field, so the Validate matrix can set any slot on any kind
+// and name the offending field in assertions.
+func payloadSlots() []struct {
+	kind  EventKind
+	field string
+	set   func(*Event)
+} {
+	return []struct {
+		kind  EventKind
+		field string
+		set   func(*Event)
+	}{
+		{KindStart, "Start", func(e *Event) { e.Start = &StartEvent{} }},
+		{KindCompletion, "Completion", func(e *Event) { e.Completion = &CompletionEvent{} }},
+		{KindAttempt, "Attempt", func(e *Event) { e.Attempt = &AttemptEvent{} }},
+		{KindToolRun, "ToolRun", func(e *Event) { e.ToolRun = &ToolRunEvent{} }},
+		{KindCompaction, "Compaction", func(e *Event) { e.Compaction = &CompactionEvent{} }},
+		{KindSteer, "Steer", func(e *Event) { e.Steer = &SteerEvent{} }},
+		{KindFinalize, "Finalize", func(e *Event) { e.Finalize = &FinalizeEvent{} }},
+		{KindDecision, "Decision", func(e *Event) { e.Decision = &DecisionEvent{} }},
+		{KindEmbed, "Embed", func(e *Event) { e.Embed = &EmbedEvent{} }},
+		{KindExec, "Exec", func(e *Event) { e.Exec = &ExecEvent{} }},
+	}
+}
+
+// TestEventValidate walks the full kind x payload matrix: the ten matching
+// pairs pass, all 90 mismatches fail with an error naming the kind and the
+// offending payload field, and the shape rules (zero payloads, two
+// payloads, empty Kind, unknown Kind, SchemaVersion 0, a future
+// SchemaVersion) each behave as documented.
+func TestEventValidate(t *testing.T) {
+	slots := payloadSlots()
+	for _, kc := range slots {
+		for _, sc := range slots {
+			ev := NewEvent(context.Background(), kc.kind)
+			sc.set(&ev)
+			err := ev.Validate()
+			if sc.kind == kc.kind {
+				if err != nil {
+					t.Errorf("%s event with its own %s payload: Validate = %v, want nil", kc.kind, sc.field, err)
+				}
+				continue
+			}
+			if err == nil {
+				t.Errorf("%s event with foreign %s payload: Validate = nil, want an error", kc.kind, sc.field)
+				continue
+			}
+			for _, want := range []string{string(kc.kind), sc.field} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("%s event with foreign %s payload: error %q does not name %q", kc.kind, sc.field, err, want)
+				}
+			}
+		}
+	}
+
+	t.Run("zero payloads", func(t *testing.T) {
+		ev := Event{Kind: KindToolRun, SchemaVersion: EventSchemaVersion}
+		err := ev.Validate()
+		if err == nil {
+			t.Fatal("Validate = nil, want an error")
+		}
+		for _, want := range []string{string(KindToolRun), "ToolRun"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not name %q", err, want)
+			}
+		}
+	})
+
+	t.Run("two payloads", func(t *testing.T) {
+		ev := Event{Kind: KindEmbed, SchemaVersion: EventSchemaVersion}
+		ev.Embed = &EmbedEvent{}
+		ev.Exec = &ExecEvent{}
+		err := ev.Validate()
+		if err == nil {
+			t.Fatal("Validate = nil, want an error")
+		}
+		// The n==2 shape is exact: both names, no elision — restoring the
+		// unconditional ", ..." must fail here.
+		if !strings.Contains(err.Error(), "2 payload fields (Embed and Exec)") {
+			t.Errorf("error %q does not read as the exact two-payload message", err)
+		}
+		if strings.Contains(err.Error(), ", ...") {
+			t.Errorf("error %q elides nothing at n==2; want no \", ...\"", err)
+		}
+		for _, want := range []string{string(KindEmbed), "Embed", "Exec"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not name %q", err, want)
+			}
+		}
+	})
+
+	t.Run("empty kind", func(t *testing.T) {
+		ev := Event{Kind: "", SchemaVersion: EventSchemaVersion, Start: &StartEvent{}}
+		err := ev.Validate()
+		if err == nil {
+			t.Fatal("Validate on Kind \"\" = nil, want an error")
+		}
+		if !strings.Contains(err.Error(), `unknown event kind ""`) {
+			t.Errorf("error = %q, want it to name the empty kind as unknown", err)
+		}
+	})
+
+	t.Run("unknown kind", func(t *testing.T) {
+		ev := Event{Kind: EventKind("span"), SchemaVersion: EventSchemaVersion, Start: &StartEvent{}}
+		err := ev.Validate()
+		if err == nil {
+			t.Fatal("Validate on an unknown kind = nil, want an error")
+		}
+		if !strings.Contains(err.Error(), `unknown event kind "span"`) {
+			t.Errorf("error = %q, want it to name kind %q as unknown", err, "span")
+		}
+	})
+
+	t.Run("schema version zero", func(t *testing.T) {
+		// A hand-built Event that skipped NewEvent carries 0 and must fail,
+		// even with an otherwise-perfect kind/payload pair. The error names
+		// the wire spelling schema_version, so a JSONL debugger can grep it.
+		ev := Event{Kind: KindSteer, SchemaVersion: 0, Steer: &SteerEvent{}}
+		err := ev.Validate()
+		if err == nil {
+			t.Fatal("Validate on SchemaVersion 0 = nil, want an error")
+		}
+		for _, want := range []string{string(KindSteer), "schema_version"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not name %q", err, want)
+			}
+		}
+	})
+
+	t.Run("future schema version passes", func(t *testing.T) {
+		// Any non-zero value passes: a newer schema is a sink's business,
+		// not Validate's.
+		ev := Event{Kind: KindSteer, SchemaVersion: EventSchemaVersion + 1, Steer: &SteerEvent{}}
+		if err := ev.Validate(); err != nil {
+			t.Errorf("Validate on a future SchemaVersion = %v, want nil", err)
+		}
+	})
+}
+
+// TestGoldenEventsValidate proves NewEvent plus a payload assignment
+// produces a Validate-clean event for every kind: the golden fixtures are
+// built exactly that way, so the pair the sinks will rely on is the pair
+// Validate accepts.
+func TestGoldenEventsValidate(t *testing.T) {
+	for _, g := range goldEvents() {
+		if err := g.ev.Validate(); err != nil {
+			t.Errorf("golden %s event: Validate = %v, want nil", g.name, err)
+		}
+	}
+	for _, s := range payloadSlots() {
+		ev := NewEvent(context.Background(), s.kind)
+		s.set(&ev)
+		if err := ev.Validate(); err != nil {
+			t.Errorf("NewEvent(%s) + %s payload: Validate = %v, want nil", s.kind, s.field, err)
+		}
+	}
+}
+
+// TestEventPayloadMappingGuard is the mechanical guard for the kind→payload
+// mapping. The mapping lives in four code sites beside the constants; this
+// test mechanically checks two of them — the kindPayloadField map (both
+// directions: every payload field mapped, every map value a real field) and
+// scanPayloads (behaviorally: each field's own kind must validate). The
+// failure messages point at the site to fix (payloadSlots included); the
+// Kind-constant and Event-field doc lines have no mechanical check.
+//
+// Residual hole: a newly declared EventKind constant with no payload field
+// and no map entry is invisible here — nothing enumerates the constants.
+// Validate rejects such events as an unknown kind, so decoders fail loudly,
+// but nothing trips on the emission side. Without the guard's existing
+// coverage, a kind added to kindPayloadField but forgotten in scanPayloads
+// accepts a two-payload event AND rejects its own well-formed event with
+// the whole suite green. Same class of check
+// provider/live_registry_test.go applies to Capabilities.
+func TestEventPayloadMappingGuard(t *testing.T) {
+	et := reflect.TypeOf(Event{})
+
+	byField := make(map[string]EventKind, len(kindPayloadField))
+	for k, f := range kindPayloadField {
+		if prev, dup := byField[f]; dup {
+			t.Errorf("kindPayloadField maps field %q twice (%s and %s) — fix the map in observe.go", f, prev, k)
+			continue
+		}
+		byField[f] = k
+		if _, ok := et.FieldByName(f); !ok {
+			t.Errorf("kindPayloadField[%s] = %q, which is not an Event field — fix the map in observe.go", k, f)
+		}
+	}
+
+	for i := range et.NumField() {
+		f := et.Field(i)
+		if f.Type.Kind() != reflect.Ptr || f.Type.Elem().Kind() != reflect.Struct {
+			continue
+		}
+		kind, mapped := EventKind(""), false
+		for k, name := range kindPayloadField {
+			if name == f.Name {
+				kind, mapped = k, true
+				break
+			}
+		}
+		if !mapped {
+			t.Errorf("Event payload field %s has no kindPayloadField entry: add the kind→field entry in observe.go, wire it into scanPayloads, and add the payloadSlots row in observe_test.go", f.Name)
+			continue
+		}
+		// scanPayloads must see the field: an event of the mapped kind
+		// carrying exactly this payload must validate.
+		ev := NewEvent(context.Background(), kind)
+		reflect.ValueOf(&ev).Elem().Field(i).Set(reflect.New(f.Type.Elem()))
+		if err := ev.Validate(); err != nil {
+			t.Errorf("scanPayloads does not count Event.%s: %s + %s validates as %v — wire the field into scanPayloads in observe.go", f.Name, kind, f.Name, err)
+		}
+	}
+
+	if got, want := len(byField), et.NumField()-countNonPayloadFields(et); got != want {
+		t.Errorf("kindPayloadField has %d entries, want %d (one per Event payload field)", got, want)
+	}
+}
+
+// countNonPayloadFields counts Event's non-payload (header) fields, so the
+// guard also fails when a payload field is added without ANY wiring.
+func countNonPayloadFields(t reflect.Type) int {
+	n := 0
+	for i := range t.NumField() {
+		f := t.Field(i)
+		if f.Type.Kind() != reflect.Ptr || f.Type.Elem().Kind() != reflect.Struct {
+			n++
+		}
+	}
+	return n
 }

@@ -312,9 +312,11 @@ func TestSaveJSONL_FlushesPrefixOnEncodeError(t *testing.T) {
 
 // TestLoadJSONL_RejectsPreSchemaLines pins the standing ruling (llmkit-ly5):
 // a line without schema_version is a pre-schema recording — unsupported. The
-// load must ERROR naming the line, never silently load zero values.
+// load runs every line through llmkit.Event.Validate, so the load must ERROR
+// naming the line, never silently load zero values.
 func TestLoadJSONL_RejectsPreSchemaLines(t *testing.T) {
-	// A valid event line, then a hand-written pre-schema line.
+	// A valid event line, then a hand-written line whose shape is fine but
+	// which carries no schema_version.
 	valid := NewTranscript()
 	valid.Record = append(valid.Record, llmkit.Event{
 		Kind:          llmkit.KindToolRun,
@@ -326,14 +328,44 @@ func TestLoadJSONL_RejectsPreSchemaLines(t *testing.T) {
 	if err := valid.SaveJSONL(&buf); err != nil {
 		t.Fatalf("SaveJSONL: %v", err)
 	}
-	buf.WriteString(`{"kind":"request","step":1,"messages":[]}` + "\n")
+	buf.WriteString(`{"kind":"tool_run","step":1,"tool_run":{"call":{"id":"c9","name":"echo"}}}` + "\n")
 
 	_, err := LoadJSONL(&buf)
 	if err == nil {
 		t.Fatal("LoadJSONL accepted a pre-schema line; want an error")
 	}
 	if !strings.Contains(err.Error(), "line 2") || !strings.Contains(err.Error(), "schema_version") {
-		t.Errorf("error = %v, want it to name line 2 and schema_version", err)
+		t.Errorf("error = %v, want it to name line 2 and the missing schema_version", err)
+	}
+}
+
+// TestLoadJSONL_RejectsShapeInvalidLines pins the rest of the Validate
+// contract at the decode boundary: a line that carries a schema_version but
+// is otherwise a malformed Event — here a kind/payload mismatch — fails the
+// load with the line number named. Without this case the migration from the
+// bespoke schema_version check to Validate had no discriminating coverage:
+// reverting to the old check left every package green.
+func TestLoadJSONL_RejectsShapeInvalidLines(t *testing.T) {
+	valid := NewTranscript()
+	valid.Record = append(valid.Record, llmkit.Event{
+		Kind:          llmkit.KindToolRun,
+		Step:          1,
+		SchemaVersion: llmkit.EventSchemaVersion,
+		ToolRun:       &llmkit.ToolRunEvent{Call: llmkit.ToolCall{ID: "c1", Name: "echo"}, Result: "ok"},
+	})
+	var buf bytes.Buffer
+	if err := valid.SaveJSONL(&buf); err != nil {
+		t.Fatalf("SaveJSONL: %v", err)
+	}
+	// schema_version present, but a completion payload on a tool_run kind.
+	buf.WriteString(`{"kind":"tool_run","step":1,"schema_version":1,"completion":{"err":"x"}}` + "\n")
+
+	_, err := LoadJSONL(&buf)
+	if err == nil {
+		t.Fatal("LoadJSONL accepted a kind/payload mismatch; want an error")
+	}
+	if !strings.Contains(err.Error(), "line 2") || !strings.Contains(err.Error(), "want ToolRun") {
+		t.Errorf("error = %v, want it to name line 2 and the expected payload field", err)
 	}
 }
 

@@ -80,11 +80,13 @@ func (t *Transcript) SaveJSONL(w io.Writer) error {
 // LoadJSONL reads a JSONL transcript (as written by [Transcript.SaveJSONL])
 // from r.
 //
-// Every line must carry schema_version ([llmkit.EventSchemaVersion]): a line
-// without one is a pre-schema recording, which is unsupported — the load
-// fails with an error naming the line instead of silently loading zero
-// values. The transcript's RunID/ParentRunID are recovered from the decoded
-// events; a file mixing two run ids is an error naming the offending line.
+// Every line must be a well-formed [llmkit.Event] — [llmkit.Event.Validate]
+// checks the shape: a declared Kind carrying exactly its own payload, and a
+// non-zero schema_version. A line without one is a pre-schema recording,
+// which is unsupported — the load fails with an error naming the line
+// instead of silently loading zero values. The transcript's
+// RunID/ParentRunID are recovered from the decoded events; a file mixing
+// two run ids is an error naming the offending line.
 func LoadJSONL(r io.Reader) (*Transcript, error) {
 	t := NewTranscript()
 	sc := bufio.NewScanner(r)
@@ -101,8 +103,8 @@ func LoadJSONL(r io.Reader) (*Transcript, error) {
 		if err := json.Unmarshal(raw, &ev); err != nil {
 			return nil, fmt.Errorf("agent: decode transcript line %d: %w", line, err)
 		}
-		if ev.SchemaVersion == 0 {
-			return nil, fmt.Errorf("agent: transcript line %d: missing schema_version: pre-schema recordings are unsupported", line)
+		if err := ev.Validate(); err != nil {
+			return nil, fmt.Errorf("agent: transcript line %d: %w", line, err)
 		}
 		if ev.RunID != "" {
 			if t.RunID == "" {

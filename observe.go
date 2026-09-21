@@ -3,6 +3,7 @@ package llmkit
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -105,9 +106,9 @@ const (
 	// Payload: [SteerEvent]. Step is set on Runner-emitted events.
 	KindSteer EventKind = "steer"
 	// KindFinalize closes a run: why it stopped (truncation reason, if the
-	// step budget or context limit ended it), how many model iterations it
-	// took, the run's total usage, and whether a forced-finalization turn
-	// fired. Payload: [FinalizeEvent]. Step is set.
+	// step budget or context limit ended it), the run's total usage, and
+	// whether a forced-finalization turn fired. Payload: [FinalizeEvent].
+	// Step is the completed-turn count.
 	KindFinalize EventKind = "finalize"
 	// KindDecision records one decision-model call: the judged state, the
 	// questions asked and the answers returned (or the error). The payload
@@ -161,7 +162,10 @@ type Event struct {
 	// explicitly on every event it emits; decorator-emitted events inside a
 	// Runner turn — the retry stage's Attempt, a decision, a sandbox Exec or
 	// embedding from a tool — inherit it from the context ([WithStep]) via
-	// [NewEvent]. 0 outside a Runner turn.
+	// [NewEvent]. 0 outside a Runner turn. On [KindFinalize] Step is the
+	// count of COMPLETED turns, not a turn number: it is 0 when no turn
+	// completed, so a finalize can carry Step 0 inside a run whose first
+	// completion failed (beside that completion's own Step 1).
 	Step int `json:"step,omitempty"`
 	// Time is when the observed operation ended, set by the emitter. Sinks
 	// never re-stamp it.
@@ -284,14 +288,14 @@ type SteerEvent struct {
 }
 
 // FinalizeEvent closes a run ([KindFinalize]). TruncationReason is set when
-// the run ended by hitting a limit rather than finishing its task;
-// Iterations counts the model turns the run took; Usage totals the run's
-// completions; Finalized marks that a forced-finalization turn fired (a
-// fact about the run's shape that is not derivable from the event stream).
+// the run ended by hitting a limit rather than finishing its task; Usage
+// totals the run's completions; Finalized marks that a forced-finalization
+// turn fired (a fact about the run's shape that is not derivable from the
+// event stream). The completed-turn count is Event.Step, not a payload
+// field.
 type FinalizeEvent struct {
 	TruncationReason string `json:"truncation_reason,omitempty"`
 	Finalized        bool   `json:"finalized,omitempty"`
-	Iterations       int    `json:"iterations"`
 	Usage            Usage  `json:"usage"`
 	// FinalText is the run's final answer text as the Runner stitched it
 	// across a max-tokens continuation, so a store can persist it without
@@ -403,4 +407,113 @@ type ExecEvent struct {
 	StderrBytes int64    `json:"stderr_bytes"`
 	Truncated   bool     `json:"truncated,omitempty"`
 	Err         string   `json:"err,omitempty"`
+}
+
+// Validate checks an event's shape, for sinks, stores, and tests that must
+// reject a malformed event before trusting it. The harness NEVER calls it —
+// not on [NewEvent], not in the [Observer] emission path, not in any
+// decorator — so it adds nothing to emission. Three rules:
+//
+//   - Kind must be one of the ten declared constants; empty or unknown
+//     fails.
+//   - Exactly one payload pointer must be non-nil, and it must be the one
+//     the Kind names. Zero payloads fails, a foreign payload fails (the
+//     error names the expected field and the offending one), and two set
+//     payloads fail.
+//   - SchemaVersion must be non-zero — a hand-built Event that skipped
+//     [NewEvent] carries 0. Any non-zero value passes: a newer schema
+//     version is a sink's business to interpret, not Validate's to refuse.
+//
+// Validate inspects only this shape. It does not check payload field
+// values, and it does not gate encoding — Marshal emits whatever it is
+// given.
+func (ev Event) Validate() error {
+	want, ok := kindPayloadField[ev.Kind]
+	if !ok {
+		return fmt.Errorf("llmkit: unknown event kind %q", string(ev.Kind))
+	}
+	if ev.SchemaVersion == 0 {
+		return fmt.Errorf("llmkit: %s event has schema_version 0 (set Event.SchemaVersion from EventSchemaVersion, or build events with NewEvent)", ev.Kind)
+	}
+	// Count the non-nil payloads and remember the first two names; no
+	// []string is built, so a well-formed event validates without
+	// allocating (the names feed only the error text).
+	n, first, second := ev.scanPayloads()
+	switch n {
+	case 1:
+		if first != want {
+			return fmt.Errorf("llmkit: %s event carries payload field %s, want %s", ev.Kind, first, want)
+		}
+		return nil
+	case 0:
+		return fmt.Errorf("llmkit: %s event carries no payload, want %s", ev.Kind, want)
+	default:
+		fields := fmt.Sprintf("%s and %s", first, second)
+		if n > 2 {
+			fields += ", ..."
+		}
+		return fmt.Errorf("llmkit: %s event carries %d payload fields (%s), want exactly %s", ev.Kind, n, fields, want)
+	}
+}
+
+// kindPayloadField maps each declared [EventKind] to the Event field that
+// carries its payload, so [Event.Validate] and its errors cannot drift from
+// the constants.
+var kindPayloadField = map[EventKind]string{
+	KindStart:      "Start",
+	KindCompletion: "Completion",
+	KindAttempt:    "Attempt",
+	KindToolRun:    "ToolRun",
+	KindCompaction: "Compaction",
+	KindSteer:      "Steer",
+	KindFinalize:   "Finalize",
+	KindDecision:   "Decision",
+	KindEmbed:      "Embed",
+	KindExec:       "Exec",
+}
+
+// scanPayloads counts the non-nil payload pointers, in struct order, and
+// names the first two. It allocates nothing: the names feed only Validate's
+// error text, and the closure stays on the stack.
+func (ev Event) scanPayloads() (n int, first, second string) {
+	seen := func(field string) {
+		switch n {
+		case 0:
+			first = field
+		case 1:
+			second = field
+		}
+		n++
+	}
+	if ev.Start != nil {
+		seen("Start")
+	}
+	if ev.Completion != nil {
+		seen("Completion")
+	}
+	if ev.Attempt != nil {
+		seen("Attempt")
+	}
+	if ev.ToolRun != nil {
+		seen("ToolRun")
+	}
+	if ev.Compaction != nil {
+		seen("Compaction")
+	}
+	if ev.Steer != nil {
+		seen("Steer")
+	}
+	if ev.Finalize != nil {
+		seen("Finalize")
+	}
+	if ev.Decision != nil {
+		seen("Decision")
+	}
+	if ev.Embed != nil {
+		seen("Embed")
+	}
+	if ev.Exec != nil {
+		seen("Exec")
+	}
+	return n, first, second
 }

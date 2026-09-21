@@ -205,19 +205,19 @@ Each event carries `run_id` (minted per run, or pinned with the `WithRunID` run 
 | `tool_run` | turn | the model's call, the result verbatim as fed to the model; `Denied` + `deny_reason` for policy denials, `is_error` for failures |
 | `compaction` | next turn | token totals before/after and the prune count; only when something was actually pruned |
 | `steer` | next turn | a delivered steering message; `follow_up` marks follow-up turns |
-| `finalize` | completed turns | why the run stopped (`truncation_reason`), iterations, total usage, the run's answer (`final_text`), whether forced finalization fired; emitted on every run end, including error returns; a failed completion does not advance the step, so a run whose only completion failed reports step 0 |
+| `finalize` | completed turns | why the run stopped (`truncation_reason`), total usage, the run's answer (`final_text`), whether forced finalization fired; the completed-turn count is the `step` itself; emitted on every run end, including error returns; a failed completion does not advance the step, so a run whose only completion failed reports step 0 |
 
 A real recorded run (weather tool, two turns) looks like this — timestamps and ids are the only things that change between runs:
 
 ```jsonl
-{"kind":"start","run_id":"1789951570068-fa30f0bc5b74e810","time":"2026-09-21T00:46:10.068152808Z","schema_version":1,"start":{"task":"What is the weather in Tokyo?","tools":["weather"]}}
-{"kind":"tool_run","run_id":"1789951570068-fa30f0bc5b74e810","step":1,"time":"2026-09-21T00:46:10.068191991Z","schema_version":1,"tool_run":{"call":{"id":"call-1","name":"weather","arguments":{"city":"Tokyo"}},"result":"18°C, clear"}}
-{"kind":"finalize","run_id":"1789951570068-fa30f0bc5b74e810","step":2,"time":"2026-09-21T00:46:10.068203302Z","schema_version":1,"finalize":{"iterations":2,"usage":{"input_tokens":1294,"output_tokens":36},"final_text":"Tokyo is 18°C and clear."}}
+{"kind":"start","run_id":"1789959179957-87bc7f41b8d43814","time":"2026-09-21T02:52:59.957895422Z","schema_version":1,"start":{"task":"What is the weather in Tokyo?","tools":["weather"]}}
+{"kind":"tool_run","run_id":"1789959179957-87bc7f41b8d43814","step":1,"time":"2026-09-21T02:52:59.958326838Z","schema_version":1,"tool_run":{"call":{"id":"call-1","name":"weather","arguments":{"city":"Tokyo"}},"result":"18°C, clear"}}
+{"kind":"finalize","run_id":"1789959179957-87bc7f41b8d43814","step":2,"time":"2026-09-21T02:52:59.958376321Z","schema_version":1,"finalize":{"usage":{"input_tokens":1294,"output_tokens":36},"final_text":"Tokyo is 18°C and clear."}}
 ```
 
 The omitted `completion` lines each carry the full request–response round-trip under `completion.request` / `completion.response`, which is what replay reads. The file name is exactly `<RunID>.jsonl` — one RunID is one file, created exclusively at the run's `start` event and closed at its `finalize` — so pin the id with `WithRunID` when a caller generates stable identifiers up front and must recover the exact file later. The id must be a safe filename component: non-empty, not `.` or `..`, no path separators, no NUL. A leftover file, a second Start for an id this sink already admitted (live, refused, or poisoned), or an unsafe id is refused through `onErr` and that run's events are dropped; a single record holding two runs does not read back. Admission, the exclusive create and that first `start` line are one step under one lock, so a record is never created and then left empty; and because the file outlives the run's admission state, a second run can never take an id some run already recorded — it is refused as a leftover, which is what keeps one run's events out of another's record. The sink is best-effort: it never fails a run, and every failure flows to the `onErr` callback given at construction. Calling `WithObserver` twice is last-wins: a Runner has exactly one durable sink.
 
-`Transcript.SaveJSONL` and `LoadJSONL` serialize the in-memory view; `LoadJSONL` errors on a line without `schema_version` — pre-schema recordings are unsupported. Both read sides meet at one interface:
+`Transcript.SaveJSONL` and `LoadJSONL` serialize the in-memory view; every `LoadJSONL` line must be a valid `llmkit.Event` (`Event.Validate`'s rule: a known kind carrying exactly its own payload, and a non-zero `schema_version`) or the load errors naming the line. The rule is forward-compatible on the version — a future `schema_version` still loads — but not on kinds: one unknown kind fails the whole load, since a kind this build cannot name cannot be decoded safely. Both read sides meet at one interface:
 
 ```go
 type Source interface {
