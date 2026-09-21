@@ -92,9 +92,34 @@ entry below is marked.
   the run's answer as the Runner stitched it across a max-tokens
   continuation, so a store persists it without re-deriving the stitch.
   Additive; no schema version bump.
+- `llmkit`: `Event.Validate()` — a shape check for sinks, stores, and
+  tests: the Kind must be a declared constant, exactly one payload pointer
+  must be non-nil and be the one the Kind names, and `SchemaVersion` must
+  be non-zero (any non-zero value passes — a newer schema is the sink's
+  business). It never runs on the emission path and does not gate
+  encoding.
+- `provider`: `Tag(spec, opts)` — the provider tag `New` puts on usage and
+  Attempt events (`Options.Provider` when set, else `string(spec.Type)`),
+  exported and called by `New` itself, so `llmkit.Observe` callers pass
+  the same value instead of restating the rule.
 
 ### Changed
 
+- **Breaking:** `FinalizeEvent` loses `Iterations` — `Event.Step` on the
+  finalize event already carries the completed-turn count (the Runner set
+  both from the same value on every exit path). Old recordings still
+  decode: the `iterations` key is ignored. No compatibility aliases.
+  This is a removal at the same schema version (still 1), not a bump —
+  safe only because no store exists yet to branch on the field, which is
+  why it lands before the store round (llmkit-2or.1) freezes the schema.
+- `agent.LoadJSONL` validates every line with `llmkit.Event.Validate`
+  instead of checking only `schema_version`: the load now errors — naming
+  the line — on any line that is not a valid Event: an undeclared kind, a
+  missing payload, a foreign or doubled payload, or a zero
+  `schema_version`. A payload-less `start` line loaded before; it fails
+  now. The rule is forward-compatible on the version (a future
+  `schema_version` still loads) but not on kinds: one unknown kind fails
+  the whole load.
 - **Breaking:** the agent transcript is the new event stream. `agent.Event`/`EventKind` and the `request`/`assistant`/`tool_result` kinds are deleted in favor of `llmkit.Event` (`Transcript.Events` is now `Transcript.Record`, of `llmkit.Event`); `WithTranscriptDir` and `WithTranscriptKey` are removed in favor of `WithObserver(agent.JSONL(dir, onErr))` (the key's motivation moved to `WithRunID`); `Hooks.TranscriptError` is removed (sink failures go to the callback the sink was constructed with); `NewReplayClient` takes `(src Source, run llmkit.RunID, caps)`. There are no compatibility aliases. A tool-call-only assistant turn no longer invents an empty text block in history (llmkit-ly5).
 - **Breaking:** the retry vocabulary moved from the root package into
   `llmkit/retry`: `llmkit.RetryConfig` is now `retry.Config`,

@@ -218,11 +218,11 @@ func (r *Runner) begin(ctx context.Context, cfg runConfig, task string) (context
 
 // emitFinalize closes the run with the Finalize event — emitted on EVERY run
 // end, including error returns: why the run stopped (the truncation reason,
-// when a limit ended it), how many model iterations it took, the run's total
-// usage, the run's answer (Outcome.FinalText, stitched across a max-tokens
-// continuation), and whether a forced-finalization turn fired. Step is the
-// number of completed turns (Outcome.Iterations); a failed completion does
-// not advance it, so a run whose only completion failed reports Step 0.
+// when a limit ended it), the run's total usage, the run's answer
+// (Outcome.FinalText, stitched across a max-tokens continuation), and
+// whether a forced-finalization turn fired. Step carries the number of
+// completed turns (Outcome.Iterations); a failed completion does not
+// advance it, so a run whose only completion failed reports Step 0.
 func (r *Runner) emitFinalize(ctx context.Context, em runEmitter, o *Outcome) {
 	if o == nil {
 		// The run panicked mid-turn (a hook bug): no outcome exists. Still
@@ -235,7 +235,6 @@ func (r *Runner) emitFinalize(ctx context.Context, em runEmitter, o *Outcome) {
 	ev.Finalize = &llmkit.FinalizeEvent{
 		TruncationReason: string(o.TruncationReason),
 		Finalized:        o.Finalized,
-		Iterations:       o.Iterations,
 		Usage:            o.Usage,
 		FinalText:        o.FinalText,
 	}

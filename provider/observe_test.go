@@ -299,3 +299,68 @@ func TestNew_StreamAttemptEventsAfterRetry(t *testing.T) {
 		t.Errorf("completion = %q/%+v, want clean hello", completions[0].Completion.Err, completions[0].Completion.Response)
 	}
 }
+
+// TestTag pins the resolution rule on the exported function: the caller's
+// Options.Provider when set, string(spec.Type) otherwise.
+func TestTag(t *testing.T) {
+	spec := Spec{Type: TypeOpenAICompatible}
+	if got := Tag(spec, Options{}); got != "openai-compatible" {
+		t.Errorf("Tag(zero Options) = %q, want openai-compatible", got)
+	}
+	if got := Tag(spec, Options{Provider: "ledger-name"}); got != "ledger-name" {
+		t.Errorf("Tag(Options.Provider set) = %q, want ledger-name", got)
+	}
+}
+
+// TestNew_AttemptTagMatchesTag pins the seam by construction: New's emitted
+// Attempt tag equals Tag(spec, opts) on both branches, so the exported
+// resolver and the emission path cannot drift. Mutating Tag ALONE (leaving
+// New untouched) breaks this test — the subtest also asserts the branch is
+// actually exercised, so a mutation to either branch cannot hide.
+func TestNew_AttemptTagMatchesTag(t *testing.T) {
+	base := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(mockTextBody("openai-compatible", "hello", 1, 1)))
+	})
+	attemptTag := func(t *testing.T, spec Spec, opts Options) string {
+		t.Helper()
+		capture := &eventCapture{}
+		opts.Observer = capture
+		opts.Retry = fastRetry()
+		client, err := New(context.Background(), spec, opts)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if _, err := client.Complete(context.Background(), simpleRequest()); err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		attempts := capture.byKind(llmkit.KindAttempt)
+		if len(attempts) != 1 {
+			t.Fatalf("attempts = %d, want 1", len(attempts))
+		}
+		return attempts[0].Attempt.Provider
+	}
+
+	t.Run("default branch", func(t *testing.T) {
+		spec := observeSpec(base)
+		var opts Options
+		got := attemptTag(t, spec, opts)
+		if got != Tag(spec, opts) {
+			t.Errorf("New attempt tag = %q, want Tag(spec, opts) = %q", got, Tag(spec, opts))
+		}
+		if got != string(spec.Type) {
+			t.Errorf("New attempt tag = %q, want the default branch %q", got, string(spec.Type))
+		}
+	})
+	t.Run("override branch", func(t *testing.T) {
+		spec := observeSpec(base)
+		opts := Options{Provider: "compat-lane"}
+		got := attemptTag(t, spec, opts)
+		if got != Tag(spec, opts) {
+			t.Errorf("New attempt tag = %q, want Tag(spec, opts) = %q", got, Tag(spec, opts))
+		}
+		if got != "compat-lane" {
+			t.Errorf("New attempt tag = %q, want the override branch %q", got, "compat-lane")
+		}
+	})
+}
