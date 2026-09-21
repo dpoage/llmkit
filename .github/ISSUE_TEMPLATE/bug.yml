@@ -1,0 +1,80 @@
+name: Bug report
+description: Something in llmkit behaves differently than documented.
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: llmkit version
+      description: Output of `go list -m github.com/dpoage/llmkit`, or a commit SHA.
+      placeholder: github.com/dpoage/llmkit v0.5.0
+    validations:
+      required: true
+
+  - type: input
+    id: go
+    attributes:
+      label: Go version
+      description: Output of `go version`.
+      placeholder: go version go1.25.1 linux/amd64
+    validations:
+      required: true
+
+  - type: dropdown
+    id: package
+    attributes:
+      label: Package
+      options:
+        - llmkit (root vocabulary)
+        - provider
+        - agent
+        - retry
+        - sandbox
+        - fsroot
+        - embed
+        - decide
+        - examples
+        - docs
+    validations:
+      required: true
+
+  - type: input
+    id: endpoint
+    attributes:
+      label: Provider and model
+      description: The provider type and model. Name the host for an openai-compatible endpoint. Never paste a key.
+      placeholder: openai-compatible, MiniMax-M3, api.minimax.io
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: State the observed behavior and the documented behavior it contradicts.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: A program or a test the maintainer can run. Reduce it to the smallest case that still fails.
+      render: go
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Output
+      description: The error, the panic, or the test failure, verbatim. Redact credentials.
+      render: text
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched the open and closed issues.
+          required: true
+        - label: This is not a security vulnerability. Those go to Security Advisories.
+          required: true

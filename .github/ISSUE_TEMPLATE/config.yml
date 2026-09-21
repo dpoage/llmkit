@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a vulnerability
+    url: https://github.com/dpoage/llmkit/security/advisories/new
+    about: Report a security issue privately. Never in a public issue.
+  - name: API reference
+    url: https://pkg.go.dev/github.com/dpoage/llmkit
+    about: The canonical reference for every package.
+  - name: Contributing guide
+    url: https://github.com/dpoage/llmkit/blob/master/CONTRIBUTING.md
+    about: The fork and pull request flow, the gate, and the sign-off rule.

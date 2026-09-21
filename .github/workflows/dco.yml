@@ -1,0 +1,29 @@
+# Developer Certificate of Origin gate. Every commit in a pull request must
+# carry a `Signed-off-by:` trailer whose email matches the commit author, so
+# the AGPL inbound contribution has a provenance record. CONTRIBUTING.md
+# explains the trailer and the fix. Merge commits are exempt: their content
+# comes from the parents, which are checked on their own.
+
+name: DCO
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  dco:
+    name: DCO
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: check sign-off
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: .github/dco-check.sh "$BASE" "$HEAD"

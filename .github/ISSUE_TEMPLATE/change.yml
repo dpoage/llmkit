@@ -1,0 +1,63 @@
+name: Change proposal
+description: Propose a new capability, a new adapter, or a change to a public API.
+labels: [proposal]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Agree on a change here before you write it. A rejected proposal costs
+        one paragraph; a rejected pull request costs the work.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What you cannot do today, and what you tried instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: surface
+    attributes:
+      label: Proposed surface
+      description: The signatures, types, or fields you want. Show the call site you wish you could write.
+      render: go
+    validations:
+      required: true
+
+  - type: textarea
+    id: caller
+    attributes:
+      label: Who calls it
+      description: Name a real caller. llmkit does not carry a surface that nothing uses.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: The other designs you weighed, and why this one wins.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: breaking
+    attributes:
+      label: Does this break existing callers?
+      options:
+        - "No"
+        - "Yes"
+        - "Unsure"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: implement
+    attributes:
+      label: Will you implement it?
+      options:
+        - "Yes, if the design is accepted"
+        - "No, I am filing the proposal only"
+    validations:
+      required: true
