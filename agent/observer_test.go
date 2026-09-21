@@ -1195,21 +1195,6 @@ func TestObserver_HookPanicLeavesSinkClean(t *testing.T) {
 	}
 }
 
-// completedSignalClient signals once after its first Complete returns.
-type completedSignalClient struct {
-	inner *fakeClient
-	once  sync.Once
-	hit   chan struct{}
-}
-
-func (c *completedSignalClient) Capabilities() llmkit.Capabilities { return c.inner.Capabilities() }
-
-func (c *completedSignalClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
-	resp, err := c.inner.Complete(ctx, req)
-	c.once.Do(func() { close(c.hit) })
-	return resp, err
-}
-
 // TestObserver_CancelledCallsRecordNotRun pins M18/M19, deterministically:
 // the policy cancels the run inside its own FIRST invocation, so the second
 // call of the turn is never authorized — it records IsError with the
