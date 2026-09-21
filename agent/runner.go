@@ -206,6 +206,11 @@ func (r *Runner) begin(ctx context.Context, cfg runConfig, task string) (context
 	tr.RunID, tr.ParentRunID = runID, cfg.parentRunID
 	em := runEmitter{tr: tr, obs: llmkit.Observers(tr, r.observer)}
 	ev := llmkit.NewEvent(ctx, llmkit.KindStart)
+	// A run opens OUTSIDE any turn: Start is Step 0 even when the context
+	// already carries a step — a nested Runner started from inside a
+	// parent's tool phase, or a caller pre-arming WithStep. The child run's
+	// turns number from 1 in their own right.
+	ev.Step = 0
 	ev.Start = &llmkit.StartEvent{Task: task, Tools: r.toolNames()}
 	em.emit(ctx, ev)
 	return ctx, em
@@ -686,6 +691,10 @@ func (r *Runner) finalizeAndTruncate(
 	}
 	*messages = append(*messages, llmkit.TextMessage(llmkit.RoleUser, finalizePrompt))
 	outcome.Finalized = true
+	// The finalization turn's step rides the context for the hook, the
+	// compaction below, and the completion itself — the same number every
+	// event of this turn reports.
+	ctx = llmkit.WithStep(ctx, outcome.Iterations+1)
 	if r.hooks.Finalize != nil {
 		r.hooks.Finalize(ctx, reason)
 	}
@@ -731,6 +740,9 @@ func (r *Runner) maybeCompact(ctx context.Context, em runEmitter, messages []llm
 	}
 	before := estimateTokens(messages)
 	after := estimateTokens(compacted)
+	// The pruned history's consuming turn rides the hook's context too,
+	// matching the CompactionEvent.Step the event below reports.
+	ctx = llmkit.WithStep(ctx, step)
 	if r.hooks.Compaction != nil {
 		r.hooks.Compaction(ctx, CompactionEvent{
 			Step:         step,
@@ -772,6 +784,11 @@ func (r *Runner) maybeCompact(ctx context.Context, em runEmitter, messages []llm
 // output token cap pays the ONE max-tokens continuation completion on top —
 // the pass is bounded to at most two schema-bearing, tool-less completions.
 func (r *Runner) repair(ctx context.Context, em runEmitter, prompt string, responseSchema json.RawMessage, baseIter int) (*Outcome, error) {
+	// The repair turn's step rides the context from entry: Hooks.Repair —
+	// and any decision observer a policy runs inside it — reads the same
+	// number the repair completion reports (baseIter+1; complete re-wraps
+	// the context with its own step, the same value).
+	ctx = llmkit.WithStep(ctx, baseIter+1)
 	if r.hooks.Repair != nil {
 		r.hooks.Repair(ctx)
 	}

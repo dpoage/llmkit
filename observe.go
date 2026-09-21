@@ -76,11 +76,14 @@ const (
 	KindStart EventKind = "start"
 	// KindCompletion records one logical completion — the request, the final
 	// response or the error, provider and model. Emitted once per completion
-	// by the outermost layer (Runner with Step, or the llmkit.Observe
-	// decorator without), never by the retry stage. The emitter mints a
-	// fresh Event.SpanID per logical completion ([WithSpan]) and passes it
-	// to the client, so the retry stage's Attempts join this event. Payload:
-	// [CompletionEvent].
+	// by the outermost layer — the agent Runner for agent runs, the
+	// llmkit.Observe decorator for bare clients — never by the retry stage.
+	// The emitter mints a fresh Event.SpanID per logical completion
+	// ([WithSpan]) and passes it to the client, so the retry stage's
+	// Attempts join this event: (run_id, span_id) identifies a completion,
+	// (run_id, step) groups a turn's events. Step is the enclosing Runner
+	// turn when the completion fires inside one — a tool's own
+	// decorator-wrapped client included. Payload: [CompletionEvent].
 	KindCompletion EventKind = "completion"
 	// KindAttempt records one provider attempt inside a completion, including
 	// failed ones. Emitted only from the provider retry stage; replay
@@ -130,10 +133,12 @@ const (
 //
 // Header fields every event carries: Kind, RunID (empty outside a run),
 // SpanID (the logical completion a Completion or Attempt belongs to), Step
-// (populated ONLY by the agent Runner; 0 elsewhere), Time (stamped by the
-// emitter when the observed operation ended), Duration, and
-// SchemaVersion ([EventSchemaVersion]). ParentRunID is a run-level fact only
-// the Runner stamps, on continued runs.
+// (the enclosing Runner turn: the Runner sets it on its own events, and
+// decorator-emitted events inside a Runner turn inherit it from the context
+// via [WithStep]; 0 elsewhere), Time (stamped by the emitter when the
+// observed operation ended), Duration, and SchemaVersion
+// ([EventSchemaVersion]). ParentRunID is a run-level fact only the Runner
+// stamps, on continued runs.
 //
 // Two wire facts for sink and replay authors: omitempty collapses empty
 // slices and maps to absent (decoding yields nil, not []), and a
@@ -283,16 +288,19 @@ type SteerEvent struct {
 // Iterations counts the model turns the run took; Usage totals the run's
 // completions; Finalized marks that a forced-finalization turn fired (a
 // fact about the run's shape that is not derivable from the event stream).
-// FinalText is the run's answer as the agent Runner's Outcome carries it —
-// stitched across a max-tokens continuation — recorded so a store can
-// persist the answer without re-deriving the stitch.
 type FinalizeEvent struct {
 	TruncationReason string `json:"truncation_reason,omitempty"`
 	Finalized        bool   `json:"finalized,omitempty"`
 	Iterations       int    `json:"iterations"`
 	Usage            Usage  `json:"usage"`
-	// FinalText is the run's final answer text; empty when the run produced
-	// none (a first-completion failure, for instance).
+	// FinalText is the run's final answer text as the Runner stitched it
+	// across a max-tokens continuation, so a store can persist it without
+	// re-deriving the stitch. Empty when the run produced none: a
+	// first-completion failure, or the hook-panic path that closes the
+	// record with zero counters. A refusal/safety stop (the Runner's
+	// StopReasonError) leaves the model's refusal prose here with no error
+	// marker on the event — cross-read the last Completion's stop_reason to
+	// detect it.
 	FinalText string `json:"final_text,omitempty"`
 }
 

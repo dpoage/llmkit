@@ -277,9 +277,11 @@ func TestNewEventStampsStepFromContext(t *testing.T) {
 	if ev := NewEvent(context.Background(), KindToolRun); ev.Step != 0 {
 		t.Errorf("NewEvent Step outside a turn = %d, want 0", ev.Step)
 	}
-	explicit := NewEvent(WithStep(context.Background(), 3), KindToolRun)
-	explicit.Step = 9
-	if explicit.Step != 9 {
-		t.Errorf("explicit Step assignment lost: got %d, want 9", explicit.Step)
-	}
+	// "Explicit assignment wins" has no meaningful pin at this layer: a
+	// local assignment to a struct field is true by construction and cannot
+	// detect a NewEvent mutant. The real pin is Runner behavior — agent's
+	// nested-Runner test asserts a child run's start event reports Step 0
+	// even though the parent's tool-phase context carried the parent's
+	// turn, which only holds if the Runner's explicit zero beats the
+	// context's value.
 }
