@@ -113,12 +113,13 @@ entry below is marked.
   safe only because no store exists yet to branch on the field, which is
   why it lands before the store round (llmkit-2or.1) freezes the schema.
 - `agent.LoadJSONL` validates every line with `llmkit.Event.Validate`
-  instead of checking only `schema_version`: the load now also errors —
-  naming the line — on an undeclared kind or a payload that is not the one
-  its kind names. The rule is forward-compatible on the version (a future
+  instead of checking only `schema_version`: the load now errors — naming
+  the line — on any line that is not a valid Event: an undeclared kind, a
+  missing payload, a foreign or doubled payload, or a zero
+  `schema_version`. A payload-less `start` line loaded before; it fails
+  now. The rule is forward-compatible on the version (a future
   `schema_version` still loads) but not on kinds: one unknown kind fails
   the whole load.
-
 - **Breaking:** the agent transcript is the new event stream. `agent.Event`/`EventKind` and the `request`/`assistant`/`tool_result` kinds are deleted in favor of `llmkit.Event` (`Transcript.Events` is now `Transcript.Record`, of `llmkit.Event`); `WithTranscriptDir` and `WithTranscriptKey` are removed in favor of `WithObserver(agent.JSONL(dir, onErr))` (the key's motivation moved to `WithRunID`); `Hooks.TranscriptError` is removed (sink failures go to the callback the sink was constructed with); `NewReplayClient` takes `(src Source, run llmkit.RunID, caps)`. There are no compatibility aliases. A tool-call-only assistant turn no longer invents an empty text block in history (llmkit-ly5).
 - **Breaking:** the retry vocabulary moved from the root package into
   `llmkit/retry`: `llmkit.RetryConfig` is now `retry.Config`,

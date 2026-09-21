@@ -1099,6 +1099,14 @@ func TestEventValidate(t *testing.T) {
 		if err == nil {
 			t.Fatal("Validate = nil, want an error")
 		}
+		// The n==2 shape is exact: both names, no elision — restoring the
+		// unconditional ", ..." must fail here.
+		if !strings.Contains(err.Error(), "2 payload fields (Embed and Exec)") {
+			t.Errorf("error %q does not read as the exact two-payload message", err)
+		}
+		if strings.Contains(err.Error(), ", ...") {
+			t.Errorf("error %q elides nothing at n==2; want no \", ...\"", err)
+		}
 		for _, want := range []string{string(KindEmbed), "Embed", "Exec"} {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("error %q does not name %q", err, want)
@@ -1177,13 +1185,18 @@ func TestGoldenEventsValidate(t *testing.T) {
 // mapping. The mapping lives in four code sites beside the constants; this
 // test mechanically checks two of them — the kindPayloadField map (both
 // directions: every payload field mapped, every map value a real field) and
-// scanPayloads (behaviorally: each field's own kind must validate) — and
-// the failure messages name the remaining sites (the Kind-constant and
-// Event-field docs, payloadSlots here) for manual wiring. Without the
-// guard, a kind added to kindPayloadField but forgotten in scanPayloads
+// scanPayloads (behaviorally: each field's own kind must validate). The
+// failure messages point at the site to fix (payloadSlots included); the
+// Kind-constant and Event-field doc lines have no mechanical check.
+//
+// Residual hole: a newly declared EventKind constant with no payload field
+// and no map entry is invisible here — nothing enumerates the constants.
+// Validate rejects such events as an unknown kind, so decoders fail loudly,
+// but nothing trips on the emission side. Without the guard's existing
+// coverage, a kind added to kindPayloadField but forgotten in scanPayloads
 // accepts a two-payload event AND rejects its own well-formed event with
-// the whole suite green. Same class of check provider/live_registry_test.go
-// applies to Capabilities.
+// the whole suite green. Same class of check
+// provider/live_registry_test.go applies to Capabilities.
 func TestEventPayloadMappingGuard(t *testing.T) {
 	et := reflect.TypeOf(Event{})
 
