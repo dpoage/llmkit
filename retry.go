@@ -38,10 +38,12 @@ func WithRetry(c Client, cfg retry.Config) Client {
 // never drops the timed-out attempts and never sees a leftover per-attempt
 // deadline. SpanID is inherited from the context, so the attempts join the
 // Completion event their emitter minted ([Observe] or the agent Runner) on
-// SpanID; Step stays 0. On final failure the stage returns the zero
-// Response to the caller — WithRetry behaviour, unchanged; [Observe], by
-// contrast, passes the inner (response, error) pair through. The stage
-// never emits a Completion event — the outermost harness layer owns that.
+// SpanID; Step follows the context ([WithStep]) the same way, so an attempt
+// inside a Runner turn carries the enclosing turn. On final failure the
+// stage returns the zero Response to the caller — WithRetry behaviour,
+// unchanged; [Observe], by contrast, passes the inner (response, error)
+// pair through. The stage never emits a Completion event — the outermost
+// harness layer owns that.
 func WithRetryObserver(c Client, cfg retry.Config, obs Observer, provider, model string) Client {
 	return &retryClient{inner: c, cfg: cfg, obs: obs, provider: provider, model: model}
 }

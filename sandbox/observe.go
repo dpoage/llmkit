@@ -13,9 +13,9 @@ import (
 // the Result, any error, and MaterializeWorkspace pass through unchanged
 // (MaterializeWorkspace emits nothing). A nil obs returns s itself.
 //
-// The event inherits llmkit.Event.RunID and llmkit.Event.SpanID from the
-// call's context (llmkit.NewEvent); Observe never mints a span — only
-// Completion emitters do. Populated fields:
+// The event inherits llmkit.Event.RunID, llmkit.Event.SpanID, and
+// llmkit.Event.Step from the call's context (llmkit.NewEvent); Observe
+// never mints a span — only Completion emitters do. Populated fields:
 //   - Backend: the concrete backend — "cli", "bwrap", and "host" match
 //     UnsupportedSpecError.Backend; "mock" is this package's own name for
 //     the backend that refuses nothing; a nested Observe reports its

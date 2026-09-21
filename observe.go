@@ -28,8 +28,9 @@ import (
 // SpanID as its Completion — Attempts join on SpanID, not on time windows,
 // and nested completions (a tool calling the model) get their own span.
 //
-// Run identity: events carry the run's [RunID] (from the context, see
-// [WithRun]); only the agent Runner stamps ParentRunID and Step.
+// Run identity: events carry the run's [RunID] from the context (see
+// [WithRun]); ParentRunID is stamped only by the agent Runner, and Step
+// follows the context ([WithStep]) wherever a Runner turn is in scope.
 type Observer interface {
 	Observe(ctx context.Context, ev Event)
 }
@@ -75,16 +76,20 @@ const (
 	KindStart EventKind = "start"
 	// KindCompletion records one logical completion — the request, the final
 	// response or the error, provider and model. Emitted once per completion
-	// by the outermost layer (Runner with Step, or the llmkit.Observe
-	// decorator without), never by the retry stage. The emitter mints a
-	// fresh Event.SpanID per logical completion ([WithSpan]) and passes it
-	// to the client, so the retry stage's Attempts join this event. Payload:
-	// [CompletionEvent].
+	// by the outermost layer — the agent Runner for agent runs, the
+	// llmkit.Observe decorator for bare clients — never by the retry stage.
+	// The emitter mints a fresh Event.SpanID per logical completion
+	// ([WithSpan]) and passes it to the client, so the retry stage's
+	// Attempts join this event: (run_id, span_id) identifies a completion,
+	// (run_id, step) groups a turn's events. Step is the enclosing Runner
+	// turn when the completion fires inside one — a tool's own
+	// decorator-wrapped client included. Payload: [CompletionEvent].
 	KindCompletion EventKind = "completion"
 	// KindAttempt records one provider attempt inside a completion, including
 	// failed ones. Emitted only from the provider retry stage; replay
 	// consumes Completion, not Attempt. Carries the Completion's Event.SpanID.
-	// Payload: [AttemptEvent]. Step 0.
+	// Payload: [AttemptEvent]. Step is the enclosing turn when emitted inside
+	// a Runner turn, else 0.
 	KindAttempt EventKind = "attempt"
 	// KindToolRun records one tool call: the model's call, the textual
 	// result, and whether it errored. A policy denial is the same kind with
@@ -107,15 +112,17 @@ const (
 	// KindDecision records one decision-model call: the judged state, the
 	// questions asked and the answers returned (or the error). The payload
 	// mirrors the decide package's vocabulary in root-owned structs so the
-	// root package never imports decide. Payload: [DecisionEvent]. Step 0.
+	// root package never imports decide. Payload: [DecisionEvent]. Step is the
+	// enclosing turn when emitted inside a Runner turn, else 0.
 	KindDecision EventKind = "decision"
 	// KindEmbed records one embedding call: model, input count, resulting
-	// dimensions, cache hits, usage, or the error. Payload: [EmbedEvent].
-	// Step 0.
+	// dimensions, cache hits, usage, or the error. Payload: [EmbedEvent]. Step
+	// is the enclosing turn when emitted inside a Runner turn, else 0.
 	KindEmbed EventKind = "embed"
 	// KindExec records one sandbox execution: backend, command, exit code,
 	// captured byte counts, whether output was truncated, or the error.
-	// Payload: [ExecEvent]. Step 0.
+	// Payload: [ExecEvent]. Step is the enclosing turn when emitted inside a
+	// Runner turn, else 0.
 	KindExec EventKind = "exec"
 )
 
@@ -126,10 +133,12 @@ const (
 //
 // Header fields every event carries: Kind, RunID (empty outside a run),
 // SpanID (the logical completion a Completion or Attempt belongs to), Step
-// (populated ONLY by the agent Runner; 0 elsewhere), Time (stamped by the
-// emitter when the observed operation ended), Duration, and
-// SchemaVersion ([EventSchemaVersion]). ParentRunID is a run-level fact only
-// the Runner stamps, on continued runs.
+// (the enclosing Runner turn: the Runner sets it on its own events, and
+// decorator-emitted events inside a Runner turn inherit it from the context
+// via [WithStep]; 0 elsewhere), Time (stamped by the emitter when the
+// observed operation ended), Duration, and SchemaVersion
+// ([EventSchemaVersion]). ParentRunID is a run-level fact only the Runner
+// stamps, on continued runs.
 //
 // Two wire facts for sink and replay authors: omitempty collapses empty
 // slices and maps to absent (decoding yields nil, not []), and a
@@ -148,8 +157,11 @@ type Event struct {
 	// the client in the context, the retry stage inherits it, so an Attempt
 	// joins its Completion on SpanID. A nested completion gets its own span.
 	SpanID SpanID `json:"span_id,omitempty"`
-	// Step is the 1-based model turn within an agent run, set only on events
-	// the Runner emits; 0 on decorator-emitted events.
+	// Step is the 1-based model turn within an agent run. The Runner sets it
+	// explicitly on every event it emits; decorator-emitted events inside a
+	// Runner turn — the retry stage's Attempt, a decision, a sandbox Exec or
+	// embedding from a tool — inherit it from the context ([WithStep]) via
+	// [NewEvent]. 0 outside a Runner turn.
 	Step int `json:"step,omitempty"`
 	// Time is when the observed operation ended, set by the emitter. Sinks
 	// never re-stamp it.
@@ -281,6 +293,15 @@ type FinalizeEvent struct {
 	Finalized        bool   `json:"finalized,omitempty"`
 	Iterations       int    `json:"iterations"`
 	Usage            Usage  `json:"usage"`
+	// FinalText is the run's final answer text as the Runner stitched it
+	// across a max-tokens continuation, so a store can persist it without
+	// re-deriving the stitch. Empty when the run produced none: a
+	// first-completion failure, or the hook-panic path that closes the
+	// record with zero counters. A refusal/safety stop (the Runner's
+	// StopReasonError) leaves the model's refusal prose here with no error
+	// marker on the event — cross-read the last Completion's stop_reason to
+	// detect it.
+	FinalText string `json:"final_text,omitempty"`
 }
 
 // DecisionEvent records one decision-model call ([KindDecision]). The

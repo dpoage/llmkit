@@ -206,6 +206,11 @@ func (r *Runner) begin(ctx context.Context, cfg runConfig, task string) (context
 	tr.RunID, tr.ParentRunID = runID, cfg.parentRunID
 	em := runEmitter{tr: tr, obs: llmkit.Observers(tr, r.observer)}
 	ev := llmkit.NewEvent(ctx, llmkit.KindStart)
+	// A run opens OUTSIDE any turn: Start is Step 0 even when the context
+	// already carries a step — a nested Runner started from inside a
+	// parent's tool phase, or a caller pre-arming WithStep. The child run's
+	// turns number from 1 in their own right.
+	ev.Step = 0
 	ev.Start = &llmkit.StartEvent{Task: task, Tools: r.toolNames()}
 	em.emit(ctx, ev)
 	return ctx, em
@@ -214,9 +219,10 @@ func (r *Runner) begin(ctx context.Context, cfg runConfig, task string) (context
 // emitFinalize closes the run with the Finalize event — emitted on EVERY run
 // end, including error returns: why the run stopped (the truncation reason,
 // when a limit ended it), how many model iterations it took, the run's total
-// usage, and whether a forced-finalization turn fired. Step is the number of
-// completed turns (Outcome.Iterations); a failed completion does not advance
-// it, so a run whose only completion failed reports Step 0.
+// usage, the run's answer (Outcome.FinalText, stitched across a max-tokens
+// continuation), and whether a forced-finalization turn fired. Step is the
+// number of completed turns (Outcome.Iterations); a failed completion does
+// not advance it, so a run whose only completion failed reports Step 0.
 func (r *Runner) emitFinalize(ctx context.Context, em runEmitter, o *Outcome) {
 	if o == nil {
 		// The run panicked mid-turn (a hook bug): no outcome exists. Still
@@ -231,6 +237,7 @@ func (r *Runner) emitFinalize(ctx context.Context, em runEmitter, o *Outcome) {
 		Finalized:        o.Finalized,
 		Iterations:       o.Iterations,
 		Usage:            o.Usage,
+		FinalText:        o.FinalText,
 	}
 	em.emit(ctx, ev)
 }
@@ -684,6 +691,10 @@ func (r *Runner) finalizeAndTruncate(
 	}
 	*messages = append(*messages, llmkit.TextMessage(llmkit.RoleUser, finalizePrompt))
 	outcome.Finalized = true
+	// The finalization turn's step rides the context for the hook, the
+	// compaction below, and the completion itself — the same number every
+	// event of this turn reports.
+	ctx = llmkit.WithStep(ctx, outcome.Iterations+1)
 	if r.hooks.Finalize != nil {
 		r.hooks.Finalize(ctx, reason)
 	}
@@ -729,6 +740,9 @@ func (r *Runner) maybeCompact(ctx context.Context, em runEmitter, messages []llm
 	}
 	before := estimateTokens(messages)
 	after := estimateTokens(compacted)
+	// The pruned history's consuming turn rides the hook's context too,
+	// matching the CompactionEvent.Step the event below reports.
+	ctx = llmkit.WithStep(ctx, step)
 	if r.hooks.Compaction != nil {
 		r.hooks.Compaction(ctx, CompactionEvent{
 			Step:         step,
@@ -770,6 +784,11 @@ func (r *Runner) maybeCompact(ctx context.Context, em runEmitter, messages []llm
 // output token cap pays the ONE max-tokens continuation completion on top —
 // the pass is bounded to at most two schema-bearing, tool-less completions.
 func (r *Runner) repair(ctx context.Context, em runEmitter, prompt string, responseSchema json.RawMessage, baseIter int) (*Outcome, error) {
+	// The repair turn's step rides the context from entry: Hooks.Repair —
+	// and any decision observer a policy runs inside it — reads the same
+	// number the repair completion reports (baseIter+1; complete re-wraps
+	// the context with its own step, the same value).
+	ctx = llmkit.WithStep(ctx, baseIter+1)
 	if r.hooks.Repair != nil {
 		r.hooks.Repair(ctx)
 	}
@@ -964,6 +983,12 @@ func (r *Runner) complete(ctx context.Context, em runEmitter, messages []llmkit.
 	// incremented only after the call returns, keeping the hook pair's step
 	// identical.
 	step := outcome.Iterations + 1
+	// The turn's Step rides the context for everything this completion
+	// touches — the request policy, the hooks, and the client, whose retry
+	// stage reads it into its Attempt events — so decorator-emitted events
+	// join the Runner's own on Step, not just on SpanID. Placed before the
+	// span mint below because the policy and BeforeCompletion fire first.
+	ctx = llmkit.WithStep(ctx, step)
 	// The clone isolates the loop's history from slice-level edits by the
 	// policy; the post-policy slice is what the wire and the transcript see.
 	if r.requestPolicy != nil {
@@ -1173,6 +1198,12 @@ type toolResult struct {
 // the same panic value in both modes.
 func (r *Runner) executeTools(ctx context.Context, outcome *Outcome, calls []llmkit.ToolCall) []toolResult {
 	results := make([]toolResult, len(calls))
+	// The turn's Step rides the whole tool phase's context — the ToolPolicy
+	// (and any decision observer inside one), the ToolStart/ToolEnd hooks,
+	// and Tool.Run itself, hence any decorator a tool calls through — so
+	// decorator-emitted events carry the same turn the Runner's own ToolRun
+	// events name.
+	ctx = llmkit.WithStep(ctx, outcome.Iterations)
 	// Every call of the turn is authorized before the first Tool.Run, in
 	// both modes, so an interactive policy never overlaps the fan-out.
 	dispatch, denied := r.authorizeCalls(ctx, calls, results)

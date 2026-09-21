@@ -12,9 +12,9 @@ import (
 // e: results, errors, Dimensions, and ModelName pass through unchanged. A
 // nil obs returns e itself.
 //
-// The event inherits llmkit.Event.RunID and llmkit.Event.SpanID from the
-// call's context (llmkit.NewEvent); Observe never mints a span — only
-// Completion emitters do. Populated fields:
+// The event inherits llmkit.Event.RunID, llmkit.Event.SpanID, and
+// llmkit.Event.Step from the call's context (llmkit.NewEvent); Observe
+// never mints a span — only Completion emitters do. Populated fields:
 //
 //   - Model: e.ModelName().
 //   - Inputs: 1 for Embed, len(texts) for EmbedBatch — the requested input

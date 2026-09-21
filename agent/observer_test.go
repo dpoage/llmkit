@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/retry"
 )
 
 // --- scripted client + tools for the event-kind coverage run ---------------
@@ -2160,5 +2161,415 @@ func TestObserver_ReentrantOnErrDoesNotDeadlock(t *testing.T) {
 	defer mu.Unlock()
 	if reentries < 5 {
 		t.Errorf("only %d reports re-entered the sink (of %d); the test proved nothing", reentries, reports)
+	}
+}
+
+// --- 4qh.7: decorator-emitted events inside a Runner turn carry the Step --
+
+// TestObserver_DecoratorAttemptCarriesTurnStep pins the retry-stage half of
+// llmkit.WithStep: a Runner driving a retry-wrapped client hands the turn's
+// Step in the completion context, so the retry stage's Attempt events —
+// built by llmkit.NewEvent from that context — carry the enclosing turn and
+// join the Runner's own Completion events on Step as well as SpanID.
+func TestObserver_DecoratorAttemptCarriesTurnStep(t *testing.T) {
+	var mu sync.Mutex
+	var attempts []llmkit.Event
+	fc := newFakeClient(
+		scriptStep{err: &llmkit.APIError{Kind: llmkit.ErrRateLimited, StatusCode: 429, Provider: "fake", Message: "429"}},
+		textResp("done", 1, 1),
+	)
+	client := llmkit.WithRetryObserver(fc, retry.Config{
+		MaxAttempts: 2,
+		BaseDelay:   time.Millisecond,
+		MaxDelay:    time.Millisecond,
+	}, llmkit.ObserverFunc(func(_ context.Context, ev llmkit.Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		attempts = append(attempts, ev)
+	}), "fake", "m")
+	r := NewRunner(client, nil, "sys")
+	out, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(attempts) != 2 {
+		t.Fatalf("attempt events = %d, want 2 (one failure, one success)", len(attempts))
+	}
+	for i, ev := range attempts {
+		if ev.Kind != llmkit.KindAttempt {
+			t.Fatalf("event %d = %s, want attempt", i, ev.Kind)
+		}
+		if ev.Step != 1 {
+			t.Errorf("attempt %d Step = %d, want 1 (the enclosing turn)", i, ev.Step)
+		}
+		if ev.RunID != out.RunID {
+			t.Errorf("attempt %d RunID = %q, want %q", i, ev.RunID, out.RunID)
+		}
+	}
+}
+
+// observeTool mimics a decorator-wrapped boundary (sandbox.Observe,
+// embed.Observe): its Run builds its event with llmkit.NewEvent from the
+// context it was handed, exactly the way the decorators emit.
+type observeTool struct {
+	name   string
+	mu     sync.Mutex
+	events []llmkit.Event
+}
+
+func (t *observeTool) Def() llmkit.ToolDef {
+	return llmkit.ToolDef{Name: t.name, Description: "emits an event", Parameters: json.RawMessage(`{"type":"object"}`)}
+}
+
+func (t *observeTool) Run(ctx context.Context, _ json.RawMessage) (string, error) {
+	ev := llmkit.NewEvent(ctx, llmkit.KindExec)
+	ev.Exec = &llmkit.ExecEvent{Backend: "fake", Command: []string{"true"}}
+	t.mu.Lock()
+	t.events = append(t.events, ev)
+	t.mu.Unlock()
+	return "ok", nil
+}
+
+// TestObserver_DecoratorEventInsideToolCarriesTurnStep pins the tool-phase
+// half of llmkit.WithStep: a decorator-style event emitted from inside
+// Tool.Run carries the turn whose tool ran, read from the context the
+// Runner extends for the whole tool phase.
+func TestObserver_DecoratorEventInsideToolCarriesTurnStep(t *testing.T) {
+	tool := &observeTool{name: "observe_me"}
+	fc := newFakeClient(
+		toolResp("c1", "observe_me", `{}`, 1, 1),
+		textResp("done", 1, 1),
+	)
+	r := NewRunner(fc, []Tool{tool}, "sys")
+	out, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	tool.mu.Lock()
+	defer tool.mu.Unlock()
+	if len(tool.events) != 1 {
+		t.Fatalf("tool-emitted events = %d, want 1", len(tool.events))
+	}
+	ev := tool.events[0]
+	if ev.Step != 1 {
+		t.Errorf("tool-emitted event Step = %d, want 1 (the turn whose tool ran)", ev.Step)
+	}
+	if ev.RunID != out.RunID {
+		t.Errorf("tool-emitted event RunID = %q, want %q", ev.RunID, out.RunID)
+	}
+}
+
+// TestObserver_FinalizeCarriesFinalText pins the FinalizeEvent.FinalText
+// contract: the Finalize event carries the run's answer as the Outcome saw
+// it — the STITCHED text after a max-tokens continuation, which a sink
+// cannot re-derive from the stream because stitchContinuation is unexported.
+func TestObserver_FinalizeCarriesFinalText(t *testing.T) {
+	fc := newFakeClient(
+		maxTokensResp("half an", 10, 5),
+		textResp("answer", 10, 5),
+	)
+	r := NewRunner(fc, nil, "sys")
+	out, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out.FinalText != "half answer" {
+		t.Fatalf("Outcome.FinalText = %q, want the stitched %q", out.FinalText, "half answer")
+	}
+	final := out.Transcript.Record[len(out.Transcript.Record)-1]
+	if final.Kind != llmkit.KindFinalize {
+		t.Fatalf("last event = %s, want finalize", final.Kind)
+	}
+	if final.Finalize.FinalText != out.FinalText {
+		t.Errorf("Finalize.FinalText = %q, want the Outcome's %q", final.Finalize.FinalText, out.FinalText)
+	}
+}
+
+// TestObserver_RunJSONRepairFinalizeCarriesFinalText extends FinalText to
+// the repair path: when RunJSON's answer needed the repair round-trip, the
+// deferred Finalize reports the REPAIR completion's text — the run's last
+// word, which is what a store must persist.
+func TestObserver_RunJSONRepairFinalizeCarriesFinalText(t *testing.T) {
+	fc := newFakeClient(
+		textResp("here is the answer: not json at all", 5, 5),
+		textResp(`{"path":"c.go","note":"fixed"}`, 5, 5),
+	)
+	r := NewRunner(fc, nil, "sys")
+	var got item
+	out, err := r.RunJSON(context.Background(), "task", json.RawMessage(`{"type":"object"}`), &got)
+	if err != nil {
+		t.Fatalf("RunJSON: %v", err)
+	}
+	want := `{"path":"c.go","note":"fixed"}`
+	if out.FinalText != want {
+		t.Fatalf("Outcome.FinalText = %q, want the repair completion %q", out.FinalText, want)
+	}
+	final := out.Transcript.Record[len(out.Transcript.Record)-1]
+	if final.Kind != llmkit.KindFinalize {
+		t.Fatalf("last event = %s, want finalize", final.Kind)
+	}
+	if final.Finalize.FinalText != want {
+		t.Errorf("Finalize.FinalText = %q, want the repaired final text %q", final.Finalize.FinalText, want)
+	}
+}
+
+// spawnRunnerTool runs a CHILD Runner from inside Tool.Run — the nested
+// harness case whose context still carries the parent turn's step.
+type spawnRunnerTool struct {
+	child *Runner
+	mu    sync.Mutex
+	out   *Outcome
+}
+
+func (t *spawnRunnerTool) Def() llmkit.ToolDef {
+	return llmkit.ToolDef{Name: "spawn", Description: "runs a nested agent", Parameters: json.RawMessage(`{"type":"object"}`)}
+}
+
+func (t *spawnRunnerTool) Run(ctx context.Context, _ json.RawMessage) (string, error) {
+	out, err := t.child.Run(ctx, "child task")
+	if err != nil {
+		return "", err
+	}
+	t.mu.Lock()
+	t.out = out
+	t.mu.Unlock()
+	return "spawned", nil
+}
+
+// TestObserver_NestedRunnerStartDoesNotInheritForeignStep pins the explicit
+// zero in begin(): a child Runner started from inside a parent's tool phase
+// reads the PARENT's turn from the context, and its Start event must still
+// report Step 0 — the child run's turns number from 1 in their own right.
+// This is also the real "explicit assignment wins" pin: nothing at the
+// NewEvent layer can detect a mutant that drops the explicit value.
+func TestObserver_NestedRunnerStartDoesNotInheritForeignStep(t *testing.T) {
+	child := NewRunner(newFakeClient(textResp("child answer", 1, 1)), nil, "sys")
+	spawn := &spawnRunnerTool{child: child}
+	warmup := &ctxTool{name: "warmup", payload: 2}
+	fc := newFakeClient(
+		toolResp("c1", "warmup", `{}`, 1, 1),
+		toolResp("c2", "spawn", `{}`, 1, 1),
+		textResp("done", 1, 1),
+	)
+	r := NewRunner(fc, []Tool{warmup, spawn}, "sys")
+	if _, err := r.Run(context.Background(), "parent task"); err != nil {
+		t.Fatalf("parent Run: %v", err)
+	}
+	spawn.mu.Lock()
+	out := spawn.out
+	spawn.mu.Unlock()
+	if out == nil {
+		t.Fatal("child run never recorded; the spawn tool did not run")
+	}
+	rec := out.Transcript.Record
+	if len(rec) != 3 {
+		t.Fatalf("child events = %d, want start+completion+finalize", len(rec))
+	}
+	if rec[0].Kind != llmkit.KindStart || rec[0].Step != 0 {
+		t.Errorf("child start = %s step %d, want start at step 0 (not the parent's turn 2)", rec[0].Kind, rec[0].Step)
+	}
+	if rec[1].Kind != llmkit.KindCompletion || rec[1].Step != 1 {
+		t.Errorf("child completion = %s step %d, want completion at step 1", rec[1].Kind, rec[1].Step)
+	}
+	if rec[2].Kind != llmkit.KindFinalize || rec[2].Step != 1 {
+		t.Errorf("child finalize = %s step %d, want finalize at step 1", rec[2].Kind, rec[2].Step)
+	}
+}
+
+// TestObserver_PolicyAndHookCtxCarryStep pins the placement of WithStep in
+// complete(): it precedes the span mint, so RequestPolicy.PrepareRequest and
+// Hooks.BeforeCompletion — the two fire points BEFORE the wire call — read
+// the same turn from their context that the step argument carries.
+func TestObserver_PolicyAndHookCtxCarryStep(t *testing.T) {
+	var mu sync.Mutex
+	var policyCtx, policyArg, hookCtx, hookArg []int
+	warmup := &ctxTool{name: "warmup", payload: 2}
+	fc := newFakeClient(
+		toolResp("c1", "warmup", `{}`, 1, 1),
+		toolResp("c2", "warmup", `{}`, 1, 1),
+		textResp("three", 1, 1),
+	)
+	r := NewRunner(fc, []Tool{warmup}, "sys",
+		WithRequestPolicy(RequestPolicyFunc(func(ctx context.Context, step int, _ *llmkit.Request) error {
+			mu.Lock()
+			policyCtx, policyArg = append(policyCtx, llmkit.StepFromContext(ctx)), append(policyArg, step)
+			mu.Unlock()
+			return nil
+		})),
+		WithHooks(Hooks{BeforeCompletion: func(ctx context.Context, step int, _ *llmkit.Request) {
+			mu.Lock()
+			hookCtx, hookArg = append(hookCtx, llmkit.StepFromContext(ctx)), append(hookArg, step)
+			mu.Unlock()
+		}}),
+	)
+	if _, err := r.Run(context.Background(), "task"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !reflect.DeepEqual(policyCtx, []int{1, 2, 3}) {
+		t.Errorf("RequestPolicy ctx steps = %v, want [1 2 3] (WithStep must precede the span mint)", policyCtx)
+	}
+	if !reflect.DeepEqual(hookCtx, []int{1, 2, 3}) {
+		t.Errorf("BeforeCompletion ctx steps = %v, want [1 2 3]", hookCtx)
+	}
+	if !reflect.DeepEqual(policyCtx, policyArg) || !reflect.DeepEqual(hookCtx, hookArg) {
+		t.Errorf("ctx steps diverge from the step arguments: policy %v/%v hooks %v/%v", policyCtx, policyArg, hookCtx, hookArg)
+	}
+}
+
+// TestObserver_FinalizeCarriesFinalText_Truncated pins FinalText on the
+// truncation path: a run stopped by the iteration cap still reports the last
+// turn's answer, truncation reason and all — a store needs the text
+// regardless of why the run stopped.
+func TestObserver_FinalizeCarriesFinalText_Truncated(t *testing.T) {
+	probe := &ctxTool{name: "probe", payload: 2}
+	fc := newFakeClient(
+		// Turn 1 carries text AND a tool call, so the loop continues past it
+		// and the iteration cap truncates the run with that text as FinalText.
+		scriptStep{resp: llmkit.Response{
+			Text:       "working on it",
+			StopReason: llmkit.StopToolUse,
+			ToolCalls:  []llmkit.ToolCall{{ID: "c1", Name: "probe", Arguments: json.RawMessage(`{}`)}},
+		}},
+	)
+	r := NewRunner(fc, []Tool{probe}, "sys", WithLimits(Limits{MaxIterations: 1}))
+	out, err := r.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !out.Truncated() || out.TruncationReason != TruncMaxIterations {
+		t.Fatalf("TruncationReason = %q, want %q", out.TruncationReason, TruncMaxIterations)
+	}
+	if out.FinalText != "working on it" {
+		t.Fatalf("Outcome.FinalText = %q, want the truncated run's last text", out.FinalText)
+	}
+	final := out.Transcript.Record[len(out.Transcript.Record)-1]
+	if final.Kind != llmkit.KindFinalize || final.Finalize.FinalText != "working on it" {
+		t.Errorf("finalize FinalText = %q, want %q even on a truncated run", final.Finalize.FinalText, "working on it")
+	}
+}
+func TestObserver_FinalizeCarriesFinalText_TextThenError(t *testing.T) {
+	probe := &ctxTool{name: "probe", payload: 2}
+	fc := newFakeClient(
+		scriptStep{resp: llmkit.Response{
+			Text:       "looking into it",
+			StopReason: llmkit.StopToolUse,
+			ToolCalls:  []llmkit.ToolCall{{ID: "c1", Name: "probe", Arguments: json.RawMessage(`{}`)}},
+		}},
+		scriptStep{err: errors.New("boom")},
+	)
+	r := NewRunner(fc, []Tool{probe}, "sys")
+	out, err := r.Run(context.Background(), "task")
+	if err == nil {
+		t.Fatal("Run succeeded; wanted the turn-2 client error")
+	}
+	if out.FinalText != "looking into it" {
+		t.Fatalf("Outcome.FinalText = %q, want turn 1's text", out.FinalText)
+	}
+	final := out.Transcript.Record[len(out.Transcript.Record)-1]
+	if final.Kind != llmkit.KindFinalize {
+		t.Fatalf("last event = %s, want finalize", final.Kind)
+	}
+	if final.Finalize.FinalText != "looking into it" {
+		t.Errorf("Finalize.FinalText = %q, want %q even though the run errored", final.Finalize.FinalText, "looking into it")
+	}
+	if final.Step != 1 {
+		t.Errorf("finalize step = %d, want 1 (the failed completion does not advance)", final.Step)
+	}
+}
+
+// TestHooks_CtxStep_Compaction pins the hook-ctx half of the WithStep
+// wiring: when Hooks.Compaction fires, its context carries the same step
+// the CompactionEvent reports.
+func TestHooks_CtxStep_Compaction(t *testing.T) {
+	big := &ctxTool{name: "big", payload: 2000}
+	var mu sync.Mutex
+	var pairs [][2]int
+	fc := newFakeClient(
+		toolResp("c1", "big", `{}`, 1, 1),
+		toolResp("c2", "big", `{}`, 1, 1),
+		toolResp("c3", "big", `{}`, 1, 1),
+		toolResp("c4", "big", `{}`, 1, 1),
+		toolResp("c5", "big", `{}`, 1, 1),
+		textResp("done", 1, 1),
+	)
+	r := NewRunner(fc, []Tool{big}, "sys",
+		WithHooks(Hooks{Compaction: func(ctx context.Context, ev CompactionEvent) {
+			mu.Lock()
+			pairs = append(pairs, [2]int{llmkit.StepFromContext(ctx), ev.Step})
+			mu.Unlock()
+		}}),
+		WithLimits(Limits{MaxIterations: 6, HistoryTokenBudget: 800}),
+	)
+	if _, err := r.Run(context.Background(), "task"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	// The fifth 2000-byte result pushes the oldest outside the recent window
+	// (compactRecentToolResults = 4), so exactly one pass fires before turn 6.
+	if len(pairs) != 1 {
+		t.Fatalf("compaction hooks = %d, want exactly 1", len(pairs))
+	}
+	if pairs[0] != [2]int{6, 6} {
+		t.Errorf("compaction hook ctx step/event step = %v, want [6 6]", pairs[0])
+	}
+}
+
+// TestHooks_CtxStep_RepairAndFinalize pins the two RunJSON hook contexts:
+// Hooks.Finalize reads the reserved finalization turn's step, Hooks.Repair
+// reads the repair turn's step — in both cases the same number the turn's
+// completion event reports.
+func TestHooks_CtxStep_RepairAndFinalize(t *testing.T) {
+	var mu sync.Mutex
+	var finalizeCtx, repairCtx []int
+	probe := &ctxTool{name: "probe", payload: 2}
+	fc := newFakeClient(
+		toolResp("c1", "probe", `{}`, 1, 1),
+		toolResp("c2", "probe", `{}`, 1, 1),
+		textResp("garbage three", 5, 5),
+		textResp(`{"path":"r.go","note":"ok"}`, 5, 5),
+	)
+	r := NewRunner(fc, []Tool{probe}, "sys",
+		WithHooks(Hooks{
+			Finalize: func(ctx context.Context, _ TruncationReason) {
+				mu.Lock()
+				finalizeCtx = append(finalizeCtx, llmkit.StepFromContext(ctx))
+				mu.Unlock()
+			},
+			Repair: func(ctx context.Context) {
+				mu.Lock()
+				repairCtx = append(repairCtx, llmkit.StepFromContext(ctx))
+				mu.Unlock()
+			},
+		}),
+		WithLimits(Limits{MaxIterations: 2}),
+	)
+	var got item
+	out, err := r.RunJSON(context.Background(), "task", json.RawMessage(`{"type":"object"}`), &got)
+	if err != nil {
+		t.Fatalf("RunJSON: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	// Cross-check the turn numbering the hooks must match: completions at
+	// steps 1, 2 (main run), 3 (forced finalization), 4 (repair).
+	var completionSteps []int
+	for _, ev := range out.Transcript.Record {
+		if ev.Kind == llmkit.KindCompletion {
+			completionSteps = append(completionSteps, ev.Step)
+		}
+	}
+	if !reflect.DeepEqual(completionSteps, []int{1, 2, 3, 4}) {
+		t.Fatalf("completion steps = %v, want [1 2 3 4]", completionSteps)
+	}
+	if !reflect.DeepEqual(finalizeCtx, []int{3}) {
+		t.Errorf("Finalize hook ctx steps = %v, want [3] (the finalization turn)", finalizeCtx)
+	}
+	if !reflect.DeepEqual(repairCtx, []int{4}) {
+		t.Errorf("Repair hook ctx steps = %v, want [4] (the repair turn)", repairCtx)
 	}
 }
