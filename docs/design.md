@@ -184,6 +184,31 @@ them is durable.
   into the Observer stream is deferred because the cutover touches
   provider, decide, embed, and bugbot in one change.
 
+## The observation vocabulary lives in the root package
+
+`Observer`, `Event` with its ten payload types, and the run/span/step identity
+that rides the context are declared in `llmkit` itself, not in a
+`llmkit/observe` leaf package. The alternative was measured before the question
+was closed: moving the vocabulary rewrites 619 references across root, agent,
+provider, embed, sandbox, and decide (28 exported symbols) and buys a naming
+improvement, nothing functional. The requirement that motivated the vocabulary
+is already met where it sits: `store/sqlite` (a later round) persists events
+without importing `agent`, because the event types are root-owned, and the
+import graph stays a DAG with nothing importing upward. A leaf package would
+not sit below the other packages anyway — agent, provider, embed, sandbox, and
+decide all already depend on the types, so a leaf would be one more package at
+root's depth, with root re-exporting or callers importing two places.
+
+- **What it buys:** every component — agent, provider, embed, sandbox,
+  decide, and the future store — speaks one event shape from the package it
+  already imports for `Request`/`Response`; no sink translates between
+  vocabularies and no store imports the agent loop to read its telemetry.
+- **What it costs:** the root package now carries agent-shaped kinds —
+  start, compaction, steer, finalize — beside the wire vocabulary, so the
+  package that documents the client's provider-free surface also holds the
+  loop's concepts. A reader looking for only the client vocabulary finds run
+  bookkeeping next to it.
+
 ## The sandbox refuses; it never drops
 
 `sandbox.Spec` is honest per backend. A field a backend cannot honor fails

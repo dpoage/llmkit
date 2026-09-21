@@ -25,10 +25,9 @@ import (
 // contract.
 //
 // The provider and model tags must identify the same backend the client
-// calls: when wrapping a client from provider.New, pass what New itself
-// derives — the spec's model, and Options.Provider when set or
-// string(spec.Type) otherwise. Mismatched tags put two provider identities
-// on one span.
+// calls: when wrapping a client from provider.New, pass provider.Tag(spec,
+// opts) as the provider — the exact value New derives — and spec.Model as
+// the model. Mismatched tags put two provider identities on one span.
 //
 // The emission rule lives on [Observer]: the OUTERMOST harness layer emits
 // the Completion event. Observe is that layer for bare clients; the agent
