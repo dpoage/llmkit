@@ -150,9 +150,10 @@ go run ./examples/decide
 
 ## Testing
 
-CI runs the full gate on every push and pull request: build, vet, race-enabled
-tests, lint, and gofmt. The live acceptance suite runs against real vendors
-and skips itself without credentials. See [docs/testing.md](docs/testing.md).
+CI runs the full gate on every pull request and on every push to `master`:
+build, vet, race-enabled tests, lint, and gofmt. The live acceptance suite
+runs against real vendors and skips itself without credentials. See
+[docs/testing.md](docs/testing.md).
 
 ## Stability
 

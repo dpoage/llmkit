@@ -4,7 +4,7 @@ llmkit ships three test suites: a hermetic default suite, a `live`-tagged accept
 
 ## The gate
 
-CI (`.github/workflows/ci.yml`) runs these commands on every push and pull request. A dedicated `sandbox-integration` job additionally runs the integration-tagged sandbox suite:
+CI (`.github/workflows/ci.yml`) runs these commands on every pull request and on every push to `master`. A dedicated `sandbox-integration` job additionally runs the integration-tagged sandbox suite:
 
 ```bash
 go build ./...
@@ -124,6 +124,8 @@ The fixture writer is secret-free by construction: it refuses to write any fixtu
 Contributor rule: any change to an adapter, the agent loop, or an `llmkit.Capabilities` field must name two things. They are its hermetic test and its live case in the registry in `provider/live_registry_test.go`.
 
 `provider/live_registry_test.go` has no build tag. It reflects over `llmkit.Capabilities` and fails the plain `go test ./...` suite when a field has no registered live case. The same happens when a case gates on a nonexistent field, or when a case has no doc. A capability cannot ship without its acceptance test.
+
+[CONTRIBUTING](../CONTRIBUTING.md) states the rest of the rules for a pull request: the sign-off, the local gate, and what does not get merged.
 
 ## Examples
 
