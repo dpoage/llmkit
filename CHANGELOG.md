@@ -55,8 +55,8 @@ entry below is marked.
   non-zero exit code is the command's verdict, not an error, exactly like
   the `Sandbox` contract.
   Both wrappers pass results and errors through
-  unchanged and take `RunID`/`SpanID` from the call's context; the sandbox
-  wrapper emits nothing from `MaterializeWorkspace`. Either wrapper
+  unchanged and take `RunID`/`SpanID`/`Step` from the call's context; the
+  sandbox wrapper emits nothing from `MaterializeWorkspace`. Either wrapper
   returns its input unchanged for a nil observer.
 
 - `llmkit`: `Observe(c, obs, provider, model)` wraps any `Client` so each
@@ -80,6 +80,18 @@ entry below is marked.
 - `llmkit/agent`: run identity and durable observation on the tool loop.
   `WithObserver(obs)` installs the Runner's single durable event sink (last-wins — a second call replaces the first, never a second history) behind the always-present in-memory `Transcript`, which now stores `llmkit.Event` values in `Transcript.Record` and carries `RunID`/`ParentRunID`. `JSONL(dir, onErr)` streams one JSON line per event to one `<RunID>.jsonl` file per run — created exclusively at the run's start, closed at its finalize, refusals reported through `onErr` and never failing the run — and reads them back through the same `Source` interface replay builds on. The Runner emits `start`, `completion` (one per logical completion, span-minted per C2), `tool_run` (with `Denied`/`deny_reason` for policy denials), `compaction`, `steer`, and `finalize` (on every run end including error returns). `WithRunID(id)` pins a run's identity; `Outcome.RunID` is exported; `Continue` chains carry `ParentRunID`.
 - `llmkit/agent`: the read side of recording. `Source` is a single-method interface (`Events(ctx, run)`) implemented by `Transcript` and the JSONL sink; `NewReplayClient(src, run, caps)` replays a recorded run from any Source, `ReplayClient.Tools` serves the recorded tool results instead of executing them (a fully offline replay, deterministic under parallel dispatch), and `ReplayClient.Err` reports a diverged replay. The sentinels `ErrUnknownRun` (a Source has no record of the run) and `ErrReplayDiverged` (a replay no longer matches its record) support errors.Is.
+- `llmkit`: `WithStep(ctx, step)` and `StepFromContext(ctx)` — the 1-based
+  turn number in the context, mirroring `WithRun`'s empty-id rule (step <= 0
+  is absent). `NewEvent` stamps `Event.Step` from it, so decorator-emitted
+  events inside a Runner turn — the retry stage's Attempt events, a decision
+  observed inside a ToolPolicy, the sandbox Exec and embed events a tool's
+  decorators emit — carry the enclosing turn; Runner-emitted events keep
+  setting Step explicitly. The agent Runner places the turn in the contexts
+  it passes to the client, policies, hooks, and tools.
+- `llmkit`: `FinalizeEvent.FinalText` (`final_text`, omitted when empty) —
+  the run's answer as the Runner stitched it across a max-tokens
+  continuation, so a store persists it without re-deriving the stitch.
+  Additive; no schema version bump.
 
 ### Changed
 
