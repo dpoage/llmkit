@@ -1108,15 +1108,23 @@ func TestEventValidate(t *testing.T) {
 
 	t.Run("empty kind", func(t *testing.T) {
 		ev := Event{Kind: "", SchemaVersion: EventSchemaVersion, Start: &StartEvent{}}
-		if err := ev.Validate(); err == nil {
-			t.Error("Validate on Kind \"\" = nil, want an error")
+		err := ev.Validate()
+		if err == nil {
+			t.Fatal("Validate on Kind \"\" = nil, want an error")
+		}
+		if !strings.Contains(err.Error(), `unknown event kind ""`) {
+			t.Errorf("error = %q, want it to name the empty kind as unknown", err)
 		}
 	})
 
 	t.Run("unknown kind", func(t *testing.T) {
 		ev := Event{Kind: EventKind("span"), SchemaVersion: EventSchemaVersion, Start: &StartEvent{}}
-		if err := ev.Validate(); err == nil {
-			t.Error("Validate on an unknown kind = nil, want an error")
+		err := ev.Validate()
+		if err == nil {
+			t.Fatal("Validate on an unknown kind = nil, want an error")
+		}
+		if !strings.Contains(err.Error(), `unknown event kind "span"`) {
+			t.Errorf("error = %q, want it to name kind %q as unknown", err, "span")
 		}
 	})
 
@@ -1162,4 +1170,71 @@ func TestGoldenEventsValidate(t *testing.T) {
 			t.Errorf("NewEvent(%s) + %s payload: Validate = %v, want nil", s.kind, s.field, err)
 		}
 	}
+}
+
+// TestEventPayloadMappingGuard is the mechanical guard for the kind→payload
+// mapping. The mapping lives in four code sites beside the constants (the
+// Kind-constant and Event-field docs, kindPayloadField, scanPayloads) plus
+// payloadSlots here; adding an Event payload field without updating every
+// one must fail THIS test, not silently change what Validate accepts —
+// without the guard, a kind added to kindPayloadField but forgotten in
+// scanPayloads accepts a two-payload event AND rejects its own well-formed
+// event with the whole suite green. Same class of check
+// provider/live_registry_test.go applies to Capabilities.
+func TestEventPayloadMappingGuard(t *testing.T) {
+	et := reflect.TypeOf(Event{})
+
+	byField := make(map[string]EventKind, len(kindPayloadField))
+	for k, f := range kindPayloadField {
+		if prev, dup := byField[f]; dup {
+			t.Errorf("kindPayloadField maps field %q twice (%s and %s) — fix the map in observe.go", f, prev, k)
+			continue
+		}
+		byField[f] = k
+		if _, ok := et.FieldByName(f); !ok {
+			t.Errorf("kindPayloadField[%s] = %q, which is not an Event field — fix the map in observe.go", k, f)
+		}
+	}
+
+	for i := range et.NumField() {
+		f := et.Field(i)
+		if f.Type.Kind() != reflect.Ptr || f.Type.Elem().Kind() != reflect.Struct {
+			continue
+		}
+		kind, mapped := EventKind(""), false
+		for k, name := range kindPayloadField {
+			if name == f.Name {
+				kind, mapped = k, true
+				break
+			}
+		}
+		if !mapped {
+			t.Errorf("Event payload field %s has no kindPayloadField entry: add the kind→field entry in observe.go, wire it into scanPayloads, and add the payloadSlots row in observe_test.go", f.Name)
+			continue
+		}
+		// scanPayloads must see the field: an event of the mapped kind
+		// carrying exactly this payload must validate.
+		ev := NewEvent(context.Background(), kind)
+		reflect.ValueOf(&ev).Elem().Field(i).Set(reflect.New(f.Type.Elem()))
+		if err := ev.Validate(); err != nil {
+			t.Errorf("scanPayloads does not count Event.%s: %s + %s validates as %v — wire the field into scanPayloads in observe.go", f.Name, kind, f.Name, err)
+		}
+	}
+
+	if got, want := len(byField), et.NumField()-countNonPayloadFields(et); got != want {
+		t.Errorf("kindPayloadField has %d entries, want %d (one per Event payload field)", got, want)
+	}
+}
+
+// countNonPayloadFields counts Event's non-payload (header) fields, so the
+// guard also fails when a payload field is added without ANY wiring.
+func countNonPayloadFields(t reflect.Type) int {
+	n := 0
+	for i := range t.NumField() {
+		f := t.Field(i)
+		if f.Type.Kind() != reflect.Ptr || f.Type.Elem().Kind() != reflect.Struct {
+			n++
+		}
+	}
+	return n
 }

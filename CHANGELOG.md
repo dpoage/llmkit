@@ -109,6 +109,9 @@ entry below is marked.
   finalize event already carries the completed-turn count (the Runner set
   both from the same value on every exit path). Old recordings still
   decode: the `iterations` key is ignored. No compatibility aliases.
+  This is a removal at the same schema version (still 1), not a bump —
+  safe only because no store exists yet to branch on the field, which is
+  why it lands before the store round (llmkit-2or.1) freezes the schema.
 
 - **Breaking:** the agent transcript is the new event stream. `agent.Event`/`EventKind` and the `request`/`assistant`/`tool_result` kinds are deleted in favor of `llmkit.Event` (`Transcript.Events` is now `Transcript.Record`, of `llmkit.Event`); `WithTranscriptDir` and `WithTranscriptKey` are removed in favor of `WithObserver(agent.JSONL(dir, onErr))` (the key's motivation moved to `WithRunID`); `Hooks.TranscriptError` is removed (sink failures go to the callback the sink was constructed with); `NewReplayClient` takes `(src Source, run llmkit.RunID, caps)`. There are no compatibility aliases. A tool-call-only assistant turn no longer invents an empty text block in history (llmkit-ly5).
 - **Breaking:** the retry vocabulary moved from the root package into
