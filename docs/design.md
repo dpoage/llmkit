@@ -189,13 +189,20 @@ them is durable.
 `Observer`, `Event` with its ten payload types, and the run/span/step
 identity that rides the context are declared in `llmkit` itself, not in a
 `llmkit/observe` leaf package. Moving them was measured before the question
-was closed: ~610 occurrences of the vocabulary's 28 exported symbols in
-comment-stripped Go code across root, agent, provider (adapters included),
-embed, and sandbox — tests included, which is most of the weight, because
-the suites pin the vocabulary; ~140 excluding tests. (The rule:
-word-boundary occurrences, `//`-comment lines removed; `decide` contributes
-zero — it sits on the `Recorder` seam, and becomes an Observer consumer
-only if the deferred Recorder fold-in happens.)
+was closed: ~610 occurrences of the event vocabulary's 28 counted symbols —
+observe.go's 27 exported declarations plus the `Event.Validate` method —
+in comment-stripped Go code across root, agent, provider (adapters
+included), embed, and sandbox; tests included, which is most of the
+weight, because the suites pin the vocabulary; ~140 excluding tests. The
+counted set is narrower than this section's own definition of the
+vocabulary: adding the run/span/step identity it names (`RunID`, `SpanID`,
+`WithRun`, `RunFromContext`, `WithSpan`, `SpanFromContext`, `WithStep`,
+`StepFromContext`, `NewEvent`, and `EventSchemaVersion` from run.go)
+spans 38 symbols and measures ~1120 with tests, ~250 without, under the
+same rule — the decision is insensitive to the counting rule. (`decide`
+contributes zero in every variant: it sits on the `Recorder` seam, and
+becomes an Observer consumer only if the deferred Recorder fold-in
+happens.)
 
 The decisive reason a leaf cannot work is the direction of the type
 dependency, not taste. The payloads embed root's own wire types —
@@ -211,6 +218,7 @@ counterexample that works, and shows the difference: `retry` is
 self-contained (root imports it; it imports no kit package), so extracting
 it costs nothing. The event vocabulary has no such cut to extract along —
 every payload is root's wire types re-exposed.
+
 - **What it buys:** most components that emit or persist events — agent,
   provider, embed, and the future store (sandbox touches only the event
   vocabulary itself) — speak one event shape from the package they already
