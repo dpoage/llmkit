@@ -34,12 +34,6 @@ func (c *captureObserver) snapshot() []Event {
 	return append([]Event(nil), c.events...)
 }
 
-func (c *captureObserver) ctxAt(i int) context.Context {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.ctxs[i]
-}
-
 // ctxByKind returns the delivery contexts of one kind's events, in
 // emission order — index-aligned with byKind.
 func (c *captureObserver) ctxByKind(k EventKind) []context.Context {

@@ -1214,7 +1214,7 @@ func TestEventPayloadMappingGuard(t *testing.T) {
 
 	for i := range et.NumField() {
 		f := et.Field(i)
-		if f.Type.Kind() != reflect.Ptr || f.Type.Elem().Kind() != reflect.Struct {
+		if f.Type.Kind() != reflect.Pointer || f.Type.Elem().Kind() != reflect.Struct {
 			continue
 		}
 		kind, mapped := EventKind(""), false
@@ -1248,7 +1248,7 @@ func countNonPayloadFields(t reflect.Type) int {
 	n := 0
 	for i := range t.NumField() {
 		f := t.Field(i)
-		if f.Type.Kind() != reflect.Ptr || f.Type.Elem().Kind() != reflect.Struct {
+		if f.Type.Kind() != reflect.Pointer || f.Type.Elem().Kind() != reflect.Struct {
 			n++
 		}
 	}
