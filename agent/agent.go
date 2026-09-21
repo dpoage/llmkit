@@ -11,20 +11,24 @@
 // # Tools
 //
 // A [Tool] declares its schema with [Tool.Def] and executes with [Tool.Run].
-// A tool error is not a loop failure: the harness feeds it back to the model
-// as a tool result prefixed "ERROR:", and the model retries, tries another
-// tool, or gives up. A panic inside [Tool.Run] is recovered and rendered the
-// same way, in both dispatch modes. Ordinary tool errors are data for the
-// model; a *ToolHealthError marks a failure as infrastructure, so it also
-// reaches [Hooks.ToolHealth]; a *StopReasonError ends the run, because the
-// model itself stopped for a provider error reason. A tool error never
-// aborts the loop; a failed [llmkit.Client.Complete], a cancelled context,
-// a [RequestPolicy] error, or [StopReasonError] ends the run with a
-// non-nil error. [Func] builds a Tool from a plain function; the struct
-// argument is the schema. Tools run one call at a time by default;
-// [WithParallelTools] runs a turn's calls concurrently, and concurrent
-// [Runner.Run] calls on one Runner are always allowed, so a Tool must be
-// safe for concurrent calls.
+// [Func] builds a Tool from a plain function; the struct argument is the
+// schema.
+//
+// An ordinary tool error never ends the run. The harness feeds it back to
+// the model as a tool result prefixed "ERROR:", and the model retries, tries
+// another tool, or gives up. A panic inside [Tool.Run] is recovered and
+// rendered the same way, in both dispatch modes. Two error types are
+// special: a *ToolHealthError marks the failure as infrastructure, so it
+// also reaches [Hooks.ToolHealth]; a *StopReasonError ends the run, because
+// the model itself stopped for a provider error reason.
+//
+// Four failures end a run with a non-nil error: a failed
+// [llmkit.Client.Complete], a cancelled context, a [RequestPolicy] error,
+// and [StopReasonError].
+//
+// Tools run one call at a time by default. [WithParallelTools] runs a turn's
+// calls concurrently, and concurrent [Runner.Run] calls on one Runner are
+// always allowed, so a Tool must be safe for concurrent calls.
 //
 // # Limits and outcomes
 //
@@ -104,9 +108,8 @@
 // Runner runs. The Runner checks the pool once per loop turn and charges it
 // after every successful completion; continuation, finalization, and repair
 // completions are charged without a fresh check. An exhausted pool stops a
-// run cleanly with
-// [TruncBudgetPool]; [ErrBudgetExhausted] is the check failure. A nil pool
-// is the default and means unlimited.
+// run cleanly with [TruncBudgetPool]; [ErrBudgetExhausted] is the check
+// failure. A nil pool is the default and means unlimited.
 //
 // # Transcripts, observers, and replay
 //

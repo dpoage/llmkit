@@ -12,10 +12,9 @@ import (
 	"sync"
 )
 
-// OllamaEmbedder produces embeddings by posting to an Ollama server's REST
-// API.
+// OllamaEmbedder posts to an Ollama server's REST API.
 //
-// Ollama endpoint: POST <baseURL>/api/embed
+// POST <baseURL>/api/embed
 //
 //	Request:  {"model": "...", "input": "..." | ["...", ...]}
 //	Response: {"model": "...", "embeddings": [[...]]}
@@ -29,8 +28,8 @@ type OllamaEmbedder struct {
 	mu         sync.RWMutex // guards dimensions
 }
 
-// NewOllamaEmbedder creates an OllamaEmbedder that posts to cfg.URL. It
-// returns an error when cfg fails Config.Validate.
+// NewOllamaEmbedder builds an embedder that posts to cfg.URL.
+// It returns an error when cfg fails [Config.Validate].
 func NewOllamaEmbedder(cfg Config) (*OllamaEmbedder, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("ollama config: %w", err)
@@ -75,9 +74,9 @@ func (o *OllamaEmbedder) Embed(ctx context.Context, text string) ([]float32, err
 }
 
 // EmbedBatch returns embeddings for multiple texts, splitting the input into
-// requests of at most MaxBatch texts (no splitting when MaxBatch is zero).
-// Results are index-aligned with the input; a failed chunk fails the whole
-// call.
+// requests of at most MaxBatch texts (0 = no splitting). Results are
+// index-aligned; a failed chunk fails the whole call.
+
 func (o *OllamaEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil

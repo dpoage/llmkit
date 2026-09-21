@@ -12,12 +12,9 @@ import (
 	"github.com/dpoage/llmkit"
 )
 
-// streamFakeClient wraps fakeClient with a Stream implementation, so a test
-// can pin which delivery path the Runner chose. Stream consumes the same
-// scripted steps as Complete (via the embedded fakeClient, which also keeps
-// recording requests) and delivers one delta per content block before
-// returning that response — the minimal native-stream shape; wire-level
-// fragmentation is the adapters' concern, not the Runner's.
+// streamFakeClient wraps fakeClient with a Stream implementation so a test can
+// pin which delivery path the Runner chose. Stream delivers one delta per
+// content block; wire-level fragmentation is the adapters' concern.
 type streamFakeClient struct {
 	*fakeClient
 
@@ -41,9 +38,8 @@ func (s *streamFakeClient) Stream(ctx context.Context, req llmkit.Request, fn fu
 	if err != nil {
 		return llmkit.Response{}, err
 	}
-	// Native streams deliver text as it is generated, so an unblocked
-	// scripted response streams its Text field; blocked responses stream
-	// one delta per block, matching the normalized shape.
+	// Unblocked scripted responses stream their Text field; blocked responses
+	// stream one delta per block, matching the normalized shape.
 	if len(resp.Blocks) == 0 && resp.Text != "" {
 		if err := fn(llmkit.Delta{Kind: llmkit.DeltaText, Text: resp.Text}); err != nil {
 			return llmkit.Response{}, err

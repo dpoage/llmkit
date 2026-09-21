@@ -9,9 +9,9 @@ import (
 	"time"
 )
 
-// statusError reports a non-200 HTTP response from a backend call. It carries
-// the parsed Retry-After header so the retry loop can honor it; the backend
-// prefix is part of Error so messages keep their "ollama: HTTP 429: ..." shape.
+// statusError carries a non-200 HTTP response from a backend. The parsed
+// Retry-After header lets the retry loop honor it; backend prefixes Error so
+// messages keep their "ollama: HTTP 429: ..." shape.
 type statusError struct {
 	backend       string
 	status        int
@@ -24,8 +24,7 @@ func (e *statusError) Error() string {
 	return fmt.Sprintf("%s: HTTP %d: %s", e.backend, e.status, e.body)
 }
 
-// retryAfterDuration returns the server-supplied Retry-After delay and
-// whether one was present in the response.
+// retryAfterDuration returns the parsed Retry-After delay and whether one was present.
 func (e *statusError) retryAfterDuration() (time.Duration, bool) {
 	return e.retryAfter, e.hasRetryAfter
 }

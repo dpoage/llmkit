@@ -18,14 +18,13 @@ import (
 // Under [WithParallelTools] an interactive policy (an "allow this?" prompt)
 // therefore never overlaps tool execution. A call that names an
 // unregistered tool never reaches the policy; it keeps the "unknown tool"
-// error path.
+// error path. A nil policy allows every call and copies nothing.
 //
 // ctx is the run's context. If ctx is cancelled, the run aborts: calls not
 // yet authorized are never dispatched; each renders
 // "ERROR: tool <name> not run: <context error>" so the record never mistakes
-// a cancelled run for a policy denial.
-// [WithToolTimeout] applies to Tool.Run only, not to Authorize; a policy
-// that blocks must honor ctx itself.
+// a cancelled run for a policy denial. [WithToolTimeout] applies to Tool.Run
+// only, not to Authorize; a policy that blocks must honor ctx itself.
 //
 // Authorize may assign a new value to call.Arguments. Tool.Run receives the
 // new arguments, and [ToolEvent.Call] carries them in [Hooks.ToolStart] and
@@ -47,8 +46,6 @@ import (
 // modes; the model never sees it.
 //
 // ToolPolicy does not rewrite tool results. Wrap the [Tool] to do that.
-//
-// A nil policy allows every call and copies nothing.
 type ToolPolicy interface {
 	// Authorize allows call, denies it with a non-nil error, or rewrites
 	// call.Arguments before allowing it.

@@ -9,16 +9,13 @@ import (
 	"github.com/dpoage/llmkit"
 )
 
-// TestTranscriptBlocksSurviveJSONLReplay pins the Blocks propagation chain:
-// a Runner records Response.Blocks into the run's Completion event,
-// SaveJSONL/LoadJSONL round-trips them (Block.Data/.Raw through
-// encoding/json), and NewReplayClient serves them back on Complete. If the
-// Completion event drops Blocks, or the Event shape stops round-tripping, or
-// ReplayClient stops serving them, this test fails.
+// TestTranscriptBlocksSurviveJSONLReplay pins the Blocks round-trip:
+// Response.Blocks reach the Completion event, survive SaveJSONL/LoadJSONL
+// (Block.Data/.Raw through encoding/json), and NewReplayClient serves
+// them back on Complete.
 func TestTranscriptBlocksSurviveJSONLReplay(t *testing.T) {
 	const thinkRaw = `{"type":"thinking","thinking":"why","signature":"sig-1"}`
 
-	// A scripted client that returns one thinking block in Response.Blocks.
 	src := NewReplayClientFromResponses([]llmkit.Response{{
 		Text: "answer",
 		Blocks: []llmkit.Block{
@@ -33,7 +30,6 @@ func TestTranscriptBlocksSurviveJSONLReplay(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	// JSONL round-trip.
 	var buf bytes.Buffer
 	if err := out.Transcript.SaveJSONL(&buf); err != nil {
 		t.Fatalf("SaveJSONL: %v", err)
@@ -43,7 +39,6 @@ func TestTranscriptBlocksSurviveJSONLReplay(t *testing.T) {
 		t.Fatalf("LoadJSONL: %v", err)
 	}
 
-	// Replay serves the recorded blocks.
 	replay, err := NewReplayClient(loaded, loaded.RunID, llmkit.Capabilities{})
 	if err != nil {
 		t.Fatalf("NewReplayClient: %v", err)

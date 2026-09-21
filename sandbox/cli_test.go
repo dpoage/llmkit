@@ -23,9 +23,9 @@ func TestNewCLIUnknownRuntime(t *testing.T) {
 	}
 }
 
-// TestNewCLIRefusesBwrapOnlyOptions pins the one-Option-type contract from
-// the CLI side: every bwrap-only option must be rejected with an error
-// NAMING the option, never silently ignored.
+// TestNewCLIRefusesBwrapOnlyOptions pins the one-Option-type contract: every
+// bwrap-only option must be rejected with an error naming the option, never
+// silently ignored.
 func TestNewCLIRefusesBwrapOnlyOptions(t *testing.T) {
 	for _, opt := range []Option{
 		WithCapPolicy(CapBestEffort),
@@ -53,7 +53,6 @@ func TestResolveParamsAppliesDefaultsAndOverrides(t *testing.T) {
 		},
 	}
 
-	// Empty spec -> backend defaults.
 	p, err := s.resolveParams(Spec{Cmd: []string{"true"}})
 	if err != nil {
 		t.Fatalf("resolveParams: %v", err)
@@ -62,7 +61,6 @@ func TestResolveParamsAppliesDefaultsAndOverrides(t *testing.T) {
 		t.Fatalf("defaults not applied: %+v", p)
 	}
 
-	// Spec overrides: image (the container backend honors it) and network.
 	p, err = s.resolveParams(Spec{
 		Cmd:     []string{"true"},
 		Image:   "custom",
@@ -119,7 +117,6 @@ func TestOptionsConfigureCLI(t *testing.T) {
 		t.Fatalf("NewCLI: %v", err)
 	}
 
-	// exercise the auto-detect path too: no WithRuntime override.
 	auto, err := NewCLI(
 		WithImage("img"), WithCPUs(4), WithMemoryMB(1024),
 	)

@@ -16,24 +16,22 @@ import (
 	"time"
 )
 
-// Questions is the set of questions one Ask evaluates, keyed by question id.
-// Ids are echoed back in the response's answer maps.
+// Questions indexes one Ask's question set by id. Ids are echoed back in the
+// response's answer maps.
 type Questions map[string]Question
 
 // Response is the normalized result of one Ask.
 type Response struct {
-	// Model is the versioned model id the server reports — the id actually
-	// used, which can differ from a requested alias ("jev-latest" ->
-	// "jev-1.13.0"). Ledger on this, not on the alias.
+	// Model is the versioned id the server actually used; it can differ from
+	// a requested alias ("jev-latest" -> "jev-1.13.0"). Ledger on this.
 	Model string
-	// Usage is the token consumption. TypeSafe bills input tokens only.
+	// Usage is token consumption. TypeSafe bills input tokens only.
 	Usage llmkit.Usage
-	// Nouls holds one entry per Noul question, keyed by question id. It is
-	// nil when the Ask included no Noul questions.
+	// Nouls holds one entry per Noul question. nil when no Nouls were asked.
 	Nouls map[string]float64
-	// Choices holds one entry per Choice question; nil when none were asked.
+	// Choices holds one entry per Choice question. nil when none were asked.
 	Choices map[string]ChoiceAnswer
-	// Scores holds one entry per Score question; nil when none were asked.
+	// Scores holds one entry per Score question. nil when none were asked.
 	Scores map[string]ScoreAnswer
 }
 
@@ -55,7 +53,7 @@ type ScoreAnswer struct {
 	Confidence    float64
 }
 
-// wireRequest is the JSON envelope posted to /v1/systemone.
+// wireRequest is the JSON envelope POSTed to /v1/systemone.
 type wireRequest struct {
 	State     json.RawMessage            `json:"state"`
 	Model     string                     `json:"model"`
@@ -63,8 +61,8 @@ type wireRequest struct {
 }
 
 // wireResponse is the JSON envelope the endpoint returns. Model and Usage
-// are required by the vendor contract; a 200 body missing either is a
-// server contract violation, not a silent zero.
+// are vendor-required; a 200 body missing either is a server contract
+// violation, not a silent zero.
 type wireResponse struct {
 	Model   string                     `json:"model"`
 	Answers map[string]json.RawMessage `json:"answers"`
@@ -76,9 +74,8 @@ type wireUsage struct {
 	OutputTokens int64 `json:"output_tokens"`
 }
 
-// answerBody decodes any answer kind; the pointer fields distinguish present
-// from absent so a missing value is a named contract violation, not a silent
-// zero.
+// answerBody decodes any answer kind. The pointer fields distinguish
+// present from absent so a missing value is a named contract violation.
 type answerBody struct {
 	Type          string             `json:"type"`
 	Noul          *float64           `json:"noul"`
@@ -90,25 +87,22 @@ type answerBody struct {
 }
 
 // statusAttempt carries one HTTP attempt's classified APIError plus the
-// Retry-After presence bit. llmkit.APIError records the parsed delay but not
-// whether a header was present, and presence — including a zero delay or a
-// past HTTP-date, which ParseRetryAfter clamps to 0 — is the embed-parity
-// signal for an immediate retry instead of exponential backoff. Ask
-// unwraps and returns the concrete *llmkit.APIError.
+// Retry-After presence bit: llmkit.APIError records the parsed delay but
+// not presence, and presence — including a 0 or past-date HTTP-date, which
+// ParseRetryAfter clamps to 0 — is the embed-parity signal that the retry
+// loop should ignore exponential backoff. Ask unwraps the APIError.
 type statusAttempt struct {
 	*llmkit.APIError
 	hasRetryAfter bool
 }
 
-// Ask evaluates state against questions in one request: it validates and
-// marshals the envelope, posts to <BaseURL>/v1/systemone with an
-// "Authorization: Bearer" header, retries transient failures per the
-// client's retry policy, validates the response against the questions, and
-// reports usage to the configured Recorder — exactly once, and only on
-// success. ctx bounds the whole call; its cancellation is never retried.
-//
-// Every returned error is an *llmkit.APIError with Provider "typesafe" (see
-// the package doc for the status mapping).
+// Ask evaluates state against questions in one request: validates and
+// marshals the envelope, POSTs to <BaseURL>/v1/systemone with an
+// "Authorization: Bearer" header, retries transient failures, validates the
+// response, and reports usage to the configured Recorder — once, on success.
+// ctx bounds the call; its cancellation is never retried. Every returned
+// error is an *llmkit.APIError with Provider "typesafe" (see the package doc
+// for the status mapping).
 func (c *Client) Ask(ctx context.Context, state any, questions Questions) (Response, error) {
 	body, err := buildRequest(state, c.model, questions)
 	if err != nil {
@@ -171,10 +165,10 @@ func (c *Client) attempt(ctx context.Context, body []byte, questions Questions) 
 }
 
 // newAPIStatusError maps a non-200 response to a sentinel-classified
-// *llmkit.APIError, wrapped with the Retry-After presence bit. As in embed,
-// the header is parsed for every status; the retry loop honors it whenever
-// the status is retried. The Message carries the vendor body text,
-// truncated; it never carries the request's credential.
+// *llmkit.APIError, wrapped with the Retry-After presence bit. The header
+// is parsed for every status; the retry loop honors it whenever the status
+// is retried. The Message carries the truncated vendor body text — never
+// the request's credential.
 func newAPIStatusError(resp *http.Response, body []byte) error {
 	kind := adapter.ClassifyStatus(resp.StatusCode, string(body))
 	msg := strings.TrimSpace(string(body))
@@ -193,10 +187,10 @@ func newAPIStatusError(resp *http.Response, body []byte) error {
 }
 
 // parseResponse validates the answer set against the questions and converts
-// it to a Response. Any violation of the server's own answer contract — a
-// missing model or usage block, a missing or extra answer, a type that does
-// not match its question, a sparse legend — is an ErrServer-class APIError
-// at the serving status: the server, not the caller, broke the protocol.
+// it to a Response. A violation of the server's own answer contract — a
+// missing model or usage block, a missing or extra answer, a type that
+// does not match its question, or a sparse legend — is an ErrServer-class
+// APIError at the serving status: the server broke the protocol.
 func parseResponse(status int, body []byte, questions Questions) (Response, error) {
 	var wire wireResponse
 	if err := json.Unmarshal(body, &wire); err != nil {
@@ -273,9 +267,9 @@ func parseResponse(status int, body []byte, questions Questions) (Response, erro
 	}, nil
 }
 
-// denseSlice converts a server map keyed by stringified legend index to the
-// index-aligned slice the Response carries. The keys must be exactly
-// "0".."n-1" — dense, in range, and matching the levels asked for.
+// denseSlice converts a server map keyed by stringified legend index into
+// the index-aligned slice the Response carries. Keys must be exactly
+// "0".."n-1" — dense, in range, matching the levels asked for.
 func denseSlice[T any](status int, id, field string, m map[string]T, n int) ([]T, error) {
 	fail := func(problem string) ([]T, error) {
 		return nil, serverError(status, fmt.Sprintf("answers[%q]%s: %s (want exactly %d entries keyed \"0\"..\"%d\")", id, field, problem, n, n-1))
@@ -297,11 +291,11 @@ func denseSlice[T any](status int, id, field string, m map[string]T, n int) ([]T
 // classifyRetryable reports whether an Ask attempt is worth retrying,
 // mirroring embed's boundary exactly: HTTP 429, every 5xx (529 included),
 // and transport failures. Everything else — auth, invalid request,
-// context-too-long, and a 200 response that violates the body contract — is
-// terminal: a deterministic server-side violation must not burn the retry
-// budget. When a retried status carried a Retry-After header, its delay
-// replaces the computed backoff; presence alone — even the 0 a past
-// HTTP-date clamps to — means an immediate retry.
+// context-too-long, a 200 that violates the body contract — is terminal: a
+// deterministic server-side violation must not burn the retry budget. When a
+// retried status carried a Retry-After header, its delay replaces the
+// computed backoff; presence alone — even the 0 a past HTTP-date clamps to
+// — means an immediate retry.
 func classifyRetryable(err error) (time.Duration, bool, bool) {
 	var st *statusAttempt
 	if errors.As(err, &st) {
@@ -323,7 +317,7 @@ func classifyRetryable(err error) (time.Duration, bool, bool) {
 // retryWorthy is the status boundary for retries: 429, any 5xx (529
 // included), and transport failures — the only StatusCode-0 errors attempt
 // produces, guarded by their ErrServer kind so a pre-wire validation error
-// could never look transient.
+// can never look transient.
 func retryWorthy(apiErr *llmkit.APIError) bool {
 	switch {
 	case apiErr.StatusCode == http.StatusTooManyRequests, apiErr.StatusCode >= 500:
@@ -353,8 +347,7 @@ func truncate(s string, n int) string {
 	return s[:n] + "..."
 }
 
-// nonEmptyOrNil keeps response maps nil when a question kind was not asked,
-// so absence reads as absence rather than an empty set.
+// nonEmptyOrNil returns nil for an empty map, so absence reads as absence.
 func nonEmptyOrNil[K comparable, V any](m map[K]V) map[K]V {
 	if len(m) == 0 {
 		return nil

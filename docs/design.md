@@ -267,6 +267,8 @@ it would drag the ONNX and GoMLX dependency trees.
 - **What it costs:** local inference is the application's job. Implement
   `Embedder` in your app if you need it.
 
+## Decision models are not Clients
+
 TypeSafe's Jev is a decision model. One request carries a state plus typed
 questions (`Noul`, `Choice`, `Score`), and the answer is a belief or a
 probability distribution. Because Jev has no messages, no tools, no

@@ -175,8 +175,8 @@ func TestNew_TruncationVisibleInCompletion(t *testing.T) {
 	}
 	observed := llmkit.Observe(stacked, obs, "openai-compatible", "llama-test")
 
-	// Observe mints the span itself (contract C2), so the join to assert is
-	// completion <-> attempt, not the caller's preset span.
+	// Observe mints the span itself, so the join to assert is completion <-> attempt,
+	// not the caller's preset span.
 	if _, err := observed.Complete(context.Background(), simpleRequest()); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}

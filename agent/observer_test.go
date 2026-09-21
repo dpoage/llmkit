@@ -19,10 +19,7 @@ import (
 	"github.com/dpoage/llmkit/retry"
 )
 
-// --- scripted client + tools for the event-kind coverage run ---------------
-
-// scriptedToolClient answers each completion with a scripted response and
-// records the RunID its context carried.
+// runIDClient records the RunID each completion's context carried.
 type runIDClient struct {
 	fakeClient
 	runIDs []llmkit.RunID
@@ -63,8 +60,7 @@ func (t *ctxTool) Run(ctx context.Context, _ json.RawMessage) (string, error) {
 	return strings.Repeat("x", t.payload), nil
 }
 
-// stepRecorder collects the Step every hook family reported, joining events
-// to hooks.
+// stepRecorder collects the Step every hook family reported.
 type stepRecorder struct {
 	mu          sync.Mutex
 	completions []int
@@ -280,9 +276,9 @@ func TestObserver_OneEventOfEachKindAtHookSteps(t *testing.T) {
 	}
 }
 
-// TestObserver_RunIDVisibleFromContext pins 4qh.1's hermetic acceptance: the
-// run id is visible from ctx inside Tool.Run, a ToolPolicy, a RequestPolicy,
-// and the client's Complete.
+// TestObserver_RunIDVisibleFromContext pins that the run id is visible
+// from ctx inside Tool.Run, a ToolPolicy, a RequestPolicy, and the
+// client's Complete.
 func TestObserver_RunIDVisibleFromContext(t *testing.T) {
 	tool := &ctxTool{name: "probe"}
 	policyRuns := []llmkit.RunID{}
@@ -1251,8 +1247,6 @@ func TestObserver_CancelledCallsRecordNotRun(t *testing.T) {
 	}
 }
 
-// --- round-3 discriminating tests: each named mutant dies ------------------
-
 // TestObserver_DuplicateStartRefusalDetails pins M15/M6/M7/M32/M39: the
 // duplicate-Start refusal names the run; the poisoned entry is retired —
 // fd closed AND encoder dropped, so neither an orphan handle nor a further
@@ -1656,8 +1650,6 @@ func TestObserver_ToolsReturnsCopy(t *testing.T) {
 		t.Errorf("scripted Tools = %v, want a non-nil empty slice", got)
 	}
 }
-
-// --- round-5 discriminating tests: the duplicate-RunID race ---------------
 
 // sinkStart, sinkTool and sinkFin build the event shapes the duplicate-race
 // tests feed straight to a sink, with no Runner in the way.
@@ -2147,8 +2139,6 @@ func TestObserver_ReentrantOnErrDoesNotDeadlock(t *testing.T) {
 		t.Errorf("only %d reports re-entered the sink (of %d); the test proved nothing", reentries, reports)
 	}
 }
-
-// --- 4qh.7: decorator-emitted events inside a Runner turn carry the Step --
 
 // TestObserver_DecoratorAttemptCarriesTurnStep pins the retry-stage half of
 // llmkit.WithStep: a Runner driving a retry-wrapped client hands the turn's

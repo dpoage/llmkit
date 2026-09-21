@@ -124,9 +124,13 @@
 // # Construction
 //
 // [New] validates the config and returns an error wrapping
-// llmkit.ErrInvalidRequest for an APIKey that is empty,
-// whitespace-only, or whitespace-padded (the same rule as
-// provider.Spec.Secret), an empty Model, and a Retry.Jitter outside
-// [0, 1]. New performs no network I/O and no environment lookups, so
-// construction is hermetic.
+// llmkit.ErrInvalidRequest for any of:
+//
+//   - an APIKey that is empty, whitespace-only, or whitespace-padded (the
+//     same rule as provider.Spec.Secret);
+//   - an empty Model;
+//   - a Retry.Jitter outside [0, 1].
+//
+// New performs no network I/O and no environment lookups, so construction
+// is hermetic.
 package decide

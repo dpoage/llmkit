@@ -31,22 +31,16 @@ type Runner struct {
 	systemPrompt string
 	limits       Limits
 
-	// observer, when non-nil, is the run's single durable event sink
-	// (installed with [WithObserver]). Every event the Runner emits fans out
-	// to the in-memory [Transcript] first and this sink last (see
-	// [llmkit.Observers]). A second WithObserver wins: one Runner has at most
-	// one durable sink (last-wins).
+	// observer, when non-nil, is the run's single durable event sink (see
+	// [WithObserver]).
 	observer llmkit.Observer
-	// maxTokens caps output tokens per completion (passed through to the client).
-	// Zero lets the adapter apply its own default.
+	// maxTokens caps output tokens per completion (see [WithMaxTokens]); zero
+	// lets the adapter apply its own default.
 	maxTokens int
-	// hooks holds the optional observer callbacks; nil funcs are no-ops with
-	// zero overhead. See [Hooks] for the fire points.
+	// hooks holds the optional observer callbacks (see [Hooks] and [WithHooks]).
 	hooks Hooks
-	// requestPolicy, when non-nil, shapes every completion request just
-	// before it goes on the wire (see [RequestPolicy] and
-	// [WithRequestPolicy]). A nil policy sends the request exactly as
-	// built, with no clone of the message slice.
+	// requestPolicy, when non-nil, shapes every completion request (see
+	// [RequestPolicy] and [WithRequestPolicy]).
 	requestPolicy RequestPolicy
 	// toolTimeout, when positive, is the per-call deadline applied to every
 	// Tool.Run (see WithToolTimeout).
@@ -54,12 +48,11 @@ type Runner struct {
 	// parallelTools, when true, dispatches one turn's tool calls concurrently
 	// (see WithParallelTools).
 	parallelTools bool
-	// budgetPool, when non-nil, is checked before every completion and
-	// charged after every successful one (see WithBudgetPool). A nil pool is
-	// unlimited.
+	// budgetPool, when non-nil, caps spend across runs (see WithBudgetPool);
+	// nil means unlimited.
 	budgetPool *BudgetPool
-	// toolPolicy, when non-nil, gates every model-requested tool call before
-	// dispatch (see WithToolPolicy). A nil policy allows all calls.
+	// toolPolicy, when non-nil, gates every model-requested tool call (see
+	// WithToolPolicy); nil allows all calls.
 	toolPolicy ToolPolicy
 }
 
@@ -78,15 +71,14 @@ func WithLimits(l Limits) Option {
 // last (see [llmkit.Observers]). The transcript always backs
 // [Outcome.Transcript]; obs is the durable record.
 //
-// Emission happens on the loop goroutine, so obs must be safe for
-// concurrent use only because concurrent Run calls on one Runner are
-// allowed — each run emits from its own goroutine ([JSONL] is safe). The
-// sink reports its own failures through
-// the callback it was constructed with ([JSONL]) and never fails the run.
-// Calling WithObserver twice is last-wins: a Runner has exactly ONE durable
-// sink, so a second installation replaces the first rather than stacking a
-// second history — compose side observers (metrics, traces) ahead of it with
-// [llmkit.Observers] instead, and install at most one durable sink.
+// Emission happens on the loop goroutine, so obs must be safe for concurrent
+// use only because concurrent Run calls on one Runner are allowed — each run
+// emits from its own goroutine ([JSONL] is safe). The sink reports its own
+// failures through the callback it was constructed with ([JSONL]) and never
+// fails the run. A Runner has exactly ONE durable sink: a second
+// WithObserver replaces the first rather than stacking a second history —
+// compose side observers (metrics, traces) ahead of it with
+// [llmkit.Observers] instead.
 func WithObserver(obs llmkit.Observer) Option {
 	return func(r *Runner) { r.observer = obs }
 }
@@ -180,9 +172,9 @@ type runEmitter struct {
 	obs llmkit.Observer
 }
 
-// emit stamps the run-level facts only the Runner owns onto ev and fans it
-// out through the run's chain. ParentRunID rides on every event of a run
-// continued from a previous one; Step is each emission site's to set.
+// emit fans ev out through the run's chain, stamping only the run-level fact
+// the Runner owns: ParentRunID for a continued run. Step is each emission
+// site's to set.
 func (e runEmitter) emit(ctx context.Context, ev llmkit.Event) {
 	if e.tr.ParentRunID != "" {
 		ev.ParentRunID = e.tr.ParentRunID
@@ -193,9 +185,7 @@ func (e runEmitter) emit(ctx context.Context, ev llmkit.Event) {
 // begin arms a run: it mints (or adopts, via [WithRunID]) the run's
 // [llmkit.RunID], places it in the context every emitter reads, builds the
 // run's observer chain, and emits the run's Start event — the first event of
-// every run, so a sink can open its run record (a JSONL filename, a row)
-// before the first Completion. Task is the caller's task text; Tools the
-// names offered to the model.
+// every run, so a sink can open its run record before the first Completion.
 func (r *Runner) begin(ctx context.Context, cfg runConfig, task string) (context.Context, runEmitter) {
 	runID := cfg.runID
 	if runID == "" {
@@ -216,13 +206,10 @@ func (r *Runner) begin(ctx context.Context, cfg runConfig, task string) (context
 	return ctx, em
 }
 
-// emitFinalize closes the run with the Finalize event — emitted on EVERY run
-// end, including error returns: why the run stopped (the truncation reason,
-// when a limit ended it), the run's total usage, the run's answer
-// (Outcome.FinalText, stitched across a max-tokens continuation), and
-// whether a forced-finalization turn fired. Step carries the number of
-// completed turns (Outcome.Iterations); a failed completion does not
-// advance it, so a run whose only completion failed reports Step 0.
+// emitFinalize closes the run with the Finalize event on EVERY run end,
+// including error returns. Step carries the number of completed turns
+// (Outcome.Iterations); a failed completion does not advance it, so a run
+// whose only completion failed reports Step 0.
 func (r *Runner) emitFinalize(ctx context.Context, em runEmitter, o *Outcome) {
 	if o == nil {
 		// The run panicked mid-turn (a hook bug): no outcome exists. Still
@@ -289,20 +276,16 @@ type RunOption func(*runConfig)
 // runConfig carries the resolved per-call options. It is unexported so new
 // options never widen the exported surface.
 type runConfig struct {
-	// seed, when non-empty, continues this conversation instead of reseeding
-	// one; see [Continue].
+	// seed, when non-empty, continues a prior conversation (see [Continue]).
 	seed []llmkit.Message
-	// attach, when non-empty, rides on the seeded task turn; see [Attach]
-	// and [taskTurn] for the shape rules.
+	// attach rides on the seeded task turn (see [Attach] and [taskTurn]).
 	attach []llmkit.Block
-	// steering, when non-nil, drains queued user turns at the loop's turn
-	// boundaries; see [Steering].
+	// steering, when non-nil, drains queued user turns at the loop's turn boundaries (see [Steering]).
 	steering *Steering
-	// runID, when non-empty, pins the run's [llmkit.RunID] ([WithRunID]);
-	// empty lets the Runner mint one.
+	// runID, when non-empty, pins the run's [llmkit.RunID] (see [WithRunID]).
 	runID llmkit.RunID
-	// parentRunID is the id of the run this one continues ([Continue]);
-	// empty on a fresh run. It rides on every event as ParentRunID.
+	// parentRunID is the id of the run this one continues (see [Continue]);
+	// empty on a fresh run, rides on every event as ParentRunID.
 	parentRunID llmkit.RunID
 }
 
@@ -384,10 +367,9 @@ func Continue(prev *Outcome) RunOption {
 // JSON-demanding prompt; the public Run passes "" and therefore never pays
 // the extra turn.
 //
-// responseSchema, when non-nil, is the JSON Schema for the final answer. It is
-// attached to every completion in the run (capability-gated; see [complete]),
-// so adapters that support structured output can apply grammar-constrained
-// decoding. The public Run passes nil; RunJSON passes its schema.
+// responseSchema, when non-nil, is the JSON Schema for the final answer,
+// attached to every completion in the run (capability-gated; see
+// [complete]). The public Run passes nil; RunJSON passes its schema.
 //
 // steering, when non-nil, delivers queued user turns at two drain points
 // ([Steering]): steers before every completion — below the limit and
@@ -442,11 +424,9 @@ func (r *Runner) run(ctx context.Context, em runEmitter, seed []llmkit.Message, 
 	defer func() { outcome.Messages = messages }()
 
 	// History-compaction state. toolNameByID lets a tool-result stub name the
-	// tool it answered; compactThreshold re-arms upward after each firing so
-	// compaction is bounded and never thrashes the prompt cache turn-over-turn.
-	// On a continued run the map starts from the seed's assistant tool calls,
-	// so a PRIOR run's results also stub with their real tool names instead of
-	// the generic fallback (see [compactStub]).
+	// tool it answered; on a continued run the map starts from the seed's
+	// assistant tool calls, so a PRIOR run's results also stub with their
+	// real tool names instead of the generic fallback (see [compactStub]).
 	toolNameByID := map[string]string{}
 	for _, m := range messages {
 		if m.Role == llmkit.RoleAssistant {
@@ -529,7 +509,6 @@ func (r *Runner) run(ctx context.Context, em runEmitter, seed []llmkit.Message, 
 			return outcome, err
 		}
 
-		// No tool calls => the model finished its turn.
 		if len(resp.ToolCalls) == 0 {
 			// StopError/StopRefusal/StopContentFilter mean the model stopped
 			// for a provider-specific error reason (refusal, safety filter,
@@ -1081,11 +1060,8 @@ func (r *Runner) complete(ctx context.Context, em runEmitter, messages []llmkit.
 // the loop continues — the run's own context is unaffected. A timeout is
 // not a *ToolHealthError and does not fire [Hooks.ToolHealth].
 //
-// [Hooks.ToolStart] fires immediately before Tool.Run and [Hooks.ToolEnd]
-// immediately after (Result, IsError, Duration set — including for a
-// panic-rendered or timed-out call); a missing tool never runs, so neither
-// fires for it. Hooks fire from the goroutine executing the call —
-// concurrently under WithParallelTools.
+// Hooks fire from the goroutine executing the call — concurrently under
+// WithParallelTools.
 func (r *Runner) runTool(ctx context.Context, call llmkit.ToolCall, step int) (result string, isErr bool) {
 	tool, ok := r.tools.lookup(call.Name)
 	if !ok {
