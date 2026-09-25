@@ -1,54 +1,68 @@
 package embed
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/dpoage/llmkit"
-	"github.com/dpoage/llmkit/internal/adapter"
-	"github.com/dpoage/llmkit/retry"
-	"io"
 	"net/http"
-	"strings"
-	"sync"
+
+	"github.com/dpoage/llmkit/internal/adapter"
 )
 
-// OpenAICompatibleEmbedder posts to any OpenAI-compatible /v1/embeddings
-// endpoint (OpenAI, Azure OpenAI, vLLM, LiteLLM).
+// openaiCodec is the [wireCodec] for [BackendOpenAICompatible]: any
+// OpenAI-compatible /v1/embeddings endpoint (OpenAI, Azure OpenAI, vLLM,
+// LiteLLM).
 //
 // POST <baseURL>/v1/embeddings
 //
 //	Request:  {"model": "...", "input": ["...", ...]}
 //	Response: {"data": [{"embedding": [...], "index": 0}], "model": "..."}
 //
-// When Config.APIKey is set, requests carry an "Authorization: Bearer" header.
-type OpenAICompatibleEmbedder struct {
-	baseURL    string
-	model      string
-	apiKey     string
-	client     *http.Client
-	retry      retry.Config
-	maxBatch   int
-	dimensions int
-	mu         sync.RWMutex // guards dimensions
+// A 200 response whose body carries an "error" object is reported as an
+// in-band vendor error rather than decoded as data.
+type openaiCodec struct{}
+
+var _ wireCodec = openaiCodec{}
+
+func (openaiCodec) path() string { return "/v1/embeddings" }
+
+func (openaiCodec) encodeRequest(model string, texts []string) any {
+	return openaiRequest{Model: model, Input: texts}
 }
 
-// NewOpenAICompatibleEmbedder builds an embedder that posts to cfg.URL.
-// It returns an error when cfg fails [Config.Validate].
-func NewOpenAICompatibleEmbedder(cfg Config) (*OpenAICompatibleEmbedder, error) {
-	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("openai-compatible config: %w", err)
+func (openaiCodec) decodeResponse(body []byte, want int) ([][]float32, *adapter.VendorError, error) {
+	var result openaiResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, nil, fmt.Errorf("decode response: %w", err)
 	}
-	return &OpenAICompatibleEmbedder{
-		baseURL:    strings.TrimRight(cfg.URL, "/"),
-		model:      cfg.Model,
-		apiKey:     cfg.APIKey,
-		client:     cfg.httpClient(),
-		retry:      cfg.retryPolicy(),
-		maxBatch:   cfg.MaxBatch,
-		dimensions: cfg.Dimensions,
-	}, nil
+	if result.Error != nil {
+		return nil, &adapter.VendorError{
+			Status:  http.StatusOK,
+			Type:    result.Error.Type,
+			Message: result.Error.Message,
+		}, nil
+	}
+	if len(result.Data) != want {
+		return nil, nil, fmt.Errorf("expected %d embeddings, got %d", want, len(result.Data))
+	}
+
+	// Response entries may arrive out of order; build by index,
+	// rejecting out-of-range and duplicate entries. Combined with the
+	// count check above, this fills every slot exactly once.
+	out := make([][]float32, want)
+	for _, d := range result.Data {
+		if d.Index < 0 || d.Index >= want {
+			return nil, nil, fmt.Errorf("unexpected index %d for batch size %d", d.Index, want)
+		}
+		if out[d.Index] != nil {
+			return nil, nil, fmt.Errorf("duplicate embedding at index %d", d.Index)
+		}
+		f32 := make([]float32, len(d.Embedding))
+		for j, v := range d.Embedding {
+			f32[j] = float32(v)
+		}
+		out[d.Index] = f32
+	}
+	return out, nil, nil
 }
 
 type openaiRequest struct {
@@ -70,138 +84,4 @@ type openaiEmbedding struct {
 type openaiError struct {
 	Message string `json:"message"`
 	Type    string `json:"type"`
-}
-
-// Embed returns the embedding for a single text.
-func (o *OpenAICompatibleEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
-	var out []float32
-	err := retry.Do(ctx, o.retry, llmkit.Classify, func(actx context.Context) error {
-		res, err := o.doEmbed(actx, []string{text})
-		if err == nil {
-			out = res[0]
-		}
-		return err
-	})
-	if err != nil {
-		return nil, err
-	}
-	if out == nil {
-		return nil, fmt.Errorf("openai-compatible: empty embeddings response")
-	}
-	return out, nil
-}
-
-// EmbedBatch returns embeddings for multiple texts, splitting the input into
-// requests of at most MaxBatch texts (0 = no splitting). Results are
-// index-aligned; a failed chunk fails the whole call.
-
-func (o *OpenAICompatibleEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
-	if len(texts) == 0 {
-		return nil, nil
-	}
-	out := make([][]float32, 0, len(texts))
-	for start := 0; start < len(texts); {
-		n := batchChunkSize(len(texts)-start, o.maxBatch)
-		chunk := texts[start : start+n]
-		var res [][]float32
-		err := retry.Do(ctx, o.retry, llmkit.Classify, func(actx context.Context) error {
-			r, err := o.doEmbed(actx, chunk)
-			if err == nil {
-				res = r
-			}
-			return err
-		})
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, res...)
-		start += n
-	}
-	return out, nil
-}
-
-// Dimensions returns the vector dimensionality. Like [OllamaEmbedder.Dimensions],
-// it may be auto-detected from the first response.
-func (o *OpenAICompatibleEmbedder) Dimensions() int {
-	o.mu.RLock()
-	defer o.mu.RUnlock()
-	return o.dimensions
-}
-
-func (o *OpenAICompatibleEmbedder) ModelName() string {
-	return o.model
-}
-
-func (o *OpenAICompatibleEmbedder) doEmbed(ctx context.Context, texts []string) ([][]float32, error) {
-	body, err := json.Marshal(openaiRequest{
-		Model: o.model,
-		Input: texts,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("openai-compatible: marshal request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.baseURL+"/v1/embeddings", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("openai-compatible: create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if o.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+o.apiKey)
-	}
-
-	resp, err := o.client.Do(req)
-	if err != nil {
-		return nil, adapter.TransportError("openai-compatible", ctx, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, adapter.TransportError("openai-compatible", ctx, err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, responseError("openai-compatible", resp, respBody)
-	}
-
-	var result openaiResponse
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, fmt.Errorf("openai-compatible: decode response: %w", err)
-	}
-	if result.Error != nil {
-		return nil, adapter.NormalizeSDKError("openai-compatible", adapter.VendorError{
-			Status:  200,
-			Type:    result.Error.Type,
-			Message: result.Error.Message,
-			Header:  resp.Header,
-		})
-	}
-	if len(result.Data) != len(texts) {
-		return nil, fmt.Errorf("openai-compatible: expected %d embeddings, got %d", len(texts), len(result.Data))
-	}
-
-	// Response entries may arrive out of order; build by index, rejecting
-	// out-of-range and duplicate entries. Combined with the count check above,
-	// this fills every slot exactly once.
-	out := make([][]float32, len(texts))
-	for _, d := range result.Data {
-		if d.Index < 0 || d.Index >= len(texts) {
-			return nil, fmt.Errorf("openai-compatible: unexpected index %d for batch size %d", d.Index, len(texts))
-		}
-		if out[d.Index] != nil {
-			return nil, fmt.Errorf("openai-compatible: duplicate embedding at index %d", d.Index)
-		}
-		f32 := make([]float32, len(d.Embedding))
-		for j, v := range d.Embedding {
-			f32[j] = float32(v)
-		}
-		out[d.Index] = f32
-	}
-
-	if err := checkDimensions("openai-compatible", out, &o.dimensions, &o.mu); err != nil {
-		return nil, err
-	}
-
-	return out, nil
 }

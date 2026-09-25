@@ -277,6 +277,35 @@ entry below is marked.
   after `NewBwrap` on a host with no resource-cap method, under
   `WithCapPolicy(CapBestEffort)` (a missing `systemd-run` selects another
   cap method, not this one).
+- **Breaking:** `embed.New`, which takes a `Config` and returns an
+  `Embedder` and an error, is now the only way to build a backend
+  embedder. The `Config.Embedder` string field is replaced by
+  `Config.Backend` of type `Backend` (`BackendOllama` or
+  `BackendOpenAICompatible`; the zero value and any other value are
+  refused). A caller that holds a backend name as a string converts it
+  with the new `embed.ParseBackend`. `New` applies no cache itself; to
+  cache a backend, pass the `Embedder` that `New` returns to
+  `NewCachedEmbedder`. The Ollama backend now sends the `input` field of
+  a single-text `Embed` as a one-element JSON array (before: a JSON
+  string); Ollama's API reference documents both shapes for `input`.
+- **Breaking:** `Config.APIKey`, when non-empty, is now sent as
+  `Authorization: Bearer <APIKey>` on every request on BOTH backends
+  (llmkit-bk8.8.1): Ollama used to drop it silently while
+  openai-compatible sent it. `Config.Validate` and `New` also refuse an
+  `APIKey` with leading or trailing whitespace, or with a byte net/http
+  cannot send in a header value (bytes 0x00-0x1F except tab, and 0x7F);
+  the error never echoes the key, raw or trimmed.
+- Every response body embed reads, on both backends, is now bounded at
+  64 MiB (llmkit-bk8.1.39). A 200 body over the limit returns a plain
+  terminal error naming the limit instead of decoding a partial or
+  oversized body. A non-200 body over the limit is classified from its
+  first 64 MiB, so a context-length phrase past that point does not
+  count.
+- The openai-compatible 200 error-object route's `APIError.Message` is
+  now trimmed and capped at 200 bytes plus `"..."`, through the same
+  helper the non-200 route already used (llmkit-bk8.1.39): before, a
+  padded or multi-megabyte in-band error message reached `Message`
+  verbatim.
 
 ### Removed
 
@@ -326,6 +355,18 @@ entry below is marked.
   `base.Timeout` replaces the 30-second per-probe ceiling.
   `sandbox.InvalidateCapabilityCache` is removed with no replacement —
   there is no cache left to invalidate.
+- **Breaking:** `embed.LoadConfig` and its private `defaults` helper.
+  `embed` no longer reads environment variables. Replacement: a caller
+  fills `Config` from its own configuration source.
+- **Breaking:** `embed`'s `"hugot"` backend case, `embed.NewEmbedder`,
+  `embed.NewOllamaEmbedder`, `embed.NewOpenAICompatibleEmbedder`, and the
+  exported `embed.OllamaEmbedder`/`embed.OpenAICompatibleEmbedder` types.
+  Replacement: `embed.New`, which returns the `Embedder` interface;
+  an unbundled backend (Hugot, or any local runtime) is still your own
+  `Embedder` implementation.
+- **Breaking:** `embed.Config.CacheEnabled` and `embed.Config.CacheSize`.
+  Replacement: pass the `Embedder` that `embed.New(cfg)` returns to
+  `embed.NewCachedEmbedder(e, maxSize)`.
 
 ### Fixed
 
@@ -485,6 +526,10 @@ entry below is marked.
   `Retry.BaseDelay`, `MaxDelay`, and `Jitter` at zero (before: 500ms,
   30s, 0.2) and sets only `RequestTimeout`, from `<PREFIX>_EMBED_TIMEOUT`;
   the policy an embedder resolves from a loaded `Config` is unchanged.
+- `embed.CachedEmbedder` no longer aliases the inner embedder's vectors
+  (llmkit-bk8.8.1): `insert` now stores a private copy, so an inner
+  `Embedder` that keeps and later mutates a slice it returned can no
+  longer corrupt a subsequent cache hit.
 
 ## [0.5.0] - 2026-09-20
 

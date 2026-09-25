@@ -3,17 +3,14 @@ package embed
 import (
 	"context"
 	"encoding/json"
-	"github.com/dpoage/llmkit/retry"
 	"math"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 )
 
-func TestOllamaEmbedder_Embed(t *testing.T) {
+func TestOllamaBackend_Embed(t *testing.T) {
 	want := []float64{0.1, 0.2, 0.3, 0.4}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -34,6 +31,9 @@ func TestOllamaEmbedder_Embed(t *testing.T) {
 		if req.Model != "nomic-embed-text" {
 			t.Errorf("expected model nomic-embed-text, got %s", req.Model)
 		}
+		if len(req.Input) != 1 || req.Input[0] != "hello world" {
+			t.Errorf("input = %q, want the one-element array [\"hello world\"]", req.Input)
+		}
 
 		resp := ollamaResponse{
 			Model:      "nomic-embed-text",
@@ -44,13 +44,13 @@ func TestOllamaEmbedder_Embed(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	emb, err := NewOllamaEmbedder(Config{
-		Embedder: "ollama",
-		Model:    "nomic-embed-text",
-		URL:      srv.URL,
+	emb, err := New(Config{
+		Backend: BackendOllama,
+		Model:   "nomic-embed-text",
+		URL:     srv.URL,
 	})
 	if err != nil {
-		t.Fatalf("NewOllamaEmbedder: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 
 	result, err := emb.Embed(context.Background(), "hello world")
@@ -75,7 +75,7 @@ func TestOllamaEmbedder_Embed(t *testing.T) {
 	}
 }
 
-func TestOllamaEmbedder_EmbedBatch(t *testing.T) {
+func TestOllamaBackend_EmbedBatch(t *testing.T) {
 	embeddings := [][]float64{
 		{0.1, 0.2},
 		{0.3, 0.4},
@@ -94,13 +94,13 @@ func TestOllamaEmbedder_EmbedBatch(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	emb, err := NewOllamaEmbedder(Config{
-		Embedder: "ollama",
-		Model:    "nomic-embed-text",
-		URL:      srv.URL,
+	emb, err := New(Config{
+		Backend: BackendOllama,
+		Model:   "nomic-embed-text",
+		URL:     srv.URL,
 	})
 	if err != nil {
-		t.Fatalf("NewOllamaEmbedder: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 
 	results, err := emb.EmbedBatch(context.Background(), []string{"a", "b", "c"})
@@ -118,14 +118,14 @@ func TestOllamaEmbedder_EmbedBatch(t *testing.T) {
 	}
 }
 
-func TestOllamaEmbedder_EmbedBatch_Empty(t *testing.T) {
-	emb, err := NewOllamaEmbedder(Config{
-		Embedder: "ollama",
-		Model:    "nomic-embed-text",
-		URL:      "http://localhost:99999", // should never be called
+func TestOllamaBackend_EmbedBatch_Empty(t *testing.T) {
+	emb, err := New(Config{
+		Backend: BackendOllama,
+		Model:   "nomic-embed-text",
+		URL:     "http://localhost:99999",
 	})
 	if err != nil {
-		t.Fatalf("NewOllamaEmbedder: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 
 	results, err := emb.EmbedBatch(context.Background(), nil)
@@ -137,20 +137,20 @@ func TestOllamaEmbedder_EmbedBatch_Empty(t *testing.T) {
 	}
 }
 
-func TestOllamaEmbedder_HTTPError(t *testing.T) {
+func TestOllamaBackend_HTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"error": "model not found"}`))
 	}))
 	defer srv.Close()
 
-	emb, err := NewOllamaEmbedder(Config{
-		Embedder: "ollama",
-		Model:    "nonexistent-model",
-		URL:      srv.URL,
+	emb, err := New(Config{
+		Backend: BackendOllama,
+		Model:   "nonexistent-model",
+		URL:     srv.URL,
 	})
 	if err != nil {
-		t.Fatalf("NewOllamaEmbedder: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 
 	_, err = emb.Embed(context.Background(), "hello")
@@ -159,14 +159,14 @@ func TestOllamaEmbedder_HTTPError(t *testing.T) {
 	}
 }
 
-func TestOllamaEmbedder_ConnectionRefused(t *testing.T) {
-	emb, err := NewOllamaEmbedder(Config{
-		Embedder: "ollama",
-		Model:    "nomic-embed-text",
-		URL:      "http://127.0.0.1:1", // nothing listening
+func TestOllamaBackend_ConnectionRefused(t *testing.T) {
+	emb, err := New(Config{
+		Backend: BackendOllama,
+		Model:   "nomic-embed-text",
+		URL:     "http://127.0.0.1:1",
 	})
 	if err != nil {
-		t.Fatalf("NewOllamaEmbedder: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 
 	_, err = emb.Embed(context.Background(), "hello")
@@ -175,35 +175,34 @@ func TestOllamaEmbedder_ConnectionRefused(t *testing.T) {
 	}
 }
 
-func TestOllamaEmbedder_InvalidConfig(t *testing.T) {
-	_, err := NewOllamaEmbedder(Config{
-		Embedder: "ollama",
-		Model:    "",
-		URL:      "http://localhost:11434",
+func TestNew_InvalidConfig(t *testing.T) {
+	_, err := New(Config{
+		Backend: BackendOllama,
+		Model:   "",
+		URL:     "http://localhost:11434",
 	})
 	if err == nil {
 		t.Fatal("expected validation error for empty model")
 	}
 }
 
-func TestOllamaEmbedder_ContextCancellation(t *testing.T) {
+func TestOllamaBackend_ContextCancellation(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Block until context is cancelled — the client should give up.
 		<-r.Context().Done()
 	}))
 	defer srv.Close()
 
-	emb, err := NewOllamaEmbedder(Config{
-		Embedder: "ollama",
-		Model:    "nomic-embed-text",
-		URL:      srv.URL,
+	emb, err := New(Config{
+		Backend: BackendOllama,
+		Model:   "nomic-embed-text",
+		URL:     srv.URL,
 	})
 	if err != nil {
-		t.Fatalf("NewOllamaEmbedder: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // cancel immediately
+	cancel()
 
 	_, err = emb.Embed(ctx, "hello")
 	if err == nil {
@@ -211,15 +210,15 @@ func TestOllamaEmbedder_ContextCancellation(t *testing.T) {
 	}
 }
 
-func TestOllamaEmbedder_ConfiguredDimensions(t *testing.T) {
-	emb, err := NewOllamaEmbedder(Config{
-		Embedder:   "ollama",
+func TestOllamaBackend_ConfiguredDimensions(t *testing.T) {
+	emb, err := New(Config{
+		Backend:    BackendOllama,
 		Model:      "nomic-embed-text",
 		URL:        "http://localhost:11434",
 		Dimensions: 768,
 	})
 	if err != nil {
-		t.Fatalf("NewOllamaEmbedder: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 
 	if emb.Dimensions() != 768 {
@@ -227,7 +226,7 @@ func TestOllamaEmbedder_ConfiguredDimensions(t *testing.T) {
 	}
 }
 
-func TestOpenAIEmbedder_Embed(t *testing.T) {
+func TestOpenAIBackend_Embed(t *testing.T) {
 	want := []float64{0.5, 0.6, 0.7}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -260,14 +259,14 @@ func TestOpenAIEmbedder_Embed(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	emb, err := NewOpenAICompatibleEmbedder(Config{
-		Embedder: "openai-compatible",
-		Model:    "text-embedding-3-small",
-		URL:      srv.URL,
-		APIKey:   "test-key",
+	emb, err := New(Config{
+		Backend: BackendOpenAICompatible,
+		Model:   "text-embedding-3-small",
+		URL:     srv.URL,
+		APIKey:  "test-key",
 	})
 	if err != nil {
-		t.Fatalf("NewOpenAICompatibleEmbedder: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 
 	result, err := emb.Embed(context.Background(), "hello world")
@@ -292,7 +291,7 @@ func TestOpenAIEmbedder_Embed(t *testing.T) {
 	}
 }
 
-func TestOpenAIEmbedder_EmbedBatch(t *testing.T) {
+func TestOpenAIBackend_EmbedBatch(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req openaiRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
@@ -313,13 +312,13 @@ func TestOpenAIEmbedder_EmbedBatch(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	emb, err := NewOpenAICompatibleEmbedder(Config{
-		Embedder: "openai-compatible",
-		Model:    "text-embedding-3-small",
-		URL:      srv.URL,
+	emb, err := New(Config{
+		Backend: BackendOpenAICompatible,
+		Model:   "text-embedding-3-small",
+		URL:     srv.URL,
 	})
 	if err != nil {
-		t.Fatalf("NewOpenAICompatibleEmbedder: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 
 	results, err := emb.EmbedBatch(context.Background(), []string{"a", "b", "c"})
@@ -332,7 +331,7 @@ func TestOpenAIEmbedder_EmbedBatch(t *testing.T) {
 	}
 }
 
-func TestOpenAIEmbedder_EmbedBatch_UnorderedResponse(t *testing.T) {
+func TestOpenAIBackend_EmbedBatch_UnorderedResponse(t *testing.T) {
 	// The OpenAI API does not guarantee ordering by index.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := openaiResponse{
@@ -347,13 +346,13 @@ func TestOpenAIEmbedder_EmbedBatch_UnorderedResponse(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	emb, err := NewOpenAICompatibleEmbedder(Config{
-		Embedder: "openai-compatible",
-		Model:    "model",
-		URL:      srv.URL,
+	emb, err := New(Config{
+		Backend: BackendOpenAICompatible,
+		Model:   "model",
+		URL:     srv.URL,
 	})
 	if err != nil {
-		t.Fatalf("NewOpenAICompatibleEmbedder: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 
 	results, err := emb.EmbedBatch(context.Background(), []string{"a", "b", "c"})
@@ -372,14 +371,14 @@ func TestOpenAIEmbedder_EmbedBatch_UnorderedResponse(t *testing.T) {
 	}
 }
 
-func TestOpenAIEmbedder_EmbedBatch_Empty(t *testing.T) {
-	emb, err := NewOpenAICompatibleEmbedder(Config{
-		Embedder: "openai-compatible",
-		Model:    "model",
-		URL:      "http://localhost:99999",
+func TestOpenAIBackend_EmbedBatch_Empty(t *testing.T) {
+	emb, err := New(Config{
+		Backend: BackendOpenAICompatible,
+		Model:   "model",
+		URL:     "http://localhost:99999",
 	})
 	if err != nil {
-		t.Fatalf("NewOpenAICompatibleEmbedder: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 
 	results, err := emb.EmbedBatch(context.Background(), nil)
@@ -391,7 +390,7 @@ func TestOpenAIEmbedder_EmbedBatch_Empty(t *testing.T) {
 	}
 }
 
-func TestOpenAIEmbedder_APIError(t *testing.T) {
+func TestOpenAIBackend_APIError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := openaiResponse{
 			Error: &openaiError{
@@ -403,13 +402,13 @@ func TestOpenAIEmbedder_APIError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	emb, err := NewOpenAICompatibleEmbedder(Config{
-		Embedder: "openai-compatible",
-		Model:    "bad-model",
-		URL:      srv.URL,
+	emb, err := New(Config{
+		Backend: BackendOpenAICompatible,
+		Model:   "bad-model",
+		URL:     srv.URL,
 	})
 	if err != nil {
-		t.Fatalf("NewOpenAICompatibleEmbedder: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 
 	_, err = emb.Embed(context.Background(), "hello")
@@ -418,21 +417,21 @@ func TestOpenAIEmbedder_APIError(t *testing.T) {
 	}
 }
 
-func TestOpenAIEmbedder_HTTPError(t *testing.T) {
+func TestOpenAIBackend_HTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"error": {"message": "invalid api key"}}`))
 	}))
 	defer srv.Close()
 
-	emb, err := NewOpenAICompatibleEmbedder(Config{
-		Embedder: "openai-compatible",
-		Model:    "model",
-		URL:      srv.URL,
-		APIKey:   "bad-key",
+	emb, err := New(Config{
+		Backend: BackendOpenAICompatible,
+		Model:   "model",
+		URL:     srv.URL,
+		APIKey:  "bad-key",
 	})
 	if err != nil {
-		t.Fatalf("NewOpenAICompatibleEmbedder: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 
 	_, err = emb.Embed(context.Background(), "hello")
@@ -441,7 +440,7 @@ func TestOpenAIEmbedder_HTTPError(t *testing.T) {
 	}
 }
 
-func TestOpenAIEmbedder_NoAuthHeader_WithoutAPIKey(t *testing.T) {
+func TestOpenAIBackend_NoAuthHeader_WithoutAPIKey(t *testing.T) {
 	var gotAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
@@ -455,13 +454,13 @@ func TestOpenAIEmbedder_NoAuthHeader_WithoutAPIKey(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	emb, err := NewOpenAICompatibleEmbedder(Config{
-		Embedder: "openai-compatible",
-		Model:    "model",
-		URL:      srv.URL,
+	emb, err := New(Config{
+		Backend: BackendOpenAICompatible,
+		Model:   "model",
+		URL:     srv.URL,
 	})
 	if err != nil {
-		t.Fatalf("NewOpenAICompatibleEmbedder: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 
 	_, err = emb.Embed(context.Background(), "hello")
@@ -617,71 +616,43 @@ func TestCachedEmbedder_DelegatesMethods(t *testing.T) {
 	}
 }
 
-func TestNewEmbedder_Ollama(t *testing.T) {
-	emb, err := NewEmbedder(Config{
-		Embedder: "ollama",
-		Model:    "nomic-embed-text",
-		URL:      "http://localhost:11434",
+func TestNew_Ollama(t *testing.T) {
+	emb, err := New(Config{
+		Backend: BackendOllama,
+		Model:   "nomic-embed-text",
+		URL:     "http://localhost:11434",
 	})
 	if err != nil {
-		t.Fatalf("NewEmbedder(ollama): %v", err)
+		t.Fatalf("New(ollama): %v", err)
 	}
 	if emb.ModelName() != "nomic-embed-text" {
 		t.Errorf("ModelName() = %q, want %q", emb.ModelName(), "nomic-embed-text")
 	}
 }
 
-func TestNewEmbedder_OpenAICompatible(t *testing.T) {
-	emb, err := NewEmbedder(Config{
-		Embedder: "openai-compatible",
-		Model:    "text-embedding-3-small",
-		URL:      "https://api.openai.com",
-		APIKey:   "sk-test",
+func TestNew_OpenAICompatible(t *testing.T) {
+	emb, err := New(Config{
+		Backend: BackendOpenAICompatible,
+		Model:   "text-embedding-3-small",
+		URL:     "https://api.openai.com",
+		APIKey:  "sk-test",
 	})
 	if err != nil {
-		t.Fatalf("NewEmbedder(openai-compatible): %v", err)
+		t.Fatalf("New(openai-compatible): %v", err)
 	}
 	if emb.ModelName() != "text-embedding-3-small" {
 		t.Errorf("ModelName() = %q, want %q", emb.ModelName(), "text-embedding-3-small")
 	}
 }
 
-func TestNewEmbedder_Hugot_ReturnsDescriptiveError(t *testing.T) {
-	_, err := NewEmbedder(Config{
-		Embedder: "hugot",
-		Model:    "sentence-transformers/all-MiniLM-L6-v2",
+func TestNew_UnknownBackend(t *testing.T) {
+	_, err := New(Config{
+		Backend: Backend("unknown"),
+		Model:   "model",
+		URL:     "http://localhost",
 	})
 	if err == nil {
-		t.Fatal("expected error for hugot embedder")
-	}
-	if !strings.Contains(err.Error(), "hugot embedder not bundled in llmkit") {
-		t.Errorf("error message should mention hugot not bundled, got: %v", err)
-	}
-}
-
-func TestNewEmbedder_Unknown(t *testing.T) {
-	_, err := NewEmbedder(Config{
-		Embedder: "unknown",
-		Model:    "model",
-		URL:      "http://localhost",
-	})
-	if err == nil {
-		t.Fatal("expected error for unknown embedder type")
-	}
-}
-
-func TestNewEmbedder_WithCache(t *testing.T) {
-	emb, err := NewEmbedder(Config{
-		Embedder:     "ollama",
-		Model:        "nomic-embed-text",
-		URL:          "http://localhost:11434",
-		CacheEnabled: true,
-	})
-	if err != nil {
-		t.Fatalf("NewEmbedder(ollama+cache): %v", err)
-	}
-	if _, ok := emb.(*CachedEmbedder); !ok {
-		t.Errorf("expected *CachedEmbedder, got %T", emb)
+		t.Fatal("expected error for unknown backend")
 	}
 }
 
@@ -693,37 +664,42 @@ func TestConfig_Validate(t *testing.T) {
 	}{
 		{
 			name:    "valid ollama",
-			cfg:     Config{Embedder: "ollama", Model: "nomic-embed-text", URL: "http://localhost:11434"},
+			cfg:     Config{Backend: BackendOllama, Model: "nomic-embed-text", URL: "http://localhost:11434"},
 			wantErr: false,
 		},
 		{
 			name:    "valid openai-compatible",
-			cfg:     Config{Embedder: "openai-compatible", Model: "text-embedding-3-small", URL: "https://api.openai.com"},
+			cfg:     Config{Backend: BackendOpenAICompatible, Model: "text-embedding-3-small", URL: "https://api.openai.com"},
 			wantErr: false,
 		},
 		{
-			name:    "unknown embedder",
-			cfg:     Config{Embedder: "foo", Model: "m", URL: "http://localhost"},
+			name:    "unknown backend",
+			cfg:     Config{Backend: "foo", Model: "m", URL: "http://localhost"},
+			wantErr: true,
+		},
+		{
+			name:    "zero backend",
+			cfg:     Config{Model: "m", URL: "http://localhost"},
 			wantErr: true,
 		},
 		{
 			name:    "empty model",
-			cfg:     Config{Embedder: "ollama", Model: "", URL: "http://localhost"},
+			cfg:     Config{Backend: BackendOllama, Model: "", URL: "http://localhost"},
 			wantErr: true,
 		},
 		{
 			name:    "empty URL for HTTP backend",
-			cfg:     Config{Embedder: "ollama", Model: "m", URL: ""},
+			cfg:     Config{Backend: BackendOllama, Model: "m", URL: ""},
 			wantErr: true,
 		},
 		{
 			name:    "negative dimensions",
-			cfg:     Config{Embedder: "ollama", Model: "m", URL: "http://localhost", Dimensions: -1},
+			cfg:     Config{Backend: BackendOllama, Model: "m", URL: "http://localhost", Dimensions: -1},
 			wantErr: true,
 		},
 		{
 			name:    "explicit zero dimensions OK",
-			cfg:     Config{Embedder: "ollama", Model: "m", URL: "http://localhost", Dimensions: 0},
+			cfg:     Config{Backend: BackendOllama, Model: "m", URL: "http://localhost", Dimensions: 0},
 			wantErr: false,
 		},
 	}
@@ -735,77 +711,6 @@ func TestConfig_Validate(t *testing.T) {
 				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
-	}
-}
-
-func TestLoadConfig_Defaults(t *testing.T) {
-	cfg, err := LoadConfig("LLMKIT_TEST_UNSET")
-	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
-	}
-	if cfg.Embedder != "ollama" {
-		t.Errorf("default Embedder = %q, want %q", cfg.Embedder, "ollama")
-	}
-	if cfg.Model != "nomic-embed-text" {
-		t.Errorf("default Model = %q, want %q", cfg.Model, "nomic-embed-text")
-	}
-	if cfg.CacheEnabled {
-		t.Error("default CacheEnabled should be false")
-	}
-	p := cfg.retryPolicy()
-	if p.MaxAttempts != 3 || p.RequestTimeout != 60*time.Second {
-		t.Errorf("resolved default attempts/timeout = %d/%v, want 3/60s (embed bounds)", p.MaxAttempts, p.RequestTimeout)
-	}
-	if p.Jitter != retry.Default().Jitter {
-		t.Errorf("resolved default Jitter = %v, want kit default %v (LoadConfig leaves Retry unset; Or fills it)", p.Jitter, retry.Default().Jitter)
-	}
-}
-
-func TestLoadConfig_EnvOverrides(t *testing.T) {
-	t.Setenv("MYAPP_EMBEDDER", "openai-compatible")
-	t.Setenv("MYAPP_EMBED_MODEL", "text-embedding-ada-002")
-	t.Setenv("MYAPP_EMBED_URL", "https://api.openai.com")
-	t.Setenv("MYAPP_EMBED_API_KEY", "sk-secret")
-	t.Setenv("MYAPP_EMBED_DIMENSIONS", "1536")
-	t.Setenv("MYAPP_EMBED_CACHE", "true")
-
-	cfg, err := LoadConfig("MYAPP")
-	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
-	}
-
-	if cfg.Embedder != "openai-compatible" {
-		t.Errorf("Embedder = %q, want %q", cfg.Embedder, "openai-compatible")
-	}
-	if cfg.Model != "text-embedding-ada-002" {
-		t.Errorf("Model = %q, want %q", cfg.Model, "text-embedding-ada-002")
-	}
-	if cfg.URL != "https://api.openai.com" {
-		t.Errorf("URL = %q, want %q", cfg.URL, "https://api.openai.com")
-	}
-	if cfg.APIKey != "sk-secret" {
-		t.Errorf("APIKey = %q, want %q", cfg.APIKey, "sk-secret")
-	}
-	if cfg.Dimensions != 1536 {
-		t.Errorf("Dimensions = %d, want 1536", cfg.Dimensions)
-	}
-	if !cfg.CacheEnabled {
-		t.Error("CacheEnabled should be true")
-	}
-}
-
-func TestLoadConfig_PrefixIsCaseInsensitive(t *testing.T) {
-	t.Setenv("LLMKIT_EMBEDDER", "ollama")
-	t.Setenv("LLMKIT_EMBED_MODEL", "nomic-embed-text")
-	t.Setenv("LLMKIT_EMBED_URL", "http://localhost:11434")
-
-	cfg, err := LoadConfig("llmkit")
-	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
-	}
-
-	if cfg.Embedder != "ollama" {
-		t.Errorf("Embedder = %q, want ollama", cfg.Embedder)
 	}
 }
 

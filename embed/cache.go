@@ -11,7 +11,7 @@ import (
 
 // Stats reports cumulative cache counters. Hits+Misses counts every text
 // requested through the cache. Counters are lifetime values; Clear does
-// not reset them. Len reports the current entry count.
+// not reset them. [CachedEmbedder.Len] reports the current entry count.
 type Stats struct {
 	Hits   int64
 	Misses int64
@@ -21,8 +21,8 @@ type Stats struct {
 // Cache keys are SHA-256(model + "\x00" + text), so different models
 // produce distinct cache entries for the same text.
 //
-// When maxSize > 0 the cache is bounded: inserting past the bound evicts
-// the least recently used entry, and cache hits refresh recency.
+// When maxSize > 0 the cache is bounded: inserting past the bound
+// evicts the least recently used entry, and cache hits refresh recency.
 // maxSize <= 0 means unbounded. All methods are safe for concurrent use.
 type CachedEmbedder struct {
 	inner   Embedder
@@ -54,8 +54,9 @@ func NewCachedEmbedder(inner Embedder, maxSize int) *CachedEmbedder {
 	}
 }
 
-// Embed returns a cached embedding or delegates to the inner Embedder. The
-// returned vector is a private copy: mutating it never affects later reads.
+// Embed returns a cached embedding or delegates to the inner Embedder.
+// The returned vector is a private copy: mutating it never affects
+// later reads.
 func (c *CachedEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
 	key := c.cacheKey(text)
 
@@ -83,8 +84,8 @@ func (c *CachedEmbedder) Embed(ctx context.Context, text string) ([]float32, err
 }
 
 // EmbedBatch returns cached embeddings where available and batches the
-// remaining texts through the inner Embedder. Results are index-aligned with
-// the input; every returned vector is a private copy (see Embed).
+// remaining texts through the inner Embedder. Results are index-aligned
+// with the input; every returned vector is a private copy (see Embed).
 func (c *CachedEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
@@ -163,15 +164,19 @@ func (c *CachedEmbedder) Clear() {
 	c.lru.Init()
 }
 
-// insert stores emb at key as the most recent entry and evicts
-// least-recently-used entries past the bound. c.mu must be held.
+// insert stores a private copy of emb at key as the most recent entry
+// and evicts least-recently-used entries past the bound. Storing a copy
+// (not the caller's slice) means a caller who mutates emb after
+// insert returns can never corrupt what a later cache hit serves.
+// c.mu must be held.
 func (c *CachedEmbedder) insert(key string, emb []float32) {
+	cp := copyVector(emb)
 	if el, ok := c.cache[key]; ok {
-		el.Value.(*lruEntry).emb = emb
+		el.Value.(*lruEntry).emb = cp
 		c.lru.MoveToFront(el)
 		return
 	}
-	c.cache[key] = c.lru.PushFront(&lruEntry{key: key, emb: emb})
+	c.cache[key] = c.lru.PushFront(&lruEntry{key: key, emb: cp})
 	for c.maxSize > 0 && len(c.cache) > c.maxSize {
 		oldest := c.lru.Back()
 		if oldest == nil {
@@ -182,8 +187,8 @@ func (c *CachedEmbedder) insert(key string, emb []float32) {
 	}
 }
 
-// copyVector returns a fresh copy of v so cached slices never alias returned
-// data.
+// copyVector returns a fresh copy of v so cached slices never alias
+// returned data.
 func copyVector(v []float32) []float32 {
 	out := make([]float32, len(v))
 	copy(out, v)

@@ -2,172 +2,115 @@ package embed
 
 import (
 	"fmt"
-	"github.com/dpoage/llmkit"
-	"github.com/dpoage/llmkit/retry"
 	"net/http"
-	"os"
-	"strconv"
 	"strings"
 	"time"
+
+	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/retry"
 )
 
 const (
-	// defaultEmbedMaxAttempts is the embed default for Retry.MaxAttempts:
-	// embedding calls retry less than LLM completions (3 attempts total).
+	// defaultEmbedMaxAttempts is the embed default for Retry.MaxAttempts.
 	defaultEmbedMaxAttempts = 3
 
 	// defaultEmbedRequestTimeout bounds a single embedding attempt when
-	// Retry.RequestTimeout is unset. Embeddings are far lighter than LLM
-	// completions, so the kit's 5m default is tightened to 60s; worst case
-	// before giving up is roughly MaxAttempts * (60s + backoff).
+	// Retry.RequestTimeout is unset. Tightened from the kit's 5m default
+	// to 60s: embeddings are far lighter than LLM completions.
 	defaultEmbedRequestTimeout = 60 * time.Second
 )
 
-// Config configures an embedding backend, its retry policy, and its
-// optional cache. NewEmbedder, NewOllamaEmbedder, and
-// NewOpenAICompatibleEmbedder call Validate before use.
+// Backend selects the wire protocol an [Embedder] built by [New] speaks.
+// The zero value names no backend and is refused by [Config.Validate].
+type Backend string
+
+const (
+	// BackendOllama posts to <URL>/api/embed on an Ollama server.
+	BackendOllama Backend = "ollama"
+	// BackendOpenAICompatible posts to <URL>/v1/embeddings on any
+	// OpenAI-compatible API (OpenAI, Azure OpenAI, vLLM, LiteLLM).
+	BackendOpenAICompatible Backend = "openai-compatible"
+)
+
+// validBackends lists the accepted backend names in ParseBackend's error,
+// which Validate returns for a bad Backend.
+const validBackends = `"ollama" or "openai-compatible"`
+
+// ParseBackend maps a backend name onto a Backend. The error names the
+// bad value and lists every accepted one, so a bad config value is
+// actionable without reading this package.
+func ParseBackend(s string) (Backend, error) {
+	switch b := Backend(s); b {
+	case BackendOllama, BackendOpenAICompatible:
+		return b, nil
+	default:
+		return "", fmt.Errorf("embed: unknown backend %q: expected %s", s, validBackends)
+	}
+}
+
+// Config configures an embedding backend and its retry policy. [New]
+// calls Validate before building the backend named by Backend.
 type Config struct {
-	// Embedder selects the backend: "ollama" or "openai-compatible".
-	Embedder string
+	// Backend selects the wire protocol: [BackendOllama] or
+	// [BackendOpenAICompatible]. The zero value is refused by Validate.
+	Backend Backend
 
 	// Model is the embedding model name (e.g. "nomic-embed-text").
+	// Validate requires a non-empty Model.
 	Model string
 
 	// URL is the base URL of the embedding service. Validate requires a
 	// non-empty URL; there is no default.
 	URL string
 
-	// APIKey is the bearer token for the openai-compatible backend. Ollama
-	// ignores it, and Validate does not require it.
+	// APIKey, when non-empty, is sent as "Authorization: Bearer <APIKey>"
+	// on every request to BOTH backends; when empty, neither backend
+	// sends an Authorization header. Validate refuses leading/trailing
+	// whitespace and any byte net/http refuses in a header value (bytes
+	// 0x00-0x1F except tab, and 0x7F). The error never echoes APIKey,
+	// raw or trimmed. An empty APIKey is always allowed.
 	APIKey string
 
-	// Dimensions overrides the expected vector dimensionality. When zero,
-	// the embedder detects the dimensionality from the first response. A
-	// later vector of a different length is an error either way.
+	// Dimensions overrides the expected vector dimensionality. When
+	// zero, the embedder detects the dimensionality from the first
+	// vector it accepts. A later vector of a different length is an
+	// error either way. Validate rejects a negative value.
 	Dimensions int
 
-	// CacheEnabled turns on the content-hash embedding cache, bounded by
-	// CacheSize.
-	CacheEnabled bool
+	// MaxBatch caps the number of texts sent in one HTTP request. Zero
+	// sends the whole batch in one request; Validate rejects a negative
+	// value. EmbedBatch splits larger inputs and preserves order; a
+	// failed chunk fails the whole call.
+	MaxBatch int
 
-	// HTTPClient optionally injects a custom HTTP client (custom transport,
-	// proxy, test double). When non-nil, the embedder uses the injected
-	// client as-is, including its Timeout: an attempt then ends at the
-	// earlier of Retry.RequestTimeout and the client's Timeout. When nil,
-	// the embedder uses a client with no Timeout, so Retry.RequestTimeout
+	// HTTPClient optionally injects a custom HTTP client (custom
+	// transport, proxy, test double). When non-nil, the embedder uses it
+	// as-is, including its Timeout: an attempt ends at the earlier of
+	// Retry.RequestTimeout and the client's Timeout. When nil, the
+	// embedder uses a client with no Timeout, so Retry.RequestTimeout
 	// is the only per-attempt bound.
 	HTTPClient *http.Client
 
-	// chunking: the whole batch goes in one request. Validate rejects a
-	// negative value. EmbedBatch splits larger inputs and preserves
-	// order; a failed chunk fails the whole call.
-	MaxBatch int
-
-	// CacheSize caps the number of cache entries when CacheEnabled is true.
-	// Zero means unbounded; Validate rejects a negative value. When
-	// positive, the cache evicts the least recently used entry past the
-	// bound.
-	CacheSize int
-
 	// Retry tunes transient-failure retries via [retry.Config]. Unset
-	// fields are completed at backend construction by [retry.Config.Or]
-	// against the embed defaults (MaxAttempts 3, RequestTimeout 60s,
+	// fields are completed at construction by [retry.Config.Or] against
+	// the embed defaults (MaxAttempts 3, RequestTimeout 60s,
 	// BaseDelay/MaxDelay/Jitter from [retry.Default]). MaxAttempts,
-	// BaseDelay, MaxDelay, and RequestTimeout resolve when <= 0; Jitter
-	// resolves when == 0 (an explicit 0 is unset, like every other zero
-	// field — to run the resolved defaults with no jitter, set
-	// Retry.Rand to a function returning 0.5). Validate rejects a
-	// Jitter outside [0, 1].
+	// BaseDelay, MaxDelay, and RequestTimeout resolve when <= 0;
+	// Jitter resolves when == 0 — to run the resolved defaults with no
+	// jitter, set Retry.Rand to a function returning 0.5. Validate
+	// rejects a Jitter outside [0, 1].
 	Retry retry.Config
 }
 
-// defaults returns a Config with sensible local-first defaults. Retry is
-// left zero: retryPolicy resolves it via [retry.Config.Or] against
-// defaultRetry at construction.
-func defaults() Config {
-	return Config{
-		Embedder:     "ollama",
-		Model:        "nomic-embed-text",
-		CacheEnabled: false,
-	}
-}
-
-// LoadConfig reads embedder configuration from environment variables.
-//
-// Environment variables (prefix is the provided prefix, e.g. "LLMKIT"):
-//
-//	<PREFIX>_EMBEDDER          - "ollama" (default) or "openai-compatible"
-//	<PREFIX>_EMBED_MODEL       - model name (default: nomic-embed-text)
-//	<PREFIX>_EMBED_URL         - base URL (required; no default)
-//	<PREFIX>_EMBED_API_KEY     - bearer token for the openai-compatible backend (optional)
-//	<PREFIX>_EMBED_DIMENSIONS  - vector dimensions (integer; 0 = auto-detect)
-//	<PREFIX>_EMBED_CACHE       - "true" (case-insensitive) to enable caching
-//	<PREFIX>_EMBED_TIMEOUT     - per-attempt timeout (Go duration, e.g. "30s"; zero, negative, or unset: 60s embed default)
-//	<PREFIX>_EMBED_MAX_BATCH   - max texts per HTTP request (integer; 0 = no chunking)
-//	<PREFIX>_EMBED_CACHE_SIZE  - max cache entries (integer; 0 = unbounded)
-//
-// Unset variables keep their defaults. A malformed integer or duration value
-// returns an error naming the variable; the returned Config is zero.
-func LoadConfig(prefix string) (Config, error) {
-	p := strings.ToUpper(prefix)
-	cfg := defaults()
-
-	if v := os.Getenv(p + "_EMBEDDER"); v != "" {
-		cfg.Embedder = v
-	}
-	if v := os.Getenv(p + "_EMBED_MODEL"); v != "" {
-		cfg.Model = v
-	}
-	if v := os.Getenv(p + "_EMBED_URL"); v != "" {
-		cfg.URL = v
-	}
-	if v := os.Getenv(p + "_EMBED_API_KEY"); v != "" {
-		cfg.APIKey = v
-	}
-	if v := os.Getenv(p + "_EMBED_DIMENSIONS"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil {
-			return Config{}, fmt.Errorf("%s_EMBED_DIMENSIONS: invalid integer %q", p, v)
-		}
-		cfg.Dimensions = n
-	}
-	if v := os.Getenv(p + "_EMBED_TIMEOUT"); v != "" {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return Config{}, fmt.Errorf("%s_EMBED_TIMEOUT: invalid duration %q", p, v)
-		}
-		cfg.Retry.RequestTimeout = d
-	}
-	if v := os.Getenv(p + "_EMBED_MAX_BATCH"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil {
-			return Config{}, fmt.Errorf("%s_EMBED_MAX_BATCH: invalid integer %q", p, v)
-		}
-		cfg.MaxBatch = n
-	}
-	if v := os.Getenv(p + "_EMBED_CACHE_SIZE"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil {
-			return Config{}, fmt.Errorf("%s_EMBED_CACHE_SIZE: invalid integer %q", p, v)
-		}
-		cfg.CacheSize = n
-	}
-	if strings.EqualFold(os.Getenv(p+"_EMBED_CACHE"), "true") {
-		cfg.CacheEnabled = true
-	}
-
-	return cfg, nil
-}
-
-// Validate reports whether c is internally consistent: Embedder names a
-// known backend, Model and URL are non-empty, Dimensions, MaxBatch, and
-// CacheSize are non-negative, and Retry.Jitter is in [0, 1]. Every
-// rejection wraps [llmkit.ErrInvalidRequest].
+// Validate reports whether c is internally consistent: Backend is
+// [BackendOllama] or [BackendOpenAICompatible], Model and URL are
+// non-empty, Dimensions and MaxBatch are non-negative, APIKey carries no
+// leading/trailing whitespace and no byte net/http cannot send in a
+// header value, and Retry.Jitter is in [0, 1]. Every rejection wraps
+// [llmkit.ErrInvalidRequest] and never echoes APIKey.
 func (c Config) Validate() error {
-	switch c.Embedder {
-	case "ollama", "openai-compatible":
-	default:
-		return fmt.Errorf("unknown embedder type %q: %w", c.Embedder, llmkit.ErrInvalidRequest)
+	if _, err := ParseBackend(string(c.Backend)); err != nil {
+		return fmt.Errorf("%w: %w", err, llmkit.ErrInvalidRequest)
 	}
 	if c.Model == "" {
 		return fmt.Errorf("embedding model name is required: %w", llmkit.ErrInvalidRequest)
@@ -181,8 +124,11 @@ func (c Config) Validate() error {
 	if c.MaxBatch < 0 {
 		return fmt.Errorf("max batch must be non-negative, got %d: %w", c.MaxBatch, llmkit.ErrInvalidRequest)
 	}
-	if c.CacheSize < 0 {
-		return fmt.Errorf("cache size must be non-negative, got %d: %w", c.CacheSize, llmkit.ErrInvalidRequest)
+	if strings.TrimSpace(c.APIKey) != c.APIKey {
+		return fmt.Errorf("embed: API key must not have leading or trailing whitespace: %w", llmkit.ErrInvalidRequest)
+	}
+	if !validHeaderValue(c.APIKey) {
+		return fmt.Errorf("embed: API key must not contain control characters: %w", llmkit.ErrInvalidRequest)
 	}
 	if c.Retry.Jitter < 0 || c.Retry.Jitter > 1 {
 		return fmt.Errorf("retry jitter must be in [0, 1], got %v: %w", c.Retry.Jitter, llmkit.ErrInvalidRequest)
@@ -190,11 +136,23 @@ func (c Config) Validate() error {
 	return nil
 }
 
-// httpClient returns the injected client as-is, or a plain client with no
-// Timeout. With the plain client, retry.Do bounds each round trip
-// with the per-attempt Retry.RequestTimeout deadline. An injected client
-// keeps its own Timeout, which can end an attempt earlier. Callers must
-// treat the returned client as read-only.
+// validHeaderValue reports whether net/http sends v in a header value:
+// its transport refuses any control byte other than tab (bytes below
+// 0x20, and DEL), the rule of httpguts.ValidHeaderFieldValue.
+func validHeaderValue(v string) bool {
+	for i := range len(v) {
+		if b := v[i]; (b < ' ' && b != '\t') || b == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// httpClient returns the injected client as-is, or a plain client with
+// no Timeout. With the plain client, retry.Do bounds each round trip
+// with the per-attempt Retry.RequestTimeout deadline. An injected
+// client keeps its own Timeout, which can end an attempt earlier.
+// Callers must treat the returned client as read-only.
 func (c Config) httpClient() *http.Client {
 	if c.HTTPClient != nil {
 		return c.HTTPClient
@@ -203,9 +161,7 @@ func (c Config) httpClient() *http.Client {
 }
 
 // defaultRetry is [retry.Default] narrowed to the embed bounds:
-// MaxAttempts 3 and a 60s per-attempt RequestTimeout (embeddings retry
-// less than LLM completions, and each attempt is far lighter — worst
-// case before giving up is roughly 3 * (60s + backoff)). BaseDelay,
+// MaxAttempts 3 and a 60s per-attempt RequestTimeout. BaseDelay,
 // MaxDelay, and Jitter keep the kit defaults.
 func defaultRetry() retry.Config {
 	d := retry.Default()

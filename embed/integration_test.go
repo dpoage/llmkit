@@ -19,7 +19,6 @@ import (
 func TestOllamaIntegration_Embed(t *testing.T) {
 	ollamaURL := "http://localhost:11434"
 
-	// Check if Ollama is reachable.
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get(ollamaURL)
 	if err != nil {
@@ -27,19 +26,18 @@ func TestOllamaIntegration_Embed(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	emb, err := NewOllamaEmbedder(Config{
-		Embedder: "ollama",
-		Model:    "nomic-embed-text",
-		URL:      ollamaURL,
+	emb, err := New(Config{
+		Backend: BackendOllama,
+		Model:   "nomic-embed-text",
+		URL:     ollamaURL,
 	})
 	if err != nil {
-		t.Fatalf("NewOllamaEmbedder: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Single embedding.
 	result, err := emb.Embed(ctx, "The Go programming language is statically typed and compiled.")
 	if err != nil {
 		t.Fatalf("Embed: %v", err)
@@ -55,7 +53,6 @@ func TestOllamaIntegration_Embed(t *testing.T) {
 		t.Errorf("Dimensions() = %d, want %d", emb.Dimensions(), len(result))
 	}
 
-	// Batch embedding.
 	texts := []string{
 		"Go is a systems programming language.",
 		"Python is an interpreted language.",

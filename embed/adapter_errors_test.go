@@ -26,23 +26,11 @@ func newTestEmbedder(t *testing.T, backend, url string, retryCfg retry.Config) E
 // HTTP client (e.g. to count dial attempts a server-side handler never sees).
 func newTestEmbedderWithClient(t *testing.T, backend, url string, retryCfg retry.Config, client *http.Client) Embedder {
 	t.Helper()
-	switch backend {
-	case "ollama":
-		emb, err := NewOllamaEmbedder(Config{Embedder: "ollama", Model: "m", URL: url, Retry: retryCfg, HTTPClient: client})
-		if err != nil {
-			t.Fatalf("NewOllamaEmbedder: %v", err)
-		}
-		return emb
-	case "openai-compatible":
-		emb, err := NewOpenAICompatibleEmbedder(Config{Embedder: "openai-compatible", Model: "m", URL: url, Retry: retryCfg, HTTPClient: client})
-		if err != nil {
-			t.Fatalf("NewOpenAICompatibleEmbedder: %v", err)
-		}
-		return emb
-	default:
-		t.Fatalf("unknown backend %q", backend)
-		return nil
+	emb, err := New(Config{Backend: Backend(backend), Model: "m", URL: url, Retry: retryCfg, HTTPClient: client})
+	if err != nil {
+		t.Fatalf("New(%s): %v", backend, err)
 	}
+	return emb
 }
 
 // writeSuccessBody writes a minimal successful response for backend.
@@ -270,7 +258,7 @@ func TestE2_TransportFailuresAndCancellation(t *testing.T) {
 
 		t.Run(backend+"/dial_failure_retried", func(t *testing.T) {
 			closedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-			closedSrv.Close() // nothing is listening at this URL now
+			closedSrv.Close()
 
 			ct := &countingTransport{rt: http.DefaultTransport}
 			emb := newTestEmbedderWithClient(t, backend, closedSrv.URL,
@@ -332,41 +320,40 @@ func TestE3_ConfigRefusalsWrapErrInvalidRequest(t *testing.T) {
 		name string
 		fn   func() error
 	}{
-		{"Validate/unknown embedder", func() error {
-			return Config{Embedder: "nope", Model: "m", URL: "http://x"}.Validate()
+		{"Validate/unknown backend", func() error {
+			return Config{Backend: "nope", Model: "m", URL: "http://x"}.Validate()
+		}},
+		{"Validate/zero backend", func() error {
+			return Config{Model: "m", URL: "http://x"}.Validate()
 		}},
 		{"Validate/empty model", func() error {
-			return Config{Embedder: "ollama", Model: "", URL: "http://x"}.Validate()
+			return Config{Backend: BackendOllama, Model: "", URL: "http://x"}.Validate()
 		}},
 		{"Validate/empty URL", func() error {
-			return Config{Embedder: "ollama", Model: "m", URL: ""}.Validate()
+			return Config{Backend: BackendOllama, Model: "m", URL: ""}.Validate()
 		}},
 		{"Validate/negative dimensions", func() error {
-			return Config{Embedder: "ollama", Model: "m", URL: "http://x", Dimensions: -1}.Validate()
+			return Config{Backend: BackendOllama, Model: "m", URL: "http://x", Dimensions: -1}.Validate()
 		}},
 		{"Validate/negative max batch", func() error {
-			return Config{Embedder: "ollama", Model: "m", URL: "http://x", MaxBatch: -1}.Validate()
+			return Config{Backend: BackendOllama, Model: "m", URL: "http://x", MaxBatch: -1}.Validate()
 		}},
-		{"Validate/negative cache size", func() error {
-			return Config{Embedder: "ollama", Model: "m", URL: "http://x", CacheSize: -1}.Validate()
+		{"Validate/whitespace-padded API key", func() error {
+			return Config{Backend: BackendOllama, Model: "m", URL: "http://x", APIKey: "  sk-test  "}.Validate()
 		}},
 		{"Validate/jitter out of range", func() error {
-			return Config{Embedder: "ollama", Model: "m", URL: "http://x", Retry: retry.Config{Jitter: 2}}.Validate()
+			return Config{Backend: BackendOllama, Model: "m", URL: "http://x", Retry: retry.Config{Jitter: 2}}.Validate()
 		}},
-		{"NewOllamaEmbedder/bad config", func() error {
-			_, err := NewOllamaEmbedder(Config{Embedder: "ollama", Model: "", URL: ""})
+		{"New/ollama bad config", func() error {
+			_, err := New(Config{Backend: BackendOllama, Model: "", URL: ""})
 			return err
 		}},
-		{"NewOpenAICompatibleEmbedder/bad config", func() error {
-			_, err := NewOpenAICompatibleEmbedder(Config{Embedder: "openai-compatible", Model: "", URL: ""})
+		{"New/openai-compatible bad config", func() error {
+			_, err := New(Config{Backend: BackendOpenAICompatible, Model: "", URL: ""})
 			return err
 		}},
-		{"NewEmbedder/nope", func() error {
-			_, err := NewEmbedder(Config{Embedder: "nope"})
-			return err
-		}},
-		{"NewEmbedder/hugot", func() error {
-			_, err := NewEmbedder(Config{Embedder: "hugot"})
+		{"New/unknown backend", func() error {
+			_, err := New(Config{Backend: "nope", Model: "m", URL: "http://x"})
 			return err
 		}},
 	}

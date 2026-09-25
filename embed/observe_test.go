@@ -260,7 +260,7 @@ func TestObserveConcurrentEmbeds(t *testing.T) {
 
 // ExampleObserve wraps a fake backend with an observer and reads the one
 // Embed event back. The fake keeps the example hermetic; real use points
-// Observe at [embed.NewEmbedder] or [embed.NewCachedEmbedder].
+// Observe at [embed.New] or [embed.NewCachedEmbedder].
 
 func ExampleObserve() {
 	log := &eventLog{}

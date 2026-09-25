@@ -268,6 +268,25 @@ it would drag the ONNX and GoMLX dependency trees.
 - **What it costs:** local inference is the application's job. Implement
   `Embedder` in your app if you need it.
 
+One construction door, `embed.New`, builds either backend from a
+`Config` and returns the `Embedder` interface; the backend types
+themselves are unexported, so a caller never imports a concrete
+per-backend type. `New` reads no environment variable and no file — a
+caller fills `Config` from its own configuration source — and applies
+no cache itself: to cache a backend, a caller passes the `Embedder` that
+`New` returns to `NewCachedEmbedder`.
+
+- **What it buys:** one refusal path (`Config.Validate`) for every
+  field, on every backend, instead of two duplicated constructors that
+  could drift: with two constructors, Ollama's silently dropped `APIKey`
+  while OpenAI-compatible's sent it. A caller composes
+  caching and observing as separate wrappers around one embedder, so
+  either one is always visible in the caller's own code, never hidden
+  inside a config flag.
+- **What it costs:** a caller who wants environment-driven configuration
+  writes that mapping itself; embed does not read the environment on its
+  behalf.
+
 ## Decision models are not Clients
 
 TypeSafe's Jev is a decision model. One request carries a state plus typed

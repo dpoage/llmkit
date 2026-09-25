@@ -38,7 +38,7 @@
 // at or below 0 becomes [DefaultRequestTimeout]; Jitter is clamped to
 // [0, 1]. A partial Config — one with unset (zero) schedule fields — is
 // completed with [Config.Or] by the constructor that owns the retry
-// policy (provider.New, decide.New, and embed.NewEmbedder), while Do
+// policy (provider.New, decide.New, and embed.New), while Do
 // normalizes only those three fields on whatever config it is given.
 //
 // [Config.Sleep] and [Config.Rand] exist for deterministic tests. nil
@@ -129,7 +129,7 @@ func Default() Config {
 //
 // Or is how the constructor that owns a retry policy completes a caller's
 // partial [Config] — provider.New does `opts.Retry.Or(retry.Default())`,
-// and decide.New and embed.NewEmbedder run their own equivalent against
+// and decide.New and embed.New run their own equivalent against
 // their defaults. Or is never applied by [Do] or the llmkit retry stage:
 // they run the config they are given, and Do normalizes only
 // MaxAttempts, RequestTimeout, and Jitter. Jitter 0 counts as unset under

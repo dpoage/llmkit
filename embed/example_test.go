@@ -9,10 +9,10 @@ import (
 	"github.com/dpoage/llmkit/embed"
 )
 
-// ExampleNewOpenAICompatibleEmbedder points the embedder at an
-// OpenAI-compatible endpoint (here an httptest server serving the wire
-// shape from the package docs) and reads one vector back.
-func ExampleNewOpenAICompatibleEmbedder() {
+// ExampleNew points a New embedder at an OpenAI-compatible endpoint (here
+// an httptest server serving the wire shape from the package docs) and
+// reads one vector back.
+func ExampleNew() {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
@@ -24,11 +24,11 @@ func ExampleNewOpenAICompatibleEmbedder() {
 	}))
 	defer srv.Close()
 
-	emb, err := embed.NewOpenAICompatibleEmbedder(embed.Config{
-		Embedder: "openai-compatible",
-		Model:    "text-embedding-fake",
-		URL:      srv.URL,
-		APIKey:   "test-key",
+	emb, err := embed.New(embed.Config{
+		Backend: embed.BackendOpenAICompatible,
+		Model:   "text-embedding-fake",
+		URL:     srv.URL,
+		APIKey:  "test-key",
 	})
 	if err != nil {
 		fmt.Println("error:", err)
@@ -47,10 +47,10 @@ func ExampleNewOpenAICompatibleEmbedder() {
 	// 3
 }
 
-// ExampleNewOllamaEmbedder points the embedder at a server speaking the
+// ExampleNew_ollama points a New embedder at a server speaking the
 // Ollama /api/embed wire shape (here an httptest server) and reads one
 // vector back.
-func ExampleNewOllamaEmbedder() {
+func ExampleNew_ollama() {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
@@ -60,10 +60,10 @@ func ExampleNewOllamaEmbedder() {
 	}))
 	defer srv.Close()
 
-	emb, err := embed.NewOllamaEmbedder(embed.Config{
-		Embedder: "ollama",
-		Model:    "nomic-embed-text",
-		URL:      srv.URL,
+	emb, err := embed.New(embed.Config{
+		Backend: embed.BackendOllama,
+		Model:   "nomic-embed-text",
+		URL:     srv.URL,
 	})
 	if err != nil {
 		fmt.Println("error:", err)
