@@ -102,20 +102,17 @@
 //
 // # Decorators
 //
-// Three wrappers compose around any [Client]:
-//
-//   - [WithRetry] classifies failures with [Classify] and retries the
-//     retryable ones with exponential backoff, honouring a carried
-//     Retry-After. Non-Client callers run the same loop with [retry.Do]
-//     and [Classify]; [retry.ParseRetryAfter] decodes the header.
-//   - [WithRecorder] reports each successful completion's usage to a
-//     [Recorder].
-//   - [WithSerializedToolCalls] truncates multi-tool-call responses to the
-//     first call; a no-op on parallel-capable clients.
-//
-// The wrappers compose over streaming too: retry stops once a delta is
-// delivered, the recorder reports the final streamed response, and
-// serialization drops tool-call deltas for any index beyond the first.
+// [github.com/dpoage/llmkit/provider.Wrap] composes retry, tool-call serialization, and
+// attempt/completion observation around any [Client]; [github.com/dpoage/llmkit/provider.New]
+// applies the same stack to a freshly built adapter. The stage order is
+// provider's secret: root holds no retry, serialization, or telemetry
+// policy of its own. [Observe] wraps any [Client] and emits one
+// Completion event per logical completion whose ctx does not already
+// carry a span (the emission rule on [Observer]). A New/Wrap stack
+// delivers its Completion and Attempt events to Options.Observer only;
+// with no Options.Observer it emits no events. Non-Client retry
+// callers run [retry.Do] directly with [Classify];
+// [retry.ParseRetryAfter] decodes the header.
 //
 // # Observability
 //
@@ -125,16 +122,19 @@
 // typed [Event] per boundary, correlated by a [RunID] the caller mints with
 // [NewRunID] and places in the context with [WithRun]. Observers are data
 // sinks: they never affect the caller's result, and a panicking observer is
-// a harness bug that propagates. [Recorder] is the separate usage-ledger
-// hook.
+// a harness bug that propagates. A [CompletionEvent]'s Response.Usage
+// and [DecisionEvent.Usage] are the spend ledger; Attempt and Finalize
+// are views over it, never a second source.
 //
-// Emission rule: the outermost harness layer emits a Completion event
-// exactly once per logical completion — the agent Runner (with Step) for
-// agent runs, or the [Observe] decorator for bare clients, never both.
-// That emitter mints a fresh [SpanID] per logical completion ([WithSpan]),
-// so the retry stage's Attempt events join it. Attempt events come only
-// from the provider retry stage, and deterministic replay consumes
-// Completion events only.
+// Ownership rule: a logical completion is owned by the span in its
+// context, and [BeginCompletion] is the only minter. An emitter
+// ([Observe], or a [github.com/dpoage/llmkit/provider] New/Wrap stack
+// above its retry stage) mints and emits only when the ctx it receives
+// carries no span; the agent Runner mints on the ctx it hands its client
+// on every turn; hooks and tools receive a ctx without the turn's span.
+// The rule is stated once, on [Observer]. Attempt events come only from
+// the provider retry stage, and deterministic replay consumes Completion
+// events only.
 //
 // # Streaming
 //
@@ -532,8 +532,10 @@ const (
 	StopError StopReason = "error"
 )
 
-// Usage reports token consumption for a single completion. Callers ledger this
-// per role/provider/model via a Recorder.
+// Usage reports token consumption for a single completion. Callers ledger
+// this per completion through an [Observer] (a [CompletionEvent]'s
+// Response.Usage is the spend ledger); [Usage.Add] is the one rule for
+// summing it.
 //
 // Normalization convention: InputTokens is the TOTAL prompt size — it INCLUDES
 // any tokens that were read from or written to the provider's prompt cache.
@@ -577,6 +579,19 @@ func (u Usage) ChargeableTokens(cacheReadWeight float64) int64 {
 	}
 	weighted := uncached + int64(float64(u.CacheReadInputTokens)*cacheReadWeight)
 	return weighted + u.OutputTokens
+}
+
+// Add returns the field-wise sum of u and v across all four fields —
+// the one summing rule every usage fold in this repository uses (the
+// agent Runner's run total, its JSON-repair fold, and the livetest
+// Tally). It does not mutate u or v.
+func (u Usage) Add(v Usage) Usage {
+	return Usage{
+		InputTokens:              u.InputTokens + v.InputTokens,
+		OutputTokens:             u.OutputTokens + v.OutputTokens,
+		CacheReadInputTokens:     u.CacheReadInputTokens + v.CacheReadInputTokens,
+		CacheCreationInputTokens: u.CacheCreationInputTokens + v.CacheCreationInputTokens,
+	}
 }
 
 // Response is a normalized completion response.
@@ -690,4 +705,38 @@ type Client interface {
 	// Capabilities returns the static capability profile for this client's
 	// provider+model.
 	Capabilities() Capabilities
+}
+
+// Identity names the backend a [Client] calls: Provider is the provider
+// tag ("anthropic", "openai", ...) or a caller's config name via
+// provider.Options.Provider; Model is the model identifier. The zero
+// Identity means "unknown client".
+type Identity struct {
+	Provider string
+	Model    string
+}
+
+// IdentifiedClient is a [Client] that knows its own [Identity]: every
+// client [github.com/dpoage/llmkit/provider.New] or [github.com/dpoage/llmkit/provider.Wrap] builds, and every provider
+// decorator around one (each forwards the identity of the client it
+// wraps, the way it forwards [StreamingClient]). Checked with a type
+// assertion, like StreamingClient — never required of a Client. A
+// caller's own decorator that embeds a Client must forward Identity
+// explicitly to keep it visible through the wrap.
+type IdentifiedClient interface {
+	Client
+	Identity() Identity
+}
+
+// IdentityOf returns c's Identity, or the zero Identity when no
+// [IdentifiedClient] type assertion reaches a non-zero result. The
+// assertion is checked through wrappers: `llmkit.Observe(plain)` where
+// `plain` is not [IdentifiedClient] satisfies the assertion and returns
+// the zero Identity (Observe forwards the inner's result), so a bare
+// fake wrapped in Observe still resolves to the zero Identity.
+func IdentityOf(c Client) Identity {
+	if ic, ok := c.(IdentifiedClient); ok {
+		return ic.Identity()
+	}
+	return Identity{}
 }

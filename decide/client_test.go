@@ -2,12 +2,14 @@ package decide
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -85,22 +87,23 @@ func writeStatus(w http.ResponseWriter, status int, body string) {
 	_, _ = io.WriteString(w, body)
 }
 
-// recorder is a concurrency-safe llmkit.Recorder collecting usage events.
-type recorder struct {
+// decisionCapture is a concurrency-safe llmkit.Observer collecting
+// DecisionEvents.
+type decisionCapture struct {
 	mu     sync.Mutex
-	events []llmkit.UsageEvent
+	events []llmkit.Event
 }
 
-func (r *recorder) Record(ev llmkit.UsageEvent) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.events = append(r.events, ev)
+func (c *decisionCapture) Observe(_ context.Context, ev llmkit.Event) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.events = append(c.events, ev)
 }
 
-func (r *recorder) count() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return len(r.events)
+func (c *decisionCapture) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.events)
 }
 
 func TestAsk_GoldenRequestEnvelope(t *testing.T) {
@@ -570,35 +573,67 @@ func TestAsk_ResponseValidation(t *testing.T) {
 	}
 }
 
-func TestAsk_RecorderFiresOnceWithResponseModel(t *testing.T) {
+// TestAsk_ObserverEmitsOneDecisionEventOnSuccess pins the success shape:
+// exactly one DecisionEvent per successful Ask, Backend "typesafe", Model
+// the response's reported model (not the requested alias), Usage, and
+// Answers and Questions sorted by ID.
+func TestAsk_ObserverEmitsOneDecisionEventOnSuccess(t *testing.T) {
 	srv := httptest.NewServer(okHandler(mixedAnswers("jev-1.13.0")))
 	defer srv.Close()
 
-	rec := &recorder{}
-	c, err := New(Config{APIKey: testAPIKey, Model: "jev-latest", BaseURL: srv.URL, Retry: fastRetry, Recorder: rec})
+	obs := &decisionCapture{}
+	c, err := New(Config{APIKey: testAPIKey, Model: "jev-latest", BaseURL: srv.URL, Retry: fastRetry, Observer: obs})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	if _, err := c.Ask(context.Background(), "s", mixedQuestions()); err != nil {
 		t.Fatalf("Ask: %v", err)
 	}
-	if got := rec.count(); got != 1 {
-		t.Fatalf("recorder events = %d, want exactly 1", got)
+	if got := obs.count(); got != 1 {
+		t.Fatalf("observer events = %d, want exactly 1", got)
 	}
-	ev := rec.events[0]
-	if ev.Provider != "typesafe" {
-		t.Errorf("Provider = %q, want typesafe", ev.Provider)
+	ev := obs.events[0]
+	if ev.Kind != llmkit.KindDecision || ev.Decision == nil {
+		t.Fatalf("Kind=%q Decision=%+v, want KindDecision with a payload", ev.Kind, ev.Decision)
+	}
+	de := ev.Decision
+	if de.Backend != "typesafe" {
+		t.Errorf("Backend = %q, want typesafe", de.Backend)
 	}
 	// The ledger records the versioned id the server reported, not the alias sent.
-	if ev.Model != "jev-1.13.0" {
-		t.Errorf("Model = %q, want the response model jev-1.13.0, not the requested alias", ev.Model)
+	if de.Model != "jev-1.13.0" {
+		t.Errorf("Model = %q, want the response model jev-1.13.0, not the requested alias", de.Model)
 	}
-	if ev.Usage.InputTokens != 120 || ev.Usage.OutputTokens != 15 {
-		t.Errorf("Usage = %+v, want 120 in / 15 out", ev.Usage)
+	if de.Usage.InputTokens != 120 || de.Usage.OutputTokens != 15 {
+		t.Errorf("Usage = %+v, want 120 in / 15 out", de.Usage)
+	}
+	if de.Err != "" {
+		t.Errorf("Err = %q, want empty on success", de.Err)
+	}
+	if len(de.Answers) != 3 {
+		t.Fatalf("Answers = %d, want 3 (belief, pick, quality)", len(de.Answers))
+	}
+	wantIDs := []string{"belief", "pick", "quality"}
+	for i, want := range wantIDs {
+		if de.Answers[i].ID != want {
+			t.Errorf("Answers[%d].ID = %q, want %q (sorted by ID)", i, de.Answers[i].ID, want)
+		}
+	}
+	if len(de.Questions) != 3 {
+		t.Fatalf("Questions = %d, want 3", len(de.Questions))
+	}
+	for i, want := range wantIDs {
+		if de.Questions[i].ID != want {
+			t.Errorf("Questions[%d].ID = %q, want %q (sorted by ID)", i, de.Questions[i].ID, want)
+		}
 	}
 }
 
-func TestAsk_RecorderSilentOnFailure(t *testing.T) {
+// TestAsk_ObserverEmitsOnFailure pins the failure shape: a DecisionEvent
+// still fires for an Ask that reached the wire and failed. Err is set,
+// Answers nil, Model the requested alias (the response never named a
+// versioned id). DecisionEvent is not a success-only usage ledger.
+func TestAsk_ObserverEmitsOnFailure(t *testing.T) {
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
@@ -606,19 +641,163 @@ func TestAsk_RecorderSilentOnFailure(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	rec := &recorder{}
-	c, err := New(Config{APIKey: testAPIKey, Model: "jev-latest", BaseURL: srv.URL, Retry: retry.Config{MaxAttempts: 2, BaseDelay: time.Millisecond}, Recorder: rec})
+	obs := &decisionCapture{}
+	c, err := New(Config{APIKey: testAPIKey, Model: "jev-latest", BaseURL: srv.URL, Retry: retry.Config{MaxAttempts: 2, BaseDelay: time.Millisecond}, Observer: obs})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, err := c.Ask(context.Background(), "s", mixedQuestions()); err == nil {
+	askErr := func() error {
+		_, err := c.Ask(context.Background(), "s", mixedQuestions())
+		return err
+	}()
+	if askErr == nil {
 		t.Fatal("expected an error")
 	}
 	if got := hits.Load(); got != 2 {
 		t.Errorf("hits = %d, want 2", got)
 	}
-	if got := rec.count(); got != 0 {
-		t.Errorf("recorder events = %d, want 0 (failures record nothing)", got)
+	if got := obs.count(); got != 1 {
+		t.Fatalf("observer events = %d, want exactly 1 (a failed Ask that reached the wire still emits)", got)
+	}
+	de := obs.events[0].Decision
+	if de == nil {
+		t.Fatal("event carries no Decision payload")
+	}
+	if de.Err == "" || de.Err != askErr.Error() {
+		t.Errorf("Err = %q, want the Ask error text %q", de.Err, askErr.Error())
+	}
+	if de.Answers != nil {
+		t.Errorf("Answers = %+v, want nil on failure", de.Answers)
+	}
+	if de.Model != "jev-latest" {
+		t.Errorf("Model = %q, want the requested alias jev-latest", de.Model)
+	}
+}
+
+// TestAsk_NoObserverEmitsNothing pins that a nil Config.Observer costs
+// nothing: Ask behaves identically with no event ever built.
+func TestAsk_NoObserverEmitsNothing(t *testing.T) {
+	srv := httptest.NewServer(okHandler(mixedAnswers("jev-1.13.0")))
+	defer srv.Close()
+
+	c, err := New(Config{APIKey: testAPIKey, Model: "jev-latest", BaseURL: srv.URL, Retry: fastRetry})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := c.Ask(context.Background(), "s", mixedQuestions()); err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+}
+
+// TestAsk_DecisionEventRoundTrip pins that an Ask on a ctx carrying a
+// run, a step, and a claimed span emits a DecisionEvent that survives
+// encoding/json with every documented field — Backend, Model, State,
+// Questions (Instructions, True/False, Options, Levels), Answers
+// (Belief, Choice, Probabilities, Confidence, Score, Levels,
+// LevelProbabilities), Usage — plus the RunID, Step, and SpanID
+// inherited from the Ask's ctx. Twelve questions and eight Asks leave
+// an unsorted conversion no realistic chance of matching by
+// map-iteration luck.
+func TestAsk_DecisionEventRoundTrip(t *testing.T) {
+	questions := Questions{
+		"zeta":  Noul{Instructions: "Is it raining?", True: "wet streets", False: map[string]any{"streets": "dry"}},
+		"alpha": Choice{Instructions: "Pick a color.", Options: map[string]any{"blue": "the sky", "red": map[string]any{"hex": "#f00"}}},
+		"mid":   Score{Instructions: map[string]any{"rubric": "quality"}, Levels: []any{"bad", "ok", "good"}},
+	}
+	extra := []string{"k", "c", "x", "e", "q", "b", "w", "g", "t"}
+	for _, id := range extra {
+		questions[id] = Noul{Instructions: "extra " + id}
+	}
+	answers := []string{
+		`"zeta":{"type":"noul","noul":0.25}`,
+		`"alpha":{"type":"choice","choice":"blue","probabilities":{"blue":0.8,"red":0.2},"confidence":0.7}`,
+		`"mid":{"type":"score","score":0.75,"legend":{"0":"bad","1":"ok","2":"good"},"probabilities":{"0":0.1,"1":0.5,"2":0.4},"confidence":0.6}`,
+	}
+	for _, id := range extra {
+		answers = append(answers, fmt.Sprintf(`%q:{"type":"noul","noul":0.5}`, id))
+	}
+	body := `{"model":"jev-1.13.0","answers":{` + strings.Join(answers, ",") + `},"usage":{"input_tokens":120,"output_tokens":15}}`
+	srv := httptest.NewServer(okHandler(body))
+	defer srv.Close()
+
+	belief := func(v float64) *float64 { return &v }
+	raw := func(s string) json.RawMessage { return json.RawMessage(s) }
+	want := &llmkit.DecisionEvent{
+		Backend: "typesafe",
+		Model:   "jev-1.13.0",
+		State:   raw(`{"doc":"sky","n":1}`),
+		Usage:   llmkit.Usage{InputTokens: 120, OutputTokens: 15},
+	}
+	wantIDs := append([]string{"alpha", "mid", "zeta"}, extra...)
+	sort.Strings(wantIDs)
+	for _, id := range wantIDs {
+		switch id {
+		case "alpha":
+			want.Questions = append(want.Questions, llmkit.DecisionQuestion{
+				ID: id, Kind: "choice", Instructions: raw(`"Pick a color."`),
+				Options: map[string]json.RawMessage{"blue": raw(`"the sky"`), "red": raw(`{"hex":"#f00"}`)},
+			})
+			want.Answers = append(want.Answers, llmkit.DecisionAnswer{
+				ID: id, Choice: "blue", Probabilities: map[string]float64{"blue": 0.8, "red": 0.2}, Confidence: 0.7,
+			})
+		case "mid":
+			want.Questions = append(want.Questions, llmkit.DecisionQuestion{
+				ID: id, Kind: "score", Instructions: raw(`{"rubric":"quality"}`),
+				Levels: []json.RawMessage{raw(`"bad"`), raw(`"ok"`), raw(`"good"`)},
+			})
+			want.Answers = append(want.Answers, llmkit.DecisionAnswer{
+				ID: id, Score: belief(0.75), Levels: []string{"bad", "ok", "good"},
+				LevelProbabilities: []float64{0.1, 0.5, 0.4}, Confidence: 0.6,
+			})
+		case "zeta":
+			want.Questions = append(want.Questions, llmkit.DecisionQuestion{
+				ID: id, Kind: "noul", Instructions: raw(`"Is it raining?"`),
+				True: raw(`"wet streets"`), False: raw(`{"streets":"dry"}`),
+			})
+			want.Answers = append(want.Answers, llmkit.DecisionAnswer{ID: id, Belief: belief(0.25)})
+		default:
+			want.Questions = append(want.Questions, llmkit.DecisionQuestion{
+				ID: id, Kind: "noul", Instructions: raw(fmt.Sprintf(`"extra %s"`, id)),
+			})
+			want.Answers = append(want.Answers, llmkit.DecisionAnswer{ID: id, Belief: belief(0.5)})
+		}
+	}
+
+	obs := &decisionCapture{}
+	c, err := New(Config{APIKey: testAPIKey, Model: "jev-latest", BaseURL: srv.URL, Retry: fastRetry, Observer: obs})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	runID := llmkit.NewRunID()
+	ctx := llmkit.BeginCompletion(llmkit.WithStep(llmkit.WithRun(context.Background(), runID), 7))
+	span := llmkit.SpanFromContext(ctx)
+	const asks = 8
+	for range asks {
+		if _, err := c.Ask(ctx, map[string]any{"doc": "sky", "n": 1}, questions); err != nil {
+			t.Fatalf("Ask: %v", err)
+		}
+	}
+	if got := obs.count(); got != asks {
+		t.Fatalf("observer events = %d, want %d (one per Ask)", got, asks)
+	}
+	for i, ev := range obs.events {
+		wire, err := json.Marshal(ev)
+		if err != nil {
+			t.Fatalf("Ask %d: Marshal: %v", i, err)
+		}
+		var got llmkit.Event
+		if err := json.Unmarshal(wire, &got); err != nil {
+			t.Fatalf("Ask %d: Unmarshal: %v", i, err)
+		}
+		if got.Kind != llmkit.KindDecision || got.RunID != runID || got.Step != 7 || got.SpanID != span {
+			t.Errorf("Ask %d: Kind/RunID/Step/SpanID = %q/%q/%d/%q, want decision/%q/7/%q inherited from the Ask ctx",
+				i, got.Kind, got.RunID, got.Step, got.SpanID, runID, span)
+		}
+		if !reflect.DeepEqual(got.Decision, want) {
+			gotJSON, _ := json.Marshal(got.Decision)
+			wantJSON, _ := json.Marshal(want)
+			t.Fatalf("Ask %d: decoded DecisionEvent\n got %s\nwant %s", i, gotJSON, wantJSON)
+		}
 	}
 }
 

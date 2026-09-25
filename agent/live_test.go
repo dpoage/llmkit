@@ -111,7 +111,7 @@ func TestLiveAgentFuncToolLoop(t *testing.T) {
 		if attempt >= 2 {
 			tools = []agent.Tool{add, now}
 		}
-		runner := agent.NewRunner(cl, tools, system, agent.WithHooks(hooks), agent.WithMaxTokens(2048))
+		runner := agent.NewRunner(cl, tools, system, agent.WithHooks(hooks), agent.WithMaxTokens(2048), agent.WithObserver(livetest.DefaultTally()))
 		out, err = runner.Run(ctx, tasks[attempt-1])
 		if err != nil {
 			t.Fatalf("run (attempt %d): %v", attempt, err)
@@ -170,7 +170,7 @@ func TestLiveAgentRunJSONAs(t *testing.T) {
 	var ans capitalAnswer
 	var outcome *agent.Outcome
 	for attempt := 1; attempt <= 3; attempt++ {
-		runner := agent.NewRunner(cl, nil, system, agent.WithMaxTokens(2048))
+		runner := agent.NewRunner(cl, nil, system, agent.WithMaxTokens(2048), agent.WithObserver(livetest.DefaultTally()))
 		a, o, err := agent.RunJSONAs[capitalAnswer](ctx, runner, tasks[attempt-1])
 		if err == nil {
 			ans, outcome = a, o
@@ -198,7 +198,7 @@ func TestLiveAgentRunJSONAs(t *testing.T) {
 
 func TestLiveAgentContinueKeepsPriorTurns(t *testing.T) {
 	ctx, cl, _ := newLiveAgentClient(t)
-	runner := agent.NewRunner(cl, nil, "You are a terse assistant.", agent.WithMaxTokens(1024))
+	runner := agent.NewRunner(cl, nil, "You are a terse assistant.", agent.WithMaxTokens(1024), agent.WithObserver(livetest.DefaultTally()))
 
 	first, err := runner.Run(ctx, "My favorite color is cerulean. Acknowledge in five words or fewer.")
 	if err != nil {
@@ -253,7 +253,7 @@ func TestLiveAgentMaxTokensContinuationParses(t *testing.T) {
 	for attempt := 1; attempt <= 3; attempt++ {
 		runner := agent.NewRunner(cl, nil,
 			"You are a terse assistant. Answer only with the requested JSON, nothing else.",
-			agent.WithMaxTokens(200))
+			agent.WithMaxTokens(200), agent.WithObserver(livetest.DefaultTally()))
 		o, err := runner.Run(ctx, phrasings[attempt-1])
 		if err != nil {
 			t.Fatalf("run (attempt %d): %v", attempt, err)
@@ -296,7 +296,7 @@ func TestLiveAgentPreservesInlineThink(t *testing.T) {
 	var out *agent.Outcome        // compliant run: visible answer + think span
 	var answerOnly *agent.Outcome // visible answer, no think span
 	for attempt := 1; attempt <= 3; attempt++ {
-		runner := agent.NewRunner(cl, nil, system, agent.WithMaxTokens(512))
+		runner := agent.NewRunner(cl, nil, system, agent.WithMaxTokens(512), agent.WithObserver(livetest.DefaultTally()))
 		o, err := runner.Run(ctx, phrasings[attempt-1])
 		if err != nil {
 			t.Fatalf("run (attempt %d): %v", attempt, err)
@@ -360,7 +360,7 @@ func TestLiveAgentPreservesInlineThink(t *testing.T) {
 	type sumAnswer struct {
 		Sum int `json:"sum"`
 	}
-	jr := agent.NewRunner(cl, nil, "Answer only in JSON matching the schema.", agent.WithMaxTokens(512))
+	jr := agent.NewRunner(cl, nil, "Answer only in JSON matching the schema.", agent.WithMaxTokens(512), agent.WithObserver(livetest.DefaultTally()))
 	ans, _, err := agent.RunJSONAs[sumAnswer](ctx, jr, "What is 17 plus 25?")
 	if err != nil {
 		t.Fatalf("RunJSONAs: %v", err)
@@ -388,7 +388,7 @@ func TestLiveAgentRequestPolicyShapesWire(t *testing.T) {
 		agent.WithHooks(agent.Hooks{
 			BeforeCompletion: func(context.Context, int, *llmkit.Request) { completions.Add(1) },
 		}),
-		agent.WithRequestPolicy(policy))
+		agent.WithRequestPolicy(policy), agent.WithObserver(livetest.DefaultTally()))
 	out, err := runner.Run(ctx, "Reply with the single word: ready.")
 	if err != nil {
 		t.Fatalf("run: %v", err)
@@ -419,7 +419,7 @@ func TestLiveAgentAttachImageOnTaskTurn(t *testing.T) {
 		t.Fatalf("encode tiny PNG: %v", err)
 	}
 
-	runner := agent.NewRunner(cl, nil, "You are a terse assistant.", agent.WithMaxTokens(256))
+	runner := agent.NewRunner(cl, nil, "You are a terse assistant.", agent.WithMaxTokens(256), agent.WithObserver(livetest.DefaultTally()))
 	out, err := runner.Run(ctx, "What color is the attached square? Answer in three words or fewer.",
 		agent.Attach(llmkit.Image("image/png", pngBuf.Bytes())))
 	if err != nil {
@@ -497,7 +497,7 @@ func TestLiveAgentToolPolicyDeny(t *testing.T) {
 		runs, authorizations = 0, 0
 		mu.Unlock()
 		runner := agent.NewRunner(cl, []agent.Tool{add}, system,
-			agent.WithHooks(hooks), agent.WithToolPolicy(policy), agent.WithMaxTokens(2048))
+			agent.WithHooks(hooks), agent.WithToolPolicy(policy), agent.WithMaxTokens(2048), agent.WithObserver(livetest.DefaultTally()))
 		out, err = runner.Run(ctx, tasks[attempt-1])
 		if err != nil {
 			t.Fatalf("run (attempt %d): %v", attempt, err)
@@ -608,7 +608,7 @@ func TestLiveAgentDeltaHook(t *testing.T) {
 		clear(textByStep)
 		mu.Unlock()
 		runner := agent.NewRunner(cl, nil, "You are a helpful assistant.",
-			agent.WithHooks(hooks), agent.WithMaxTokens(2048))
+			agent.WithHooks(hooks), agent.WithMaxTokens(2048), agent.WithObserver(livetest.DefaultTally()))
 		o, err := runner.Run(ctx, phrasings[attempt-1])
 		if err != nil {
 			t.Fatalf("run (attempt %d): %v", attempt, err)
@@ -653,7 +653,7 @@ func TestLiveAgentDeltaHook(t *testing.T) {
 // assistant turns and the handle ends with nothing pending.
 func TestLiveAgentSteering(t *testing.T) {
 	ctx, cl, _ := newLiveAgentClient(t)
-	runner := agent.NewRunner(cl, nil, "You are a terse assistant.", agent.WithMaxTokens(1024))
+	runner := agent.NewRunner(cl, nil, "You are a terse assistant.", agent.WithMaxTokens(1024), agent.WithObserver(livetest.DefaultTally()))
 
 	s := agent.NewSteering()
 	s.FollowUp(llmkit.Text("Now answer the same way for Japan: give just the capital city name, nothing else."))

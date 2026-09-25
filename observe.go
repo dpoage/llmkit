@@ -18,16 +18,25 @@ import (
 //
 // # Emission rule
 //
-// A Completion event is emitted exactly once per logical completion by the
-// OUTERMOST harness layer — either the agent Runner (with Event.Step set) or
-// the llmkit.Observe client decorator for bare clients — never both.
-// Attempt events come only from the provider retry stage, inside the same
-// logical completion; deterministic replay consumes Completion events only
-// and ignores Attempts. Join rule: the Completion emitter mints a fresh
-// Event.SpanID per logical completion and places it in the context it passes
-// to the client ([WithSpan]), so every Attempt event carries the same
-// SpanID as its Completion — Attempts join on SpanID, not on time windows,
-// and nested completions (a tool calling the model) get their own span.
+// A logical completion is owned by the span in its ctx, and
+// [BeginCompletion] is the only minter. The rule has three parts:
+//
+//   - An emitter ([Observe], or a [github.com/dpoage/llmkit/provider]
+//     New/Wrap stack above its retry stage) mints and emits only when
+//     the ctx it receives carries no span; a ctx that already carries
+//     one belongs to an enclosing emitter, and the call passes through
+//     without a new span or event. A stack claims even when it has no
+//     Options.Observer; it then emits nothing.
+//   - The agent Runner mints on the ctx it hands its client, on every
+//     turn, and emits that turn's Completion.
+//   - Hooks and tools receive a ctx without the turn's span.
+//
+// Attempt events come only from the provider retry stage inside the same
+// logical completion, joined to it by Event.SpanID; deterministic
+// replay consumes Completion events only. A [CompletionEvent]'s
+// Response.Usage (and [DecisionEvent.Usage]) is the spend ledger;
+// Attempt and Finalize are views over it. A failed completion carries
+// the zero Response and reports no usage.
 //
 // Run identity: events carry the run's [RunID] from the context (see
 // [WithRun]); ParentRunID is stamped only by the agent Runner, and Step
@@ -36,8 +45,7 @@ type Observer interface {
 	Observe(ctx context.Context, ev Event)
 }
 
-// ObserverFunc adapts a plain function to the [Observer] interface, the way
-// [RecorderFunc] adapts to Recorder.
+// ObserverFunc adapts a plain function to the [Observer] interface.
 type ObserverFunc func(ctx context.Context, ev Event)
 
 // Observe calls f(ctx, ev). It satisfies [Observer].
@@ -80,7 +88,7 @@ const (
 	// by the outermost layer — the agent Runner for agent runs, the
 	// llmkit.Observe decorator for bare clients — never by the retry stage.
 	// The emitter mints a fresh Event.SpanID per logical completion
-	// ([WithSpan]) and passes it to the client, so the retry stage's
+	// ([BeginCompletion]) and passes it to the client, so the retry stage's
 	// Attempts join this event: (run_id, span_id) identifies a completion,
 	// (run_id, step) groups a turn's events. Step is the enclosing Runner
 	// turn when the completion fires inside one — a tool's own
@@ -153,10 +161,11 @@ type Event struct {
 	// continued from a previous one; decorators leave it empty.
 	ParentRunID RunID `json:"parent_run_id,omitempty"`
 	// SpanID is stamped by [NewEvent] on every kind from the context
-	// ([WithSpan]); it is load-bearing on Completion and Attempt: the
+	// ([BeginCompletion]); it is load-bearing on Completion and Attempt: the
 	// Completion emitter mints one per logical completion and passes it to
 	// the client in the context, the retry stage inherits it, so an Attempt
-	// joins its Completion on SpanID. A nested completion gets its own span.
+	// joins its Completion on SpanID. Which call gets a new span follows
+	// the emission rule on [Observer].
 	SpanID SpanID `json:"span_id,omitempty"`
 	// Step is the 1-based model turn within an agent run. The Runner sets it
 	// explicitly on every event it emits; decorator-emitted events inside a
@@ -215,19 +224,24 @@ type StartEvent struct {
 }
 
 // CompletionEvent records one logical completion ([KindCompletion]): the
-// request sent, the final response or the error, and the provider/model that
-// served it. Err is non-empty exactly when the completion failed; a failed
-// completion carries the zero Response. Request and Response embed the full
-// message round-trip, so a sink can replay the turn from this event alone.
+// request sent, the final response or error, and the identity of the
+// client that served it. Err is non-empty exactly when the completion
+// failed; a failed completion carries the zero Response and reports no
+// usage (Response.Usage is the spend ledger — see [Observer] above).
+// Request and Response embed the full message round-trip, so a sink can
+// replay the turn from this event alone. Request aliases the caller's
+// Messages and Blocks slices until the call returns — Observe and the
+// provider stages do not clone them — so a sink that retains this event
+// past the call must copy the top-level slices itself.
 type CompletionEvent struct {
 	Request  Request  `json:"request"`
 	Response Response `json:"response"`
 	// Err is the failure, as text; empty on success.
 	Err string `json:"err,omitempty"`
 	// Provider is the provider tag ("anthropic", "openai", ...) or the
-	// caller's own config name.
+	// caller's own config name — the client's [IdentityOf].Provider.
 	Provider string `json:"provider,omitempty"`
-	// Model is the model identifier.
+	// Model is the model identifier — the client's [IdentityOf].Model.
 	Model string `json:"model,omitempty"`
 }
 
@@ -237,10 +251,17 @@ type CompletionEvent struct {
 // the raw adapter response — attempts are observed below the tool-call
 // serializer — so the CompletionEvent's Response may differ from it where
 // the serializer truncated. A failed attempt carries the error text and
-// the zero Response; when that error is an [*APIError], StatusCode and
-// RetryAfter carry its HTTP status and the server-suggested delay as the
-// server sent it (both zero on success and for unclassified transport
-// failures). Event.SpanID joins it to its logical completion.
+// the zero Response; when that error is an [*APIError], StatusCode carries
+// its HTTP status (0 on success and for unclassified transport failures).
+// HasRetryAfter reports whether that *APIError carried a Retry-After
+// header; RetryAfter is meaningful only when HasRetryAfter is true and is
+// zero otherwise, even when the underlying APIError set a nonzero
+// RetryAfter without the presence bit. The presence bit records the
+// header; it does not by itself say the stage retried after the attempt
+// — the final attempt, a non-retryable status (a 400 with a present
+// zero, for instance), and a cancelled parent all report
+// (RetryAfter, HasRetryAfter) without a retry following. Event.SpanID
+// joins it to its logical completion.
 type AttemptEvent struct {
 	// Attempt is the 1-based attempt number within the logical completion.
 	Attempt  int      `json:"attempt"`
@@ -251,11 +272,17 @@ type AttemptEvent struct {
 	// [*APIError]; 0 on success and for unclassified transport failures.
 	StatusCode int `json:"status_code,omitempty"`
 	// RetryAfter is the *APIError's RetryAfter as the server sent it,
-	// before the stage caps it at MaxDelay; 0 when the server supplied
-	// none.
+	// before the stage caps it at MaxDelay. Meaningful only when
+	// HasRetryAfter is true.
 	RetryAfter time.Duration `json:"retry_after,omitempty"`
-	Provider   string        `json:"provider,omitempty"`
-	Model      string        `json:"model,omitempty"`
+	// HasRetryAfter reports that the failed attempt's *APIError carried a
+	// Retry-After header. The bit records the header's presence; it does
+	// not by itself say the stage retried after the attempt — the final
+	// attempt, a non-retryable status, and a cancelled parent all carry
+	// (RetryAfter, HasRetryAfter) without a retry following.
+	HasRetryAfter bool   `json:"has_retry_after,omitempty"`
+	Provider      string `json:"provider,omitempty"`
+	Model         string `json:"model,omitempty"`
 }
 
 // ToolRunEvent records one tool call ([KindToolRun]). Call is the model's
@@ -379,17 +406,13 @@ type DecisionAnswer struct {
 }
 
 // EmbedEvent records one embedding call ([KindEmbed]): the model, how many
-// inputs were embedded, the per-vector dimensions, how many inputs were
-// served from the caller's cache, the usage, or the error. Err is non-empty
-// exactly when the call failed. v1 records a summary, not the inputs or
-// vectors; replaying this boundary is out of Round A scope and additive
-// later.
+// inputs were embedded, the per-vector dimensions, or the error. Err is
+// non-empty exactly when the call failed. v1 records a summary, not the
+// inputs or vectors.
 type EmbedEvent struct {
 	Model      string `json:"model,omitempty"`
 	Inputs     int    `json:"inputs"`
 	Dimensions int    `json:"dimensions"`
-	CacheHits  int    `json:"cache_hits"`
-	Usage      Usage  `json:"usage"`
 	Err        string `json:"err,omitempty"`
 }
 
@@ -397,8 +420,8 @@ type EmbedEvent struct {
 // command and argv, the exit code, how many bytes of output each stream
 // produced, whether capture was truncated, or the error that prevented
 // execution. ExitCode is -1 when the process never ran to an exit (Err
-// non-empty). v1 records a summary, not the captured output; replaying this
-// boundary is out of Round A scope and additive later.
+// non-empty). v1 records a summary, not the captured output; replaying
+// this boundary is out of scope today and additive later.
 type ExecEvent struct {
 	Backend     string   `json:"backend,omitempty"`
 	Command     []string `json:"command,omitempty"`

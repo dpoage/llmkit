@@ -37,18 +37,21 @@ entry below is marked.
   `WithRun`, `RunFromContext`, and `NewRunID`, whose ids sort lexically in
   mint order.
   Spans join attempts to their completion: the Completion emitter mints a
-  `SpanID` per logical completion (`WithSpan`, `SpanFromContext`,
-  `NewSpanID`) and the retry stage's Attempt events inherit it.
+  `SpanID` per logical completion (`BeginCompletion`, `SpanFromContext`;
+  the `WithSpan`/`NewSpanID` pair this cycle first added is removed
+  again below) and the retry stage's Attempt events inherit it.
   A Completion event is emitted once per logical completion by the outermost
   layer; Attempt events come only from the provider retry stage, and replay
-  consumes Completion only. `Recorder` is unchanged; folding it into the
-  stream is deferred.
+  consumes Completion only. `Recorder` is removed this cycle — see the
+  Removed entry below; usage rides the Completion (and Decision) events
+  via `Response.Usage` / `DecisionEvent.Usage`.
 - `llmkit/embed` and `llmkit/sandbox`: `Observe` decorators at the last two
   unobserved nondeterministic boundaries. `embed.Observe(e, obs)` emits one
   Embed event per `Embed`/`EmbedBatch` call — model, requested input count,
-  vector dimensions, duration, and the error; `CacheHits` and `Usage` stay
-  zero because the `Embedder` interface exposes neither per-call cache
-  attribution nor token usage. `sandbox.Observe(s, obs)` emits one Exec
+  vector dimensions, duration, and the error. `CacheHits` and `Usage`
+  fields are removed this cycle — see the Removed entry below; the
+  `Embedder` interface never exposed per-call cache attribution or token
+  usage. `sandbox.Observe(s, obs)` emits one Exec
   event per `Exec` — backend name, command, exit code (`-1` when the
   process never ran to an exit), captured byte counts per stream,
   truncation, the run's measured duration, and the infrastructure error; a
@@ -73,24 +76,36 @@ entry below is marked.
   a single backend cannot keep honoring is still refused with the
   unchanged `UnsupportedSpecError`.
 
-- `llmkit`: `Observe(c, obs, provider, model)` wraps any `Client` so each
-  logical completion — one `Complete` or `Stream` call, success or error —
-  emits exactly one `Completion` event: the request as received, the final
-  response (on the stream path assembled through the same synthesis
-  `llmkit.Stream` performs) or the error text, tagged with the provider and
-  model arguments. It mints a fresh span per call and stamps it into the
-  client's context, so provider `Attempt` events join it; a nil observer
-  returns the client unchanged.
+- `llmkit`: `Observe(c Client, obs Observer) Client` wraps any `Client` so
+  each logical completion — one `Complete` or `Stream` call, success or
+  error — emits exactly one `Completion` event: the request as received,
+  the final response (on the stream path assembled through the same
+  synthesis `llmkit.Stream` performs) or the error text, tagged with
+  `llmkit.IdentityOf(c)`. It is ownership-aware: it reads the ctx's
+  span with `SpanFromContext` and, on a non-empty span (an enclosing
+  emitter — an outer `Observe`, a `provider.New`/`Wrap` stack, or the
+  agent `Runner` — already claimed the call), passes `c` through
+  unchanged — no span mint, no event. On an unclaimed ctx it mints a
+  fresh span, places it in the ctx it hands the inner client, and emits
+  the `Completion` event on that same ctx when the call returns — so
+  the inner client's `Attempt` events join it. A nil observer returns
+  the client unchanged.
 - `llmkit`: `WithRetryObserver(c, cfg, obs, provider, model)` — the retry
   stage emitting one `Attempt` event per attempt, failures included,
   numbered 1..N by the loop, span inherited from the context, duration
   covering just that attempt. `WithRetry` keeps its signature and emits
-  nothing.
-- `provider`: `Options.Observer` plumbs an `llmkit.Observer` into `New`'s
-  retry stage; `New` emits Attempt events only and never `Completion`
-  events — wrap its result with `llmkit.Observe` (or run it under the agent
-  Runner, which emits its own) to capture completions, and never both for
-  the same client.
+  nothing. **Removed in this same cycle** — see the Removed entry
+  below; `provider.New`/`provider.Wrap` carry the same `Attempt` events
+  on `Options.Observer`.
+- `provider`: `Options.Observer` plumbs an `llmkit.Observer` into
+  `New`'s stack. With `Options.Observer` set, `New` emits one `Attempt`
+  event per wire call from the retry stage AND one `Completion` event
+  per logical completion the caller's ctx does not already claim;
+  without one, `New` emits no events at all. A `New`/`Wrap` client run
+  under the agent `Runner` sees an already-claimed ctx and emits no
+  `Completion` (the `Runner` owns it); `Options.Observer` still
+  receives `Attempt` events when set. Never stack `Options.Observer`
+  and an outer `llmkit.Observe` on the same client.
 - `llmkit/agent`: run identity and durable observation on the tool loop.
   `WithObserver(obs)` installs the Runner's single durable event sink
   (last-wins — a second call replaces the first, never a second history)
@@ -101,7 +116,7 @@ entry below is marked.
   run's start, closed at its finalize, refusals reported through `onErr`
   and never failing the run — and reads them back through the same `Source`
   interface replay builds on. The Runner emits `start`, `completion` (one
-  per logical completion, span-minted per C2), `tool_run` (with
+  per logical completion, span-minted per turn), `tool_run` (with
   `Denied`/`deny_reason` for policy denials), `compaction`, `steer`, and
   `finalize` (on every run end including error returns). `WithRunID(id)`
   pins a run's identity; `Outcome.RunID` is exported; `Continue` chains
@@ -173,6 +188,75 @@ entry below is marked.
   `Jitter` 0 counts as unset — the explicit value "no jitter" no longer
   pins; the deterministic escape is the `Config.Rand` hook (a function
   that returns 0.5 produces exactly 1.0 jitter factors).
+
+- `llmkit`: `BeginCompletion(ctx) context.Context` — the only span minter
+  now: a fresh `SpanID` unconditionally, even over a ctx that already
+  carries one. The agent Runner mints on every turn (it never reads the
+  incoming span); `Observe` reads `SpanFromContext` and mints only when
+  the call is unclaimed; a `[provider.New]`/`[provider.Wrap]` stack
+  mints on every call whose ctx carries no span — whether or not
+  `Options.Observer` is set. The rule, stated once on `llmkit.Observer`:
+  an emitter mints and emits only when the ctx it receives carries no
+  span; the Runner mints on the ctx it hands its client; hooks and tools
+  receive a ctx without the turn's span (llmkit-bk8.3.2).
+- `llmkit`: `Identity{Provider, Model}`, `IdentifiedClient` (checked via
+  type assertion, like `StreamingClient`), and `IdentityOf(c Client)
+  Identity` (the zero `Identity` for a non-identified client). Every
+  provider stage forwards `Identity` from the client it wraps;
+  `provider.New`/`provider.Wrap`'s returned client implements
+  `IdentifiedClient`; the agent Runner stamps its `Completion` events
+  with `IdentityOf(r.client)` (llmkit-bk8.3.3).
+- `llmkit`: `Usage.Add(v Usage) Usage` — the one rule for summing usage,
+  value semantics like `time.Time.Add`. Used by the agent Runner's run
+  total, its `RunJSON` repair fold, and `internal/livetest.Tally`
+  (llmkit-bk8.4.1).
+- `llmkit`: `AttemptEvent.HasRetryAfter` (`has_retry_after`,
+  `omitempty`) — the presence bit `RetryAfter` needed: it is meaningful
+  only when `HasRetryAfter` is true, and the retry stage now copies
+  `RetryAfter` only then (llmkit-bk8.1.21, llmkit-bk8.1.43). Wire change
+  at schema 2 — see the Changed entry below.
+- `provider`: `Wrap(c llmkit.Client, opts Options) llmkit.Client` — the
+  same stack `New` applies (completion emitter -> serialize ->
+  retry[Attempt]) around any `llmkit.Client`, the replacement for
+  stacking the removed root decorators by hand. Identity is
+  `llmkit.IdentityOf(c)`, `Provider` replaced by `Options.Provider` when
+  set. `Wrap` ignores `Options.HTTPClient` (the inner adapter and its
+  transport are kept: a `New` client built with HTTPClient o1 keeps o1
+  across every Wrap), and, over a client with neither an `Identity()`
+  method nor `Options.Provider` set, emits events with the zero Identity
+  (documented, not an error). `Wrap` over a client `New` or `Wrap`
+  returned rebuilds one stack from the client below it; the new `Options`
+  apply (`Retry`, `Observer`, and `Provider` when set), the inner adapter
+  and its transport are kept, and the rebuilt stack keeps the
+  Identity it carried unless `Options.Provider` is set, so
+  `Wrap(New(spec, o1), o2)` makes at most `o2.Retry`'s `MaxAttempts`
+  wire calls per call. A foreign decorator between the two stacks hides
+  the inner one, and both retry. The stack claims, above its retry
+  stage, every call whose context is not already claimed, with or
+  without `Options.Observer`, so an `llmkit.Observe` wrapped inside it
+  is silenced: `Wrap(llmkit.Observe(c, obs), provider.Options{})`
+  delivers no `Completion` event to `obs`, which drops out of the spend
+  ledger — pass `obs` as `Options.Observer` instead. Migration note:
+  migrating from `WithRetry` to `Wrap`, a partial `Options.Retry` is
+  Or-defaulted field-wise from `retry.Default`, so an explicit `Jitter`
+  of 0 becomes `retry.Default`'s 20% and a `MaxAttempts`-only
+  `Options.Retry` takes `retry.Default`'s 500 ms base — a `WithRetry`
+  caller changes schedule on migration.
+- `decide`: `Config.Observer llmkit.Observer` and `decide/observe.go`'s
+  conversion of `Questions`/`Response` to the root `DecisionEvent`
+  vocabulary (`Questions`/`Answers` each sorted by ID). `Ask` emits
+  exactly one `DecisionEvent` per `Ask` that passes pre-wire
+  validation — success or failure; a `buildRequest` refusal emits
+  none; a caller's already-cancelled ctx emits one with `Err` set
+  and zero wire hits — on the `Ask`'s own context (`decide` never
+  mints a span) (llmkit-4qh.15).
+- `internal/livetest`: `Tally` implements `llmkit.Observer` (summing
+  `Completion.Response.Usage` and `DecisionEvent.Usage` with
+  `Usage.Add`, gaining `CacheCreationInputTokens`; `Attempt`, every
+  other kind, and a failed `Completion`/`Decision` are ignored), wired
+  as `Options.Observer` in `Session.Client`, `Config.Observer` in
+  `Session.DecideClient`, and `agent.WithObserver
+  (livetest.DefaultTally())` on every live `agent.Runner`.
 
 ### Changed
 
@@ -405,6 +489,64 @@ entry below is marked.
   as a property name inside `input_schema.properties`; a root object
   with a `properties` key was sent with the `""` key dropped.
 
+- **Breaking:** `llmkit.Observe` is now ownership-aware: it passes `c`
+  through unchanged (no span mint, no event) when its ctx already
+  carries a claimed span — reversing the previous "always mints a fresh
+  span, even over an inherited one" pin. The `provider, model string`
+  parameters are gone; identity comes from `llmkit.IdentityOf(c)`. A
+  bare client ledgers through `llmkit.Observe(c, obs)`; a Runner-run
+  client ledgers through `agent.WithObserver`. See the Added entry.
+- **Breaking:** `provider.New`'s stack now includes the completion
+  emitter: with `Options.Observer` set, `New` emits one `Completion`
+  event per logical completion the caller's ctx does not already claim,
+  in addition to the retry stage's `Attempt` events — previously `New`
+  emitted `Attempt` events only and the caller had to wrap the result in
+  `llmkit.Observe` for a `Completion`. A `New`/`Wrap` client run under
+  the agent `Runner` still reports `Attempt` events only: the Runner's
+  own claim on the ctx makes the stack's own emitter a silent no-op.
+- **Breaking:** the usage ledger moves off `Recorder` onto the Observer
+  stream: `CompletionEvent.Response.Usage` (and `DecisionEvent.Usage`)
+  is now the spend ledger; `Attempt` and `FinalizeEvent.Usage` are views
+  over it, never a second source, and every fold that used to hand-sum
+  four `Usage` fields now calls `Usage.Add`. Replacement per execution
+  context: a client run by an `agent.Runner` ledgers through the
+  Runner's `agent.WithObserver` sink (per-role attribution is now per
+  Runner); a bare client ledgers through `provider.Options.Observer`
+  or `llmkit.Observe(c, obs)`, reading
+  `CompletionEvent.Response.Usage`; `decide` ledgers through
+  `decide.Config.Observer`, reading `DecisionEvent.Usage`.
+  Migration note (bugbot, cross-repo): every `WithRecorder`/
+  `Options.Recorder` site under an `agent.Runner` moves to
+  `agent.WithObserver` on that Runner — per-role attribution becomes
+  per-Runner, since `UsageEvent.Role` was already removed in 0.3.0 and
+  this round deletes the "wrap your Recorder per role" workaround it
+  left behind; a bare-client site moves to `provider.Options.Observer`
+  or `llmkit.Observe(c, obs)`. `agent.WithObserver` keeps only the last
+  sink it is given, so a Runner that also writes a transcript with
+  `WithObserver(agent.JSONL(dir, onErr))` (see the transcript entry
+  above) takes both sinks in one call:
+  `agent.WithObserver(llmkit.Observers(ledger, agent.JSONL(dir, onErr)))`.
+  Two separate `WithObserver` calls keep only the second sink and
+  silently drop the first one's transcript or ledger.
+- **Breaking:** `provider.Wrap` is not like-for-like with the removed
+  `WithRetry`: it also serializes tool calls (truncates a multi-tool-
+  call response to one) when the wrapped client's `ParallelToolCalls`
+  capability is false — a step a caller retrying a foreign client by
+  hand used to add separately.
+- **Breaking:** `EventSchemaVersion` is now 2. Wire-key changes at this
+  bump: `AttemptEvent` gains `has_retry_after`; `EmbedEvent` loses
+  `cache_hits` and `usage`; `CompletionEvent`'s `provider`/`model` keys
+  are now populated by the agent Runner (previously always empty on
+  Runner-emitted events).
+- `agent.Runner`'s `complete()` claims the completion only on the
+  context it hands the CLIENT (`llmkit.BeginCompletion`); `Hooks.Delta`
+  and `Hooks.AfterCompletion` now receive the PRE-CLAIM context (Step
+  still set) — matching `RequestPolicy.PrepareRequest` and
+  `Hooks.BeforeCompletion`, which already did. A provider client called
+  from a hook no longer inherits the turn's span; whether it emits its
+  own `Completion` follows the emission rule on `llmkit.Observer`
+  (llmkit-bk8.1.61).
+
 ### Removed
 
 - **Breaking:** `sandbox.WithToolchainBinds` and
@@ -495,6 +637,26 @@ entry below is marked.
   unconditionally to either `Spec.BaseURL` or the vendor default, and the
   genai SDK checks an explicit `HTTPOptions.BaseURL` ahead of any
   process-global tier.
+
+- **Breaking:** `llmkit.Recorder`, `llmkit.RecorderFunc`,
+  `llmkit.UsageEvent`, `llmkit.WithRecorder`, `provider.Options.Recorder`,
+  `decide.Config.Recorder`. Replacement: the spend ledger is
+  `CompletionEvent.Response.Usage` (and `DecisionEvent.Usage`),
+  delivered per execution context — see the Changed entry above.
+- **Breaking:** `llmkit.WithRetry`, `llmkit.WithRetryObserver`,
+  `llmkit.WithSerializedToolCalls` (root `retry.go`/`serialize.go`
+  deleted). Replacement: `provider.Wrap(c, opts)` — it also serializes
+  tool calls when `ParallelToolCalls` is false (see Changed).
+  `provider.New` already applies the same stack to a fresh adapter.
+- **Breaking:** `llmkit.WithSpan`, `llmkit.NewSpanID`. Replacement:
+  `llmkit.BeginCompletion(ctx)` — the only span minter, ownership-aware
+  through `SpanFromContext`, which stays exported.
+- **Breaking:** `provider.Tag(spec, opts)`. Replacement:
+  `llmkit.IdentityOf(c)` on the client `New`/`Wrap` returned.
+- **Breaking:** `EmbedEvent.CacheHits` and `EmbedEvent.Usage`
+  (llmkit-bk8.4.4): the `Embedder` interface exposes neither per-call
+  cache attribution nor token usage, so both fields had zero writers and
+  zero readers outside tests. No replacement.
 
 ### Fixed
 

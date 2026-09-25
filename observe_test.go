@@ -124,12 +124,13 @@ func goldEvents() []struct {
 					// A failed attempt carries the zero Response; its Usage
 					// field has no omitempty (a struct tag cannot omit a
 					// struct), so the wire shows it as {"usage":{}}.
-					Response:   Response{},
-					Err:        "429 too many requests",
-					StatusCode: 429,
-					RetryAfter: 30 * time.Second,
-					Provider:   "openai",
-					Model:      "gpt",
+					Response:      Response{},
+					Err:           "429 too many requests",
+					StatusCode:    429,
+					RetryAfter:    30 * time.Second,
+					HasRetryAfter: true,
+					Provider:      "openai",
+					Model:         "gpt",
 				},
 			},
 		},
@@ -230,7 +231,7 @@ func goldEvents() []struct {
 			ev: Event{
 				Kind: KindEmbed, RunID: goldRun,
 				Time: goldTime, Duration: 120 * time.Millisecond, SchemaVersion: EventSchemaVersion,
-				Embed: &EmbedEvent{Model: "text-embed-3", Inputs: 4, Dimensions: 1536, CacheHits: 1, Usage: Usage{InputTokens: 900}},
+				Embed: &EmbedEvent{Model: "text-embed-3", Inputs: 4, Dimensions: 1536},
 			},
 		},
 		{
@@ -267,7 +268,7 @@ func TestEventGoldenJSON(t *testing.T) {
   "run_id": "1758366600000-deadbeef00112233",
   "parent_run_id": "1758366500000-cafebabefeedface",
   "time": "2026-09-20T12:30:00Z",
-  "schema_version": 1,
+  "schema_version": 2,
   "start": {
     "task": "summarize the ledger",
     "tools": [
@@ -283,7 +284,7 @@ func TestEventGoldenJSON(t *testing.T) {
   "step": 2,
   "time": "2026-09-20T12:30:00Z",
   "duration": 1500000000,
-  "schema_version": 1,
+  "schema_version": 2,
   "completion": {
     "request": {
       "system": "sys",
@@ -366,7 +367,7 @@ func TestEventGoldenJSON(t *testing.T) {
   "span_id": "1758366600001-0123456789abcdef",
   "time": "2026-09-20T12:30:00Z",
   "duration": 250000000,
-  "schema_version": 1,
+  "schema_version": 2,
   "attempt": {
     "attempt": 1,
     "request": {
@@ -387,6 +388,7 @@ func TestEventGoldenJSON(t *testing.T) {
     "err": "429 too many requests",
     "status_code": 429,
     "retry_after": 30000000000,
+    "has_retry_after": true,
     "provider": "openai",
     "model": "gpt"
   }
@@ -397,7 +399,7 @@ func TestEventGoldenJSON(t *testing.T) {
   "step": 3,
   "time": "2026-09-20T12:30:00Z",
   "duration": 200000000,
-  "schema_version": 1,
+  "schema_version": 2,
   "tool_run": {
     "call": {
       "id": "t1",
@@ -412,7 +414,7 @@ func TestEventGoldenJSON(t *testing.T) {
   "run_id": "1758366600000-deadbeef00112233",
   "step": 3,
   "time": "2026-09-20T12:30:00Z",
-  "schema_version": 1,
+  "schema_version": 2,
   "tool_run": {
     "call": {
       "id": "t2",
@@ -429,7 +431,7 @@ func TestEventGoldenJSON(t *testing.T) {
   "step": 4,
   "time": "2026-09-20T12:30:00Z",
   "duration": 5000000,
-  "schema_version": 1,
+  "schema_version": 2,
   "compaction": {
     "before_tokens": 9000,
     "after_tokens": 4000,
@@ -441,7 +443,7 @@ func TestEventGoldenJSON(t *testing.T) {
   "run_id": "1758366600000-deadbeef00112233",
   "step": 5,
   "time": "2026-09-20T12:30:00Z",
-  "schema_version": 1,
+  "schema_version": 2,
   "steer": {
     "message": {
       "role": "user",
@@ -462,7 +464,7 @@ func TestEventGoldenJSON(t *testing.T) {
   "step": 8,
   "time": "2026-09-20T12:30:00Z",
   "duration": 60000000000,
-  "schema_version": 1,
+  "schema_version": 2,
   "finalize": {
     "truncation_reason": "max_steps",
     "finalized": true,
@@ -478,7 +480,7 @@ func TestEventGoldenJSON(t *testing.T) {
   "run_id": "1758366600000-deadbeef00112233",
   "time": "2026-09-20T12:30:00Z",
   "duration": 800000000,
-  "schema_version": 1,
+  "schema_version": 2,
   "decision": {
     "backend": "typesafe",
     "model": "jev-1",
@@ -566,15 +568,11 @@ func TestEventGoldenJSON(t *testing.T) {
   "run_id": "1758366600000-deadbeef00112233",
   "time": "2026-09-20T12:30:00Z",
   "duration": 120000000,
-  "schema_version": 1,
+  "schema_version": 2,
   "embed": {
     "model": "text-embed-3",
     "inputs": 4,
-    "dimensions": 1536,
-    "cache_hits": 1,
-    "usage": {
-      "input_tokens": 900
-    }
+    "dimensions": 1536
   }
 }`,
 		"exec": `{
@@ -582,7 +580,7 @@ func TestEventGoldenJSON(t *testing.T) {
   "run_id": "1758366600000-deadbeef00112233",
   "time": "2026-09-20T12:30:00Z",
   "duration": 2000000000,
-  "schema_version": 1,
+  "schema_version": 2,
   "exec": {
     "backend": "docker",
     "command": [
@@ -654,7 +652,7 @@ func TestSchemaVersionOnEveryEncodedEvent(t *testing.T) {
 			if err != nil {
 				t.Fatalf("marshal: %v", err)
 			}
-			if !strings.Contains(string(data), `"schema_version":1`) {
+			if !strings.Contains(string(data), `"schema_version":2`) {
 				t.Fatalf("schema_version missing from %s event: %s", tc.name, data)
 			}
 			var back Event

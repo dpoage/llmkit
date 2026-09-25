@@ -105,12 +105,6 @@ func TestObserveEmbedEmitsOneEvent(t *testing.T) {
 	if e.Dimensions != 3 {
 		t.Errorf("Dimensions = %d, want 3", e.Dimensions)
 	}
-	if e.CacheHits != 0 {
-		t.Errorf("CacheHits = %d, want 0 (the wrapper cannot observe per-call cache attribution)", e.CacheHits)
-	}
-	if e.Usage != (llmkit.Usage{}) {
-		t.Errorf("Usage = %+v, want zero (no Embedder exposes usage)", e.Usage)
-	}
 	if e.Err != "" {
 		t.Errorf("Err = %q, want empty on success", e.Err)
 	}

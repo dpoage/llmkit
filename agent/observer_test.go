@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/provider"
 	"github.com/dpoage/llmkit/retry"
 )
 
@@ -758,17 +759,20 @@ func TestObserver_FinalizeOnErrorReturns(t *testing.T) {
 	})
 }
 
-// TestObserver_SpanMintedPerCompletion pins C2's mint: every completion
-// event carries its OWN fresh SpanID — present, pairwise distinct, and NOT
-// inherited from any span already in the caller's context.
+// TestObserver_SpanMintedPerCompletion pins that every completion event
+// carries its own fresh SpanID — present, pairwise distinct, and not
+// inherited from any span already in the caller's context. The Runner
+// mints unconditionally via BeginCompletion even when the top-level Run
+// ctx already carries a claimed span.
 func TestObserver_SpanMintedPerCompletion(t *testing.T) {
-	inherited := llmkit.NewSpanID()
+	claimed := llmkit.BeginCompletion(context.Background())
+	inherited := llmkit.SpanFromContext(claimed)
 	fc := newFakeClient(
 		maxTokensResp("half an", 10, 5),
 		textResp("answer", 10, 5),
 	)
 	r := NewRunner(fc, nil, "sys")
-	out, err := r.Run(llmkit.WithSpan(context.Background(), inherited), "task")
+	out, err := r.Run(claimed, "task")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -2152,20 +2156,33 @@ func TestObserver_DecoratorAttemptCarriesTurnStep(t *testing.T) {
 		scriptStep{err: &llmkit.APIError{Kind: llmkit.ErrRateLimited, StatusCode: 429, Provider: "fake", Message: "429"}},
 		textResp("done", 1, 1),
 	)
-	client := llmkit.WithRetryObserver(fc, retry.Config{
-		MaxAttempts: 2,
-		BaseDelay:   time.Millisecond,
-		MaxDelay:    time.Millisecond,
-	}, llmkit.ObserverFunc(func(_ context.Context, ev llmkit.Event) {
-		mu.Lock()
-		defer mu.Unlock()
-		attempts = append(attempts, ev)
-	}), "fake", "m")
+	client := provider.Wrap(fc, provider.Options{
+		Retry: retry.Config{
+			MaxAttempts: 2,
+			BaseDelay:   time.Millisecond,
+			MaxDelay:    time.Millisecond,
+		},
+		Observer: llmkit.ObserverFunc(func(_ context.Context, ev llmkit.Event) {
+			mu.Lock()
+			defer mu.Unlock()
+			attempts = append(attempts, ev)
+		}),
+	})
 	r := NewRunner(client, nil, "sys")
 	out, err := r.Run(context.Background(), "task")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
+	var turnCompletions []llmkit.Event
+	for _, ev := range out.Transcript.Record {
+		if ev.Kind == llmkit.KindCompletion && ev.Step == 1 {
+			turnCompletions = append(turnCompletions, ev)
+		}
+	}
+	if len(turnCompletions) != 1 || turnCompletions[0].SpanID == "" {
+		t.Fatalf("turn-1 Runner Completions = %d, want exactly 1 with a non-empty span", len(turnCompletions))
+	}
+	turnSpan := turnCompletions[0].SpanID
 	mu.Lock()
 	defer mu.Unlock()
 	if len(attempts) != 2 {
@@ -2175,12 +2192,46 @@ func TestObserver_DecoratorAttemptCarriesTurnStep(t *testing.T) {
 		if ev.Kind != llmkit.KindAttempt {
 			t.Fatalf("event %d = %s, want attempt", i, ev.Kind)
 		}
+		if ev.SpanID != turnSpan {
+			t.Errorf("attempt %d SpanID = %q, want the turn's Runner Completion span %q", i, ev.SpanID, turnSpan)
+		}
 		if ev.Step != 1 {
 			t.Errorf("attempt %d Step = %d, want 1 (the enclosing turn)", i, ev.Step)
 		}
 		if ev.RunID != out.RunID {
 			t.Errorf("attempt %d RunID = %q, want %q", i, ev.RunID, out.RunID)
 		}
+	}
+}
+
+// TestObserver_RunnerClaimSilencesNestedObserve pins the Runner half of
+// the claim-above-retry rule: a Runner driving
+// Wrap(llmkit.Observe(fc, obs)) with no Options.Observer, over a
+// 429,429,200 script, delivers exactly one Completion to obs for the
+// turn — the Runner's own at Step 1 — never one per attempt from the
+// nested Observe.
+func TestObserver_RunnerClaimSilencesNestedObserve(t *testing.T) {
+	rateLimited := func() scriptStep {
+		return scriptStep{err: &llmkit.APIError{Kind: llmkit.ErrRateLimited, StatusCode: 429, Provider: "fake", Message: "429"}}
+	}
+	fc := newFakeClient(rateLimited(), rateLimited(), textResp("done", 1, 1))
+	obs := &captureObserver{}
+	client := provider.Wrap(llmkit.Observe(fc, obs), provider.Options{Retry: retry.Config{
+		MaxAttempts: 3,
+		BaseDelay:   time.Millisecond,
+		MaxDelay:    time.Millisecond,
+		Sleep:       func(context.Context, time.Duration) error { return nil },
+	}})
+	r := NewRunner(client, nil, "sys", WithObserver(obs))
+	if _, err := r.Run(context.Background(), "task"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	completions := obs.byKind(llmkit.KindCompletion)
+	if len(completions) != 1 {
+		t.Fatalf("completions = %d, want exactly 1 (the Runner's)", len(completions))
+	}
+	if completions[0].Step != 1 {
+		t.Errorf("completion Step = %d, want 1: the Runner's Completion, not the nested Observe's", completions[0].Step)
 	}
 }
 

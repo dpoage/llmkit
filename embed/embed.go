@@ -162,10 +162,10 @@
 // behaves exactly like the embedder it wraps: vectors, errors,
 // Dimensions, and ModelName pass through unchanged. The event carries the
 // model, the requested input count, the vector dimensionality, the call's
-// duration, and the error; CacheHits and Usage stay zero — the Embedder
-// interface exposes neither per-call cache attribution nor token usage.
-// Run and span ids come from the call's context ([llmkit.WithRun],
-// [llmkit.WithSpan]), so embeddings correlate with the rest of a run's
+// duration, and the error. Run and span ids come from the call's context
+// ([llmkit.WithRun]; a span rides the context when the call happens
+// inside a claimed completion — see [llmkit.BeginCompletion] — and is
+// empty otherwise), so embeddings correlate with the rest of a run's
 // events. See [Observe] for the exact field contract.
 package embed
 

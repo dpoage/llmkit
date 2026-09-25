@@ -81,29 +81,34 @@ deltas from the response (`stream.go`).
 - **What it costs:** synthesized streams deliver in whole-response chunks,
   not token by token. A UI that needs token pacing needs a native stream.
 
-## Decorator order: serialize, then record, then retry
+## Decorator order: completion emitter, serialize, retry
 
 `provider.New` wraps every adapter the same way, outer to inner:
-`serialize -> recorder -> retry -> adapter` (`provider/provider.go`).
+completion emitter -> serialize -> retry -> adapter
+(`provider/provider.go`).
 
-The order fixes who sees what. The tool-call serializer truncates a
-multi-call response to one before your loop sees it. The recorder books usage
-only for the final successful attempt. The retry wrapper sees raw adapter
-errors, so its classification and `Retry-After` handling stay accurate —
-and it is the only layer that sees attempt boundaries, which is why
-`Options.Observer` wires its Attempt events there: one event per wire call,
-failures included, joined to the completion's span.
+The order fixes who sees what. The completion emitter is the outermost
+layer; it mints the span and (when `Options.Observer` is set) emits the
+`Completion` event. The tool-call serializer truncates a multi-call
+response to one before your loop sees it. The retry wrapper sees raw
+adapter errors, so its classification and `Retry-After` handling stay
+accurate — and it is the only layer that sees attempt boundaries, which
+is why `Options.Observer` wires its `Attempt` events there: one event
+per wire call, failures included, joined to the completion's span.
 
 - **What it buys:** each wrapper has one job and one viewpoint; usage is
   never double-counted across attempts, and a sink can watch per-attempt
   flakiness without double-counting spend.
-- **What it costs:** the order is fixed. `New` never emits `Completion`
-  events — the outermost layer owns those: the agent Runner for agent runs,
-  or wrap the returned client with `llmkit.Observe` for bare clients (never
-  both for the same client). And because Attempt events sit below the
-  serializer, a sink correlating them with the Completion must account for
-  the truncation itself: the Attempt carries the raw response, the
-  Completion the truncated one your loop sees.
+- **What it costs:** the order is fixed. The completion emitter is the
+  outermost layer, so a `New`/`Wrap` stack run under the agent `Runner`
+  sees an already-claimed ctx and emits `Attempt` events only — the
+  `Runner` owns the `Completion`. Run a bare `New`/`Wrap` client under
+  the same `Options.Observer`, or wrap a non-provider `Client` with
+  `llmkit.Observe` for bare clients; never both for the same client.
+  And because `Attempt` events sit below the serializer, a sink
+  correlating them with the `Completion` must account for the
+  truncation itself: the `Attempt` carries the raw response, the
+  `Completion` the truncated one your loop sees.
 
 ## Honest capabilities
 
@@ -196,9 +201,8 @@ them is durable.
   observer is visible as a harness bug instead of silently dropping data.
 - **What it costs:** event fields are contract — a rename changes every
   sink's format, so the per-kind wire shapes are pinned by golden-literal
-  tests. `llmkit.Recorder` stays the usage-ledger hook for now; folding it
-  into the Observer stream is deferred because the cutover touches
-  provider, decide, embed, and bugbot in one change.
+  tests. Usage rides the Completion (and Decision) event as the spend
+  ledger, summed by the one rule `Usage.Add`; `llmkit.Recorder` is gone.
 
 ## The observation vocabulary lives in the root package
 
@@ -212,24 +216,24 @@ included), embed, and sandbox; tests included, which is most of the
 weight, because the suites pin the vocabulary; ~140 excluding tests. The
 counted set is narrower than this section's own definition of the
 vocabulary: adding the run/span/step identity it names (`RunID`, `SpanID`,
-`WithRun`, `RunFromContext`, `WithSpan`, `SpanFromContext`, `WithStep`,
-`StepFromContext`, `NewEvent`, and `EventSchemaVersion` from run.go)
-spans 38 symbols and measures ~1120 with tests, ~250 without, under the
-same rule — the decision is insensitive to the counting rule. (`decide`
-contributes zero in every variant: it sits on the `Recorder` seam, and
-becomes an Observer consumer only if the deferred Recorder fold-in
-happens.)
+`WithRun`, `RunFromContext`, `BeginCompletion`, `SpanFromContext`,
+`WithStep`, `StepFromContext`, `NewEvent`, and `EventSchemaVersion` from
+run.go) spans 38 symbols and measures ~1120 with tests, ~250 without,
+under the same rule — the decision is insensitive to the counting rule.
+(`decide` contributed zero in the original measurement — it sat on the
+`Recorder` seam — and is now an Observer consumer in its own right:
+`Config.Observer` emits one `DecisionEvent` per `Ask` that reaches the wire.)
 
 The decisive reason a leaf cannot work is the direction of the type
 dependency, not taste. The payloads embed root's own wire types —
 `CompletionEvent` carries a `Request` and a `Response`, `AttemptEvent`
 too, `ToolRunEvent` a `ToolCall`, `SteerEvent` a `Message`,
-`EmbedEvent` and `DecisionEvent` a `Usage` — so a `llmkit/observe` leaf
-would have to import root. Root's `Observe`, `WithRetryObserver`, and
-`Observers` construct and carry `Event`, so root would have to import the
-leaf. The leaf can only sit above root, and then most consumers (sandbox
-is the exception: its entire llmkit surface is the event vocabulary) import
-two packages for one vocabulary. `llmkit/retry` is the extracted-package
+`DecisionEvent` a `Usage` — so a `llmkit/observe` leaf would have to
+import root. Root's `Observe` and `Observers` construct and carry
+`Event`, so root would have to import the leaf. The leaf can only sit
+above root, and then most consumers (sandbox is the exception: its
+entire llmkit surface is the event vocabulary) import two packages for
+one vocabulary. `llmkit/retry` is the extracted-package
 counterexample that works, and shows the difference: `retry` is
 self-contained (root imports it; it imports no kit package), so extracting
 it costs nothing. The event vocabulary has no such cut to extract along —
@@ -315,7 +319,7 @@ package.
 - **What it buys:** an honest surface. A decision answer cannot masquerade
   as chat text, and no `Capabilities` field lies about streaming or tools.
   Callers share the common vocabulary where it fits: the sentinel errors,
-  `retry.Config`, `Usage`, and the recorder. The retry loop lives in one
+  `retry.Config`, `Usage`, and the Observer vocabulary. The retry loop lives in one
   place: `retry.Do`.
 - **What it costs:** a second construction path outside the `provider.New`
   gate. Code that targets `llmkit.Client` cannot take a `decide` client.

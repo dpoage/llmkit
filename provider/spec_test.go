@@ -76,49 +76,9 @@ func TestParseType_RejectsGarbageListingValidValues(t *testing.T) {
 	}
 }
 
-// TestNew_RecorderProviderTag pins the UsageEvent tagging contract: the
-// provider tag defaults to string(spec.Type) and Options.Provider overrides
-// it, for callers whose ledger keys on a config-map name.
-func TestNew_RecorderProviderTag(t *testing.T) {
-	base := newServer(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(mockTextBody("openai", "ok", 1, 1)))
-	})
-	complete := func(t *testing.T, opts Options) llmkit.UsageEvent {
-		t.Helper()
-		var mu sync.Mutex
-		var ev llmkit.UsageEvent
-		opts.Recorder = llmkit.RecorderFunc(func(e llmkit.UsageEvent) {
-			mu.Lock()
-			defer mu.Unlock()
-			ev = e
-		})
-		spec := Spec{Type: TypeOpenAI, Model: "gpt-test", Secret: "k", BaseURL: base}
-		client, err := New(context.Background(), spec, opts)
-		if err != nil {
-			t.Fatalf("New: %v", err)
-		}
-		if _, err := client.Complete(context.Background(), simpleRequest()); err != nil {
-			t.Fatalf("Complete: %v", err)
-		}
-		mu.Lock()
-		defer mu.Unlock()
-		return ev
-	}
-
-	t.Run("defaults to spec.Type", func(t *testing.T) {
-		ev := complete(t, Options{})
-		if ev.Provider != string(TypeOpenAI) || ev.Model != "gpt-test" {
-			t.Errorf("event tags = %q/%q, want %q/gpt-test", ev.Provider, ev.Model, string(TypeOpenAI))
-		}
-	})
-	t.Run("Options.Provider overrides", func(t *testing.T) {
-		ev := complete(t, Options{Provider: "my-config-key"})
-		if ev.Provider != "my-config-key" || ev.Model != "gpt-test" {
-			t.Errorf("event tags = %q/%q, want my-config-key/gpt-test", ev.Provider, ev.Model)
-		}
-	})
-}
+// TestNew_RecorderProviderTag (the provider-tag-default/override contract
+// via a deleted Options.Recorder) is covered, Observer/Identity based, by
+// TestNew_Identity in observe_test.go.
 
 // TestNew_RejectsOAuthOnNonAnthropic pins the Auth-scope rule: OAuth
 // bearer-token authentication is implemented only by the Anthropic adapter,

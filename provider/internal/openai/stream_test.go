@@ -11,10 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/dpoage/llmkit"
-	"github.com/dpoage/llmkit/retry"
 	"github.com/openai/openai-go/v3"
 )
 
@@ -531,57 +529,5 @@ func TestOpenAIStream_TruncatedMidToolArgs(t *testing.T) {
 	}
 }
 
-// TestStream_InBandSSEErrorClassifiedByType pins an SSE data line carrying the body's error object on a committed 200 stream classifies in band by vendor type: invalid_request_error is terminal (one hit), server_error is retryable (two hits). Both keep StatusCode 200.
-func TestStream_InBandSSEErrorClassifiedByType(t *testing.T) {
-	tests := []struct {
-		name     string
-		event    string
-		wantKind error
-		wantHits int
-		wantMsg  string
-	}{
-		{"invalid_request_error", `{"error":{"type":"invalid_request_error","message":"x"}}`, llmkit.ErrInvalidRequest, 1, "x"},
-		{"server_error", `{"error":{"type":"server_error","message":"boom"}}`, llmkit.ErrServer, 2, ""},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			hits := 0
-			base := newServer(t, func(w http.ResponseWriter, r *http.Request) {
-				hits++
-				sseHandler(nil, tc.event)(w, r)
-			})
-			adapterClient, err := New(streamModel, Options{APIKey: "k", BaseURL: base})
-			if err != nil {
-				t.Fatalf("New: %v", err)
-			}
-			client := llmkit.WithRetry(adapterClient, retry.Config{
-				MaxAttempts: 2,
-				BaseDelay:   time.Millisecond,
-				Sleep:       func(context.Context, time.Duration) error { return nil },
-			})
-			resp, err := llmkit.Stream(context.Background(), client, simpleRequest(), func(llmkit.Delta) error { return nil })
-			if err == nil {
-				t.Fatal("Stream: want error, got nil")
-			}
-			if !errors.Is(err, tc.wantKind) {
-				t.Errorf("err = %v, want %v (in-band type classification)", err, tc.wantKind)
-			}
-			var apiErr *llmkit.APIError
-			if !errors.As(err, &apiErr) {
-				t.Fatalf("err = %T (%v), want *llmkit.APIError", err, err)
-			}
-			if apiErr.StatusCode != http.StatusOK {
-				t.Errorf("StatusCode = %d, want 200 (the committed stream's status)", apiErr.StatusCode)
-			}
-			if tc.wantMsg != "" && apiErr.Message != tc.wantMsg {
-				t.Errorf("Message = %q, want the event's error message %q", apiErr.Message, tc.wantMsg)
-			}
-			if !reflect.DeepEqual(resp, llmkit.Response{}) {
-				t.Errorf("resp = %#v, want zero Response", resp)
-			}
-			if hits != tc.wantHits {
-				t.Errorf("wire hits = %d, want %d", hits, tc.wantHits)
-			}
-		})
-	}
-}
+// TestStream_InBandSSEErrorClassifiedByType's retry behaviour lives at
+// provider.TestConformance_OpenAIStream_InBandSSEErrorClassifiedByType.

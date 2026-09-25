@@ -253,11 +253,12 @@ func (s *Session) CapsOverride(t testing.TB) func(llmkit.Capabilities) llmkit.Ca
 }
 
 // Client builds a live client for this session through provider.New — the
-// production construction path, wrapper stack included — with the recording
-// transport injected via Options.HTTPClient and the run-wide token tally as
-// Options.Recorder. mutate, when non-nil, adjusts the Spec last (e.g. an
-// intentionally bad key or model for the error-normalization cases); it runs
-// after CapsOverride so an assertion-aware override can still be replaced.
+// production construction path, wrapper stack included — with the
+// recording transport injected via Options.HTTPClient and the run-wide
+// token tally as Options.Observer. mutate, when non-nil, adjusts the Spec
+// last (e.g. an intentionally bad key or model for error-normalization
+// cases); it runs after CapsOverride so an assertion-aware override can
+// still be replaced.
 func (s *Session) Client(ctx context.Context, t testing.TB, tr *Transport, mutate func(*provider.Spec)) llmkit.Client {
 	spec := provider.Spec{
 		Type:    s.Lane.Type,
@@ -279,7 +280,7 @@ func (s *Session) Client(ctx context.Context, t testing.TB, tr *Transport, mutat
 	}
 	cl, err := provider.New(ctx, spec, provider.Options{
 		HTTPClient: &http.Client{Transport: tr},
-		Recorder:   DefaultTally(),
+		Observer:   DefaultTally(),
 	})
 	if err != nil {
 		t.Fatalf("livetest: provider.New for lane %s: %v", s.Lane.Name, err)
@@ -290,7 +291,7 @@ func (s *Session) Client(ctx context.Context, t testing.TB, tr *Transport, mutat
 
 // DecideClient builds the typesafe lane's decide client through
 // decide.New, with the recording transport injected via Config.HTTPClient
-// and the run-wide token tally as Config.Recorder. mutate, when non-nil,
+// and the run-wide token tally as Config.Observer. mutate, when non-nil,
 // adjusts the Config last.
 func (s *Session) DecideClient(ctx context.Context, t testing.TB, tr *Transport, mutate func(*decide.Config)) *decide.Client {
 	cfg := decide.Config{
@@ -298,7 +299,7 @@ func (s *Session) DecideClient(ctx context.Context, t testing.TB, tr *Transport,
 		Model:      s.Model,
 		BaseURL:    s.BaseURL,
 		HTTPClient: &http.Client{Transport: tr},
-		Recorder:   DefaultTally(),
+		Observer:   DefaultTally(),
 	}
 	if mutate != nil {
 		mutate(&cfg)
@@ -340,16 +341,18 @@ func (s *Session) Logf(t testing.TB, format string, args ...any) {
 	t.Logf("%s", Redact(s.Key, fmt.Sprintf(format, args...)))
 }
 
-// Tally is the run-wide token accumulator. It implements llmkit.Recorder and
-// is wired into every client livetest builds, so a whole test binary's spend
-// is reported by one line at exit.
+// Tally is the run-wide token accumulator. It implements llmkit.Observer
+// and is wired into every client livetest builds (Options.Observer,
+// Config.Observer, agent.WithObserver on every live Runner), so a whole
+// test binary's spend is reported by one line at exit. It sums
+// Completion.Response.Usage and DecisionEvent.Usage with [llmkit.Usage.Add]
+// on success — Completion and Decision are the spend ledger; Attempt and
+// every other event kind are ignored, so a stack that also reports
+// Attempts is never double-counted.
 type Tally struct {
-	mu        sync.Mutex
-	total     int64
-	input     int64
-	output    int64
-	cacheRead int64
-	calls     int
+	mu    sync.Mutex
+	usage llmkit.Usage
+	calls int
 }
 
 var defaultTally = new(Tally)
@@ -357,14 +360,26 @@ var defaultTally = new(Tally)
 // DefaultTally returns the run-wide tally wired into every livetest client.
 func DefaultTally() *Tally { return defaultTally }
 
-// Record implements llmkit.Recorder.
-func (t *Tally) Record(ev llmkit.UsageEvent) {
+// Observe implements llmkit.Observer.
+func (t *Tally) Observe(_ context.Context, ev llmkit.Event) {
+	var u llmkit.Usage
+	switch ev.Kind {
+	case llmkit.KindCompletion:
+		if ev.Completion == nil || ev.Completion.Err != "" {
+			return
+		}
+		u = ev.Completion.Response.Usage
+	case llmkit.KindDecision:
+		if ev.Decision == nil || ev.Decision.Err != "" {
+			return
+		}
+		u = ev.Decision.Usage
+	default:
+		return
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.total += ev.Usage.InputTokens + ev.Usage.OutputTokens
-	t.input += ev.Usage.InputTokens
-	t.output += ev.Usage.OutputTokens
-	t.cacheRead += ev.Usage.CacheReadInputTokens
+	t.usage = t.usage.Add(u)
 	t.calls++
 }
 
@@ -373,6 +388,7 @@ func (t *Tally) Record(ev llmkit.UsageEvent) {
 func (t *Tally) PrintSummary() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	fmt.Printf("LIVE_TOKENS total=%d input=%d output=%d cache_read=%d calls=%d\n",
-		t.total, t.input, t.output, t.cacheRead, t.calls)
+	fmt.Printf("LIVE_TOKENS total=%d input=%d output=%d cache_read=%d cache_creation=%d calls=%d\n",
+		t.usage.InputTokens+t.usage.OutputTokens, t.usage.InputTokens, t.usage.OutputTokens,
+		t.usage.CacheReadInputTokens, t.usage.CacheCreationInputTokens, t.calls)
 }

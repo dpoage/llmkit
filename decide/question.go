@@ -57,33 +57,33 @@ type noulCriteria struct {
 }
 
 // buildRequest validates the state and every question pre-wire and returns
-// the complete request body. Every failure is an *llmkit.APIError wrapping
-// llmkit.ErrInvalidRequest with a message naming the field path; no network
-// I/O happens on this path.
-func buildRequest(state any, model string, questions Questions) ([]byte, error) {
-	stateRaw, err := marshalStructured(state, "state")
+// the complete request body plus the state's own validated raw JSON
+// (stateRaw); the DecisionEvent conversion reuses stateRaw verbatim
+// instead of re-marshalling state.
+func buildRequest(state any, model string, questions Questions) (body []byte, stateRaw json.RawMessage, err error) {
+	stateRaw, err = marshalStructured(state, "state")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(questions) == 0 {
-		return nil, invalidRequest("questions", "at least one question is required")
+		return nil, nil, invalidRequest("questions", "at least one question is required")
 	}
 	wq := make(map[string]json.RawMessage, len(questions))
 	for id, q := range questions {
 		if id == "" {
-			return nil, invalidRequest("questions", "question id must be non-empty")
+			return nil, nil, invalidRequest("questions", "question id must be non-empty")
 		}
 		raw, err := buildQuestion(id, q)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		wq[id] = raw
 	}
-	body, err := json.Marshal(wireRequest{State: stateRaw, Model: model, Questions: wq})
+	body, err = json.Marshal(wireRequest{State: stateRaw, Model: model, Questions: wq})
 	if err != nil {
-		return nil, fmt.Errorf("decide: marshal request: %w", err)
+		return nil, nil, fmt.Errorf("decide: marshal request: %w", err)
 	}
-	return body, nil
+	return body, stateRaw, nil
 }
 
 func buildQuestion(id string, q Question) (json.RawMessage, error) {

@@ -93,7 +93,7 @@ func TestQuestion_PrewireValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := buildRequest(tt.state, "m", tt.questions)
+			_, _, err := buildRequest(tt.state, "m", tt.questions)
 			if err == nil {
 				t.Fatal("expected a pre-wire validation error")
 			}
@@ -136,17 +136,17 @@ func TestQuestion_NullDescriptionsAllowed(t *testing.T) {
 }
 
 func TestQuestion_ErrorsNameFieldPaths(t *testing.T) {
-	_, err := buildRequest("s", "m", Questions{"q": Noul{Instructions: 7}})
+	_, _, err := buildRequest("s", "m", Questions{"q": Noul{Instructions: 7}})
 	if err == nil || !strings.Contains(err.Error(), `questions["q"].instructions`) {
 		t.Errorf("err = %v, want a message naming the instructions path", err)
 	}
 
-	_, err = buildRequest("s", "m", Questions{"q": Choice{Instructions: "i", Options: map[string]any{"a": 1}}})
+	_, _, err = buildRequest("s", "m", Questions{"q": Choice{Instructions: "i", Options: map[string]any{"a": 1}}})
 	if err == nil || !strings.Contains(err.Error(), `questions["q"].options["a"]`) {
 		t.Errorf("err = %v, want a message naming the option path", err)
 	}
 
-	_, err = buildRequest(42, "m", Questions{"q": Noul{Instructions: "i"}})
+	_, _, err = buildRequest(42, "m", Questions{"q": Noul{Instructions: "i"}})
 	if err == nil || !strings.Contains(err.Error(), "state") {
 		t.Errorf("err = %v, want a message naming state", err)
 	}

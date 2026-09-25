@@ -64,36 +64,68 @@ func TestSpanFromContextAbsent(t *testing.T) {
 	}
 }
 
-func TestWithSpanRoundTrip(t *testing.T) {
-	ctx := WithSpan(context.Background(), SpanID("1758366600001-0123456789abcdef"))
-	if got := SpanFromContext(ctx); got != "1758366600001-0123456789abcdef" {
-		t.Fatalf("SpanFromContext = %q, want the stored id", got)
+// TestBeginCompletion_MintsFreshSpan pins BeginCompletion as the only span
+// minter: the returned ctx carries a non-empty span, and two successive
+// calls on the SAME starting ctx never mint the same one.
+func TestBeginCompletion_MintsFreshSpan(t *testing.T) {
+	base := context.Background()
+	a := SpanFromContext(BeginCompletion(base))
+	b := SpanFromContext(BeginCompletion(base))
+	if a == "" || b == "" {
+		t.Fatalf("SpanFromContext(BeginCompletion(...)) = %q / %q, want both non-empty", a, b)
 	}
-	inner := WithSpan(ctx, SpanID("second"))
-	if got := SpanFromContext(inner); got != "second" {
-		t.Fatalf("SpanFromContext(overwritten) = %q, want %q", got, "second")
-	}
-	if got := SpanFromContext(ctx); got != "1758366600001-0123456789abcdef" {
-		t.Fatalf("outer context mutated: %q", got)
+	if a == b {
+		t.Fatalf("two BeginCompletion calls minted the same span %q", a)
 	}
 }
 
-func TestWithSpanEmptyPreservesOuter(t *testing.T) {
-	outer := WithSpan(context.Background(), SpanID("1758366600001-0123456789abcdef"))
-	if got := SpanFromContext(WithSpan(outer, "")); got != "1758366600001-0123456789abcdef" {
-		t.Fatalf("WithSpan(outer, \"\") erased the enclosing span id: got %q", got)
+// TestBeginCompletion_OverwritesInheritedSpan pins the unconditional-mint
+// contract: BeginCompletion mints a fresh span even when its ctx already
+// carries one — it never reuses an enclosing completion's span.
+func TestBeginCompletion_OverwritesInheritedSpan(t *testing.T) {
+	outer := BeginCompletion(context.Background())
+	outerSpan := SpanFromContext(outer)
+	inner := BeginCompletion(outer)
+	innerSpan := SpanFromContext(inner)
+	if innerSpan == "" {
+		t.Fatal("inner BeginCompletion produced an empty span")
+	}
+	if innerSpan == outerSpan {
+		t.Fatalf("inner BeginCompletion reused the outer span %q; must always mint fresh", outerSpan)
 	}
 }
 
 // Run and span ids live under independent keys: one context carries both,
 // which is how a Completion's Attempts join on span inside a run.
 func TestRunAndSpanKeysAreIndependent(t *testing.T) {
-	ctx := WithSpan(WithRun(context.Background(), RunID("run-1")), SpanID("span-1"))
+	ctx := BeginCompletion(WithRun(context.Background(), RunID("run-1")))
 	if got := RunFromContext(ctx); got != "run-1" {
 		t.Fatalf("RunFromContext = %q, want run-1", got)
 	}
-	if got := SpanFromContext(ctx); got != "span-1" {
-		t.Fatalf("SpanFromContext = %q, want span-1", got)
+	if got := SpanFromContext(ctx); got == "" {
+		t.Fatal("SpanFromContext = empty, want the span BeginCompletion minted")
+	}
+}
+
+// TestBeginCompletion_SpanFormat pins the minted span's shape: the same
+// <13-digit millis>-<16 hex chars> format NewRunID uses.
+func TestBeginCompletion_SpanFormat(t *testing.T) {
+	span := SpanFromContext(BeginCompletion(context.Background()))
+	if !regexp.MustCompile(`^[0-9]{13}-[0-9a-f]{16}$`).MatchString(string(span)) {
+		t.Fatalf("BeginCompletion span = %q, want <13-digit millis>-<16 hex chars>", span)
+	}
+}
+
+// TestBeginCompletion_SpanUniqueAcross10k pins mint uniqueness across a
+// realistic volume of logical completions.
+func TestBeginCompletion_SpanUniqueAcross10k(t *testing.T) {
+	seen := make(map[SpanID]struct{}, 10000)
+	for i := range 10000 {
+		span := SpanFromContext(BeginCompletion(context.Background()))
+		if _, dup := seen[span]; dup {
+			t.Fatalf("duplicate span %q at iteration %d", span, i)
+		}
+		seen[span] = struct{}{}
 	}
 }
 
@@ -104,30 +136,12 @@ func TestNewRunIDFormat(t *testing.T) {
 	}
 }
 
-func TestNewSpanIDFormat(t *testing.T) {
-	id := NewSpanID()
-	if !regexp.MustCompile(`^[0-9]{13}-[0-9a-f]{16}$`).MatchString(string(id)) {
-		t.Fatalf("NewSpanID() = %q, want <13-digit millis>-<16 hex chars>", id)
-	}
-}
-
 func TestNewRunIDUniqueAcross10k(t *testing.T) {
 	seen := make(map[RunID]struct{}, 10000)
 	for i := 0; i < 10000; i++ {
 		id := NewRunID()
 		if _, dup := seen[id]; dup {
 			t.Fatalf("duplicate RunID %q at iteration %d", id, i)
-		}
-		seen[id] = struct{}{}
-	}
-}
-
-func TestNewSpanIDUniqueAcross10k(t *testing.T) {
-	seen := make(map[SpanID]struct{}, 10000)
-	for i := 0; i < 10000; i++ {
-		id := NewSpanID()
-		if _, dup := seen[id]; dup {
-			t.Fatalf("duplicate SpanID %q at iteration %d", id, i)
 		}
 		seen[id] = struct{}{}
 	}
@@ -163,7 +177,8 @@ func parseMillisPrefix(id RunID) int64 {
 
 func TestNewEventStampsHeader(t *testing.T) {
 	before := time.Now()
-	ctx := WithSpan(WithRun(context.Background(), RunID("1758366600000-deadbeef00112233")), SpanID("1758366600001-0123456789abcdef"))
+	ctx := BeginCompletion(WithRun(context.Background(), RunID("1758366600000-deadbeef00112233")))
+	wantSpan := SpanFromContext(ctx)
 	ev := NewEvent(ctx, KindCompletion)
 	after := time.Now()
 
@@ -173,8 +188,8 @@ func TestNewEventStampsHeader(t *testing.T) {
 	if ev.RunID != "1758366600000-deadbeef00112233" {
 		t.Fatalf("RunID = %q, want the context's run id", ev.RunID)
 	}
-	if ev.SpanID != "1758366600001-0123456789abcdef" {
-		t.Fatalf("SpanID = %q, want the context's span id", ev.SpanID)
+	if ev.SpanID == "" || ev.SpanID != wantSpan {
+		t.Fatalf("SpanID = %q, want the context's minted span %q", ev.SpanID, wantSpan)
 	}
 	if ev.SchemaVersion != EventSchemaVersion {
 		t.Fatalf("SchemaVersion = %d, want %d", ev.SchemaVersion, EventSchemaVersion)
@@ -196,7 +211,7 @@ func TestNewEventStampsHeader(t *testing.T) {
 // wire exactly: the header Time is stamped without a monotonic clock
 // reading, in UTC, so the decoded copy is DeepEqual to the emitted one.
 func TestNewEventRoundTripsDeepEqual(t *testing.T) {
-	ctx := WithSpan(WithRun(context.Background(), RunID("1758366600000-deadbeef00112233")), SpanID("1758366600001-0123456789abcdef"))
+	ctx := BeginCompletion(WithRun(context.Background(), RunID("1758366600000-deadbeef00112233")))
 	ev := NewEvent(ctx, KindExec)
 	if ev.Time.Location() != time.UTC {
 		t.Fatalf("NewEvent stamped %s, want UTC so the decode is DeepEqual", ev.Time.Location())
@@ -255,12 +270,12 @@ func TestWithStepOverwrite(t *testing.T) {
 // facts — run, span, and step — which is how a decorator-emitted event
 // inside a Runner turn joins on every axis at once.
 func TestRunSpanStepKeysAreIndependent(t *testing.T) {
-	ctx := WithStep(WithSpan(WithRun(context.Background(), RunID("run-1")), SpanID("span-1")), 4)
+	ctx := WithStep(BeginCompletion(WithRun(context.Background(), RunID("run-1"))), 4)
 	if got := RunFromContext(ctx); got != "run-1" {
 		t.Errorf("RunFromContext = %q, want run-1", got)
 	}
-	if got := SpanFromContext(ctx); got != "span-1" {
-		t.Errorf("SpanFromContext = %q, want span-1", got)
+	if got := SpanFromContext(ctx); got == "" {
+		t.Errorf("SpanFromContext = empty, want the span BeginCompletion minted")
 	}
 	if got := StepFromContext(ctx); got != 4 {
 		t.Errorf("StepFromContext = %d, want 4", got)

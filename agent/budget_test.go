@@ -134,8 +134,8 @@ func TestBudgetPool_StopsInFlight(t *testing.T) {
 // TestBudgetPool_RunnerChargesPerCompletion pins the charge side of
 // WithBudgetPool: the Runner adds every successful completion's
 // ChargeableTokens (CacheReadWeight-discounted) to the pool, so Spent() equals
-// the summed chargeable usage — with no Recorder and no caller-side Add
-// involved. Cache reads are discounted by the configured weight.
+// the summed chargeable usage. The Runner folds it directly; no Observer
+// is involved. Cache reads are discounted by the configured weight.
 func TestBudgetPool_RunnerChargesPerCompletion(t *testing.T) {
 	// Turn 1: 100 in (40 from cache), 10 out. Turn 2: 50 in (0 cache), 5 out.
 	// Weight 0.5: chargeable = (100-40)*1 + 40*0.5 + 10 + 50 + 5 = 60+20+65 = 145.
@@ -163,9 +163,9 @@ func TestBudgetPool_RunnerChargesPerCompletion(t *testing.T) {
 	}
 }
 
-// TestBudgetPool_ExhaustedStopsWithoutRecorder verifies a pool installed with
-// WithBudgetPool stops the run with TruncBudgetPool once exhausted — the pool
-// is charged only by the Runner; no llmkit.Recorder participates anywhere.
+// TestBudgetPool_ExhaustedStopsWithoutRecorder verifies a pool installed
+// with WithBudgetPool stops the run with TruncBudgetPool once exhausted.
+// Only the Runner charges the pool; no Observer participates.
 func TestBudgetPool_ExhaustedStopsWithoutRecorder(t *testing.T) {
 	pool := NewBudgetPool(100)
 	// bigSpendClient never charges: only the Runner does.

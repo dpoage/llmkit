@@ -158,6 +158,8 @@ When to use: guardrails. Allowlists and denylists, argument rewrites (constrain 
 
 Hooks run synchronously, inline on the goroutine that reaches the fire point. Every hook family reports the same 1-based step for a turn: `ToolEvent.Step`, `CompactionEvent.Step`, and the `step` the Runner stamps on the run's `llmkit.Event` values. Consumers join on it. A repair turn continues the numbering.
 
+Every hook receives a context without the turn's completion span — the same pre-claim context `RequestPolicy` sees — and so does every tool. A provider client called from a hook therefore never reports its `Attempt` events under the turn's span; whether it emits its own `Completion` follows the emission rule on `llmkit.Observer`. The Runner tags every `Completion` event it emits with the client's identity (`llmkit.IdentityOf(r.client)`): `Provider` and `Model` on the event name the client that served the turn.
+
 ```go
 agent.WithHooks(agent.Hooks{
 	ToolEnd: func(_ context.Context, ev agent.ToolEvent) {

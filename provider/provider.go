@@ -58,17 +58,24 @@
 // goes to Spec.BaseURL when set, else to the vendor default host, and its
 // credential header carries Spec.Secret. New performs no network I/O.
 //
-// The returned client is decorated, outer to inner:
+// # The stack
 //
-//	serialize -> recorder -> retry[Attempt events] -> adapter
-//
-// so usage is recorded only for the final successful attempt, retries see the
-// raw adapter errors, and models without parallel tool calls have their
-// multi-call responses truncated to one before the caller sees them. When
-// [Options.Observer] is set, the retry stage emits one Attempt event per
-// attempt (failures included); New never emits Completion events — the
-// outermost harness layer owns those (the agent Runner, or wrap the
-// returned client with llmkit.Observe).
+// [Wrap] decorates any [llmkit.Client] with this package's stack; [New]
+// applies the same stack to a freshly built adapter. The stage order
+// between the caller and the adapter is this package's secret: outer
+// to inner, a completion emitter, then tool-call serialization, then
+// attempt-observed retry. A caller sees: models without parallel tool
+// calls have their multi-call responses truncated to one, transient
+// failures retry with backoff, and [Options.Observer] receives one
+// Attempt event per provider attempt (failures included) plus one
+// Completion event per logical completion the caller's context does not
+// already belong to (see [llmkit.BeginCompletion]) — so a New/Wrap
+// client run under the agent Runner reports Attempts only, the
+// Runner's Completion being the one that already claimed the ctx.
+// Wrap ignores [Options.HTTPClient] (adapters only) and, over a foreign
+// client with no [llmkit.Identity] of its own and no [Options.Provider]
+// set, emits events with empty Provider/Model — documented, not an
+// error.
 package provider
 
 import (
@@ -232,8 +239,7 @@ type Spec struct {
 }
 
 // Options tunes client construction. The zero value is valid: it uses
-// default retry policy, no recorder, no observer, and the default HTTP
-// transport.
+// default retry policy, no observer, and the default HTTP transport.
 type Options struct {
 	// Retry configures the shared retry wrapper. Unset schedule fields
 	// (<= 0; == 0 for Jitter) are completed field-wise from retry.Default
@@ -243,21 +249,21 @@ type Options struct {
 	// every other zero field — to run the resolved defaults with no
 	// jitter, set Retry.Rand to a function returning 0.5).
 	Retry retry.Config
-	// Recorder, if non-nil, receives a UsageEvent after each successful
-	// completion.
-	Recorder llmkit.Recorder
-	// Observer, if non-nil, receives one Attempt event per provider attempt
-	// from the retry stage, failures included, tagged with the resolved
-	// provider name ([Options.Provider], or string(spec.Type)) and the
-	// model. New emits Attempt events only — never a Completion event; the
-	// outermost harness layer emits that one. Wrap the returned client with
-	// llmkit.Observe (or run it under the agent Runner, which emits its own)
-	// to capture completions, and do not wrap a Runner-run client twice.
-	// Without such an emitter above the stack, the events' SpanID is empty:
-	// the span is minted by the Completion emitter, not by New.
+	// Observer, if non-nil, receives one Attempt event per provider
+	// attempt from the retry stage (failures included), tagged with the
+	// resolved [llmkit.Identity], AND one Completion event per logical
+	// completion the ctx does not already belong to (see
+	// [llmkit.BeginCompletion]) — so a New/Wrap client run under the
+	// agent Runner reports Attempts only, the Runner's Completion having
+	// already claimed the ctx. It is the only observer a stack feeds
+	// Completion events: an [llmkit.Observe] wrapped around the client
+	// before it was handed to [Wrap] sits below the retry stage, finds
+	// every attempt already claimed, and emits nothing — pass that
+	// observer here instead.
 	Observer llmkit.Observer
-	// Provider overrides the provider tag on emitted usage and attempt
-	// events. Empty tags events with string(spec.Type); set it when your
+	// Provider overrides the provider tag on the resolved Identity. Empty
+	// tags events with string(spec.Type) for New, or with the wrapped
+	// client's own IdentityOf(c).Provider for Wrap; set it when your
 	// ledger keys on a config-map name rather than the provider type.
 	Provider string
 	// HTTPClient overrides the transport used by the underlying SDKs.
@@ -265,25 +271,15 @@ type Options struct {
 	// Transport adds reach the wire. nil gives each adapter its own plain
 	// http.Client, which sends through http.DefaultTransport and never
 	// through http.DefaultClient; Retry's RequestTimeout bounds each
-	// attempt.
+	// attempt. Wrap ignores this field: it decorates an already-built
+	// client and never touches a transport.
 	HTTPClient *http.Client
 }
 
-// New builds a fully-wrapped Client for the given provider spec.
-// The returned client is decorated, outer-to-inner, with:
-//
-//	serialize -> recorder -> retry[Attempt events] -> adapter
-//
-// so usage is recorded only for the final successful attempt, retries see
-// the raw adapter errors, and non-parallel-capable providers (e.g. arbitrary
-// openai-compatible endpoints) have their multi-tool-call responses
-// truncated to one before the agent loop sees them. WithSerializedToolCalls
-// is a no-op for providers whose Capabilities report ParallelToolCalls=true
-// (Anthropic, Google, first-party OpenAI), so decorating unconditionally is
-// safe and capability-driven. With [Options.Observer] set, the retry stage
-// emits one Attempt event per attempt, joined to the completion's span;
-// New itself never emits a Completion event — wrap the result with
-// llmkit.Observe for bare-client capture, or let the agent Runner emit it.
+// New builds a fully-wrapped Client for the given provider spec: the same
+// stack [Wrap] documents, over a freshly built adapter, with Identity
+// resolved as {opts.Provider or string(spec.Type), spec.Model}
+// (spec.Secret is never part of it).
 //
 // spec.Secret is the resolved credential (callers obtain it via their own
 // config); New performs no network I/O and is testable without real keys.
@@ -427,22 +423,77 @@ func New(ctx context.Context, spec Spec, opts Options) (llmkit.Client, error) {
 			spec.Type, validTypes, llmkit.ErrInvalidRequest)
 	}
 
-	// Field-wise completion: the caller's partial Retry config keeps its
-	// fields and takes retry.Default's schedule for everything it leaves
-	// unset ([retry.Config.Or]). MaxAttempts-only is the documented case
-	// — BaseDelay stays at 0, so retries hot-loop with no backoff.
+	identity := llmkit.Identity{Provider: providerTag(spec, opts), Model: spec.Model}
+	return wrap(adapter, opts, identity), nil
+}
+
+// Wrap decorates c with the provider stack, outer to inner:
+//
+//	[completion emitter] -> serialize -> retry[Attempt events] -> c
+//
+// Identity is [llmkit.IdentityOf](c), with Provider replaced by
+// opts.Provider when set; a foreign c that does not implement
+// [llmkit.IdentifiedClient] gets the zero Identity when opts.Provider
+// is also empty (documented, not an error — Wrap never requires one),
+// and `{opts.Provider, ""}` when only opts.Provider is set. The stack
+// implements [llmkit.IdentifiedClient] and [llmkit.StreamingClient].
+// Serialize is a no-op when c.Capabilities().ParallelToolCalls is true.
+// Wrap ignores [Options.HTTPClient] (adapters only): the inner adapter
+// and its transport are kept, so a [New] client built with HTTPClient
+// o1 keeps o1 across every Wrap.
+//
+// Wrap is idempotent over its own stacks: when c is a client [New] or
+// Wrap returned, Wrap rebuilds one stack from c's base with the new opts
+// — Retry, Observer, and Provider (when set) apply; the inner adapter
+// and its transport are kept, and c's Identity carries through unless
+// opts.Provider is set. Wrap(New(spec, o1), o2) therefore runs one
+// retry loop under o2.Retry: one call makes at most o2.Retry's
+// resolved MaxAttempts (a zero Retry resolves via [retry.Config.Or] to
+// retry.Default's 4), never the product of the two schedules. A
+// foreign decorator between the two stacks hides the inner one, and
+// both retry.
+//
+// The stack claims every call whose ctx carries no span (see
+// [llmkit.BeginCompletion]) above its retry stage, whether or not
+// opts.Observer is set, so a call yields at most one Completion event
+// across the stack. An [llmkit.Observe] below the stack — c itself, or
+// one c calls with the ctx it was handed — is therefore silenced:
+// Wrap(llmkit.Observe(c, obs), Options{}) delivers no Completion event
+// to obs, which drops out of the spend ledger. Pass obs as
+// opts.Observer instead.
+//
+// Wrap is not like-for-like with a bare retry wrapper — it also
+// serializes tool calls when ParallelToolCalls is false, a step a caller
+// retrying a foreign Client by hand would otherwise have to add.
+func Wrap(c llmkit.Client, opts Options) llmkit.Client {
+	identity := llmkit.IdentityOf(c)
+	if opts.Provider != "" {
+		identity.Provider = opts.Provider
+	}
+	if s, ok := c.(*stackClient); ok {
+		c = s.base
+	}
+	return wrap(c, opts, identity)
+}
+
+// wrap builds the stack for a fixed identity, outer to inner:
+// stackClient (outermost — Wrap's handle on c, and the claim when no
+// observer is wired) -> completion emitter (llmkit.Observe, only when
+// opts.Observer is set; otherwise the stack mints the span and emits no
+// Completion event) -> serialize -> retry (carrying identity, the
+// innermost provider stage). The caller's partial Retry config keeps
+// its set fields and takes retry.Default's schedule for everything it
+// leaves unset ([retry.Config.Or]).
+func wrap(c llmkit.Client, opts Options, identity llmkit.Identity) llmkit.Client {
 	retryCfg := opts.Retry.Or(retry.Default())
-	providerTag := Tag(spec, opts)
-	// The attempt observer lives in the retry stage: it is the only layer
-	// that sees attempt boundaries. A nil observer makes this exactly
-	// WithRetry.
-	client := llmkit.WithRetryObserver(adapter, retryCfg, opts.Observer, providerTag, spec.Model)
-	client = llmkit.WithRecorder(client, opts.Recorder, providerTag, spec.Model)
-	// Outermost: force at-most-one tool call per response when the backend
-	// does not support parallel tool calls (see llmkit serialize.go). Capable
-	// providers short-circuit inside the wrapper, so this is a free check
-	// for anthropic/google/openai and the safety net for openai-compatible.
-	return llmkit.WithSerializedToolCalls(client), nil
+	stack := retryStage(c, retryCfg, opts.Observer, identity)
+	stack = serializeStage(stack)
+	return &stackClient{
+		base:     c,
+		identity: identity,
+		next:     llmkit.Observe(stack, opts.Observer),
+		claims:   opts.Observer == nil,
+	}
 }
 
 // anthropicProfileBaseURLFile returns the path of the Anthropic SDK profile
@@ -496,15 +547,10 @@ func anthropicProfileBaseURLFile() string {
 	return config.ProfilePath(dir, profile)
 }
 
-// Tag resolves the provider tag that [New] puts on usage and Attempt
-// events: [Options.Provider] when set, else string(spec.Type). Callers
-// wrapping a New-built client with [llmkit.Observe] must pass this same
-// value as the provider argument, so one span never carries two provider
-// identities.
-//
-// Tag validates nothing: for a spec [New] would refuse (an unknown Type
-// included) it returns Options.Provider, or string(spec.Type) verbatim.
-func Tag(spec Spec, opts Options) string {
+// providerTag resolves the provider identity tag: opts.Provider when set,
+// else string(spec.Type). It is unexported because no caller needs its
+// own copy — New calls it directly and Wrap reads IdentityOf(c).
+func providerTag(spec Spec, opts Options) string {
 	if opts.Provider != "" {
 		return opts.Provider
 	}

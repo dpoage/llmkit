@@ -178,10 +178,7 @@ func (r *Runner) runJSON(ctx context.Context, cfg runConfig, task string, schema
 	// the token cap" from a genuine parse failure still can.
 	repairOutcome.TruncationReason = outcome.TruncationReason
 	repairOutcome.Finalized = outcome.Finalized
-	repairOutcome.Usage.InputTokens += outcome.Usage.InputTokens
-	repairOutcome.Usage.OutputTokens += outcome.Usage.OutputTokens
-	repairOutcome.Usage.CacheReadInputTokens += outcome.Usage.CacheReadInputTokens
-	repairOutcome.Usage.CacheCreationInputTokens += outcome.Usage.CacheCreationInputTokens
+	repairOutcome.Usage = repairOutcome.Usage.Add(outcome.Usage)
 	// From here the repair outcome IS the run's outcome — the deferred
 	// Finalize reports its Iterations/Usage, so the last recorded turn is the
 	// repair's.

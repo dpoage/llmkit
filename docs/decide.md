@@ -49,7 +49,7 @@ placeholder key. An invalid field returns an error wrapping
 | `BaseURL` | No | Endpoint root for tests and gateways. Default: `https://api.typesafe.ai`; the path `/v1/systemone` is appended. |
 | `HTTPClient` | No | Used as-is, including its `Timeout`. Default: a plain client with no `http.Client.Timeout`, so the per-attempt `RequestTimeout` is the only bound. |
 | `Retry` | No | Resolved at construction via `retry.Config.Or`: 3 attempts, 30 s per-attempt timeout, `BaseDelay` (500 ms), `MaxDelay` (30 s), and `Jitter` (20%) from `retry.Default`. An explicit `Jitter` of 0 resolves like every other unset field; pin `Retry.Rand` for the resolved defaults with no jitter. |
-| `Recorder` | No | Receives one `llmkit.UsageEvent` per successful `Ask` through its `Record(llmkit.UsageEvent)` method. Default: nil (no recording). |
+| `Observer` | No | Receives one [`llmkit.DecisionEvent`](https://pkg.go.dev/github.com/dpoage/llmkit#DecisionEvent) per `Ask` that passes pre-wire validation (success or failure; a caller's already-cancelled ctx emits one with `Err` set and zero wire hits; a `buildRequest` refusal emits nothing), via its `Observe(ctx, llmkit.Event)` method. Default: nil (no events). |
 
 ## The three question types
 
@@ -362,16 +362,21 @@ like any other `ErrServer`.
 Error messages carry the vendor body text, truncated to 200 characters plus
 an appended `...`. llmkit never places the API key into an error.
 
-## Usage and the Recorder
+## Usage and observability
 
 TypeSafe bills input tokens only; output tokens are free
 ([Models](https://docs.typesafe.ai/models.md); no vendor review date on the
 page; verified 2026-09-19). `Response.Usage` reports both counts.
 
-A non-nil `Config.Recorder` receives exactly one `llmkit.UsageEvent`
-per successful `Ask`. `Provider` is `"typesafe"` and `Model` is the
-versioned id the server reported. The recorder fires on success only
-and never on failure.
+A non-nil `Config.Observer` receives exactly one `llmkit.DecisionEvent`
+per `Ask` that passes pre-wire validation — success or failure, never
+for a `buildRequest` refusal. A caller's already-cancelled ctx emits
+one event with `Err` set and zero wire hits. On success: `Backend`
+`"typesafe"`, `Model` the versioned id the server reported, `Usage`,
+`State` and `Questions` as validated, `Answers` — each of
+`Questions`/`Answers` sorted by ID. On failure: `Err` set, `Answers`
+nil, `Model` the requested alias. `decide` never mints a span; the
+event rides whatever Run/Span/Step the `Ask`'s `ctx` already carries.
 
 ## Vendor limits and jaggedness
 

@@ -53,8 +53,8 @@ func (g *googleAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(
 	// scanning starts — context cancellation, deadline, connection reset:
 	// iterateResponseStream only logs them — and a clean EOF is
 	// indistinguishable from a stream cut short. Fail loudly instead of
-	// dressing a partial up as StopEndTurn; WithRetry's per-attempt
-	// RequestTimeout relies on this to see a stalled attempt as failed.
+	// dressing a partial up as StopEndTurn; the provider retry stage's
+	// per-attempt RequestTimeout relies on this to see a stalled attempt as failed.
 	if err := ctx.Err(); err != nil {
 		return llmkit.Response{}, g.normalizeErr(ctx, err)
 	}

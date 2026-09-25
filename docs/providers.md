@@ -113,73 +113,75 @@ The example programs under `examples/` read four variables through `examples/int
 
 With the variables unset, an example prints its usage and exits without touching the network.
 
-## The decorator stack
+## The stack
 
-`New` returns the adapter wrapped in three decorators, outer to inner:
+`New` returns the adapter wrapped in `provider.Wrap`'s stack, outer to inner:
 
 ```mermaid
 flowchart LR
-    C[Caller] --> S[serialize<br/>WithSerializedToolCalls] --> R[recorder<br/>WithRecorder] --> T[retry<br/>WithRetryObserver<br/>Attempt events] --> A[adapter<br/>vendor SDK]
+    C[Caller] --> E[completion emitter<br/>llmkit.Observe] --> S[serialize] --> T[retry<br/>Attempt events] --> A[adapter<br/>vendor SDK]
 ```
 
-The order decides who sees what:
+The stage order is the package's secret; one fact matters to callers: the retry stage sees raw adapter errors, so its classification and `Retry-After` handling stay accurate, and the outermost emitter sees the caller-visible (serialized) response.
 
-- Usage is recorded only for the final successful attempt (the recorder sits outside the retry wrapper).
-- The retry wrapper sees raw adapter errors, so its classification and `Retry-After` handling stay accurate.
-- With `Options.Observer` set, the retry stage emits one `Attempt` event per wire call, failures included — it is the only layer that sees attempt boundaries.
+With `Options.Observer` set, the retry stage emits one `Attempt` event per wire call, failures included, AND the outermost emitter emits one `Completion` event per logical completion the caller's context does not already belong to (see [`llmkit.BeginCompletion`](https://pkg.go.dev/github.com/dpoage/llmkit#BeginCompletion)) — so a `New`/`Wrap` client run under the agent `Runner` reports `Attempt` events only, the Runner's own `Completion` having already claimed the context.
 
-All three decorators compose over streaming. Retry stops once a delta reaches the caller. The recorder reports the final streamed response. Serialization drops tool-call deltas for any index beyond the first.
+The stack composes over streaming too: retry stops once a delta reaches the caller, and serialization drops tool-call deltas for any index beyond the first.
 
-`Options` tunes the stack:
+`Options` tunes the stack for both `New` and `Wrap`:
 
 | Field | Effect | Default |
 |---|---|---|
-| `Retry` | Retry policy for the retry wrapper. Unset fields (≤ 0; `Jitter` == 0) are completed field-wise from `retry.Default` via `retry.Config.Or`; every field you set is kept — `Retry{BaseDelay: 2s}` sleeps a 2 s-based schedule, `Retry{MaxAttempts: 2}` keeps the 500 ms base. | `retry.Default` fills every unset field: 4 attempts, 500 ms base delay, 30 s cap, 20% jitter, 5 m per-attempt timeout |
-| `Recorder` | Receives a `llmkit.UsageEvent` after each successful completion. | nil (no recording) |
-| `Observer` | Receives one `llmkit.AttemptEvent` per provider attempt (failures included) from the retry stage, tagged with the resolved provider name and model. `New` emits no `Completion` events — see the next section. | nil (no attempt events) |
-| `Provider` | Overrides the provider tag on usage and attempt events; set it when your ledger keys on a config name. | `string(spec.Type)` |
-| `HTTPClient` | Overrides the transport the SDKs use; for `httptest` and proxies. Headers its `Transport` adds reach the wire. | a plain `http.Client` per adapter over `http.DefaultTransport` (never `http.DefaultClient`); `Retry`'s per-attempt timeout bounds each attempt |
+| `Retry` | Retry policy for the retry stage. Unset fields (≤ 0; `Jitter` == 0) are completed field-wise from `retry.Default` via `retry.Config.Or`; every field you set is kept — `Retry{BaseDelay: 2s}` sleeps a 2 s-based schedule, `Retry{MaxAttempts: 2}` keeps the 500 ms base. | `retry.Default` fills every unset field: 4 attempts, 500 ms base delay, 30 s cap, 20% jitter, 5 m per-attempt timeout |
+| `Observer` | Receives one `llmkit.AttemptEvent` per provider attempt (failures included) from the retry stage, AND one `llmkit.CompletionEvent` per logical completion whose context the stack claims (a `New`/`Wrap` client run under the agent `Runner` sees an already-claimed context and receives `Attempt` events only), both tagged with the resolved `llmkit.Identity`. | nil (no events) |
+| `Provider` | Overrides the `Identity.Provider` tag on emitted events. | `string(spec.Type)` for `New`; `llmkit.IdentityOf(c).Provider` for `Wrap` |
+| `HTTPClient` | Overrides the transport the SDKs use; for `httptest` and proxies. Headers its `Transport` adds reach the wire. `Wrap` ignores this field — it decorates an already-built client and the inner adapter and its transport are kept: a `New` client built with HTTPClient `o1` keeps `o1` across every `Wrap`. | a plain `http.Client` per adapter over `http.DefaultTransport` (never `http.DefaultClient`); `Retry`'s per-attempt timeout bounds each attempt |
+
+## Wrapping a foreign client
+
+`provider.Wrap(c, opts)` puts the same stack around any `llmkit.Client` — the replacement for stacking root decorators by hand:
+
+```go
+wrapped := provider.Wrap(someClient, provider.Options{
+	Retry:    retry.Config{MaxAttempts: 3},
+	Observer: myObserver,
+	Provider: "my-config-name",
+})
+```
+
+Identity is `llmkit.IdentityOf(c)`, with `Provider` replaced by `Options.Provider` when set; a client with neither an `Identity()` method nor an explicit `Options.Provider` gets the zero identity (documented, not an error). `Wrap` is not like-for-like with the removed root retry decorator: it also serializes tool calls when the wrapped client's `ParallelToolCalls` capability is false, a step a caller retrying a foreign client by hand used to add separately.
+
+`Wrap` is idempotent over its own stacks. Given a client `New` or `Wrap` returned, it rebuilds one stack from the client below it: the new `Options` apply (`Retry`, `Observer`, and `Provider` when set); the inner adapter and its transport are kept, and the rebuilt stack keeps the `Identity` it carried unless `Options.Provider` is set. `provider.Wrap(client, opts)` over a `New` client therefore makes at most `opts.Retry`'s resolved `MaxAttempts` wire calls per call, not the product of two retry schedules. A foreign decorator between the two stacks hides the inner one, and both retry.
+
+Above its retry stage, the stack claims every call whose context is not already claimed, whether or not `Options.Observer` is set. An `llmkit.Observe` handed to `Wrap` is therefore silenced: `provider.Wrap(llmkit.Observe(c, obs), provider.Options{})` delivers no `Completion` event to `obs`, which drops out of the spend ledger. Pass `obs` as `Options.Observer` instead.
 
 ## Observing completions and attempts
 
-`Options.Observer` puts an `llmkit.Observer` inside the retry stage. The observer receives one `Attempt` event per wire call — failures included — numbered from 1.
+Ownership decides who emits the `Completion` event. The rule has three parts (stated once, on `llmkit.Observer`): an emitter — `llmkit.Observe`, or a `New`/`Wrap` stack above its retry stage — mints a span and emits only when the context it receives carries no span, and passes the call through when the context already carries one; the agent `Runner` mints on the context it hands its client, on every turn; hooks and tools receive a context without the turn's span. A `New`/`Wrap` stack claims even without `Options.Observer`; it then emits no events at all, neither `Completion` nor `Attempt`. With `Options.Observer` set, a stack called directly emits both kinds, and a stack whose context is already claimed emits `Attempt` events only, on the enclosing span.
 
-A sink can watch flakiness without counting spend twice. `New` never emits `Completion` events: the outermost layer owns that one.
-
-For a bare client, wrap the constructed client with `llmkit.Observe`. It emits exactly one `Completion` event per logical call. The event carries:
-
-- the request as received
-- the final response, or the error text
-- on the stream path, the response assembled from the same synthesis `llmkit.Stream` performs
+For a client this package did not build — a bare `llmkit.Client` you want to observe — wrap it with `llmkit.Observe(c, obs)` directly, outside any `Wrap` (see above); it follows the same rule. For a client a `Runner` runs, put the sink on the `Runner` with `agent.WithObserver`.
 
 ```go
 spec := provider.Spec{Type: provider.TypeAnthropic, Model: "claude-sonnet-4-5", Secret: os.Getenv("ANTHROPIC_API_KEY")}
 var events []llmkit.Event
 obs := llmkit.ObserverFunc(func(ctx context.Context, ev llmkit.Event) {
-    events = append(events, ev)
+	events = append(events, ev)
 })
-opts := provider.Options{Observer: obs}
-client, err := provider.New(ctx, spec, opts)
-// provider.Tag(spec, opts) is the tag New itself derives, so one span never
-// carries two provider identities.
-observed := llmkit.Observe(client, obs, provider.Tag(spec, opts), spec.Model)
+client, err := provider.New(ctx, spec, provider.Options{Observer: obs})
+// client already emits one Completion event per call (because the
+// New/Wrap stack owns the ctx above its retry stage and Options.Observer
+// is set), plus its Attempt events — no extra llmkit.Observe wrap needed.
 ```
 
-`llmkit.Observe` mints a fresh span per logical completion and stamps it into the context it hands the client. Every `Attempt` event joins its `Completion` event on `ev.SpanID`.
+Because the observer's outermost stage sits above the serializer, a `Completion` event shows the truncated response your loop sees, while the retry stage's `Attempt` events show the raw adapter response.
 
-A nested completion (a tool calling the model) gets its own span.
-
-Because the observer sits below the serializer, an `Attempt` event shows the raw adapter response. The `Completion` event shows the truncated response your loop sees.
-
-The attempt emitter is `llmkit.WithRetryObserver(c, cfg, obs, provider, model)`. It works on ANY `llmkit.Client` — not only through `provider.New`.
-
-If the same client runs inside an `agent.Runner`, do not wrap it with `llmkit.Observe`. The Runner emits `Completion` events itself (with `Step` set), and double-wrapping records every completion twice. Pass the durable sink to the Runner instead.
+If the same client runs inside an `agent.Runner`, the Runner is the emitter that owns the turn's `Completion` (with `Step` set, tagged with the client's `Identity`); `Options.Observer` still receives the `Attempt` events when set. An extra `llmkit.Observe` around a Runner-run client receives the context the Runner already claimed, so it never records a second `Completion`.
 
 ## Error normalization
 
 Adapters map vendor failures onto the sentinel errors in `llmkit`; match them with `errors.Is` on the returned error. The `Kind` is derived from the HTTP status, with the response body disambiguating 400s:
 
-| HTTP status / failure | `llmkit` kind | Retried by `WithRetry` |
+| HTTP status / failure | `llmkit` kind | Retried by the retry stage |
 |---|---|---|
 | 429 | `ErrRateLimited` | Yes; carries `Retry-After` when the response supplies one |
 | 401, 403 | `ErrAuth` | No |
@@ -207,7 +209,7 @@ A refused pre-wire request (a `Capabilities` violation, a malformed block, an un
 
 Two `Retry-After` rules apply across the table.
 
-First, the header is honored on every status that carries it, but only Anthropic and OpenAI can surface it: the Google SDK hides response headers, so Google errors report `HasRetryAfter` false and the retry wrapper falls back to exponential backoff. An OpenAI in-band error on a 200 stream is the same gap from the other side: the SDK's `StreamError` carries no headers, so no `Retry-After` surfaces there either.
+First, the header is honored on every status that carries it, but only Anthropic and OpenAI can surface it: the Google SDK hides response headers, so Google errors report `HasRetryAfter` false and the retry stage falls back to exponential backoff. An OpenAI in-band error on a 200 stream is the same gap from the other side: the SDK's `StreamError` carries no headers, so no `Retry-After` surfaces there either.
 
 Second, a `Retry-After` above `retry.Config.MaxDelay` is truncated to `MaxDelay` (30 s by default) — and jitter never pushes a backoff sleep past `MaxDelay` either.
 

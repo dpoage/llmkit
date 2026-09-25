@@ -5,9 +5,9 @@
 //
 // The package imports only the standard library and knows nothing about
 // llmkit. A caller supplies a classify function that decides, for each
-// error, whether the loop retries and which delay applies. llmkit's
-// WithRetry wraps [Do] around the APIError classifier; call Do directly to
-// retry any other error source under the same policy.
+// error, whether the loop retries and which delay applies. provider.Wrap's
+// retry stage wraps [Do] around the APIError classifier; call Do directly
+// to retry any other error source under the same policy.
 //
 // The loop runs in this order:
 //

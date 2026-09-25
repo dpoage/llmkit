@@ -327,50 +327,48 @@ func caseErrorBadModel(t *testing.T, sess *livetest.Session) {
 	bad.finish(decide.Response{}, err)
 }
 
-// captureRecorder captures the usage events one case produces while still
-// feeding the run-wide tally, so the LIVE_TOKENS line stays complete.
-type captureRecorder struct {
-	tally  *livetest.Tally
+// decisionCapture captures llmkit.Event values, for the usage_recorded case.
+type decisionCapture struct {
 	mu     sync.Mutex
-	events []llmkit.UsageEvent
+	events []llmkit.Event
 }
 
-func (c *captureRecorder) Record(ev llmkit.UsageEvent) {
-	c.tally.Record(ev)
+func (c *decisionCapture) Observe(_ context.Context, ev llmkit.Event) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.events = append(c.events, ev)
 }
 
-func (c *captureRecorder) snapshot() []llmkit.UsageEvent {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return append([]llmkit.UsageEvent(nil), c.events...)
-}
-
-// caseUsageRecorded proves Config.Recorder fires exactly once per successful
-// Ask, with the provider tag and the response's reported model.
+// caseUsageRecorded pins the success shape live: exactly one
+// DecisionEvent per successful Ask, Backend "typesafe", Model the
+// response's reported model, Usage matching the response.
 func caseUsageRecorded(t *testing.T, sess *livetest.Session) {
 	base := newDecideCase(t, sess, "usage_recorded")
-	rec := &captureRecorder{tally: livetest.DefaultTally()}
-	via := base.variant(func(c *decide.Config) { c.Recorder = rec })
+	obs := &decisionCapture{}
+	via := base.variant(func(c *decide.Config) { c.Observer = llmkit.Observers(obs, livetest.DefaultTally()) })
 	resp, err := via.ask(ticketState, ticketQuestions())
 	if err != nil {
 		t.Fatalf("ask: %v", err)
 	}
-	events := rec.snapshot()
+	obs.mu.Lock()
+	events := append([]llmkit.Event(nil), obs.events...)
+	obs.mu.Unlock()
 	if len(events) != 1 {
-		t.Fatalf("Config.Recorder fired %d time(s), want exactly once per successful Ask", len(events))
+		t.Fatalf("Config.Observer fired %d time(s), want exactly once per successful Ask", len(events))
 	}
 	ev := events[0]
-	if ev.Provider != "typesafe" {
-		t.Fatalf("usage event provider %q, want typesafe", ev.Provider)
+	if ev.Kind != llmkit.KindDecision || ev.Decision == nil {
+		t.Fatalf("event = %+v, want a KindDecision payload", ev)
 	}
-	if ev.Model != resp.Model {
-		t.Fatalf("usage event model %q, want the response's reported model %q", ev.Model, resp.Model)
+	de := ev.Decision
+	if de.Backend != "typesafe" {
+		t.Fatalf("Backend = %q, want typesafe", de.Backend)
 	}
-	if ev.Usage != resp.Usage {
-		t.Fatalf("usage event %+v does not match the response's %+v", ev.Usage, resp.Usage)
+	if de.Model != resp.Model {
+		t.Fatalf("Model = %q, want the response's reported model %q", de.Model, resp.Model)
+	}
+	if de.Usage != resp.Usage {
+		t.Fatalf("Usage = %+v does not match the response's %+v", de.Usage, resp.Usage)
 	}
 	via.finish(resp, err)
 }

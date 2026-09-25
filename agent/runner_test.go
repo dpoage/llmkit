@@ -4,11 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/provider"
 )
 
 // echoTool returns whatever it's given, or errors when asked to.
@@ -787,5 +792,175 @@ func TestRun_TextWithoutTextBlockReachesHistory(t *testing.T) {
 	}
 	if asst.Content[1].Kind != llmkit.BlockText || asst.Content[1].Text != "calling the tool" {
 		t.Errorf("block 1 = %+v, want the surfaced text block", asst.Content[1])
+	}
+}
+
+// identifiedFakeClient wraps fakeClient with a fixed llmkit.Identity, so
+// the Runner stamps its Completion events with that identity.
+type identifiedFakeClient struct {
+	fakeClient
+	identity llmkit.Identity
+}
+
+func (c *identifiedFakeClient) Identity() llmkit.Identity { return c.identity }
+
+// TestRun_CompletionEventsCarryClientIdentity pins the Runner's
+// identity stamp: every Completion event's Provider/Model comes from
+// llmkit.IdentityOf(r.client). A fake implementing IdentifiedClient tags
+// its events {"fake","m-1"}; a plain fake tags nothing.
+func TestRun_CompletionEventsCarryClientIdentity(t *testing.T) {
+	completionTags := func(t *testing.T, out *Outcome) (provider, model string, found bool) {
+		t.Helper()
+		for _, ev := range out.Transcript.Record {
+			if ev.Kind != llmkit.KindCompletion {
+				continue
+			}
+			return ev.Completion.Provider, ev.Completion.Model, true
+		}
+		return "", "", false
+	}
+
+	t.Run("identified client", func(t *testing.T) {
+		fc := &identifiedFakeClient{
+			fakeClient: fakeClient{steps: []scriptStep{textResp("done", 1, 1)}},
+			identity:   llmkit.Identity{Provider: "fake", Model: "m-1"},
+		}
+		r := NewRunner(fc, nil, "sys")
+		out, err := r.Run(context.Background(), "task")
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		p, m, found := completionTags(t, out)
+		if !found {
+			t.Fatal("no Completion event observed")
+		}
+		if p != "fake" || m != "m-1" {
+			t.Errorf("completion tags = %q/%q, want fake/m-1", p, m)
+		}
+	})
+	t.Run("plain client", func(t *testing.T) {
+		fc := newFakeClient(textResp("done", 1, 1))
+		r := NewRunner(fc, nil, "sys")
+		out, err := r.Run(context.Background(), "task")
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		p, m, found := completionTags(t, out)
+		if !found {
+			t.Fatal("no Completion event observed")
+		}
+		if p != "" || m != "" {
+			t.Errorf("completion tags = %q/%q, want empty: a plain fake is not IdentifiedClient", p, m)
+		}
+	})
+}
+
+// captureObserver collects every event an llmkit.Observer receives.
+type captureObserver struct {
+	mu     sync.Mutex
+	events []llmkit.Event
+}
+
+func (c *captureObserver) Observe(_ context.Context, ev llmkit.Event) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.events = append(c.events, ev)
+}
+
+func (c *captureObserver) byKind(k llmkit.EventKind) []llmkit.Event {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []llmkit.Event
+	for _, ev := range c.events {
+		if ev.Kind == k {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
+// openAICompatBody builds a minimal successful openai-compatible chat
+// completion body, for the bare provider.New client.
+func openAICompatBody(model, text string, inTok, outTok int64) string {
+	return fmt.Sprintf(`{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":%q,`+
+		`"choices":[{"index":0,"message":{"role":"assistant","content":%q},"finish_reason":"stop"}],`+
+		`"usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}}`,
+		model, text, inTok, outTok, inTok+outTok)
+}
+
+// TestObserver_HookProviderCallGetsOwnSpan pins that a bare provider.New
+// client called from an AfterCompletion hook or a Delta hook emits its
+// own Completion event on its own span, and its Attempts do not carry
+// the enclosing turn's span.
+func TestObserver_HookProviderCallGetsOwnSpan(t *testing.T) {
+	for _, hookName := range []string{"AfterCompletion", "Delta"} {
+		t.Run(hookName, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(openAICompatBody("judge-model", "judged", 3, 2)))
+			}))
+			t.Cleanup(srv.Close)
+
+			obs := &captureObserver{}
+			judge, err := provider.New(context.Background(), provider.Spec{
+				Type: provider.TypeOpenAICompatible, Model: "judge-model", BaseURL: srv.URL, Secret: "k",
+			}, provider.Options{Observer: obs})
+			if err != nil {
+				t.Fatalf("provider.New: %v", err)
+			}
+			callJudge := func(ctx context.Context) {
+				if _, err := judge.Complete(ctx, llmkit.Request{
+					Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "judge")},
+				}); err != nil {
+					t.Errorf("judge Complete: %v", err)
+				}
+			}
+			var hooks Hooks
+			switch hookName {
+			case "AfterCompletion":
+				hooks.AfterCompletion = func(ctx context.Context, _ int, _ *llmkit.Request, _ *llmkit.Response, _ error) {
+					callJudge(ctx)
+				}
+			case "Delta":
+				hooks.Delta = func(ctx context.Context, _ int, _ llmkit.Delta) { callJudge(ctx) }
+			}
+
+			fc := newFakeClient(textResp("turn text", 1, 1))
+			r := NewRunner(fc, nil, "sys", WithHooks(hooks))
+			out, err := r.Run(context.Background(), "task")
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+
+			var turnSpan llmkit.SpanID
+			for _, ev := range out.Transcript.Record {
+				if ev.Kind == llmkit.KindCompletion {
+					turnSpan = ev.SpanID
+				}
+			}
+			if turnSpan == "" {
+				t.Fatal("no turn Completion event observed")
+			}
+
+			completions := obs.byKind(llmkit.KindCompletion)
+			attempts := obs.byKind(llmkit.KindAttempt)
+			if len(completions) != 1 {
+				t.Fatalf("judge completions = %d, want 1 (its own logical completion)", len(completions))
+			}
+			if completions[0].SpanID == "" || completions[0].SpanID == turnSpan {
+				t.Errorf("judge completion span = %q, want a fresh span distinct from the turn's %q", completions[0].SpanID, turnSpan)
+			}
+			if len(attempts) == 0 {
+				t.Fatal("judge client emitted no Attempt events")
+			}
+			for i, ev := range attempts {
+				if ev.SpanID != completions[0].SpanID {
+					t.Errorf("judge attempt %d span = %q, want the judge completion's %q", i, ev.SpanID, completions[0].SpanID)
+				}
+				if ev.SpanID == turnSpan {
+					t.Errorf("judge attempt %d carries the turn's span %q; a hook call must not inherit it", i, turnSpan)
+				}
+			}
+		})
 	}
 }

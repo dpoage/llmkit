@@ -63,10 +63,12 @@ type Config struct {
 	// Retry.Rand to a function returning 0.5).
 	Retry retry.Config
 
-	// Recorder is optional. A non-nil Recorder receives exactly one
-	// UsageEvent per successful Ask — Provider "typesafe", the response's
-	// reported Model, and the token usage — and nothing on failure.
-	Recorder llmkit.Recorder
+	// Observer is optional. A non-nil Observer receives exactly one
+	// [llmkit.DecisionEvent] per Ask that passes pre-wire validation —
+	// success or failure; a caller's already-cancelled ctx emits one
+	// with Err set and zero wire hits; a buildRequest refusal emits
+	// nothing — on the Ask's context.
+	Observer llmkit.Observer
 }
 
 // New validates cfg and returns a Client. It returns an error wrapping
@@ -100,7 +102,7 @@ func New(cfg Config) (*Client, error) {
 		endpoint: strings.TrimRight(base, "/") + systemOnePath,
 		client:   cfg.httpClient(),
 		retry:    cfg.retryPolicy(),
-		recorder: cfg.Recorder,
+		observer: cfg.Observer,
 	}, nil
 }
 
@@ -113,7 +115,7 @@ type Client struct {
 	endpoint string
 	client   *http.Client
 	retry    retry.Config
-	recorder llmkit.Recorder
+	observer llmkit.Observer
 }
 
 // httpClient returns the injected client as-is, or a plain client with no

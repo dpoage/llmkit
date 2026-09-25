@@ -70,6 +70,14 @@ import (
 // Runner (which is safe), every hook can fire concurrently across runs. Hook
 // functions must therefore be safe for concurrent use — synchronize their own
 // state.
+//
+// Every hook receives a context without the turn's completion span
+// (Step set): the Runner claims the span only on the context it hands
+// the client, and Delta and AfterCompletion, which fire after that
+// claim, still receive the pre-claim context. Tools receive the loop
+// context, likewise without the span. Which model calls made from a
+// hook or a tool emit their own Completion follows the emission rule on
+// [llmkit.Observer].
 type Hooks struct {
 	// BeforeCompletion fires immediately before each client.Complete.
 	BeforeCompletion func(ctx context.Context, step int, req *llmkit.Request)

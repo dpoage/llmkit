@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/dpoage/llmkit"
-	"github.com/dpoage/llmkit/retry"
 )
 
 // SSE event shapes follow the Gemini API's streamGenerateContent?alt=sse
@@ -535,42 +534,8 @@ func TestStream_ConnectionResetMidStream(t *testing.T) {
 	}
 }
 
-// TestStream_RetryTimeoutStalledStream: WithRetry's per-attempt
-// RequestTimeout must abort a stream that stalls after delivering a
-// chunk — a silent partial would make the attempt look successful and
-// defeat the timeout entirely. The attempt fails with
-// context.DeadlineExceeded in the chain and no Response.
-func TestStream_RetryTimeoutStalledStream(t *testing.T) {
-	base := newServer(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = fmt.Fprint(w, "data: "+mustJSON(t, textChunk("Hello"))+"\n\n")
-		w.(http.Flusher).Flush()
-		<-r.Context().Done() // stall until the attempt deadline reaps us
-	})
-	cl := llmkit.WithRetry(newStreamClient(t, base), retry.Config{
-		MaxAttempts:    1,
-		RequestTimeout: 150 * time.Millisecond,
-		BaseDelay:      time.Millisecond,
-		MaxDelay:       time.Millisecond,
-	})
-	deltas := 0
-	resp, err := llmkit.Stream(context.Background(), cl, simpleRequest(), func(llmkit.Delta) error {
-		deltas++
-		return nil
-	})
-	if err == nil {
-		t.Fatal("expected timeout error, got partial success")
-	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("error = %v, want context.DeadlineExceeded in the chain", err)
-	}
-	if !reflect.DeepEqual(resp, llmkit.Response{}) {
-		t.Fatalf("resp = %+v, want zero Response", resp)
-	}
-	if deltas != 1 {
-		t.Fatalf("deltas = %d, want 1 (first chunk before the stall)", deltas)
-	}
-}
+// TestStream_RetryTimeoutStalledStream's retry behaviour lives at
+// provider.TestConformance_GoogleStream_RetryTimeoutStalledStream.
 
 // TestStream_FnErrorStopsIteration: after fn errors, no further part may
 // reach fn, even with more chunks queued on the wire.

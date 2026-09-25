@@ -33,8 +33,8 @@ var liveCases = []liveCase{
 	{Name: "max_tokens", Doc: "a tiny MaxTokens yields StopMaxTokens"},
 	{Name: "error_bad_key", Doc: "an invalid credential normalizes to ErrAuth"},
 	{Name: "error_bad_model", Doc: "an unknown model normalizes to ErrInvalidRequest"},
-	{Name: "usage_recorded", Doc: "WithRecorder emits one UsageEvent for a successful completion"},
-	{Name: "attempt_events", Doc: "Options.Observer receives one Attempt event per wire call from the retry stage and no Completion event"},
+	{Name: "usage_recorded", Doc: "Options.Observer receives the Completion event's Response.Usage on a bare New client, tagged with the lane's model"},
+	{Name: "attempt_events", Doc: "Options.Observer receives one Completion event plus N Attempt events sharing its SpanID (Q1: New's own completion emitter)"},
 
 	// Capability-keyed cases: one per llmkit.Capabilities field.
 	{Name: "context_window", Gate: "ContextWindow", Doc: "an oversize prompt yields ErrContextTooLong when the window is known"},

@@ -25,17 +25,15 @@ import (
 //   - Duration: wall time of the call.
 //   - Err: the error's text; "" on success.
 //
-// CacheHits and Usage stay zero. Embedder carries no per-call cache
-// attribution (*CachedEmbedder exposes lifetime counters only) and no
-// Embedder in this module exposes token usage. Input texts and vectors
-// are not recorded; v1 embed events are a summary, so replaying this
-// boundary is not possible today.
+// Input texts and vectors are not recorded; v1 embed events are a summary,
+// so replaying this boundary is not possible today.
 //
 // Placement around a cache changes attribution:
 // NewCachedEmbedder(Observe(inner, obs), n) emits one event per cache miss
-// (a hit never reaches the observer);
-// Observe(NewCachedEmbedder(inner, n), obs) emits one event per call,
-// always with CacheHits 0.
+// (a hit never reaches the observer); Observe(NewCachedEmbedder(inner, n),
+// obs) emits one event per call, hit or miss alike — the cache is
+// invisible to the event either way, since Embedder exposes no per-call
+// cache attribution.
 //
 // Observers are synchronous: a panic in obs propagates and obs never
 // affects the returned vectors.

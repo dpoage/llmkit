@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/dpoage/llmkit"
-	"github.com/dpoage/llmkit/retry"
 )
 
 // echoClient is a programmable Client that returns scripted responses and
@@ -95,85 +94,21 @@ func ExampleStream() {
 	// Hello world
 }
 
-func ExampleWithRetry() {
-	c := &echoClient{
-		errs: []error{
-			&llmkit.APIError{Kind: llmkit.ErrRateLimited, StatusCode: 429, Provider: "demo", Message: "slow down"},
-		},
-		responses: []llmkit.Response{
-			{Text: "recovered", StopReason: llmkit.StopEndTurn},
-		},
-	}
-	wrapped := llmkit.WithRetry(c, retry.Config{
-		MaxAttempts:    3,
-		BaseDelay:      time.Millisecond,
-		MaxDelay:       time.Millisecond,
-		RequestTimeout: time.Minute,
-	})
-	resp, err := wrapped.Complete(context.Background(), llmkit.Request{
-		Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "hi")},
-	})
-	if err != nil {
-		fmt.Println("error:", err)
-		return
-	}
-	fmt.Println("attempts:", c.attempts)
-	fmt.Println(resp.Text)
-	// Output:
-	// attempts: 2
-	// recovered
-}
-
-func ExampleWithRecorder() {
-	c := &echoClient{responses: []llmkit.Response{{
-		Text:  "hi there",
-		Usage: llmkit.Usage{InputTokens: 12, OutputTokens: 5},
-	}}}
-	var events []llmkit.UsageEvent
-	wrapped := llmkit.WithRecorder(c, llmkit.RecorderFunc(func(ev llmkit.UsageEvent) {
-		events = append(events, ev)
-	}), "anthropic", "claude-sonnet-4-5")
-
-	_, err := wrapped.Complete(context.Background(), llmkit.Request{
-		Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "hi")},
-	})
-	if err != nil {
-		fmt.Println("error:", err)
-		return
-	}
-	for _, ev := range events {
-		fmt.Printf("%s/%s in=%d out=%d\n", ev.Provider, ev.Model, ev.Usage.InputTokens, ev.Usage.OutputTokens)
-	}
-	// Output:
-	// anthropic/claude-sonnet-4-5 in=12 out=5
-}
-
 func ExampleObserve() {
 	c := &echoClient{
-		errs: []error{
-			&llmkit.APIError{Kind: llmkit.ErrRateLimited, StatusCode: 429, Provider: "demo", Message: "slow down"},
-		},
 		responses: []llmkit.Response{
 			{Text: "observed", StopReason: llmkit.StopEndTurn},
 		},
 	}
-	// Observe is the outermost layer: it emits one Completion event per
-	// logical call, while WithRetryObserver reports each Attempt from inside
-	// the retry stage — joined to the completion by the event's SpanID.
+	// Observe emits one Completion event per logical call when wrapping a
+	// bare client. A client built with provider.New or provider.Wrap also
+	// emits Attempt events from its retry stage, joined to this Completion
+	// by SpanID — see the provider package's Wrap example.
 	var kinds []llmkit.EventKind
 	obs := llmkit.ObserverFunc(func(ctx context.Context, ev llmkit.Event) {
 		kinds = append(kinds, ev.Kind)
 	})
-	observed := llmkit.Observe(
-		llmkit.WithRetryObserver(c, retry.Config{
-			MaxAttempts:    3,
-			BaseDelay:      time.Millisecond,
-			MaxDelay:       time.Millisecond,
-			RequestTimeout: time.Minute,
-		}, obs, "anthropic", "claude-sonnet-4-5"),
-		obs,
-		"anthropic", "claude-sonnet-4-5",
-	)
+	observed := llmkit.Observe(c, obs)
 	_, err := observed.Complete(context.Background(), llmkit.Request{
 		Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "hi")},
 	})
@@ -185,8 +120,6 @@ func ExampleObserve() {
 		fmt.Println(k)
 	}
 	// Output:
-	// attempt
-	// attempt
 	// completion
 }
 

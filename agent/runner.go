@@ -978,13 +978,18 @@ func (r *Runner) complete(ctx context.Context, em runEmitter, messages []llmkit.
 	if r.hooks.BeforeCompletion != nil {
 		r.hooks.BeforeCompletion(ctx, step, &req)
 	}
-	// The logical completion gets its own span, minted BEFORE the client call
-	// and stamped on the Completion event: a retry-wrapped client's Attempt
-	// events read the same context and join this completion on SpanID (see
-	// [llmkit.Observer]). The Runner is the OUTERMOST harness layer, so it —
-	// never the retry stage — emits the Completion event, and it never wraps
-	// its client with llmkit.Observe.
-	ctx = llmkit.WithSpan(ctx, llmkit.NewSpanID())
+	// The logical completion is claimed on the ctx handed to the client:
+	// BeginCompletion mints a fresh span there, so a retry-wrapped
+	// client's Attempt events join this completion on SpanID (see
+	// [llmkit.Observer]). Delta and AfterCompletion receive the pre-claim
+	// ctx below (Step set, no span) — like RequestPolicy and
+	// BeforeCompletion above — so a provider client a hook calls claims
+	// its own span via BeginCompletion and emits its own Completion
+	// event, instead of inheriting the turn's span. The Runner is the
+	// outermost harness layer for the turn itself, so it — never the
+	// retry stage — emits this Completion event, and it never wraps its
+	// client with llmkit.Observe.
+	clientCtx := llmkit.BeginCompletion(ctx)
 	start := time.Now()
 
 	var resp llmkit.Response
@@ -994,13 +999,14 @@ func (r *Runner) complete(ctx context.Context, em runEmitter, messages []llmkit.
 		// the client's native stream when it implements StreamingClient and
 		// synthesizes deltas from the finished Response otherwise. The
 		// returned Response — and therefore everything below — is identical
-		// to the Complete path either way.
-		resp, err = llmkit.Stream(ctx, r.client, req, func(d llmkit.Delta) error {
+		// to the Complete path either way. The hook itself fires on the
+		// pre-claim ctx, not clientCtx.
+		resp, err = llmkit.Stream(clientCtx, r.client, req, func(d llmkit.Delta) error {
 			r.hooks.Delta(ctx, step, d)
 			return nil
 		})
 	} else {
-		resp, err = r.client.Complete(ctx, req)
+		resp, err = r.client.Complete(clientCtx, req)
 	}
 	if r.hooks.AfterCompletion != nil {
 		var respPtr *llmkit.Response
@@ -1010,27 +1016,28 @@ func (r *Runner) complete(ctx context.Context, em runEmitter, messages []llmkit.
 		r.hooks.AfterCompletion(ctx, step, &req, respPtr, err)
 	}
 	// The Completion event: one per logical completion, success or failure
-	// (Err set, zero Response), emitted after the AfterCompletion hook so the
-	// hook family stays closest to the wire call.
-	ev := llmkit.NewEvent(ctx, llmkit.KindCompletion)
+	// (Err set, zero Response), emitted after the AfterCompletion hook so
+	// the hook family stays closest to the wire call. Built on clientCtx
+	// so its SpanID matches the one the client (and any Attempt events
+	// it emitted) saw. Provider and Model come from the client's own
+	// Identity, never from arguments to the emitter.
+	ev := llmkit.NewEvent(clientCtx, llmkit.KindCompletion)
 	ev.Step = step
 	ev.Duration = time.Since(start)
-	ce := &llmkit.CompletionEvent{Request: req, Response: resp}
+	identity := llmkit.IdentityOf(r.client)
+	ce := &llmkit.CompletionEvent{Request: req, Response: resp, Provider: identity.Provider, Model: identity.Model}
 	if err != nil {
 		ce.Err = err.Error()
 		ce.Response = llmkit.Response{}
 	}
 	ev.Completion = ce
-	em.emit(ctx, ev)
+	em.emit(clientCtx, ev)
 	if err != nil {
 		return llmkit.Response{}, fmt.Errorf("agent: completion failed at iteration %d: %w", step, err)
 	}
 
 	outcome.Iterations++
-	outcome.Usage.InputTokens += resp.Usage.InputTokens
-	outcome.Usage.OutputTokens += resp.Usage.OutputTokens
-	outcome.Usage.CacheReadInputTokens += resp.Usage.CacheReadInputTokens
-	outcome.Usage.CacheCreationInputTokens += resp.Usage.CacheCreationInputTokens
+	outcome.Usage = outcome.Usage.Add(resp.Usage)
 	outcome.LastStopReason = resp.StopReason
 	// FinalText is always the LAST completion's text: assigned
 	// unconditionally, so an empty completion empties it (no stale earlier

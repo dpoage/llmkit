@@ -46,7 +46,7 @@ type StreamingClient interface {
 	// calling goroutine, in wire order, once per fragment; a non-nil error
 	// from fn cancels the stream and is returned (wrapped) — no Response.
 	// fn execution time counts toward the per-attempt RequestTimeout a
-	// wrapping WithRetry applies. The returned Response equals what Complete
+	// wrapping provider retry stage applies. The returned Response equals what Complete
 	// returns for the same wire exchange: same normalization, Usage
 	// convention, StopReason, thinking text and signatures, and ToolCalls
 	// with concatenated Arguments. Block.Raw may differ in encoding (a
@@ -65,8 +65,8 @@ type StreamingClient interface {
 // returning it. When Blocks carries no text block but Text is set, one
 // DeltaText from Text is emitted after the blocks and before the tool-call
 // deltas. fn runs on the calling goroutine, and its execution time
-// counts toward the per-attempt RequestTimeout when Stream is wrapped in
-// WithRetry.
+// counts toward the per-attempt RequestTimeout when Stream is wrapped by
+// the provider retry stage.
 func Stream(ctx context.Context, c Client, req Request, fn func(Delta) error) (Response, error) {
 	if sc, ok := c.(StreamingClient); ok {
 		return sc.Stream(ctx, req, fn)

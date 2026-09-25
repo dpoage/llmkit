@@ -6,7 +6,7 @@
 // and no text output, so this package does not implement [llmkit.Client]
 // and shares no code path with the provider packages. It uses only the
 // root package's error types, retry configuration, usage types, and
-// recorder.
+// observer vocabulary.
 //
 // # One request, one decision
 //
@@ -134,12 +134,17 @@
 //     used. Ledger on that reported Model, not on the alias sent.
 //   - Billing counts input tokens only; output tokens are free.
 //
-// # Concurrency
+// # Observability
 //
-// A *Client is safe for concurrent use, and each Ask is independent.
-// The optional [Config.Recorder] fires exactly once per successful
-// Ask with Provider "typesafe" and the response's reported Model, and
-// never on failure.
+// A *Client is safe for concurrent use, and each Ask is independent. When
+// [Config.Observer] is set, Ask emits exactly one [llmkit.DecisionEvent]
+// per Ask that passes pre-wire validation — success or failure, none for
+// a buildRequest refusal — with Backend "typesafe", Model (the
+// response's reported model on success, the requested alias on
+// failure), Usage, State, Questions, and Answers each sorted by ID. A
+// caller's already-cancelled ctx emits one event with Err set and zero
+// wire hits. decide never mints a span; the event rides whatever
+// Run/Span/Step the Ask's ctx already carries.
 //
 // # Construction
 //

@@ -221,7 +221,7 @@ func TestConformance_CallerCancellationIsNotAPIError(t *testing.T) {
 	}
 }
 
-// TestConformance_PerAttemptTimeoutRetriesTwice pins a stalled server under WithRetry{MaxAttempts: 2, RequestTimeout: 50ms} is hit exactly twice and the final error is *APIError{ErrServer, StatusCode 0} with context.DeadlineExceeded reachable through Err.
+// TestConformance_PerAttemptTimeoutRetriesTwice pins a stalled server under a two-attempt Wrap retry config (MaxAttempts: 2, RequestTimeout: 50ms) is hit exactly twice and the final error is *APIError{ErrServer, StatusCode 0} with context.DeadlineExceeded reachable through Err.
 func TestConformance_PerAttemptTimeoutRetriesTwice(t *testing.T) {
 	for _, f := range allAdapters() {
 		t.Run(f.name, func(t *testing.T) {
@@ -237,7 +237,7 @@ func TestConformance_PerAttemptTimeoutRetriesTwice(t *testing.T) {
 				return nil
 			})
 			cfg.RequestTimeout = 50 * time.Millisecond
-			client := llmkit.WithRetry(f.build(t, base), cfg)
+			client := Wrap(f.build(t, base), Options{Retry: cfg})
 			_, err := client.Complete(context.Background(), simpleRequest())
 			if err == nil {
 				t.Fatal("expected the final timeout error, got nil")
@@ -281,7 +281,7 @@ func TestConformance_CtxCancelledDuringBackoffSleep(t *testing.T) {
 					cancel() // the caller's ctx ends during the backoff sleep
 					return ctx.Err()
 				})
-				client := llmkit.WithRetry(f.build(t, base), cfg)
+				client := Wrap(f.build(t, base), Options{Retry: cfg})
 				var err error
 				if mode == "complete" {
 					_, err = client.Complete(ctx, simpleRequest())
@@ -544,13 +544,16 @@ func TestNew_StreamCallbackSentinelSurvivesCancel(t *testing.T) {
 	}
 }
 
-// llmkitRetryCfg builds a WithRetry config with a deterministic no-op
-// schedule for the conformance retry tests.
+// llmkitRetryCfg builds a Wrap retry config with a deterministic no-op
+// schedule for the conformance retry tests. Rand is pinned to 0.5 so the
+// jitter factor is exactly 1, regardless of whether an explicit Jitter: 0
+// is treated as unset and falls back to retry.Default's 20%.
 func llmkitRetryCfg(sleep func(context.Context, time.Duration) error) retry.Config {
 	return retry.Config{
 		MaxAttempts: 2,
 		BaseDelay:   time.Millisecond,
 		Jitter:      0,
+		Rand:        func() float64 { return 0.5 },
 		Sleep:       sleep,
 	}
 }
@@ -596,7 +599,7 @@ func TestConformance_RetryAfterHonoredOnEveryStatus(t *testing.T) {
 				sleeps = append(sleeps, d)
 				return nil
 			})
-			client := llmkit.WithRetry(f.build(t, base), cfg)
+			client := Wrap(f.build(t, base), Options{Retry: cfg})
 			if _, err := client.Complete(context.Background(), simpleRequest()); !errors.Is(err, llmkit.ErrServer) {
 				t.Fatalf("Complete err = %v, want ErrServer", err)
 			}

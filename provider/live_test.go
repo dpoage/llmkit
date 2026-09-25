@@ -114,8 +114,8 @@ func (lc *liveClient) complete(req llmkit.Request) (llmkit.Response, error) {
 	return lc.cl.Complete(lc.ctx, req)
 }
 
-// completeVia is complete through a caller-wrapped client (e.g. an extra
-// WithRecorder layer) while still logging the request for the fixture.
+// completeVia runs Complete on a caller-wrapped client while still
+// logging the request for the fixture.
 func (lc *liveClient) completeVia(cl llmkit.Client, req llmkit.Request) (llmkit.Response, error) {
 	if req.MaxTokens == 0 {
 		req.MaxTokens = defaultLiveMaxTokens
@@ -351,43 +351,7 @@ func caseErrorBadModel(t *testing.T, lc *liveClient) {
 	bad.finish(llmkit.Response{}, err)
 }
 
-type captureRecorder struct {
-	mu     sync.Mutex
-	events []llmkit.UsageEvent
-}
-
-func (c *captureRecorder) Record(ev llmkit.UsageEvent) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.events = append(c.events, ev)
-}
-
-func (c *captureRecorder) snapshot() []llmkit.UsageEvent {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return append([]llmkit.UsageEvent(nil), c.events...)
-}
-
-func caseUsageRecorded(t *testing.T, lc *liveClient) {
-	rec := &captureRecorder{}
-	wrapped := llmkit.WithRecorder(lc.cl, rec, "live-"+lc.sess.Lane.Name, lc.model)
-	resp, err := lc.completeVia(wrapped, llmkit.Request{
-		Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "Reply with exactly: OK")},
-	})
-	if err != nil {
-		t.Fatalf("complete: %v", err)
-	}
-	events := rec.snapshot()
-	if len(events) != 1 {
-		t.Fatalf("WithRecorder emitted %d event(s), want 1", len(events))
-	}
-	if ev := events[0]; ev.Model != lc.model || ev.Usage.InputTokens <= 0 || ev.Usage.OutputTokens <= 0 {
-		t.Fatalf("usage event = %+v, want this lane's model with accounted tokens", ev)
-	}
-	lc.finish(resp, err)
-}
-
-// eventObserver collects llmkit events for the attempt_events case.
+// eventObserver collects llmkit events delivered to Options.Observer.
 type eventObserver struct {
 	mu     sync.Mutex
 	events []llmkit.Event
@@ -399,13 +363,11 @@ func (o *eventObserver) Observe(_ context.Context, ev llmkit.Event) {
 	o.events = append(o.events, ev)
 }
 
-// caseAttemptEvents pins the Options.Observer wiring through the production
-// construction path: the retry stage reports its attempt (the success lane
-// makes exactly one wire call) and New never emits a Completion event. The
-// client is built here rather than via sess.Client because the observer is
-// wired at construction, inside the retry stage.
-func caseAttemptEvents(t *testing.T, lc *liveClient) {
-	obs := &eventObserver{}
+// newObservedClient builds a bare provider.New client for lc's lane with
+// obs fanned in alongside the run-wide Tally, so LIVE_TOKENS stays
+// accurate.
+func newObservedClient(t *testing.T, lc *liveClient, obs llmkit.Observer) llmkit.Client {
+	t.Helper()
 	spec := provider.Spec{
 		Type:    lc.sess.Lane.Type,
 		Model:   lc.sess.Model,
@@ -420,18 +382,62 @@ func caseAttemptEvents(t *testing.T, lc *liveClient) {
 	}
 	cl, err := provider.New(lc.ctx, spec, provider.Options{
 		HTTPClient: &http.Client{Transport: lc.tr},
-		Recorder:   livetest.DefaultTally(),
-		Observer:   obs,
+		Observer:   llmkit.Observers(obs, livetest.DefaultTally()),
 	})
 	if err != nil {
 		redFatal(t, lc.sess, "provider.New with Options.Observer: %v", err)
 	}
+	return cl
+}
+
+// caseUsageRecorded pins the usage_recorded case: on a bare New client,
+// the Completion event's Response.Usage — received through
+// Options.Observer — reports real accounted tokens, tagged with the
+// lane's model.
+func caseUsageRecorded(t *testing.T, lc *liveClient) {
+	obs := &eventObserver{}
+	cl := newObservedClient(t, lc, obs)
 	resp, err := lc.completeVia(cl, llmkit.Request{
 		Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "Reply with exactly: OK")},
 	})
 	if err != nil {
 		t.Fatalf("complete: %v", err)
 	}
+	var completions int
+	for _, ev := range obs.events {
+		if ev.Kind != llmkit.KindCompletion {
+			continue
+		}
+		completions++
+		if ev.Completion == nil {
+			t.Fatal("completion event carries no payload")
+		}
+		if ev.Completion.Model != lc.model {
+			t.Errorf("completion Model = %q, want the lane's %q", ev.Completion.Model, lc.model)
+		}
+		if ev.Completion.Response.Usage.InputTokens <= 0 || ev.Completion.Response.Usage.OutputTokens <= 0 {
+			t.Errorf("completion usage = %+v, want accounted tokens", ev.Completion.Response.Usage)
+		}
+	}
+	if completions != 1 {
+		t.Fatalf("Options.Observer received %d Completion events, want 1", completions)
+	}
+	lc.finish(resp, err)
+}
+
+// caseAttemptEvents pins the Options.Observer wiring through New's
+// production construction path: one Completion event plus N Attempt
+// events sharing its SpanID, N=1 for a single successful wire call.
+func caseAttemptEvents(t *testing.T, lc *liveClient) {
+	obs := &eventObserver{}
+	cl := newObservedClient(t, lc, obs)
+	resp, err := lc.completeVia(cl, llmkit.Request{
+		Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "Reply with exactly: OK")},
+	})
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	var completions []llmkit.Event
 	attempts := 0
 	for _, ev := range obs.events {
 		switch ev.Kind {
@@ -441,11 +447,23 @@ func caseAttemptEvents(t *testing.T, lc *liveClient) {
 				t.Fatalf("attempt event %+v: want sequential 1-based numbering", ev)
 			}
 		case llmkit.KindCompletion:
-			t.Fatal("provider.New emitted a Completion event; New emits Attempts only")
+			completions = append(completions, ev)
 		}
+	}
+	if len(completions) != 1 {
+		t.Fatalf("Options.Observer received %d Completion events, want 1 (Q1: New's own emitter)", len(completions))
 	}
 	if attempts != 1 {
 		t.Fatalf("Options.Observer received %d Attempt events, want 1 for a single wire call", attempts)
+	}
+	span := completions[0].SpanID
+	if span == "" {
+		t.Fatal("completion SpanID empty")
+	}
+	for _, ev := range obs.events {
+		if ev.Kind == llmkit.KindAttempt && ev.SpanID != span {
+			t.Errorf("attempt SpanID = %q, want the completion's %q", ev.SpanID, span)
+		}
 	}
 	lc.finish(resp, err)
 }

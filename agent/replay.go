@@ -42,6 +42,11 @@ type Source interface {
 // block for offline evaluation: record a run once into any sink, then replay
 // it deterministically against modified harness code.
 //
+// ReplayClient does not implement [llmkit.IdentifiedClient], so the
+// `Completion` events the agent `Runner` emits for a replayed run
+// carry empty Provider and Model — a replay is served by no
+// provider.
+//
 // Complete returns the next recorded response, validating that the request's
 // tool-call structure (the count and ids of preceding tool-result messages)
 // matches what was recorded for that step. Matching is intentionally lenient

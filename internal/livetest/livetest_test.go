@@ -1,6 +1,7 @@
 package livetest
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -111,11 +112,35 @@ func TestRedact(t *testing.T) {
 	}
 }
 
-func TestTally(t *testing.T) {
+// TestTally_SumsCompletionAndDecisionUsage defends: Tally sums
+// Completion.Response.Usage and DecisionEvent.Usage via Usage.Add, including
+// CacheCreationInputTokens.
+func TestTally_SumsCompletionAndDecisionUsage(t *testing.T) {
 	tl := new(Tally)
-	tl.Record(llmkit.UsageEvent{Usage: llmkit.Usage{InputTokens: 100, OutputTokens: 20, CacheReadInputTokens: 8}})
-	tl.Record(llmkit.UsageEvent{Usage: llmkit.Usage{InputTokens: 30, OutputTokens: 5}})
-	if tl.total != 155 || tl.input != 130 || tl.output != 25 || tl.cacheRead != 8 || tl.calls != 2 {
-		t.Fatalf("tally = total=%d input=%d output=%d cacheRead=%d calls=%d", tl.total, tl.input, tl.output, tl.cacheRead, tl.calls)
+	ctx := context.Background()
+	tl.Observe(ctx, llmkit.Event{Kind: llmkit.KindCompletion, Completion: &llmkit.CompletionEvent{
+		Response: llmkit.Response{Usage: llmkit.Usage{InputTokens: 100, OutputTokens: 20, CacheReadInputTokens: 8, CacheCreationInputTokens: 3}},
+	}})
+	tl.Observe(ctx, llmkit.Event{Kind: llmkit.KindDecision, Decision: &llmkit.DecisionEvent{
+		Usage: llmkit.Usage{InputTokens: 30, OutputTokens: 5},
+	}})
+	want := llmkit.Usage{InputTokens: 130, OutputTokens: 25, CacheReadInputTokens: 8, CacheCreationInputTokens: 3}
+	if tl.usage != want || tl.calls != 2 {
+		t.Fatalf("tally = %+v calls=%d, want %+v and 2", tl.usage, tl.calls, want)
+	}
+}
+
+// TestTally_IgnoresAttemptAndFailedEvents defends: a Completion with its
+// Attempt on the same span records the usage once (calls=1), and a failed
+// Completion (Err set, zero Response) is not counted as a call.
+func TestTally_IgnoresAttemptAndFailedEvents(t *testing.T) {
+	tl := new(Tally)
+	ctx := context.Background()
+	u := llmkit.Usage{InputTokens: 50, OutputTokens: 10}
+	tl.Observe(ctx, llmkit.Event{Kind: llmkit.KindAttempt, Attempt: &llmkit.AttemptEvent{Response: llmkit.Response{Usage: u}}})
+	tl.Observe(ctx, llmkit.Event{Kind: llmkit.KindCompletion, Completion: &llmkit.CompletionEvent{Response: llmkit.Response{Usage: u}}})
+	tl.Observe(ctx, llmkit.Event{Kind: llmkit.KindCompletion, Completion: &llmkit.CompletionEvent{Err: "boom"}})
+	if tl.usage != u || tl.calls != 1 {
+		t.Fatalf("tally = %+v calls=%d, want %+v and 1 (Attempt and the failed Completion ignored)", tl.usage, tl.calls, u)
 	}
 }

@@ -7,12 +7,10 @@ import (
 )
 
 func TestNewClient_OpenAICompatibleSerializesToolCalls(t *testing.T) {
-	// An openai-compatible endpoint defaults to ParallelToolCalls=false, and
-	// New wires WithSerializedToolCalls as the outermost decorator for
-	// that capability profile. The test asserts the property end-to-end:
-	// (1) the returned client advertises ParallelToolCalls=false; and
-	// (2) a multi-tool-call HTTP response is truncated to one tool call by
-	//     the time Complete returns, with no caller-side wrapping needed.
+	// New wires the serialize stage as the outermost decorator so an
+	// openai-compatible endpoint (ParallelToolCalls=false) sees a
+	// single tool call by the time Complete returns, with no caller-side
+	// wrapping needed.
 	multiBody := `{
 		"id": "chatcmpl-multi",
 		"object": "chat.completion",
@@ -52,7 +50,7 @@ func TestNewClient_OpenAICompatibleSerializesToolCalls(t *testing.T) {
 		t.Fatalf("Complete: %v", err)
 	}
 	if len(resp.ToolCalls) != 1 {
-		t.Fatalf("ToolCalls = %d, want 1 (truncated by WithSerializedToolCalls)", len(resp.ToolCalls))
+		t.Fatalf("ToolCalls = %d, want 1 (truncated by the serialize stage)", len(resp.ToolCalls))
 	}
 	if resp.ToolCalls[0].ID != "call_1" {
 		t.Errorf("kept tool call ID = %q, want first (call_1)", resp.ToolCalls[0].ID)

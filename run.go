@@ -20,8 +20,8 @@ type RunID string
 // emitter (the agent Runner or the [Observe] decorator) mints a fresh
 // SpanID per logical completion and places it in the context it passes to
 // the client; the retry stage's Attempt events read the same context and
-// join their Completion on Event.SpanID — not on time windows — and a
-// nested completion (a tool calling the model) gets its own span. Like
+// join their Completion on Event.SpanID — not on time windows. Which
+// call gets a new span follows the emission rule on [Observer]. Like
 // RunID, the zero value means "no span" and is never serialized.
 type SpanID string
 
@@ -52,18 +52,24 @@ func RunFromContext(ctx context.Context) RunID {
 	return id
 }
 
-// WithSpan returns a context carrying the completion span id. Passing the
-// empty SpanID returns ctx unchanged: an unset span never erases an
-// enclosing one.
-func WithSpan(ctx context.Context, id SpanID) context.Context {
-	if id == "" {
-		return ctx
-	}
-	return context.WithValue(ctx, spanIDContextKey{}, id)
+// BeginCompletion returns ctx marked as belonging to the logical completion
+// its caller is about to emit, with a fresh [SpanID] minted unconditionally
+// — even when ctx already carries one. The agent Runner mints on every
+// turn; [Observe] and a [github.com/dpoage/llmkit/provider] New/Wrap
+// stack mint only when the ctx they receive carries no span (the
+// emission rule on [Observer]).
+//
+// Callers decide ownership before calling: read the incoming ctx's span
+// with [SpanFromContext]; when non-empty, an enclosing emitter already
+// claimed the call, and an ownership-aware caller ([Observe] or a
+// [github.com/dpoage/llmkit/provider.New]/[github.com/dpoage/llmkit/provider.Wrap] stack) must skip the mint and pass ctx
+// through. The agent Runner mints anyway.
+func BeginCompletion(ctx context.Context) context.Context {
+	return context.WithValue(ctx, spanIDContextKey{}, SpanID(newID()))
 }
 
-// SpanFromContext returns the span id stored by [WithSpan], or the empty
-// SpanID when the context carries none.
+// SpanFromContext returns the span id stored by [BeginCompletion], or the
+// empty SpanID when the context carries none.
 func SpanFromContext(ctx context.Context) SpanID {
 	id, _ := ctx.Value(spanIDContextKey{}).(SpanID)
 	return id
@@ -108,15 +114,11 @@ func newID() string {
 // by mint time.
 func NewRunID() RunID { return RunID(newID()) }
 
-// NewSpanID mints a fresh span id — same format as [NewRunID] (see
-// [SpanID] for how spans join events).
-func NewSpanID() SpanID { return SpanID(newID()) }
-
 // EventSchemaVersion is stamped on every [Event] this build emits
 // (Event.SchemaVersion). Bump it when an Event field changes meaning in a
 // way a durable sink must distinguish; additively appended fields do not
 // require a bump.
-const EventSchemaVersion = 1
+const EventSchemaVersion = 2
 
 // NewEvent returns an Event of the given kind with the shared header
 // fields filled in: Kind, Time (now, UTC, monotonic clock reading stripped
