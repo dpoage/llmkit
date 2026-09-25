@@ -53,7 +53,9 @@ What the package does NOT defend:
 | Detection call | `DetectBwrap` | `Detect` | none — explicit opt-in | none |
 | Network modes honored | `none`, `host` | `none`, `host`, `bridge` | `""` (default), `host` | recorded, never enforced |
 | `Image` honored | No — refused | Yes — required default, per-`Spec` override | No — refused | recorded only |
-| Resource-cap mechanism | `systemd-run --user --scope` or a delegated cgroup v2 subtree; `ErrBwrapNoCapMethod` without one (`CapBestEffort` opts out) | Runtime flags: `--cpus`, `--memory`, `--pids-limit` | none | none |
+| Resource-cap mechanism | `systemd-run --user --scope` on systemd ≥ 254 (required for `--expand-environment=no`) or a delegated cgroup v2 subtree; `ErrBwrapNoCapMethod` without one (`CapBestEffort` opts out) | Runtime flags: `--cpus`, `--memory`, `--pids-limit` | none | none |
+
+Bwrap checks the systemd version the first time an `Exec` finds a systemd user instance, and keeps the answer for the lifetime of that `Bwrap` value. The one exception is a check cut short because the caller's context ended; the next `Exec` checks again. A `systemd-run --version` probe that fails or times out counts as "no", so that `Bwrap` never uses `systemd-run`. It falls back to a delegated cgroup v2 subtree, or to `ErrBwrapNoCapMethod`. A new `Bwrap` probes again.
 
 A backend refuses anything it cannot honor. The refusal point differs by stage:
 
@@ -70,7 +72,7 @@ Honored / refused (`UnsupportedSpecError`) / recorded (Mock stores the value and
 | Spec field | CLI | Bwrap | HostExec | Mock |
 |---|---|---|---|---|
 | `RepoDir` | honored — copied into a fresh workspace | honored — same | honored — same | recorded |
-| `Workspace` | honored — used directly; must be absolute | honored — used directly; must be absolute | honored — used verbatim | recorded |
+| `Workspace` | honored — used directly; must be absolute | honored — used directly; must be absolute | honored — used directly; must be absolute | recorded |
 | `Cmd` | honored — required non-empty | honored — required non-empty | honored — required non-empty | recorded |
 | `Env` | honored — `KEY=VALUE` list | honored | honored — appended to the host environment | recorded |
 | `Image` | honored — overrides the default image | refused | refused | recorded |
@@ -80,50 +82,96 @@ Honored / refused (`UnsupportedSpecError`) / recorded (Mock stores the value and
 | `ROMounts` | honored — read-only binds | honored — read-only binds (`Shared` has no SELinux effect) | refused | recorded |
 | `RWMounts` | honored — writable binds | honored — writable binds | refused | recorded |
 | `SetupCmds` | honored — `/bin/sh` wrapper, failed setup exits 125 | honored — same wrapper | refused | recorded |
-| `CaptureFiles` | honored — read back after the run | honored | honored — no pre-run validation; escapes silently omitted | recorded |
+| `CaptureFiles` | honored — read back after the run | honored | honored — same pre-run validation as the container backends | recorded |
 
-The Mock column means the same thing in every row. `Mock.Exec` records the whole `Spec` verbatim and honors none of it. `Mock.Exec` never touches the filesystem and returns scripted results.
+The Mock column means the same thing in every row. `Mock.Exec` records the whole well-formed `Spec` verbatim and honors none of it — but it is not a law-free zone: it refuses a malformed `Spec` exactly like every backend, and its `MaterializeWorkspace` creates a real empty directory. It never copies `RepoDir` (it has nothing to run), and the caller removes the directory it returns.
+
+## Validity rules (every backend, including Mock)
+
+A `Spec` that violates any of these rules is refused at `Exec` with
+`InvalidSpecError{Field, Reason}` (match with `errors.As`) before anything
+is written or launched — on every backend, the Mock included:
+
+1. `Cmd` must be non-empty.
+2. One of `RepoDir` or `Workspace` must be set.
+3. `Workspace`, when set, must be an absolute path. (The three real backends also require it to exist as a directory this process can enter — search permission — refused as `InvalidSpecError{Field: "Workspace"}` before the run; the Mock never checks.)
+4. Every `WriteFiles` key must be a workspace-relative path that does not escape the workspace.
+5. Every `CaptureFiles` entry must satisfy the same rule, before the run.
+6. Every `ROMounts`/`RWMounts` entry must have a non-empty absolute `HostPath` and `ContainerPath`.
+7. `ContainerPath` must be unique across `ROMounts` and `RWMounts` combined.
+8. Every `Env` entry must be `KEY=VALUE` with a non-empty `KEY`. An entry without `=` would make the container backend inherit that name's value from the host environment — a host-env leak — and be silently dropped elsewhere; an empty key fails inside the run on the container backends. Both are refused everywhere.
+
+`InvalidSpecError.Field` names the rule's field: `Cmd` (1), `RepoDir` (2), `Workspace` (3), `WriteFiles` (4), `CaptureFiles` (5), `ROMounts` or `RWMounts` (6: the list holding the bad mount; 7: the list holding the second occurrence of the duplicate, `ROMounts` checked first), `Env` (8).
+
+A well-formed `Spec` field a single backend cannot honor is instead refused with `UnsupportedSpecError` (the rows above).
 
 Two conventions apply across all container-backed runs:
 
 - Exit codes 125, 126, and 127 mean "environment error, not a demonstrated result". A failed `SetupCmds` step exits 125 by design, so a broken setup cannot read as the command's own result.
 - A mount's `ContainerPath` must be unique across `ROMounts` and `RWMounts` combined, and both mount paths must be absolute.
 
+A command that cannot be **launched** reports the shell's convention on every real backend: `127` when it is missing and `126` when it is not executable, in `Result.ExitCode` with a nil error. Bwrap gets this through its always-on `/bin/sh` exec wrapper (with no `SetupCmds` the wrapper script is exactly `exec "$@"`); the exit codes reported on Bwrap below depend on which shell is bound as the sandbox's `/bin/sh`. HostExec maps the launch error to the exit code (a shebang-less 0755 script is `126` there, though it runs fine under bwrap's shell); the CLI backend reports whatever the runtime reports (a found-but-unloadable executable is exit `1` there — llmkit-bk8.1.18). Known HostExec divergences, where the host's exec call fails before any shell is involved: a command path that loops through symlinks (`ELOOP`) or is too long (`ENAMETOOLONG`), an empty `Cmd[0]`, and a bare name that resolves only through a relative `PATH` entry (Go's `exec.ErrDot`) are infrastructure errors on HostExec. On Bwrap, the same four failures reach the wrapper shell; bash reports `126`, `126`, `127`, and `126` for ELOOP, ENAMETOOLONG, `Cmd[""]`, and a shebang naming a missing interpreter; Debian dash reports `127`, `127`, `126`, and `127` for the same four. The core rule `127` missing / `126` not executable holds under both shells.
+
+A command **killed by a signal** reports `128+signo` (SIGSEGV: `139`) with a nil error on every real backend; `-1` is reserved for the sandbox's own kills (timeout, idle watchdog, growth ceiling). One divergence: under the CLI backend `Spec.Cmd` is the container's PID 1, and the kernel drops a signal PID 1 has no handler for, so a command that signals itself (`sh -c 'kill -SEGV $$'`, `kill -KILL $$`) exits `0` there instead of `139`/`137`.
+
 ## Options
 
 One `Option` type serves both option-taking constructors. A constructor refuses an option its backend cannot honor with a plain error that names the option and the backend. Only an impossible default network mode comes back as `UnsupportedSpecError`.
 
-| Option | Accepted by | Default |
-|---|---|---|
-| `WithRuntime(name)` | `NewCLI` | auto-detect: podman, then docker |
-| `WithImage(image)` | `NewCLI` (required — `NewCLI` errors without it) | none |
-| `WithCPUs(c)` | `NewCLI`, `NewBwrap` | 2 |
-| `WithMemoryMB(m)` | `NewCLI`, `NewBwrap` | 2048 MB |
-| `WithTimeout(d)` | `NewCLI`, `NewBwrap` | 10m |
-| `WithIdleTimeout(d)` | `NewCLI`, `NewBwrap` | 0 — idle watchdog disabled |
-| `WithNetwork(n)` | `NewCLI`, `NewBwrap` | `NetworkNone`; `bridge` on `NewBwrap` is a construction error |
-| `WithPidsLimit(n)` | `NewCLI`, `NewBwrap` | 256; `<= 0` disables the cap |
-| `WithMaxOutputBytes(n)` | `NewCLI`, `NewBwrap` | `DefaultMaxOutputBytes` (1 MiB per stream) |
-| `WithScratchSizeMB(mb)` | `NewCLI`, `NewBwrap` | 512 MB; `<= 0` falls back to 512 |
-| `WithWorkspaceGrowthCeilingMB(mb)` | `NewCLI`, `NewBwrap` | 2048 MB (2 GiB); `<= 0` disables the ceiling |
-| `WithCapPolicy(p)` | `NewBwrap` | `CapRequired` — fail with `ErrBwrapNoCapMethod` when no mechanism exists |
-| `WithToolchainBinds(mounts)` | `NewBwrap` | none beyond the fixed allowlist |
-| `WithToolchainPath(prepend)` | `NewBwrap` | empty — no `PATH` prepend |
+| Option | Accepted by | Default | Refusal |
+|---|---|---|---|
+| `WithRuntime(name)` | `NewCLI` | auto-detect: podman, then docker | — |
+| `WithImage(image)` | `NewCLI` (required — `NewCLI` errors without it) | none | — |
+| `WithCPUs(c)` | `NewCLI`, `NewBwrap` | 2 | `<= 0`, NaN, or ±Inf refused at construction |
+| `WithMemoryMB(m)` | `NewCLI`, `NewBwrap` | 2048 MB | `<= 0` refused at construction |
+| `WithTimeout(d)` | `NewCLI`, `NewBwrap` | 10m | `<= 0` refused at construction |
+| `WithIdleTimeout(d)` | `NewCLI`, `NewBwrap` | 0 — idle watchdog disabled | 0 disables; negative refused |
+| `WithNetwork(n)` | `NewCLI`, `NewBwrap` | `NetworkNone`; `bridge` on `NewBwrap` is a construction error | — |
+| `WithPidsLimit(n)` | `NewCLI`, `NewBwrap` | 256 | 0 disables; negative refused |
+| `WithMaxOutputBytes(n)` | `NewCLI`, `NewBwrap` | `DefaultMaxOutputBytes` (1 MiB per stream) | `<= 0` refused at construction |
+| `WithScratchSizeMB(mb)` | `NewCLI`, `NewBwrap` | 512 MB | `<= 0` refused at construction |
+| `WithWorkspaceGrowthCeilingMB(mb)` | `NewCLI`, `NewBwrap` | 2048 MB (2 GiB) | 0 disables; negative refused |
+| `WithCapPolicy(p)` | `NewBwrap` | `CapRequired` — fail with `ErrBwrapNoCapMethod` when no mechanism exists | — |
+| `WithHostToolchains(res)` | `NewCLI`, `NewBwrap` | none | — |
 
 `NewHostExec` takes no options, and `NewMock` takes none either.
+
+A constructor refuses a numeric value that names no usable limit. `WithCPUs` needs a positive finite number: it refuses 0, a negative value, NaN, and ±Inf. `WithMemoryMB`, `WithTimeout`, `WithScratchSizeMB`, and `WithMaxOutputBytes` refuse 0 and negative values. `WithPidsLimit`, `WithWorkspaceGrowthCeilingMB`, and `WithIdleTimeout` accept 0 as an explicit disable and refuse a negative value. The error names the option, its value, and the backend: `sandbox: option WithMemoryMB(0) must be > 0 on the cli backend`.
+
+## Host toolchains
+
+A sandbox image (or the Bwrap tmpfs root, which starts with none) that lacks a toolchain the run needs — node, python, cargo, ... — can still run it by mounting the equivalent host install read-only. Resolve once, then configure either backend with the result:
+
+```go
+res := sandbox.ResolveHostToolchains([]string{"node", "python3"})
+if len(res.Unresolved) > 0 {
+	log.Printf("host toolchains not found: %v", res.Unresolved) // best-effort, not fatal
+}
+for _, fp := range res.Fingerprints {
+	log.Printf("toolchain %s: %s (%s)", fp.Name, fp.Version, fp.Path)
+}
+
+b, err := sandbox.NewBwrap(sandbox.WithHostToolchains(res))
+// or: sandbox.NewCLI(sandbox.WithImage("img"), sandbox.WithHostToolchains(res))
+```
+
+- `ResolveHostToolchains(names)` resolves each entry into a read-only mount and a provenance fingerprint. A bare name resolves through the host's `PATH` and also contributes a `PATH` entry. An absolute directory is mounted as-is and contributes no `PATH` entry. Resolution is best-effort per entry: an entry that cannot be resolved on this host is skipped and its trimmed name reported in `Unresolved`, in request order; it never fails the whole call.
+- `WithHostToolchains(res)` is the one option, accepted by both `NewCLI` and `NewBwrap`. The mount layout and how `PATH` is composed are each backend's own business — CLI renders `-v host:ctr:ro` plus `--env PATH=...` before any `Spec.Env` entry; Bwrap renders `--ro-bind` plus `--setenv PATH ...` — but in both cases an explicit `PATH` in `Spec.Env` still overrides.
+- On `NewCLI`, a toolchain `PATH` entry replaces the image's own `ENV PATH`. The composed `PATH` is the toolchain directories followed by `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`, so an image tool outside those directories is no longer found. For example, in `golang:1.23-alpine` with a bare-name host toolchain configured, `go version` exits 127. To keep such a tool, set `PATH` in `Spec.Env` to include the image's directories. A resolution with no `PATH` entry (only absolute directories) leaves the image's `ENV PATH` in effect.
+- Caveat: a mounted host toolchain's shared-library closure must be loadable in the image or tmpfs root it lands in. A glibc host toolchain mounted into a musl-based image (or vice versa) will fail to exec even though the file is present. For an executable in the host's `/usr/bin`, the resolver mounts the whole host `/usr` (the parent of `bin`), not only the toolchain's own files (llmkit-bk8.7.4).
 
 ## Classifying a Result
 
 Classify in this order. A wrong order misreads kills as verdicts.
 
-1. An `Exec` error return: infrastructure failure (missing runtime, failed workspace copy, launch failure). There is no verdict at all.
+1. An `Exec` error return: a refused `Spec` (`errors.As` to `InvalidSpecError` — fix the Spec — or `UnsupportedSpecError` — the backend cannot honor it), the caller's context ended (cancel or deadline: the `sandbox: execution cancelled` error, `errors.Is` to `ctx.Err()`), or an infrastructure failure (missing runtime, failed workspace copy). There is no verdict at all.
 2. `Result.InfraKilled()`: the sandbox killed the run. `KillReason()` names the cause. Do not read `ExitCode` or output — the run never finished on its own.
 3. `Result.ExitCode`: the command's own outcome. Apply the caller's own convention for 125/126/127 environment errors.
 4. `Result.StdoutTruncated` / `Result.StderrTruncated`: the stream exceeded the cap; a truncation marker sits inside the captured text.
 
 ```mermaid
 flowchart TD
-    A[Exec returns] -->|error non-nil| B[Infrastructure failure. No verdict.]
+    A[Exec returns] -->|error non-nil| B[Refused Spec, caller context ended, or infrastructure failure. No verdict.]
     A -->|error nil| C{InfraKilled?}
     C -->|yes| D[Sandbox kill. No verdict. KillReason names the cause.]
     C -->|no| E{ExitCode}
@@ -143,9 +191,9 @@ flowchart TD
 
 The event mirrors [Classifying a Result](#classifying-a-result):
 
-- The backend name. `cli`, `bwrap`, and `host` match `UnsupportedSpecError.Backend`. `mock` is the package's own name for the backend that refuses nothing. Any other implementation is named by its Go type.
+- The backend name. `cli`, `bwrap`, and `host` match `UnsupportedSpecError.Backend`. `mock` is the package's own name for the scripted backend, which refuses a malformed `Spec` exactly like every backend. Any other implementation is named by its Go type.
 - `Spec.Cmd` (copied).
-- The exit code, captured byte counts, truncation, `Result.Duration`, and the infrastructure error. A non-zero exit arrives as the command's verdict with `Err` empty, and `-1` means the process never ran to an exit.
+- The exit code, captured byte counts, truncation, `Result.Duration`, and `Err`: the text of the error `Exec` returned — a refused `Spec` (`InvalidSpecError`, `UnsupportedSpecError`), a caller context that ended (`sandbox: execution cancelled`), or an infrastructure failure. A non-zero exit arrives as the command's verdict with `Err` empty, and `-1` means the process never ran to an exit.
 - `RunID` and `SpanID`, taken from the call's context.
 
 The full field contract — including what stays zero — is the [`Observe` reference](https://pkg.go.dev/github.com/dpoage/llmkit/sandbox#Observe). This page does not restate it.
@@ -155,9 +203,11 @@ b, err := sandbox.NewBwrap()
 if err != nil {
 	return err // or skip: no bwrap on this host
 }
-defer func() { _ = b.Close() }() // Close is not on the Sandbox interface
-
 sb := sandbox.Observe(b, obs) // obs is your llmkit.Observer
+if c, ok := sb.(io.Closer); ok {
+	defer c.Close() // Close is not on the Sandbox interface. With a non-nil observer, Observe's return value always implements io.Closer: Close forwards to the wrapped backend's Close, or returns nil when the backend has none.
+}
+
 res, err := sb.Exec(ctx, sandbox.Spec{Cmd: []string{"go", "test", "./..."}})
 ```
 
@@ -174,7 +224,7 @@ By default `Exec` copies the repository snapshot into a fresh temporary director
 
 Every write into a workspace defends against links planted by the snapshot or by an earlier untrusted run:
 
-1. `WriteFiles` keys pass a lexical check first: absolute paths and `..` escapes are rejected. The container backends apply the same check to `CaptureFiles` entries before the run. HostExec skips that pre-check; its hardened read-back (step 4) omits escaping paths silently.
+1. `WriteFiles` keys pass a lexical check first: absolute paths and `..` escapes are rejected. `CaptureFiles` entries pass the same check before the run on every backend, so an escaping entry is refused instead of silently omitted.
 2. Each write walks every parent component and refuses a symlinked directory. It creates missing directories one at a time — never `MkdirAll`, which would silently walk through a planted link.
 3. The leaf file opens with `O_NOFOLLOW` on unix, so a planted symlink at the destination fails closed.
 4. Capture reads back resolve the full path through `EvalSymlinks` and refuse anything that lands outside the workspace. A file the command never wrote is silently absent from `Result.Captured`; capture is best-effort, never a manifest.
@@ -185,7 +235,7 @@ Every CLI and Bwrap run runs under a shared watchdog with two independent kill c
 
 **Idle window** (`WithIdleTimeout`): the run dies after this long with no observable progress. Progress is language-agnostic and layered cheapest-first. The layers run in order: bytes written to stdout/stderr, then any change in the workspace tree (size, entry count, newest mtime). The CPU probe runs only when both are flat. A compiler grinding silently on one large file still counts as active. The default is 0: the idle window is disabled, and only the absolute timeout and the growth ceiling bound a run.
 
-**Growth ceiling** (`WithWorkspaceGrowthCeilingMB`): the run dies when the workspace's net regular-file size grows by more than the ceiling since the run started. A disk-filler resets the idle clock forever under the progress definition, so this check runs independently of it. The default is 2 GiB; a value of 0 or less disables the ceiling. A kill surfaces as `WorkspaceQuotaExceeded`, never as `TimedOut`, and the breach overrides the process's own exit code.
+**Growth ceiling** (`WithWorkspaceGrowthCeilingMB`): the run dies when the workspace's net regular-file size grows by more than the ceiling since the run started. A disk-filler resets the idle clock forever under the progress definition, so this check runs independently of it. The default is 2 GiB; 0 disables the ceiling, and the constructor refuses a negative value. A kill surfaces as `WorkspaceQuotaExceeded`, never as `TimedOut`, and the breach overrides the process's own exit code.
 
 Sampling details:
 
@@ -199,15 +249,17 @@ A quota breach always wins: it is measured final disk usage, not a heuristic.
 
 ## Capability probes
 
-Before planning work against an unfamiliar sandbox, a caller can measure what it can actually run. `ProbeCapabilities` executes the caller's `[]ProbeEntry` table inside the sandbox and returns a `CapabilitySet` mapping probe name to mode to availability.
+Before planning work against an unfamiliar sandbox, a caller can measure what it can actually run: `Probe(ctx, sb, base, probes)` runs the caller's `[]ProbeEntry` table against `sb` and returns a `CapabilitySet` mapping probe name to mode to availability.
 
-- The kit ships no probe entries. What to probe, and how to interpret exit codes and stdout into named modes, is the caller's knowledge. The package only runs the argv and caches the answer.
-- The result is cached per process. The cache key combines the image, the probe-set identity, and the mounts/env configuration. Two callers never share a wrongly shaped entry, and a moved mount re-probes.
-- Probes are best-effort. An `Exec` error or timeout marks every mode of that entry unavailable; the call never returns an error. A probe runs under the backend's default network mode — `none` on the container backends, host on HostExec — with a 30s ceiling.
+- The kit ships no probe entries. What to probe, and how to interpret exit codes and stdout into named modes, is the caller's knowledge. `Probe` only runs the argv each entry supplies — every call re-runs every entry, with no cache.
+- Each entry's `Exec` uses a copy of `base` with `Cmd` set to the entry's probe argv and `Timeout` defaulted to a fixed probe ceiling when `base.Timeout` is unset — every other `base` field (`Image`, `ROMounts`, `Env`, ...) reaches `sb.Exec` unchanged, so probing over `Observe(sb, obs)` or `sb` directly sends identical Specs.
+- A refusal (`errors.As` to `*InvalidSpecError` or `*UnsupportedSpecError`) is returned as an error — `Probe` gives up rather than guessing at a set that was never run. Any other `Exec` error marks that entry's every mode unavailable, best-effort, and `Probe` keeps going.
+- `base.Image` must be empty on Bwrap and HostExec. Both backends refuse a non-empty `Image` with `UnsupportedSpecError`, so `Probe` returns that refusal at the first entry and runs no probe argv.
+- `base` must set `RepoDir` or `Workspace`. With neither set, `Probe` returns `InvalidSpecError` (`one of RepoDir or Workspace must be set`). (This applies when the probe table is non-empty: an empty `probes` returns an empty `CapabilitySet` and a nil error.)
+- A nil `sb` is an error: `Probe` returns `sandbox: Probe requires a non-nil Sandbox`.
+- To probe with host toolchains, construct the sandbox with `WithHostToolchains(res)`. Every `Exec` on that sandbox sees the toolchains, including each `Exec` that `Probe` makes.
 
-- `InvalidateCapabilityCache(image)` forces a re-probe, mainly for tests.
-
-Full reference: [`ProbeCapabilities`](https://pkg.go.dev/github.com/dpoage/llmkit/sandbox#ProbeCapabilities).
+Full reference: [`Probe`](https://pkg.go.dev/github.com/dpoage/llmkit/sandbox#Probe).
 
 ## sandbox and fsroot
 

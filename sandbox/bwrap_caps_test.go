@@ -22,6 +22,10 @@ func TestSystemdRunWrapArgs(t *testing.T) {
 	mustContainSeq(t, args, "-p", "MemoryMax=512M")
 	mustContainSeq(t, args, "-p", "CPUQuota=150%")
 	mustContainSeq(t, args, "-p", "TasksMax=128")
+	// llmkit-bk8.1.16: the wrapper must pass --expand-environment=no so the
+	// untrusted argv reaches bwrap byte-for-byte instead of having ${NAME}
+	// expanded from the HOST environment by systemd-run.
+	mustContainSeq(t, args, "--expand-environment=no")
 	mustContainSeq(t, args, "--", "/usr/bin/bwrap")
 
 	// The bwrap argv must be preserved verbatim at the tail.
@@ -96,9 +100,110 @@ func TestDetectBwrapCapMethodNeverPanics(t *testing.T) {
 	// methods and never block indefinitely, regardless of host capability.
 	ctx, cancel := context.WithTimeout(context.Background(), systemdRunProbeTimeout*2)
 	defer cancel()
-	method := detectBwrapCapMethod(ctx)
+	method := detectBwrapCapMethod(ctx, systemdRunExpandSupport)
 	if method != bwrapCapNone && method != bwrapCapSystemdRun && method != bwrapCapCgroupV2 {
 		t.Errorf("unexpected cap method %v", method)
+	}
+}
+
+// stubCapMethod forces detectCapMethod to report m for the test's duration.
+func stubCapMethod(t *testing.T, m bwrapCapMethod) {
+	t.Helper()
+	prev := detectCapMethod
+	detectCapMethod = func(context.Context, func(context.Context) bool) bwrapCapMethod { return m }
+	t.Cleanup(func() { detectCapMethod = prev })
+}
+
+// TestDetectBwrapCapMethodFailsClosedWithoutExpandSupport pins the 1.16
+// fail-closed path: when the host's systemd-run does NOT support
+// --expand-environment=no (the bk8.1.16 fix flag), the systemd-run method
+// must never resolve — detection degrades to the cgroup v2 subtree or none.
+// Enforcement may be absent on such a host, never "enforcement plus a
+// host-env leak". systemd-run itself is stubbed AVAILABLE, so only the
+// support answer can rule the method out; the supported row proves the
+// stub reaches detection.
+func TestDetectBwrapCapMethodFailsClosedWithoutExpandSupport(t *testing.T) {
+	prev := systemdRunUserAvailable
+	systemdRunUserAvailable = func(context.Context) bool { return true }
+	t.Cleanup(func() { systemdRunUserAvailable = prev })
+
+	if got := detectBwrapCapMethod(context.Background(), func(context.Context) bool { return true }); got != bwrapCapSystemdRun {
+		t.Fatalf("with expand support, detectBwrapCapMethod = %d, want systemd-run (the stubs must reach detection)", got)
+	}
+	switch got := detectBwrapCapMethod(context.Background(), func(context.Context) bool { return false }); got {
+	case bwrapCapCgroupV2, bwrapCapNone:
+		// ok — degraded, not leaked
+	default:
+		t.Fatalf("detectBwrapCapMethod = %d, want cgroup v2 or none when the expand fix is unsupported", got)
+	}
+}
+
+// TestSystemdRunExpandSupportProbeParsesVersion pins the support probe: a
+// "systemd <major>" first line is accepted at >= 254, and every other
+// answer — older systemd, malformed or empty output, a failing or missing
+// systemd-run — fails closed.
+func TestSystemdRunExpandSupportProbeParsesVersion(t *testing.T) {
+	prev := systemdRunVersion
+	t.Cleanup(func() { systemdRunVersion = prev })
+	rows := []struct {
+		name string
+		out  string
+		err  error
+		want bool
+	}{
+		{"254 is the first supported", "systemd 254 (254.5-1)\n+PAM +AUDIT\n", nil, true},
+		{"newer systemd", "systemd 261 (261.2-1-arch)\n", nil, true},
+		{"253 is too old", "systemd 253 (253.1-1)\n", nil, false},
+		{"rc suffix is not an integer", "systemd 254rc1 (254-rc1)\n", nil, false},
+		{"garbage", "hello world\n", nil, false},
+		{"empty", "", nil, false},
+		{"nonzero exit", "systemd 261 (261.2)\n", errors.New("exit status 1"), false},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			systemdRunVersion = func(context.Context) ([]byte, error) { return []byte(row.out), row.err }
+			if got := systemdRunExpandSupport(context.Background()); got != row.want {
+				t.Fatalf("systemdRunExpandSupport(%q, %v) = %t, want %t", row.out, row.err, got, row.want)
+			}
+		})
+	}
+	t.Run("unreachable systemd-run", func(t *testing.T) {
+		systemdRunVersion = prev
+		t.Setenv("PATH", t.TempDir())
+		if systemdRunExpandSupport(context.Background()) {
+			t.Fatal("probe must fail closed when systemd-run is unreachable")
+		}
+	})
+}
+
+// TestExpandSupportCacheProbesOncePerInstance pins the per-instance cache:
+// the version probe runs once for any number of Execs, but an answer the
+// caller's ended ctx cut short is not remembered.
+func TestExpandSupportCacheProbesOncePerInstance(t *testing.T) {
+	prev := systemdRunVersion
+	t.Cleanup(func() { systemdRunVersion = prev })
+	calls := 0
+	systemdRunVersion = func(ctx context.Context) ([]byte, error) {
+		calls++
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return []byte("systemd 261 (261.2)\n"), nil
+	}
+
+	var c expandSupportCache
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if c.supported(cancelled) {
+		t.Fatal("a probe cut short by the caller must answer no")
+	}
+	for range 3 {
+		if !c.supported(context.Background()) {
+			t.Fatal("supported = false, want the probed yes")
+		}
+	}
+	if calls != 2 {
+		t.Fatalf("version probe ran %d times, want 2 (the cancelled attempt, then once for every live call)", calls)
 	}
 }
 
@@ -107,9 +212,7 @@ func TestDetectBwrapCapMethodNeverPanics(t *testing.T) {
 // matches ErrBwrapNoCapMethod via errors.Is, so callers can attach their own
 // remediation without string matching.
 func TestBwrapExec_NoCapMethod_IsSentinel(t *testing.T) {
-	prev := detectCapMethod
-	detectCapMethod = func(context.Context) bwrapCapMethod { return bwrapCapNone }
-	t.Cleanup(func() { detectCapMethod = prev })
+	stubCapMethod(t, bwrapCapNone)
 
 	repo := t.TempDir()
 	if err := os.WriteFile(filepath.Join(repo, "f.txt"), []byte("x"), 0o644); err != nil {

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"testing"
 )
 
@@ -57,16 +58,13 @@ func TestResolveHostToolchains_RefusesHomeBinAscent(t *testing.T) {
 	}
 	t.Setenv("PATH", binDir)
 
-	res, err := ResolveHostToolchains([]string{"fakenode"})
-	if err != nil {
-		t.Fatalf("ResolveHostToolchains: %v", err)
+	res := ResolveHostToolchains([]string{"fakenode"})
+	if len(res.mounts) != 1 {
+		t.Fatalf("want 1 mount, got %d: %+v", len(res.mounts), res.mounts)
 	}
-	if len(res.Mounts) != 1 {
-		t.Fatalf("want 1 mount, got %d: %+v", len(res.Mounts), res.Mounts)
-	}
-	if res.Mounts[0].HostPath != binDir {
+	if res.mounts[0].HostPath != binDir {
 		t.Errorf("mount HostPath = %q, want the narrow bin dir %q (must NOT ascend to $HOME %q)",
-			res.Mounts[0].HostPath, binDir, home)
+			res.mounts[0].HostPath, binDir, home)
 	}
 }
 
@@ -89,13 +87,10 @@ func TestResolveHostToolchains_RefusesLocalBinAscent(t *testing.T) {
 	}
 	t.Setenv("PATH", binDir)
 
-	res, err := ResolveHostToolchains([]string{"fakenode"})
-	if err != nil {
-		t.Fatalf("ResolveHostToolchains: %v", err)
-	}
-	if len(res.Mounts) != 1 || res.Mounts[0].HostPath != binDir {
+	res := ResolveHostToolchains([]string{"fakenode"})
+	if len(res.mounts) != 1 || res.mounts[0].HostPath != binDir {
 		t.Fatalf("mount HostPath = %+v, want the narrow bin dir %q (must NOT ascend to ~/.local %q)",
-			res.Mounts, binDir, localDir)
+			res.mounts, binDir, localDir)
 	}
 }
 
@@ -123,13 +118,10 @@ func TestResolveHostToolchains_StillAscendsForNarrowVersionedRoot(t *testing.T) 
 	}
 	t.Setenv("PATH", binDir)
 
-	res, err := ResolveHostToolchains([]string{"fakenode"})
-	if err != nil {
-		t.Fatalf("ResolveHostToolchains: %v", err)
-	}
-	if len(res.Mounts) != 1 || res.Mounts[0].HostPath != versionedRoot {
+	res := ResolveHostToolchains([]string{"fakenode"})
+	if len(res.mounts) != 1 || res.mounts[0].HostPath != versionedRoot {
 		t.Fatalf("mount HostPath = %+v, want the versioned root %q (narrow ascent must still happen for legitimate nvm/asdf layouts)",
-			res.Mounts, versionedRoot)
+			res.mounts, versionedRoot)
 	}
 }
 
@@ -140,26 +132,23 @@ func TestResolveHostToolchains_SymlinkClosure(t *testing.T) {
 	root, shimDir := fakeToolchainHost(t, "fakenode")
 	t.Setenv("PATH", shimDir)
 
-	res, err := ResolveHostToolchains([]string{"fakenode"})
-	if err != nil {
-		t.Fatalf("ResolveHostToolchains: %v", err)
-	}
-	if len(res.Mounts) != 1 {
-		t.Fatalf("want 1 mount, got %d: %+v", len(res.Mounts), res.Mounts)
+	res := ResolveHostToolchains([]string{"fakenode"})
+	if len(res.mounts) != 1 {
+		t.Fatalf("want 1 mount, got %d: %+v", len(res.mounts), res.mounts)
 	}
 	wantRoot := filepath.Join(root, "versions", "1.2.3")
-	if res.Mounts[0].HostPath != wantRoot {
-		t.Errorf("mount HostPath = %q, want %q (the versioned toolchain root, not the shim dir)", res.Mounts[0].HostPath, wantRoot)
+	if res.mounts[0].HostPath != wantRoot {
+		t.Errorf("mount HostPath = %q, want %q (the versioned toolchain root, not the shim dir)", res.mounts[0].HostPath, wantRoot)
 	}
-	if !res.Mounts[0].Shared {
+	if !res.mounts[0].Shared {
 		t.Error("host toolchain mount must have Shared=true (host-owned dir, no :Z relabel)")
 	}
-	if res.Mounts[0].ContainerPath != hostToolchainMountRoot+"/fakenode" {
-		t.Errorf("ContainerPath = %q, want %s/fakenode", res.Mounts[0].ContainerPath, hostToolchainMountRoot)
+	if res.mounts[0].ContainerPath != hostToolchainMountRoot+"/fakenode" {
+		t.Errorf("ContainerPath = %q, want %s/fakenode", res.mounts[0].ContainerPath, hostToolchainMountRoot)
 	}
 	wantPathDir := hostToolchainMountRoot + "/fakenode/bin"
-	if res.PathPrepend != wantPathDir {
-		t.Errorf("PathPrepend = %q, want %q", res.PathPrepend, wantPathDir)
+	if res.pathPrepend != wantPathDir {
+		t.Errorf("pathPrepend = %q, want %q", res.pathPrepend, wantPathDir)
 	}
 	if len(res.Fingerprints) != 1 || res.Fingerprints[0].Name != "fakenode" {
 		t.Fatalf("Fingerprints = %+v, want one entry named fakenode", res.Fingerprints)
@@ -170,32 +159,49 @@ func TestResolveHostToolchains_SymlinkClosure(t *testing.T) {
 	if res.Fingerprints[0].Version == "" {
 		t.Error("fingerprint Version should be populated from the fake --version script output")
 	}
+	if res.Unresolved != nil {
+		t.Errorf("Unresolved = %+v, want nil (fakenode resolved)", res.Unresolved)
+	}
 }
 
-func TestResolveHostToolchains_UnresolvableNameSkipped(t *testing.T) {
-	t.Setenv("PATH", t.TempDir()) // empty PATH: nothing resolves
+// TestResolveHostToolchains_UnresolvedNamesReported pins that an entry that
+// does not resolve contributes no mount, no PATH entry, and no fingerprint,
+// and its trimmed name appears in Unresolved, in request order. A blank
+// entry (empty or whitespace-only) is neither resolved nor unresolved and
+// never appears in either slice.
+func TestResolveHostToolchains_UnresolvedNamesReported(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // empty PATH: no bare name resolves
 
-	res, err := ResolveHostToolchains([]string{"definitely-not-a-real-toolchain-xyz"})
-	if err != nil {
-		t.Fatalf("ResolveHostToolchains should be best-effort (no error), got %v", err)
+	res := ResolveHostToolchains([]string{"node-that-does-not-exist-xyz", "", "  ", "/no/such/dir"})
+	want := []string{"node-that-does-not-exist-xyz", "/no/such/dir"}
+	if !slices.Equal(res.Unresolved, want) {
+		t.Errorf("Unresolved = %+v, want %+v", res.Unresolved, want)
 	}
-	if len(res.Mounts) != 0 || len(res.Fingerprints) != 0 || res.PathPrepend != "" {
-		t.Errorf("unresolvable name should produce an empty resolution, got %+v", res)
+	if len(res.Fingerprints) != 0 || len(res.mounts) != 0 || res.pathPrepend != "" {
+		t.Errorf("unresolved entries must contribute nothing: Fingerprints=%+v mounts=%+v pathPrepend=%q",
+			res.Fingerprints, res.mounts, res.pathPrepend)
+	}
+
+	_, shimDir := fakeToolchainHost(t, "fakenode")
+	t.Setenv("PATH", shimDir)
+	res2 := ResolveHostToolchains([]string{"fakenode"})
+	if res2.Unresolved != nil {
+		t.Errorf("Unresolved = %+v, want nil (fakenode resolved)", res2.Unresolved)
+	}
+	if len(res2.Fingerprints) != 1 {
+		t.Errorf("Fingerprints = %+v, want one entry", res2.Fingerprints)
 	}
 }
 
 func TestResolveHostToolchains_ExplicitDir(t *testing.T) {
 	dir := t.TempDir()
 
-	res, err := ResolveHostToolchains([]string{dir})
-	if err != nil {
-		t.Fatalf("ResolveHostToolchains: %v", err)
+	res := ResolveHostToolchains([]string{dir})
+	if len(res.mounts) != 1 || res.mounts[0].HostPath != dir {
+		t.Fatalf("want one mount at %q, got %+v", dir, res.mounts)
 	}
-	if len(res.Mounts) != 1 || res.Mounts[0].HostPath != dir {
-		t.Fatalf("want one mount at %q, got %+v", dir, res.Mounts)
-	}
-	if res.PathPrepend != "" {
-		t.Errorf("an explicit dir with no resolved executable should not contribute a PATH entry, got %q", res.PathPrepend)
+	if res.pathPrepend != "" {
+		t.Errorf("an explicit dir with no resolved executable should not contribute a PATH entry, got %q", res.pathPrepend)
 	}
 	// An explicit dir still gets a fingerprint (path only; version probing
 	// against a bare directory fails silently).
@@ -208,21 +214,21 @@ func TestResolveHostToolchains_DedupesContainerPaths(t *testing.T) {
 	_, shimDir := fakeToolchainHost(t, "fakenode")
 	t.Setenv("PATH", shimDir)
 
-	res, err := ResolveHostToolchains([]string{"fakenode", "fakenode"})
-	if err != nil {
-		t.Fatalf("ResolveHostToolchains: %v", err)
+	res := ResolveHostToolchains([]string{"fakenode", "fakenode"})
+	if len(res.mounts) != 1 {
+		t.Errorf("duplicate entries should collapse to one mount, got %d: %+v", len(res.mounts), res.mounts)
 	}
-	if len(res.Mounts) != 1 {
-		t.Errorf("duplicate entries should collapse to one mount, got %d: %+v", len(res.Mounts), res.Mounts)
+	if res.Unresolved != nil {
+		t.Errorf("Unresolved = %+v, want nil (a deduplicated entry still resolved)", res.Unresolved)
 	}
 }
 
 func TestResolveHostToolchains_EmptyAndBlankEntriesSkipped(t *testing.T) {
-	res, err := ResolveHostToolchains([]string{"", "   "})
-	if err != nil {
-		t.Fatalf("ResolveHostToolchains: %v", err)
+	res := ResolveHostToolchains([]string{"", "   "})
+	if len(res.mounts) != 0 {
+		t.Errorf("blank entries should produce no mounts, got %+v", res.mounts)
 	}
-	if len(res.Mounts) != 0 {
-		t.Errorf("blank entries should produce no mounts, got %+v", res.Mounts)
+	if res.Unresolved != nil {
+		t.Errorf("Unresolved = %+v, want nil (a blank entry is neither resolved nor unresolved)", res.Unresolved)
 	}
 }

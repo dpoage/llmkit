@@ -14,10 +14,9 @@ import (
 	"time"
 )
 
-// bwrapProbeTimeout bounds DetectBwrap's userns capability probe. bwrap with
-// a trivial argv (running /bin/true inside an unshared user namespace) exits
-// almost instantly; this stays generous without letting a wedged host hang
-// detection.
+// bwrapProbeTimeout bounds DetectBwrap's userns capability probe. A bwrap
+// running /bin/true inside an unshared user namespace exits almost instantly;
+// this stays generous without letting a wedged host hang detection.
 const bwrapProbeTimeout = 5 * time.Second
 
 // DetectBwrap reports whether the bwrap backend is usable on this host and,
@@ -27,13 +26,13 @@ const bwrapProbeTimeout = 5 * time.Second
 //  2. the bwrap binary must be on PATH;
 //  3. unprivileged user namespaces must actually work — some distributions
 //     ship bwrap but disable unprivileged userns via sysctl
-//     (kernel.unprivileged_userns_clone=0) or an AppArmor profile
-//     (Ubuntu 24.04's default "restrict unprivileged user namespaces"), in
-//     which case bwrap is present but every real run would fail. This is
-//     probed directly (attempting the actual unshare) rather than by reading
-//     a specific sysctl, since the exact gate mechanism differs across
-//     distributions (sysctl vs AppArmor vs SELinux) and a direct probe is
-//     the one check that agrees with reality on all of them.
+//     (kernel.unprivileged_userns_clone=0) or an AppArmor profile (Ubuntu
+//     24.04's default "restrict unprivileged user namespaces"), in which case
+//     bwrap is present but every real run would fail. This is probed directly
+//     (attempting the actual unshare) rather than by reading a specific
+//     sysctl, since the gate mechanism differs across distributions (sysctl
+//     vs AppArmor vs SELinux) and a direct probe is the one check that agrees
+//     with reality on all of them.
 func DetectBwrap() (ok bool, reason string) {
 	if runtime.GOOS != "linux" {
 		return false, fmt.Sprintf("bwrap backend requires Linux (running on %s); use the container CLI backend (NewCLI, podman/docker) instead", runtime.GOOS)
@@ -53,26 +52,25 @@ func DetectBwrap() (ok bool, reason string) {
 // namespaces actually work end to end, rather than inferring it from a
 // sysctl file whose name and meaning vary across distributions.
 //
-// The probe run needs SOME executable reachable inside the sandbox, but it
-// must not assume fixedROAllowlist's paths exist: on non-FHS hosts (NixOS,
-// Guix) /bin and /sbin are absent entirely, and even `true` lives under
-// /nix/store or /run rather than /bin. Since this ephemeral, immediately-
-// exiting process runs nothing untrusted and only exists to answer "does
-// unshare(2) actually work here", binding the entire host root read-only for
-// it (rather than the real run's narrow allowlist) is safe and portable: it
-// works identically regardless of which distro layout the host uses.
+// The probe needs SOME executable reachable inside the sandbox but must not
+// assume fixedROAllowlist's paths exist: on non-FHS hosts (NixOS, Guix) /bin
+// and /sbin are absent entirely, and even `true` lives under /nix/store or
+// /run rather than /bin. Since this ephemeral, immediately-exiting process
+// runs nothing untrusted and only answers "does unshare(2) actually work
+// here", binding the entire host root read-only (rather than the real run's
+// narrow allowlist) is safe and portable across distro layouts.
 //
-// INVARIANT: the --ro-bind / / below is acceptable ONLY because this probe
-// always execs a fixed, hardcoded, trusted command (`true`, resolved by
-// this function itself) — it must NEVER be reused to run caller-supplied or
+// INVARIANT: --ro-bind / / below is acceptable ONLY because this probe
+// always execs a fixed, hardcoded, trusted command (`true`, resolved by this
+// function itself) — it must NEVER be reused to run caller-supplied or
 // model-generated code. Every other bwrap invocation in this package goes
 // through buildBwrapArgs' narrow fixedROAllowlist instead; this is the one
-// deliberate exception, and it must stay that way.
+// deliberate exception.
 func probeBwrapUserns(bwrapPath string) error {
 	truePath, err := exec.LookPath("true")
 	if err != nil {
-		// Every POSIX system ships a `true` somewhere on PATH; this is
-		// belt-and-suspenders in case PATH is unusually stripped down.
+		// Belt-and-suspenders: every POSIX system ships a `true` somewhere
+		// on PATH, but fallback in case PATH is unusually stripped down.
 		truePath = "/bin/true"
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), bwrapProbeTimeout)
@@ -87,60 +85,64 @@ func probeBwrapUserns(bwrapPath string) error {
 	return nil
 }
 
-// Bwrap is a Sandbox backed by the host's bubblewrap (bwrap) binary: an
+// Bwrap is a Sandbox backed by the host's bubblewrap binary: an
 // unprivileged-user-namespace sandbox that runs directly on host toolchains
 // instead of a baked container image (see bwrap_command.go for the security
 // posture). It is safe for concurrent use: each Exec prepares its own
 // workspace and launches its own bwrap process.
 //
-// There is no image concept here: a non-empty Spec.Image is REFUSED at Exec
-// (UnsupportedSpecError) rather than silently ignored, and ProbeCapabilities
-// callers key the probe cache on the resolved host-toolchain mounts/env
-// instead (see ProbeCapabilities' mounts/env cache key), the same mechanism
-// used to key a mounted toolchain for the container backend.
+// A non-empty Spec.Image is REFUSED at Exec (UnsupportedSpecError) rather
+// than silently ignored. To run with host toolchains, construct the backend
+// with WithHostToolchains(res): every Exec on it sees the toolchains.
 type Bwrap struct {
 	bwrapPath string
-	// defaults is the shared per-run default state (see the defaults type):
-	// CPU/memory/pids caps, absolute+idle timeouts, network mode, output cap,
-	// scratch size, and workspace-growth ceiling. Backed by
-	// options.baseDefaults and configured via the one shared Option type.
+	// defaults: shared per-run state (CPU/memory/pids caps, absolute+idle
+	// timeouts, network mode, output cap, scratch size, workspace-growth
+	// ceiling). Backed by options.baseDefaults, configured via the one
+	// shared Option type.
 	defaults
-	// capPolicy selects what Exec does when no resource-limit enforcement
-	// mechanism (neither systemd-run --user --scope nor a delegated cgroup
-	// v2 subtree) is available: CapRequired (the default) fails loudly with
-	// ErrBwrapNoCapMethod; CapBestEffort (WithCapPolicy) runs uncapped.
+	// capPolicy: CapRequired (default) fails loudly with ErrBwrapNoCapMethod
+	// when neither systemd-run --user --scope nor a delegated cgroup v2
+	// subtree is available; CapBestEffort (WithCapPolicy) runs uncapped.
 	capPolicy CapPolicy
-	// toolchainBinds are extra read-only binds (beyond fixedROAllowlist)
+	// toolchainBinds: extra read-only binds (beyond fixedROAllowlist)
 	// resolved by the host-toolchain resolver, applied to every run.
 	toolchainBinds []ROMount
-	// toolchainPathPrepend is the PATH prefix (ResolveHostToolchains'
-	// PathPrepend) for the same resolution that produced toolchainBinds;
-	// see bwrapParams.toolchainPathPrepend for how it reaches buildBwrapArgs.
+	// toolchainPathPrepend: ResolveHostToolchains' pathPrepend for the same
+	// resolution that produced toolchainBinds; see
+	// bwrapParams.toolchainPathPrepend for how it reaches buildBwrapArgs.
 	toolchainPathPrepend string
-	// baselinePathAppend is the ":"-joined in-sandbox directories of the
-	// resolved POSIX baseline utilities (resolveBwrapBaseline), appended
-	// AFTER DefaultContainerPath so it never shadows allowlist binaries or
-	// operator toolchains. Empty on FHS hosts, where the baseline is
-	// already reachable through DefaultContainerPath. The matching binds
-	// are merged into toolchainBinds at construction.
+	// baselinePathAppend: ":"-joined in-sandbox directories of the resolved
+	// POSIX baseline utilities, appended AFTER defaultContainerPath so it
+	// never shadows allowlist binaries or operator toolchains. Empty on FHS
+	// hosts. The matching binds are merged into toolchainBinds at
+	// construction.
 	baselinePathAppend string
-	// wsCache is the pristine-materialization cache backing prepareWorkspace,
+	// wsCache: pristine-materialization cache backing prepareWorkspace,
 	// shared with the CLI backend via prepareWorkspaceCached (workspace.go).
 	wsCache wsCache
+	// expandSupport: caches whether this host's systemd-run accepts
+	// --expand-environment=no, so the version probe runs once per instance
+	// rather than on every Exec.
+	expandSupport expandSupportCache
 }
 
 // NewBwrap constructs a Bwrap sandbox. It fails fast with the same
 // actionable reasons as DetectBwrap when the backend is not usable on this
-// host, so a misconfigured backend choice is caught at
-// construction time rather than on the first real run. The CLI-only options
-// (WithRuntime, WithImage) are refused here with an error naming the option,
-// and a WithNetwork mode bwrap could never honor fails at construction.
+// host, so a misconfigured backend choice is caught at construction time
+// rather than on the first real run. The CLI-only options (WithRuntime,
+// WithImage) are refused here with an error naming the option; a numeric
+// option out of range is refused before any runtime lookup; a WithNetwork
+// mode bwrap could never honor fails at construction.
 func NewBwrap(opts ...Option) (*Bwrap, error) {
 	o := newOptions(opts)
-	if err := o.checkSupported("bwrap", cliOnlyOptions); err != nil {
+	if err := o.checkSupported(backendBwrap, cliOnlyOptions); err != nil {
 		return nil, err
 	}
-	if err := validateNetworkDefault("bwrap", o.network, bwrapNetworks); err != nil {
+	if err := o.checkNumericOptions(backendBwrap); err != nil {
+		return nil, err
+	}
+	if err := validateNetworkDefault(backendBwrap, o.network, bwrapNetworks); err != nil {
 		return nil, err
 	}
 	ok, reason := DetectBwrap()
@@ -157,23 +159,20 @@ func NewBwrap(opts ...Option) (*Bwrap, error) {
 	if o.has("WithCapPolicy") {
 		s.capPolicy = o.capPolicy
 	}
-	if o.has("WithToolchainBinds") {
+	if o.has("WithHostToolchains") {
 		s.toolchainBinds = o.toolchainBinds
-	}
-	if o.has("WithToolchainPath") {
 		s.toolchainPathPrepend = o.toolchainPathPrepend
 	}
 
-	// POSIX baseline provisioning: container images guarantee
-	// a shell + core utilities structurally; the bwrap tmpfs root does not.
-	// On store-based distros (NixOS, Guix) DefaultContainerPath's FHS dirs
-	// hold only sh and env, so caller machinery (`mkdir -p` setup commands,
-	// agent-planned `sh -c` scripts) fails with
-	// "mkdir: command not found". Resolve the baseline from the host once
-	// per construction; on FHS hosts this is a no-op (empty baseline).
-	// Operator toolchainBinds win any ContainerPath collision — an operator
-	// pinning e.g. "bash" via WithToolchainBinds overrides the baseline
-	// resolution of the same name.
+	// POSIX baseline provisioning: container images guarantee a shell + core
+	// utilities structurally; the bwrap tmpfs root does not. On store-based
+	// distros (NixOS, Guix) defaultContainerPath's FHS dirs hold only sh and
+	// env, so caller machinery (`mkdir -p` setup commands, agent-planned
+	// `sh -c` scripts) fails with "mkdir: command not found". Resolve the
+	// baseline from the host once per construction; on FHS hosts this is a
+	// no-op (empty baseline). Operator toolchainBinds (WithHostToolchains)
+	// win any ContainerPath collision — pinning e.g. "bash" overrides the
+	// baseline resolution of the same name.
 	baseMounts, basePath := resolveBwrapBaseline(exec.LookPath, filepath.EvalSymlinks)
 	s.baselinePathAppend = basePath
 	seen := make(map[string]bool, len(s.toolchainBinds))
@@ -211,9 +210,8 @@ var bwrapBaselineUtilities = []string{
 	"bash",
 	// which is NOT a coreutils applet (GNU which on NixOS, debianutils on
 	// Debian, a busybox applet on Alpine) but every container base image
-	// ships it and agents routinely probe with `which node` before falling
-	// back to `command -v` — a missing which burns an exec-budget call on
-	// a spurious environment_error (the_cloud, 2026-07-15).
+	// ships it, and a missing which makes agents fall back to `command -v`
+	// after a spurious environment_error.
 	"which",
 }
 
@@ -221,7 +219,7 @@ var bwrapBaselineUtilities = []string{
 // and a ":"-joined PATH APPEND for the bwrap sandbox. Filtering happens
 // before the toolchain resolver runs:
 //
-//   - a utility whose symlink-resolved home is already a DefaultContainerPath
+//   - a utility whose symlink-resolved home is already a defaultContainerPath
 //     directory is skipped — it is reachable through the fixed allowlist
 //     binds, so FHS hosts resolve an EMPTY baseline and keep byte-identical
 //     sandbox argv (no extra mounts, no PATH suffix, no --version probes);
@@ -232,10 +230,11 @@ var bwrapBaselineUtilities = []string{
 // Survivors go through ResolveHostToolchains — the single mount-shaping
 // implementation (see toolchain.go's backend contract) — with fingerprints
 // discarded: baseline utilities are plumbing, not verdict-relevant
-// toolchains. Best-effort throughout: an unresolvable utility is skipped,
-// and a host too broken to resolve any baseline yields ("", nil) rather
-// than an error — the run then fails with the same command-not-found it
-// would have hit anyway, and doctor's bwrap section points at the host.
+// toolchains. Best-effort throughout: an unresolvable utility is silently
+// skipped (recorded in ToolchainResolution.Unresolved, which this function
+// discards along with the fingerprints) — the run then fails with the same
+// command-not-found it would have hit anyway.
+//
 // lookPath and evalSymlinks are injected for testability (exec.LookPath and
 // filepath.EvalSymlinks in production).
 func resolveBwrapBaseline(lookPath func(string) (string, error), evalSymlinks func(string) (string, error)) ([]ROMount, string) {
@@ -243,23 +242,19 @@ func resolveBwrapBaseline(lookPath func(string) (string, error), evalSymlinks fu
 	if len(names) == 0 {
 		return nil, ""
 	}
-	res, err := ResolveHostToolchains(names)
-	if err != nil {
-		return nil, ""
-	}
-	return res.Mounts, res.PathPrepend
+	res := ResolveHostToolchains(names)
+	return res.mounts, res.pathPrepend
 }
 
 // filterBwrapBaseline applies resolveBwrapBaseline's filtering rules (see
 // its doc) to names: drop unresolvable utilities, drop utilities already
-// reachable through a DefaultContainerPath directory, and collapse
-// utilities sharing one resolved home directory to the first name. Pure
-// with respect to its injected lookups, so the FHS-no-op and
-// store-layout-dedupe guarantees are unit-testable without a store-based
-// host.
+// reachable through a defaultContainerPath directory, and collapse
+// utilities sharing one resolved home directory to the first name. Pure with
+// respect to its injected lookups, so the FHS-no-op and
+// store-layout-dedupe guarantees are unit-testable without a store-based host.
 func filterBwrapBaseline(names []string, lookPath func(string) (string, error), evalSymlinks func(string) (string, error)) []string {
 	defaultDirs := make(map[string]bool)
-	for _, d := range strings.Split(DefaultContainerPath, ":") {
+	for _, d := range strings.Split(defaultContainerPath, ":") {
 		defaultDirs[d] = true
 	}
 	seenDirs := make(map[string]bool)
@@ -285,8 +280,8 @@ func filterBwrapBaseline(names []string, lookPath func(string) (string, error), 
 
 // Close removes this Bwrap instance's workspace-cache parent directory, if
 // one was ever materialized. See CLI.Close's doc comment for the concurrency
-// contract this mirrors; the same reasoning applies unchanged. Safe to call
-// on a nil receiver and multiple times.
+// contract; the same reasoning applies. Safe to call on a nil receiver and
+// multiple times.
 func (s *Bwrap) Close() error {
 	if s == nil {
 		return nil
@@ -294,36 +289,20 @@ func (s *Bwrap) Close() error {
 	return s.wsCache.close()
 }
 
-// MaterializeWorkspace clones the pristine-workspace cache for repoDir into a
-// fresh, caller-owned workspace directory. See CLI.MaterializeWorkspace's
+// MaterializeWorkspace clones the pristine-workspace cache for repoDir into
+// a fresh, caller-owned workspace directory. See CLI.MaterializeWorkspace's
 // doc comment; the contract is identical.
 func (s *Bwrap) MaterializeWorkspace(repoDir string) (string, error) {
 	ws, _, err := prepareWorkspaceCached(&s.wsCache, repoDir, nil)
 	return ws, err
 }
 
-// Limits returns the effective resource caps the backend applies to a Spec
-// that does not override them, mirroring CLI.Limits.
-func (s *Bwrap) Limits() (cpus float64, memoryMB, pidsLimit int) {
-	return s.defaultCPUs, s.defaultMemory, s.pidsLimit
-}
-
-// ScratchAndGrowthCeiling mirrors CLI.ScratchAndGrowthCeiling: the
-// effective /tmp+root tmpfs scratch size (MB) and workspace-growth ceiling
-// (bytes) this backend applies, including the explicit-zero-disables cases.
-func (s *Bwrap) ScratchAndGrowthCeiling() (scratchSizeMB int, growthCeilingBytes int64) {
-	return s.defaultScratchSizeMB, s.defaultGrowthCeilingBytes
-}
-
 // resolveBwrapParams applies backend defaults to a Spec, producing the
-// concrete bwrapParams for the run (workspace is filled in by Exec). A
-// non-empty Spec.Image is refused — there is no image to select on this
-// backend — and the network mode must be one bwrap can honor.
+// concrete bwrapParams for the run (workspace is filled in by Exec). The
+// network mode must be one bwrap can honor. A non-empty Spec.Image never
+// reaches here: validateSpec refuses it.
 func (s *Bwrap) resolveBwrapParams(spec Spec) (bwrapParams, error) {
-	if spec.Image != "" {
-		return bwrapParams{}, &UnsupportedSpecError{Backend: "bwrap", Field: "Image", Value: spec.Image}
-	}
-	network, err := resolveNetworkMode("bwrap", s.defaultNetwork, spec.Network, bwrapNetworks...)
+	network, err := resolveNetworkMode(backendBwrap, s.defaultNetwork, spec.Network, bwrapNetworks...)
 	if err != nil {
 		return bwrapParams{}, err
 	}
@@ -341,202 +320,102 @@ func (s *Bwrap) resolveBwrapParams(spec Spec) (bwrapParams, error) {
 	}, nil
 }
 
-// Exec implements Sandbox. See the Sandbox interface for the error contract:
-// only infrastructure failures are returned as errors; a non-zero exit code
-// is reported in Result.ExitCode. Process supervision mirrors CLI.Exec
-// (context/timeout/force-kill discipline) with --die-with-parent + a
+// Exec implements Sandbox. Its error contract is the Sandbox interface's:
+// an error only for a refused Spec (InvalidSpecError, UnsupportedSpecError),
+// a caller ctx that ended (the "sandbox: execution cancelled" error), or an
+// infrastructure failure (ErrBwrapNoCapMethod among them); a non-zero exit
+// code is reported in Result.ExitCode. Process supervision (deadline,
+// watchdog, growth ceiling, outcome precedence, reap discipline) lives in
+// run.go's runSupervised; this body keeps only the bwrap-specific pieces:
+// Spec admission, cap-method resolution (after the Workspace checks, before
+// any write), and the resource-cap wrapper (with --die-with-parent + a
 // process-group kill replacing container rm — bwrap has no daemon-tracked
-// object for a "docker rm -f" equivalent to reap.
+// object for a "docker rm -f" equivalent to reap).
 func (s *Bwrap) Exec(ctx context.Context, spec Spec) (Result, error) {
-	if len(spec.Cmd) == 0 {
-		return Result{}, errors.New("sandbox: spec.Cmd must be non-empty")
-	}
-	if err := validateBwrapMounts(spec.ROMounts, spec.RWMounts); err != nil {
+	if err := validateSpec(backendBwrap, spec); err != nil {
 		return Result{}, err
 	}
-	capturePaths, err := sanitizeCapturePaths(spec.CaptureFiles)
-	if err != nil {
-		return Result{}, err
-	}
-
-	prepStart := time.Now()
-	var ws string
-	var cacheHit bool
-	if spec.Workspace != "" {
-		// Caller-owned iteration workspace — identical contract to CLI.Exec's
-		// Spec.Workspace handling; see its doc comment for the rationale.
-		if !filepath.IsAbs(spec.Workspace) {
-			return Result{}, fmt.Errorf("sandbox: workspace %q must be an absolute path", spec.Workspace)
-		}
-		info, statErr := os.Stat(spec.Workspace)
-		if statErr != nil {
-			return Result{}, fmt.Errorf("sandbox: stat workspace %q: %w", spec.Workspace, statErr)
-		}
-		if !info.IsDir() {
-			return Result{}, fmt.Errorf("sandbox: workspace %q is not a directory", spec.Workspace)
-		}
-		ws = spec.Workspace
-		if err := applyWriteFiles(ws, spec.WriteFiles); err != nil {
-			return Result{}, err
-		}
-	} else {
-		ws, cacheHit, err = prepareWorkspaceCached(&s.wsCache, spec.RepoDir, spec.WriteFiles)
-		if err != nil {
-			return Result{}, err
-		}
-		defer func() { _ = os.RemoveAll(ws) }()
-	}
-	prepDuration := time.Since(prepStart)
-
+	// resolveBwrapParams is the "Spec + defaults -> argv inputs" stage;
+	// per-backend Spec admission already ran in validateSpec.
 	p, err := s.resolveBwrapParams(spec)
 	if err != nil {
 		return Result{}, err
 	}
-	p.workspace = ws
 
 	cpus := s.defaultCPUs
 	memoryMB := s.defaultMemory
 
-	capMethod := detectCapMethod(ctx)
-	if capMethod == bwrapCapNone && s.capPolicy != CapBestEffort {
-		return Result{}, ErrBwrapNoCapMethod
-	}
+	// Spec.Timeout <= 0 resolves to the backend default here; the supervisor
+	// applies the resolved value as the run deadline verbatim.
 	timeout := spec.Timeout
 	if timeout <= 0 {
 		timeout = s.defaultTimeout
 	}
 
-	idleTimeout := s.defaultIdleTimeout
+	// Cap method is resolved by the admit hook — after the supervisor's
+	// Workspace checks (so a bad Workspace is refused as such on every
+	// host) and before any write. The cap wrapper (systemd-run scope,
+	// cgroup v2 subtree, or none) wraps the bwrap argv and is built inside
+	// buildCmd — it needs the workspace-filled argv. Its cleanup always
+	// runs, whether or not the run started.
+	var capMethod bwrapCapMethod
+	var wrap resourceCapWrap
+	defer func() {
+		if wrap.cleanup != nil {
+			wrap.cleanup()
+		}
+	}()
 
-	runCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	bwrapArgv := buildBwrapArgs(p)
-	wrap, err := s.newResourceCapWrap(capMethod, bwrapArgv, cpus, memoryMB, s.pidsLimit)
-	if err != nil {
-		return Result{}, err
-	}
-	defer wrap.cleanup()
-
-	cmd := exec.CommandContext(runCtx, wrap.name, wrap.args...)
-	setBwrapProcAttr(cmd)
-
-	stdout := newCappedBuffer(s.maxOutputBytes)
-	stderr := newCappedBuffer(s.maxOutputBytes)
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-
-	// Idle watchdog: mirrors CLI.Exec's contract exactly, including the
-	// independent workspace-growth ceiling — see CLI.Exec's
-	// doc comment for the full rationale. quotaExceeded is set ONLY on a
-	// growth-ceiling kill (never a plain idle-stall kill — see
-	// watchdogArgs). growthBase is captured HERE (once, before the command
-	// starts) rather than inside the goroutine so Exec's post-run
-	// checkGrowthCeiling call below shares the EXACT same baseline the
-	// tick loop uses.
-	var idleKilled atomic.Bool
-	var quotaExceeded atomic.Bool
-	done := make(chan struct{})
+	// pidForCPU feeds the watchdog's /proc-tree CPU probe; stored right
+	// after Start.
 	var pidForCPU atomic.Int64
-	var fingerprint func() progressSnapshot
-	var growthBase progressSnapshot
-	if idleTimeout > 0 || s.defaultGrowthCeilingBytes > 0 {
-		fingerprint = func() progressSnapshot {
-			ps := progressSnapshot{outputBytes: stdout.written() + stderr.written()}
-			ps.fsSize, ps.fsCount, ps.fsMaxModNano = workspaceProgress(ws)
-			return ps
-		}
-		growthBase = fingerprint()
-		active := func() bool {
-			pid := pidForCPU.Load()
-			if pid == 0 {
-				return false
-			}
-			return procTreeCPUBusy(int(pid))
-		}
-		limits := watchdogLimits{idleTimeout: idleTimeout, growthCeilingBytes: s.defaultGrowthCeilingBytes}
-		go watchIdle(watchdogArgs{
-			done:           done,
-			fingerprint:    fingerprint,
-			activeFallback: active,
-			limits:         limits,
-			base:           growthBase,
-			pollEvery:      effectivePollInterval(idleTimeout, s.defaultGrowthCeilingBytes),
-			killed:         &idleKilled,
-			quotaExceeded:  &quotaExceeded,
-			cancel:         cancel,
-		})
-	}
-
-	start := time.Now()
-	if startErr := cmd.Start(); startErr != nil {
-		close(done)
-		return Result{}, fmt.Errorf("sandbox: start %s: %w", wrap.name, startErr)
-	}
-	if cmd.Process != nil {
-		pidForCPU.Store(int64(cmd.Process.Pid))
-		if joinErr := wrap.joinCgroup(cmd.Process.Pid); joinErr != nil {
-			killBwrapProcessGroup(cmd)
-			_ = cmd.Wait()
-			close(done)
-			return Result{}, joinErr
-		}
-	}
-	runErr := cmd.Wait()
-	close(done)
-	duration := time.Since(start)
-
-	// Post-run growth check: see
-	// checkGrowthCeiling's doc. Must run BEFORE the outcome-precedence
-	// branches below — a growth-ceiling breach is a hard invariant, not a
-	// race heuristic, so it is never allowed to lose to a "genuine" exit
-	// code the way an idle-stall kill legitimately can.
-	checkGrowthCeiling(fingerprint, growthBase, s.defaultGrowthCeilingBytes, &quotaExceeded)
-
-	res := Result{Duration: duration, PrepDuration: prepDuration, WorkspaceCacheHit: cacheHit}
-	res.Stdout, res.StdoutTruncated = stdout.result()
-	res.Stderr, res.StderrTruncated = stderr.result()
-	res.Captured = captureWorkspaceFiles(ws, capturePaths, s.maxOutputBytes)
-
-	// Caller cancellation takes ABSOLUTE priority, checked FIRST, ahead of
-	// EVERY other outcome signal (cancellation precedence); see CLI.Exec's
-	// identical block for the full rationale.
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		killBwrapProcessGroup(cmd)
-		return res, fmt.Errorf("sandbox: execution cancelled: %w", ctxErr)
-	}
-
-	// process's own reported outcome — see
-	// checkGrowthCeiling's doc for why this does not follow the "genuine
-	// exit code wins over a racing watchdog" rule below.
-	if quotaExceeded.Load() {
-		res.WorkspaceQuotaExceeded = true
-		res.ExitCode = -1
-		killBwrapProcessGroup(cmd)
-		return res, nil
-	}
-
-	if runErr == nil {
-		res.ExitCode = 0
-		return res, nil
-	}
-	var exitErr *exec.ExitError
-	if errors.As(runErr, &exitErr) && exitErr.ExitCode() >= 0 {
-		res.ExitCode = exitErr.ExitCode()
-		return res, nil
-	}
-
-	// Idle watchdog or absolute deadline: quotaExceeded was already handled
-	// above, so reaching here means a plain idle-stall (or absolute-
-	// deadline) kill.
-	if idleKilled.Load() || errors.Is(runCtx.Err(), context.DeadlineExceeded) {
-		res.TimedOut = true
-		res.ExitCode = -1
-		killBwrapProcessGroup(cmd)
-		return res, nil
-	}
-
-	return res, fmt.Errorf("sandbox: run %s: %w", wrap.name, runErr)
+	return runSupervised(ctx, runSpec{
+		spec:           spec,
+		timeout:        timeout,
+		idleTimeout:    s.defaultIdleTimeout,
+		growthCeiling:  s.defaultGrowthCeilingBytes,
+		maxOutputBytes: s.maxOutputBytes,
+		hooks: runHooks{
+			admit: func(ctx context.Context) error {
+				capMethod = detectCapMethod(ctx, s.expandSupport.supported)
+				if capMethod == bwrapCapNone && s.capPolicy != CapBestEffort {
+					return ErrBwrapNoCapMethod
+				}
+				return nil
+			},
+			prepareWorkspace: func(repoDir string) (string, bool, error) {
+				return prepareWorkspaceCached(&s.wsCache, repoDir, spec.WriteFiles)
+			},
+			buildCmd: func(ws string, runCtx context.Context) (*exec.Cmd, error) {
+				p.workspace = ws
+				w, err := s.newResourceCapWrap(capMethod, buildBwrapArgs(p), cpus, memoryMB, s.pidsLimit)
+				if err != nil {
+					return nil, err
+				}
+				wrap = w
+				cmd := exec.CommandContext(runCtx, w.name, w.args...)
+				setBwrapProcAttr(cmd)
+				return cmd, nil
+			},
+			afterStart: func(cmd *exec.Cmd) error {
+				if cmd.Process != nil {
+					pidForCPU.Store(int64(cmd.Process.Pid))
+					if joinErr := wrap.joinCgroup(cmd.Process.Pid); joinErr != nil {
+						return joinErr
+					}
+				}
+				return nil
+			},
+			cpuBusy: func() bool {
+				pid := pidForCPU.Load()
+				if pid == 0 {
+					return false
+				}
+				return procTreeCPUBusy(int(pid))
+			},
+			reap: func(cmd *exec.Cmd) { killBwrapProcessGroup(cmd) },
+		},
+	})
 }
 
 // resourceCapWrap is the resolved (binary, args) to exec for a run's cap
@@ -557,7 +436,7 @@ type resourceCapWrap struct {
 //     properties, so no post-Start action is needed and --collect lets
 //     systemd reap the transient unit itself (cleanup is a no-op).
 //   - cgroup v2: a delegated subtree is created with the resolved limits
-//     BEFORE Start (cgroup v2 requires the controllers configured before
+//     BEFORE Start (cgroup v2 requires controllers configured before
 //     population), bwrap execs directly (no wrapper binary), and joinCgroup
 //     moves the just-started pid into the subtree by writing it to
 //     cgroup.procs — cgroup v2 membership propagates to every process the
@@ -577,7 +456,7 @@ func (s *Bwrap) newResourceCapWrap(method bwrapCapMethod, bwrapArgv []string, cp
 		if !ok {
 			// Lost the delegated subtree between detection and use (e.g. a
 			// concurrent process reconfigured cgroups); fail rather than
-			// silently running uncapped.
+			// silently run uncapped.
 			return resourceCapWrap{}, ErrBwrapNoCapMethod
 		}
 		dir := filepath.Join(parent, "llmkit-"+randToken())
@@ -604,10 +483,10 @@ func (s *Bwrap) newResourceCapWrap(method bwrapCapMethod, bwrapArgv []string, cp
 	}
 }
 
-// writeCgroupLimits writes the resolved memory.max/cpu.max/pids.max
-// controller files into dir. A limit that resolves to "omit" (see
-// cgroupV2Limits) is left unwritten, so that controller inherits the
-// parent's limit rather than being reset to "max".
+// writeCgroupLimits writes the resolved memory.max/cpu.max/pids.max files
+// into dir. A limit that resolves to "omit" (see cgroupV2Limits) is left
+// unwritten, so that controller inherits the parent's limit rather than
+// being reset to "max".
 func writeCgroupLimits(dir string, cpus float64, memoryMB, pidsLimit int) error {
 	memory, cpuMax, pids, memOK, cpuOK, pidsOK := cgroupV2Limits(cpus, memoryMB, pidsLimit)
 	if memOK {
@@ -628,11 +507,11 @@ func writeCgroupLimits(dir string, cpus float64, memoryMB, pidsLimit int) error 
 	return nil
 }
 
-// procTreeCPUBusy is the bwrap backend's activeFallback progress signal
-// (watchIdle's costlier-fallback argument): it reports whether the process
-// tree rooted at pid is currently consuming CPU above cpuBusyThreshold,
-// sampled via /proc — the host-process analogue of containerCPUBusy's
-// `runtime stats` probe, since bwrap has no container object to query.
+// procTreeCPUBusy is the bwrap backend's activeFallback progress signal:
+// it reports whether the process tree rooted at pid is currently consuming
+// CPU above cpuBusyThreshold, sampled via /proc — the host-process analogue
+// of containerCPUBusy's `runtime stats` probe, since bwrap has no container
+// object to query.
 func procTreeCPUBusy(pid int) bool {
 	before, ok := procTreeCPUTicks(pid)
 	if !ok {
@@ -674,9 +553,9 @@ const clockTicksPerSec = 100
 func procTreeCPUTicks(root int) (ticks int64, ok bool) {
 	rootTicks, rootOK := procStatTicks(root)
 	if !rootOK {
-		// The root pid itself must resolve — otherwise this is not "process
-		// with zero CPU usage", it's "process does not exist", and the
-		// caller must treat that as unknown (ok=false), not as zero ticks.
+		// The root pid must resolve — otherwise this is "process does not
+		// exist", not "process with zero CPU usage", and the caller must
+		// treat it as unknown (ok=false), not zero ticks.
 		return 0, false
 	}
 	seen := map[int]bool{root: true}
@@ -713,8 +592,8 @@ func procStatTicks(pid int) (int64, bool) {
 		return 0, false
 	}
 	rest := splitFields(line[closeParen+2:])
-	// rest[0] is field 3 (state); utime is field 14 -> rest index 11; stime
-	// is field 15 -> rest index 12.
+	// rest[0] is field 3 (state); utime is field 14 (rest[11]); stime is
+	// field 15 (rest[12]).
 	if len(rest) < 13 {
 		return 0, false
 	}

@@ -4,12 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 )
 
@@ -29,33 +26,38 @@ func Detect() (runtime string, ok bool) {
 	return "", false
 }
 
-// CLI is a Sandbox backed by a container runtime CLI (podman or docker). It is
-// safe for concurrent use: each Exec prepares its own workspace and launches
-// its own uniquely-named container.
+// CLI is a Sandbox backed by a container runtime CLI (podman or docker),
+// safe for concurrent use.
 type CLI struct {
 	runtime      string
 	defaultImage string
-	// defaults is the shared per-run default state (see the defaults type):
-	// CPU/memory/pids caps, absolute+idle timeouts, network mode, output cap,
-	// scratch size, and workspace-growth ceiling. Backed by options.baseDefaults
-	// and configured via the one shared Option type.
+	// defaults holds the shared per-run default state, configured via Option.
 	defaults
-	// wsCache is the pristine-materialization cache backing prepareWorkspace.
-	// Zero value is ready to use; see wsCache's doc comment.
+	// toolchainBinds and toolchainPathPrepend are WithHostToolchains'
+	// resolved read-only mounts and PATH prefix, rendered by
+	// resolveParams/buildRunArgs alongside Spec.ROMounts. Nil/empty when
+	// no host toolchains are configured.
+	toolchainBinds       []ROMount
+	toolchainPathPrepend string
+	// wsCache is the pristine-materialization cache; zero value is ready to use.
 	wsCache wsCache
 }
 
 // NewCLI constructs a CLI sandbox backed by a container runtime (podman, then
 // docker; WithRuntime overrides the auto-detect order). WithImage is
-// required. The bwrap-only options (WithCapPolicy, WithToolchainBinds,
-// WithToolchainPath) are refused here with an error naming the option, and a
-// WithNetwork mode the runtime could never honor fails at construction.
+// required. The bwrap-only options (WithCapPolicy) are refused here with an
+// error naming the option, a numeric option out of range is refused before
+// any runtime lookup, and a WithNetwork mode the runtime could never honor
+// fails at construction.
 func NewCLI(opts ...Option) (*CLI, error) {
 	o := newOptions(opts)
-	if err := o.checkSupported("cli", bwrapOnlyOptions); err != nil {
+	if err := o.checkSupported(backendCLI, bwrapOnlyOptions); err != nil {
 		return nil, err
 	}
-	if err := validateNetworkDefault("cli", o.network, cliNetworks); err != nil {
+	if err := o.checkNumericOptions(backendCLI); err != nil {
+		return nil, err
+	}
+	if err := validateNetworkDefault(backendCLI, o.network, cliNetworks); err != nil {
 		return nil, err
 	}
 
@@ -80,6 +82,10 @@ func NewCLI(opts ...Option) (*CLI, error) {
 	}
 	s.defaults = baseDefaults()
 	o.applyDefaults(&s.defaults)
+	if o.has("WithHostToolchains") {
+		s.toolchainBinds = o.toolchainBinds
+		s.toolchainPathPrepend = o.toolchainPathPrepend
+	}
 	// Best-effort hygiene: purge any workspace-cache parent dirs a previous,
 	// non-Closed CLI instance (or a crashed process) left behind. See
 	// purgeStaleWorkspaceCaches.
@@ -130,50 +136,32 @@ func (s *CLI) MaterializeWorkspace(repoDir string) (string, error) {
 	return ws, err
 }
 
-// Runtime returns the resolved runtime binary name (podman or docker).
-func (s *CLI) Runtime() string { return s.runtime }
-
-// Limits returns the effective resource caps the backend applies to a Spec that
-// does not override them: the default CPU count, memory ceiling (MB), and pids
-// limit. Exposed so status/doctor and tests can confirm the
-// configured CPU / memory limits actually reached the backend.
-func (s *CLI) Limits() (cpus float64, memoryMB, pidsLimit int) {
-	return s.defaultCPUs, s.defaultMemory, s.pidsLimit
-}
-
-// ScratchAndGrowthCeiling returns the effective /tmp tmpfs scratch size (MB)
-// and workspace-growth ceiling (bytes) the backend applies when a Spec
-// doesn't override them, mirroring Limits' "confirm config reached the
-// backend" purpose — including the explicit-zero-disables case: an
-// explicit 0 override must be observable as a truly disabled (0) ceiling
-// here, not the backend's own
-// non-zero built-in default.
-func (s *CLI) ScratchAndGrowthCeiling() (scratchSizeMB int, growthCeilingBytes int64) {
-	return s.defaultScratchSizeMB, s.defaultGrowthCeilingBytes
-}
-
 // resolveParams applies backend defaults to a Spec, producing the concrete
 // runParams for the run (workspace and containerName are filled in by Exec).
 // The network mode is resolved and validated here: a mode the backend cannot
 // honor refuses the run with an UnsupportedSpecError instead of passing
-// through to the runtime flag.
+// through to the runtime flag. Host-toolchain binds/PATH prefix (see
+// WithHostToolchains) are copied straight through — this backend renders no
+// PATH override of its own when none are configured.
 func (s *CLI) resolveParams(spec Spec) (runParams, error) {
-	network, err := resolveNetworkMode("cli", s.defaultNetwork, spec.Network, cliNetworks...)
+	network, err := resolveNetworkMode(backendCLI, s.defaultNetwork, spec.Network, cliNetworks...)
 	if err != nil {
 		return runParams{}, err
 	}
 	p := runParams{
-		image:         s.defaultImage,
-		network:       network,
-		cpus:          s.defaultCPUs,
-		memoryMB:      s.defaultMemory,
-		pidsLimit:     s.pidsLimit,
-		scratchSizeMB: s.defaultScratchSizeMB,
-		env:           spec.Env,
-		cmd:           spec.Cmd,
-		roMounts:      spec.ROMounts,
-		rwMounts:      spec.RWMounts,
-		setupCmds:     spec.SetupCmds,
+		image:                s.defaultImage,
+		network:              network,
+		cpus:                 s.defaultCPUs,
+		memoryMB:             s.defaultMemory,
+		pidsLimit:            s.pidsLimit,
+		scratchSizeMB:        s.defaultScratchSizeMB,
+		env:                  spec.Env,
+		cmd:                  spec.Cmd,
+		roMounts:             spec.ROMounts,
+		rwMounts:             spec.RWMounts,
+		setupCmds:            spec.SetupCmds,
+		toolchainBinds:       s.toolchainBinds,
+		toolchainPathPrepend: s.toolchainPathPrepend,
 	}
 	if spec.Image != "" {
 		p.image = spec.Image
@@ -181,213 +169,47 @@ func (s *CLI) resolveParams(spec Spec) (runParams, error) {
 	return p, nil
 }
 
-// Exec implements Sandbox. See the Sandbox interface for the error contract:
-// only infrastructure failures are returned as errors; a non-zero exit code is
-// reported in Result.ExitCode.
+// Exec implements Sandbox. Its error contract is the Sandbox interface's
+// (the package doc's "Error contract"): an error only for a refused Spec
+// (InvalidSpecError, UnsupportedSpecError), a caller ctx that ended (the
+// "sandbox: execution cancelled" error), or an infrastructure failure; a
+// non-zero exit code is reported in Result.ExitCode.
 func (s *CLI) Exec(ctx context.Context, spec Spec) (Result, error) {
-	if len(spec.Cmd) == 0 {
-		return Result{}, errors.New("sandbox: spec.Cmd must be non-empty")
-	}
-	if err := validateMounts(spec.ROMounts, spec.RWMounts); err != nil {
+	if err := validateSpec(backendCLI, spec); err != nil {
 		return Result{}, err
 	}
-	capturePaths, err := sanitizeCapturePaths(spec.CaptureFiles)
-	if err != nil {
-		return Result{}, err
-	}
-
-	prepStart := time.Now()
-	var ws string
-	var cacheHit bool
-	if spec.Workspace != "" {
-		// Caller-owned iteration workspace (see Spec.Workspace doc): skip the
-		// fresh-copy/pristine-cache path entirely and apply WriteFiles directly
-		// onto the given directory. No defer RemoveAll — lifecycle is the
-		// caller's, not ours.
-		//
-		// Require an absolute path: Workspace is trusted verbatim (see the
-		// Spec doc's TRUST note) as a directory this process itself created,
-		// which is always an absolute path (MaterializeWorkspace returns one).
-		// A relative path would resolve against the CLI process's current
-		// working directory instead of the caller's intended location — an
-		// easy-to-miss caller bug that this guard turns into an immediate,
-		// unambiguous error instead of a silent wrong-directory write.
-		if !filepath.IsAbs(spec.Workspace) {
-			return Result{}, fmt.Errorf("sandbox: workspace %q must be an absolute path", spec.Workspace)
-		}
-		info, statErr := os.Stat(spec.Workspace)
-		if statErr != nil {
-			return Result{}, fmt.Errorf("sandbox: stat workspace %q: %w", spec.Workspace, statErr)
-		}
-		if !info.IsDir() {
-			return Result{}, fmt.Errorf("sandbox: workspace %q is not a directory", spec.Workspace)
-		}
-		ws = spec.Workspace
-		if err := applyWriteFiles(ws, spec.WriteFiles); err != nil {
-			return Result{}, err
-		}
-	} else {
-		var err error
-		ws, cacheHit, err = s.prepareWorkspace(spec.RepoDir, spec.WriteFiles)
-		if err != nil {
-			return Result{}, err
-		}
-		defer func() { _ = os.RemoveAll(ws) }()
-	}
-	prepDuration := time.Since(prepStart)
-
-	p, err := s.resolveParams(spec)
-	if err != nil {
-		return Result{}, err
-	}
-	p.workspace = ws
-	p.containerName = "llmkit-" + randToken()
-
 	timeout := spec.Timeout
 	if timeout <= 0 {
 		timeout = s.defaultTimeout
 	}
-	idleTimeout := s.defaultIdleTimeout
-
-	// runCtx bounds the run by the absolute timeout (a hard ceiling) and is
-	// cancelled if the caller's ctx is cancelled first or the idle watchdog
-	// fires.
-	runCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	args := buildRunArgs(p)
-	cmd := exec.CommandContext(runCtx, s.runtime, args...)
-
-	stdout := newCappedBuffer(s.maxOutputBytes)
-	stderr := newCappedBuffer(s.maxOutputBytes)
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-
-	// Idle watchdog: instead of killing a healthy-but-slow run at a fixed
-	// deadline, cancel only after idleTimeout elapses with NO observable
-	// progress. Progress is language-agnostic and layered cheapest-first:
-	//   1. bytes written to stdout/stderr, and any change to the writable
-	//      workspace tree (build caches, compiled artifacts, generated files —
-	//      every ecosystem writes one or the other while it works);
-	//   2. only when (1) is flat, a container-CPU probe, so a compiler churning
-	//      silently on one large translation unit (no output, no fs writes yet)
-	//      still counts as progress.
-	// The absolute timeout above stays a hard ceiling.
-	//
-	// Independently, a workspace-GROWTH ceiling bounds NET
-	// growth in workspace size since the run started (fsSize; a
-	// write-then-delete churn nets out and never trips it): a process that
-	// only fills disk resets the idle clock forever under the
-	// progress definition above and would otherwise run undetected until the
-	// absolute Timeout. watchIdle checks growth on the SAME per-tick
-	// workspaceProgress call the fingerprint below already makes — no extra
-	// filesystem walk — and kills with the distinct Result.
-	// WorkspaceQuotaExceeded reason (never plain TimedOut) when growth
-	// exceeds the ceiling, regardless of whether output/CPU activity would
-	// otherwise read as "progress". base is captured HERE (once, before the
-	// command starts) rather than inside the goroutine so Exec's post-run
-	// checkGrowthCeiling call below shares the EXACT same baseline the tick
-	// loop uses — see checkGrowthCeiling's doc for why that final check
-	// exists.
-	var idleKilled atomic.Bool
-	var quotaExceeded atomic.Bool
-	done := make(chan struct{})
-	var fingerprint func() progressSnapshot
-	var growthBase progressSnapshot
-	if idleTimeout > 0 || s.defaultGrowthCeilingBytes > 0 {
-		fingerprint = func() progressSnapshot {
-			ps := progressSnapshot{outputBytes: stdout.written() + stderr.written()}
-			ps.fsSize, ps.fsCount, ps.fsMaxModNano = workspaceProgress(ws)
-			return ps
-		}
-		growthBase = fingerprint()
-		active := func() bool { return s.containerCPUBusy(p.containerName) }
-		limits := watchdogLimits{idleTimeout: idleTimeout, growthCeilingBytes: s.defaultGrowthCeilingBytes}
-		go watchIdle(watchdogArgs{
-			done:           done,
-			fingerprint:    fingerprint,
-			activeFallback: active,
-			limits:         limits,
-			base:           growthBase,
-			pollEvery:      effectivePollInterval(idleTimeout, s.defaultGrowthCeilingBytes),
-			killed:         &idleKilled,
-			quotaExceeded:  &quotaExceeded,
-			cancel:         cancel,
-		})
+	// resolveParams is the "Spec + defaults -> argv inputs" stage; the
+	// per-backend Spec admission already ran in validateSpec.
+	p, err := s.resolveParams(spec)
+	if err != nil {
+		return Result{}, err
 	}
-
-	start := time.Now()
-	runErr := cmd.Run()
-	close(done)
-	duration := time.Since(start)
-
-	// Post-run growth check: see
-	// checkGrowthCeiling's doc. Must run BEFORE the outcome-precedence
-	// branches below — a growth-ceiling breach is a hard invariant, not a
-	// race heuristic, so it is never allowed to lose to a "genuine" exit
-	// code the way an idle-stall kill legitimately can.
-	checkGrowthCeiling(fingerprint, growthBase, s.defaultGrowthCeilingBytes, &quotaExceeded)
-
-	res := Result{Duration: duration, PrepDuration: prepDuration, WorkspaceCacheHit: cacheHit}
-	res.Stdout, res.StdoutTruncated = stdout.result()
-	res.Stderr, res.StderrTruncated = stderr.result()
-	res.Captured = captureWorkspaceFiles(ws, capturePaths, s.maxOutputBytes)
-
-	// Caller cancellation takes ABSOLUTE priority, checked FIRST, ahead of
-	// EVERY other outcome signal (growth-ceiling breach, exit code, or
-	// infra timeout) — the documented cancellation precedence.
-	// checkGrowthCeiling above already ran unconditionally (its cost is
-	// paid either way), but a caller cancel landing in the same window as
-	// a breach — or even a clean exit — must always surface as the
-	// documented "sandbox: execution cancelled" error, never silently
-	// reinterpreted as a quota kill or a stale success: the caller no
-	// longer wants this result at all, regardless of what our own
-	// machinery observed.
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		s.forceRemove(p.containerName)
-		return res, fmt.Errorf("sandbox: execution cancelled: %w", ctxErr)
-	}
-
-	// Outcome precedence. A growth-ceiling breach ALWAYS wins over the
-	// process's own reported outcome — see
-	// checkGrowthCeiling's doc for why this does not follow the "genuine
-	// exit code wins over a racing watchdog" rule below.
-	if quotaExceeded.Load() {
-		res.WorkspaceQuotaExceeded = true
-		res.ExitCode = -1
-		s.forceRemove(p.containerName)
-		return res, nil
-	}
-
-	// A process that returned its OWN status — a clean exit or a real
-	// non-zero code — was not killed by us, so those win next: an idle
-	// watchdog (or absolute deadline) firing in the same instant can never
-	// mask a genuine repro verdict. Our kills surface as a signal
-	// (ExitCode -1) and fall through to the timeout branch below.
-	if runErr == nil {
-		res.ExitCode = 0
-		return res, nil
-	}
-	var exitErr *exec.ExitError
-	if errors.As(runErr, &exitErr) && exitErr.ExitCode() >= 0 {
-		res.ExitCode = exitErr.ExitCode()
-		return res, nil
-	}
-
-	// Idle watchdog or absolute deadline: a timeout, not a demonstration.
-	// The runtime may not have torn the container down in time; reap it by
-	// name to honor the always-clean-up guarantee. quotaExceeded was
-	// already handled above, so reaching here means a plain idle-stall (or
-	// absolute-deadline) kill.
-	if idleKilled.Load() || errors.Is(runCtx.Err(), context.DeadlineExceeded) {
-		res.TimedOut = true
-		res.ExitCode = -1
-		s.forceRemove(p.containerName)
-		return res, nil
-	}
-
-	// Anything else (binary missing, failed to start, unexpected signal).
-	return res, fmt.Errorf("sandbox: run %s: %w", s.runtime, runErr)
+	// The container name is fixed BEFORE the run: cpuBusy reads it from
+	// the watchdog goroutine and reap from the supervisor.
+	name := "llmkit-" + randToken()
+	p.containerName = name
+	return runSupervised(ctx, runSpec{
+		spec:           spec,
+		timeout:        timeout,
+		idleTimeout:    s.defaultIdleTimeout,
+		growthCeiling:  s.defaultGrowthCeilingBytes,
+		maxOutputBytes: s.maxOutputBytes,
+		hooks: runHooks{
+			prepareWorkspace: func(repoDir string) (string, bool, error) {
+				return s.prepareWorkspace(repoDir, spec.WriteFiles)
+			},
+			buildCmd: func(ws string, runCtx context.Context) (*exec.Cmd, error) {
+				p.workspace = ws
+				return exec.CommandContext(runCtx, s.runtime, buildRunArgs(p)...), nil
+			},
+			cpuBusy: func() bool { return s.containerCPUBusy(name) },
+			reap:    func(*exec.Cmd) { s.forceRemove(name) },
+		},
+	})
 }
 
 // forceRemove best-effort removes a container by name, used to guarantee

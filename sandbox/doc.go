@@ -51,14 +51,23 @@
 //     or its examples constructs one.
 //   - NewMock (*Mock): a scriptable Sandbox for tests. The caller
 //     enqueues scripted responses and reads back the recorded calls, so
-//     caller code runs its tests without a real runtime or bwrap.
+//     caller code runs its tests without a real runtime or bwrap. The Mock
+//     runs nothing but is not a law-free zone: it refuses a malformed Spec
+//     exactly like every backend, and its MaterializeWorkspace creates a
+//     real empty directory.
 //
 // # Specs and options
 //
-// Spec fields are honest per backend. A backend either honors a
-// non-empty per-call field or refuses the run at Exec with an
-// UnsupportedSpecError naming the backend, field, and value. No backend
-// silently drops or substitutes a requested posture. Spec.Network is a
+// Spec fields are honest per backend. A Spec that is malformed for every
+// backend — empty Cmd, neither RepoDir nor Workspace, a relative
+// Workspace, an escaping WriteFiles key or CaptureFiles entry, an
+// empty/relative mount path, a duplicate ContainerPath, or an Env entry
+// without "=" or with an empty key — is refused at Exec with an
+// InvalidSpecError on EVERY backend, the Mock included. A well-formed Spec
+// field a backend cannot honor is refused at Exec with an
+// UnsupportedSpecError naming the
+// backend, field, and value. No backend silently drops or substitutes a
+// requested posture. Spec.Network is a
 // typed NetworkMode: none, host, or bridge. Only the container backend
 // honors bridge. Spec.Image is honored only by the container backend;
 // the imageless backends refuse a non-empty Image.
@@ -73,21 +82,23 @@
 // # Capability probes
 //
 // Before planning work against an unfamiliar sandbox, a caller can
-// measure what the sandbox can actually run. ProbeCapabilities executes
-// the caller's []ProbeEntry table inside the sandbox and returns a
-// CapabilitySet, cached per process. Each entry names a capability,
-// supplies the argv that measures it, and interprets the probe's exit
-// code and stdout into named modes. The kit ships no probe entries:
-// what to probe, and how to read the answer, is the caller's knowledge.
-// This package only runs the argv and caches the answers.
+// measure what the sandbox can actually run. Probe(ctx, sb, base, probes)
+// runs the caller's []ProbeEntry table against sb and returns a
+// CapabilitySet. Each entry names a capability, supplies the argv that
+// measures it, and interprets the probe's exit code and stdout into named
+// modes. The kit ships no probe entries: what to probe, and how to read
+// the answer, is the caller's knowledge. Probe keeps no cache — every
+// call re-runs every entry — and returns a refused base Spec
+// (InvalidSpecError, UnsupportedSpecError) as an error instead of a
+// guessed-at set.
 //
 // # Backend conformance
 //
 // Every backend gives a Result the same shape semantics: exit codes,
 // InfraKilled and KillReason, Captured, and the truncation flags.
-// conformance_test.go runs one shared case table through Mock on every
-// test run, and through Bwrap and CLI under the integration tag, to pin
-// that contract.
+// conformance_test.go runs one shared case table through HostExec on
+// every test run, and through Bwrap and CLI under the integration tag,
+// to pin that contract.
 //
 // # Security posture
 //
@@ -110,7 +121,9 @@
 // trees.
 //
 // Exec materializes every workspace from the repository snapshot into
-// a fresh temporary directory, never the live checkout. A caller can
+// a fresh temporary directory, never the live checkout, and refuses a
+// Spec before any write when it is malformed (InvalidSpecError) or not
+// honorable by the backend (UnsupportedSpecError). A caller can
 // instead pass its own directory as Spec.Workspace. Everything
 // written into a workspace is symlink-hardened: Exec resolves paths
 // and refuses them if they escape the workspace root. Content planted
@@ -129,10 +142,16 @@
 //
 // # Error contract
 //
-// Exec returns a Go error only for infrastructure failures: a missing
-// runtime, a failed workspace copy, an inability to launch. A non-zero
-// exit code of the sandboxed command itself is reported in
-// Result.ExitCode, not as an error.
+// Exec returns a Go error in exactly three cases: a refused Spec — an
+// InvalidSpecError (malformed for every backend: fix the Spec) or an
+// UnsupportedSpecError (this backend cannot honor a field: pick another
+// backend or drop the field) — before anything is written or launched; a
+// caller context that ended (cancel or deadline), as the "sandbox:
+// execution cancelled" error wrapping ctx.Err(); and an infrastructure
+// failure (a missing runtime, a failed workspace copy, a runtime or
+// wrapper that could not be started). Everything the sandboxed command
+// itself does is reported in the Result instead: its exit code, 127/126
+// when it cannot be launched, and 128+signo when a signal killed it.
 //
 // Path containment for agent tools — resolving and confining
 // tool-supplied paths under a trusted root — is a separate concern. It

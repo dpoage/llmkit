@@ -19,10 +19,11 @@ package sandbox
 // general-purpose alternative backend.
 import (
 	"context"
-	"fmt"
+	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
-	"time"
+	"syscall"
 )
 
 // HostExec is a Sandbox implementation that runs commands directly on the
@@ -58,108 +59,84 @@ func NewHostExec() *HostExec { return &HostExec{} }
 //
 // There are no resource caps and no idle watchdog on this backend, so
 // Result.WorkspaceQuotaExceeded is always false; only the absolute
-// Spec.Timeout can kill a run.
+// Spec.Timeout can kill a run (no backend default: timeout <= 0 means the
+// only bound is the caller's context). Workspace must be absolute (like every
+// backend — validateSpec) and is checked to exist as a directory this
+// process can enter before the run.
 func (h *HostExec) Exec(ctx context.Context, spec Spec) (Result, error) {
-	if len(spec.Cmd) == 0 {
-		return Result{}, fmt.Errorf("sandbox: HostExec requires a non-empty Cmd")
-	}
-	if spec.RepoDir == "" && spec.Workspace == "" {
-		return Result{}, fmt.Errorf("sandbox: HostExec requires RepoDir or Workspace")
-	}
-	if spec.Image != "" {
-		return Result{}, &UnsupportedSpecError{Backend: "host", Field: "Image", Value: spec.Image}
-	}
-	if len(spec.ROMounts) > 0 {
-		return Result{}, &UnsupportedSpecError{Backend: "host", Field: "ROMounts", Value: fmt.Sprintf("%d mount(s)", len(spec.ROMounts))}
-	}
-	if len(spec.RWMounts) > 0 {
-		return Result{}, &UnsupportedSpecError{Backend: "host", Field: "RWMounts", Value: fmt.Sprintf("%d mount(s)", len(spec.RWMounts))}
-	}
-	if len(spec.SetupCmds) > 0 {
-		return Result{}, &UnsupportedSpecError{Backend: "host", Field: "SetupCmds", Value: fmt.Sprintf("%d command(s)", len(spec.SetupCmds))}
-	}
-	if _, err := resolveNetworkMode("host", NetworkHost, spec.Network, NetworkHost); err != nil {
+	if err := validateSpec(backendHost, spec); err != nil {
 		return Result{}, err
 	}
-
-	prepStart := time.Now()
-	ws := spec.Workspace
-	cleanup := func() {}
-	if ws == "" {
-		w, err := prepareWorkspace(spec.RepoDir, spec.WriteFiles)
-		if err != nil {
-			return Result{}, err
-		}
-		ws = w
-		cleanup = func() { _ = os.RemoveAll(ws) }
-	} else if len(spec.WriteFiles) > 0 {
-		if err := applyWriteFiles(ws, spec.WriteFiles); err != nil {
-			return Result{}, err
-		}
-	}
-	defer cleanup()
-	prepDuration := time.Since(prepStart)
-
-	runCtx := ctx
-	var cancel context.CancelFunc
-	if spec.Timeout > 0 {
-		runCtx, cancel = context.WithTimeout(ctx, spec.Timeout)
-		defer cancel()
-	}
-
-	maxBytes := DefaultMaxOutputBytes
-	stdout := newCappedBuffer(maxBytes)
-	stderr := newCappedBuffer(maxBytes)
-
-	cmd := exec.CommandContext(runCtx, spec.Cmd[0], spec.Cmd[1:]...)
-	cmd.Dir = ws
-	if len(spec.Env) > 0 {
-		cmd.Env = append(os.Environ(), spec.Env...)
-	}
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-
-	start := time.Now()
-	runErr := cmd.Run()
-	duration := time.Since(start)
-
-	timedOut := runCtx.Err() == context.DeadlineExceeded
-	exitCode := 0
-	if runErr != nil {
-		if timedOut {
-			exitCode = -1
-		} else if exitErr, ok := runErr.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		} else {
-			// A launch failure (binary not found, permission denied, etc.) is
-			// an infrastructure error, not a demonstrable exit code — matches
-			// the CLI backend's Exec error contract.
-			return Result{}, fmt.Errorf("sandbox: HostExec run %v: %w", spec.Cmd, runErr)
-		}
-	}
-
-	outStr, outTrunc := stdout.result()
-	errStr, errTrunc := stderr.result()
-
-	var captured map[string][]byte
-	if len(spec.CaptureFiles) > 0 {
-		captured = captureWorkspaceFiles(ws, spec.CaptureFiles, maxBytes)
-	}
-
-	return Result{
-		ExitCode:        exitCode,
-		Stdout:          outStr,
-		Stderr:          errStr,
-		StdoutTruncated: outTrunc,
-		StderrTruncated: errTrunc,
-		Duration:        duration,
-		TimedOut:        timedOut,
-		PrepDuration:    prepDuration,
-		Captured:        captured,
-	}, nil
+	return runSupervised(ctx, runSpec{
+		spec:           spec,
+		timeout:        spec.Timeout,
+		maxOutputBytes: DefaultMaxOutputBytes,
+		hooks: runHooks{
+			prepareWorkspace: func(repoDir string) (string, bool, error) {
+				ws, err := prepareWorkspace(repoDir, spec.WriteFiles)
+				return ws, false, err
+			},
+			buildCmd: func(ws string, runCtx context.Context) (*exec.Cmd, error) {
+				cmd := exec.CommandContext(runCtx, spec.Cmd[0], spec.Cmd[1:]...)
+				cmd.Dir = ws
+				if len(spec.Env) > 0 {
+					cmd.Env = append(os.Environ(), spec.Env...)
+				}
+				return cmd, nil
+			},
+			commandExit: hostCommandExit,
+		},
+	})
 }
 
 var _ Sandbox = (*HostExec)(nil)
+
+// hostCommandExit maps a run error the classifier left as infrastructure
+// onto Spec.Cmd's own exit status. HostExec supervises the command itself
+// — no runtime or shell in between — so two such errors are the command's
+// verdict, reported the way a shell (and the container backends) report
+// them, with a nil error:
+//
+//   - death by a signal nobody in the kit sent (the watchdog, deadline, and
+//     caller-ctx kills are classified before this point): 128+signo;
+//   - a LAUNCH failure — the child never started: 127 when the command
+//     could not be found, 126 when it was found but cannot be executed (no
+//     permission, or a format the OS refuses to run).
+//
+// Every other error — e.g. a workspace that vanished before the chdir —
+// stays an infrastructure error (ok false). The observed launch shapes:
+// an absolute missing path is *os.PathError{Op:"fork/exec", ENOENT}; a bare
+// name is exec.ErrNotFound; a non-executable file is fs.ErrPermission; a
+// found-but-unrunnable file is ENOEXEC ("exec format error"); a missing
+// cmd.Dir is *os.PathError{Op:"chdir"}. The supervisor refuses a Workspace
+// the child cannot enter before the run, but that check precedes Start: a
+// concurrent actor that revokes search permission on the caller's Workspace
+// in between still surfaces here as the chdir's EACCES, which maps to 126.
+func hostCommandExit(runErr error) (exitCode int, ok bool) {
+	var exitErr *exec.ExitError
+	if errors.As(runErr, &exitErr) {
+		if ws, isWait := exitErr.Sys().(interface {
+			Signaled() bool
+			Signal() syscall.Signal
+		}); isWait && ws.Signaled() {
+			return 128 + int(ws.Signal()), true
+		}
+		return 0, false
+	}
+	if errors.Is(runErr, exec.ErrNotFound) {
+		return 127, true
+	}
+	var pathErr *os.PathError
+	if errors.As(runErr, &pathErr) && pathErr.Op == "fork/exec" {
+		switch {
+		case errors.Is(pathErr, fs.ErrNotExist):
+			return 127, true
+		case errors.Is(pathErr, fs.ErrPermission), errors.Is(pathErr, syscall.ENOEXEC):
+			return 126, true
+		}
+	}
+	return 0, false
+}
 
 // MaterializeWorkspace implements Sandbox. HostExec has no pristine cache to
 // consult: it performs a fresh full copy of repoDir into a caller-owned

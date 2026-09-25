@@ -29,8 +29,6 @@ func TestNewCLIUnknownRuntime(t *testing.T) {
 func TestNewCLIRefusesBwrapOnlyOptions(t *testing.T) {
 	for _, opt := range []Option{
 		WithCapPolicy(CapBestEffort),
-		WithToolchainBinds([]ROMount{{HostPath: "/h", ContainerPath: "/c"}}),
-		WithToolchainPath("/opt/kit/bin"),
 	} {
 		if _, err := NewCLI(WithRuntime("podman"), WithImage("img"), opt); err == nil {
 			t.Error("NewCLI accepted a bwrap-only option without error")
@@ -38,6 +36,29 @@ func TestNewCLIRefusesBwrapOnlyOptions(t *testing.T) {
 			t.Errorf("error %v must name the option and the cli backend", err)
 		}
 	}
+}
+
+// TestNewCLIAcceptsWithHostToolchains pins that NewCLI accepts
+// WithHostToolchains (it is not a bwrap-only option) and that the
+// configured mounts and PATH prefix reach the rendered argv through
+// resolveParams.
+func TestNewCLIAcceptsWithHostToolchains(t *testing.T) {
+	rt, ok := Detect()
+	if !ok {
+		t.Skip("no container runtime detected; NewCLI needs one")
+	}
+	res := ToolchainResolution{mounts: []ROMount{{HostPath: "/h", ContainerPath: "/c", Shared: true}}, pathPrepend: "/c/bin"}
+	s, err := NewCLI(WithRuntime(rt), WithImage("img"), WithHostToolchains(res))
+	if err != nil {
+		t.Fatalf("NewCLI rejected WithHostToolchains: %v", err)
+	}
+	p, err := s.resolveParams(Spec{Cmd: []string{"true"}})
+	if err != nil {
+		t.Fatalf("resolveParams: %v", err)
+	}
+	args := buildRunArgs(p)
+	mustContainSeq(t, args, "-v", "/h:/c:ro")
+	mustContainSeq(t, args, "--env", "PATH=/c/bin:"+defaultContainerPath)
 }
 
 func TestResolveParamsAppliesDefaultsAndOverrides(t *testing.T) {

@@ -58,6 +58,20 @@ entry below is marked.
   unchanged and take `RunID`/`SpanID`/`Step` from the call's context; the
   sandbox wrapper emits nothing from `MaterializeWorkspace`. Either wrapper
   returns its input unchanged for a nil observer.
+- `llmkit/sandbox`: `InvalidSpecError`. Every backend — the Mock included —
+  now refuses a malformed `Spec` at `Exec` with `InvalidSpecError{Field,
+  Reason}` (match with `errors.As`), instead of each backend enforcing a
+  different subset: an empty `Cmd`; neither `RepoDir` nor `Workspace`; a
+  relative `Workspace`; a `WriteFiles` key or `CaptureFiles` entry that
+  escapes the workspace (HostExec previously dropped an escaping
+  `CaptureFiles` entry silently instead of refusing it); an empty or
+  relative mount path; a duplicate `ContainerPath` across `ROMounts` and
+  `RWMounts`; and an `Env` entry without `=` or with an empty key (see
+  Fixed for the host-environment leak the first closes). The three real
+  backends also refuse, with `Field: "Workspace"`, a `Workspace` that does
+  not exist, is not a directory, or cannot be entered. A well-formed field
+  a single backend cannot keep honoring is still refused with the
+  unchanged `UnsupportedSpecError`.
 
 - `llmkit`: `Observe(c, obs, provider, model)` wraps any `Client` so each
   logical completion — one `Complete` or `Stream` call, success or error —
@@ -123,6 +137,20 @@ entry below is marked.
   Attempt events (`Options.Provider` when set, else `string(spec.Type)`),
   exported and called by `New` itself, so `llmkit.Observe` callers pass
   the same value instead of restating the rule.
+- `sandbox.WithHostToolchains(res ToolchainResolution)`: one option for
+  host toolchains, accepted by both `NewCLI` and `NewBwrap` (host
+  toolchains were bwrap-only before). Resolve once with
+  `ResolveHostToolchains(names)` and pass the same value to either
+  constructor; the backend renders the read-only mounts and composes
+  `PATH`. On `NewCLI`, a resolution with a `PATH` entry replaces the
+  image's own `ENV PATH` with the toolchain directories followed by
+  `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`; a `PATH=`
+  entry in `Spec.Env` overrides it on both backends.
+- `sandbox.Observe`'s return value implements `io.Closer` when the
+  observer is non-nil: `Close` forwards to the inner backend's `Close`
+  when it has one (`CLI`, `Bwrap`) and returns `nil` otherwise (`Mock`,
+  `HostExec`). The return type stays `Sandbox`, so a caller that wants to
+  `Close` type-asserts.
 
 - `llmkit`: `llmkit.Classify`, the kit's one retryability rule, in
   `retry.Do`'s classify shape: cancellation (anything chaining
@@ -196,6 +224,153 @@ entry below is marked.
   behavior is unchanged except that every in-tree loop now applies
   `internal/retry`'s stricter negative-`Retry-After` and overflow clamps,
   which no in-tree config could reach.
+- **Breaking:** `sandbox.Mock.ResponseFunc` is now
+  `func(ctx context.Context, n int, spec Spec) (Result, error)` — it
+  receives the caller's `Exec` context.
+- **Breaking:** `sandbox.Mock.Exec` is no longer a law-free zone: it
+  refuses a `Spec` that is malformed for every backend with
+  `InvalidSpecError` (see Added), and when the caller's context is already
+  done it records the call, consumes nothing, and returns the zero
+  `Result` with a `sandbox: execution cancelled` error instead of a
+  scripted response.
+- **Breaking:** `sandbox.HostExec` now requires `Spec.Workspace` to be an
+  absolute path (like every backend) and pre-validates `CaptureFiles`
+  entries with the same lexical workspace-escape rule the container
+  backends apply, refusing an escaping entry at `Exec` instead of omitting
+  it silently after the run.
+- **Breaking:** `sandbox.Mock.MaterializeWorkspace` returns a FRESH EMPTY
+  temporary directory (prefix `llmkit-mock-`) instead of returning
+  `repoDir` unchanged — following the documented "os.RemoveAll the return
+  value" contract used to delete the caller's repository. `repoDir` is
+  accepted but never read and need not exist. `Mock.Materialized()`
+  lists every directory created, in call order.
+- **Breaking:** `sandbox.HostExec` reports a command killed by a signal as
+  `ExitCode` 128+signo (SIGSEGV: 139) with a nil error, like the bwrap and
+  CLI backends, instead of `ExitCode: -1`; `-1` stays reserved for the
+  sandbox's own kills (timeout, idle watchdog, growth ceiling).
+- **Breaking:** `sandbox.NewCLI` and `sandbox.NewBwrap` refuse a numeric
+  option value that names no usable limit, at construction:
+  `WithCPUs` refuses 0, a negative value, NaN, and ±Inf; `WithMemoryMB`,
+  `WithTimeout`, `WithScratchSizeMB`, and `WithMaxOutputBytes` refuse a
+  value `<= 0`. Before, some of these values silently weakened the run
+  and others failed it outright: `WithCPUs(NaN)` rendered no CPU quota on
+  either backend and ran uncapped; `WithCPUs(+Inf)` ran uncapped on the
+  CLI backend, but on the bwrap backend every run exited 1 because
+  systemd-run rejects `CPUQuota=+Inf%`; `WithTimeout(0)` failed every run
+  at once on both backends. The error names the option, its value, and the
+  backend. `WithPidsLimit`, `WithWorkspaceGrowthCeilingMB`, and
+  `WithIdleTimeout` keep `0` as the documented explicit disable and
+  refuse a negative value (llmkit-bk8.1.7).
+- **Breaking:** `sandbox.ResolveHostToolchains(names)` returns only a
+  `ToolchainResolution`, with no error (it never returned a non-nil one):
+  drop the `, err` at each call site. The resolution gains
+  `Unresolved []string`, listing every trimmed, non-blank entry that did
+  not resolve on this host, in request order.
+- **Breaking:** `sandbox.Bwrap.Exec` reports a run whose deadline passes
+  before its child starts as `TimedOut` with `ExitCode` -1 and a nil
+  error, like the CLI and HostExec backends. Before, it returned the error
+  `sandbox: start systemd-run: context deadline exceeded` and a zero
+  `Result`. A launcher that cannot start now fails with
+  `sandbox: run <launcher>: ...` instead of `sandbox: start <launcher>: ...`,
+  and the returned `Result` carries the launch attempt's `Duration`. One
+  reachable case: the bwrap binary removed or made non-executable
+  after `NewBwrap` on a host with no resource-cap method, under
+  `WithCapPolicy(CapBestEffort)` (a missing `systemd-run` selects another
+  cap method, not this one).
+
+### Removed
+
+- **Breaking:** `sandbox.WithToolchainBinds` and
+  `sandbox.WithToolchainPath`. Replacement:
+  `sandbox.WithHostToolchains(sandbox.ResolveHostToolchains(names))` on
+  `NewCLI` or `NewBwrap`. Resolve once and pass the same value; it also
+  carries `Fingerprints` and `Unresolved`.
+- **Breaking:** the `sandbox.ToolchainResolution.Mounts` and
+  `ToolchainResolution.PathPrepend` fields (now unexported). Replacement:
+  pass the resolution to `WithHostToolchains(res)` on either constructor;
+  the backend renders the mounts and composes `PATH`.
+- **Breaking:** `sandbox.DefaultContainerPath` (now unexported).
+  Replacement: none. The backends compose `PATH` themselves; a `PATH=`
+  entry in `Spec.Env` overrides it.
+- **Breaking:** `sandbox.CLI.Limits`, `sandbox.Bwrap.Limits`,
+  `sandbox.CLI.ScratchAndGrowthCeiling`, and
+  `sandbox.Bwrap.ScratchAndGrowthCeiling`. Replacement: none. The
+  constructors refuse zero and negative values (and non-finite values
+  for `WithCPUs`) — the same values the accessors used to report a
+  substitute for — and no fallback is substituted. A test that read
+  these accessors to confirm that a configuration reached the backend
+  loses that probe.
+- **Breaking:** `sandbox.CLI.Runtime`. Replacement: `sandbox.Detect()`
+  returns the runtime `NewCLI` auto-detects; a caller that passed
+  `WithRuntime(name)` already has the name.
+- **Breaking:** `sandbox.Mock.Reset`. Replacement: construct a new `Mock`
+  with `NewMock`.
+
+- **Breaking:** `sandbox.ProbeCapabilities` is removed in favor of
+  `sandbox.Probe(ctx, sb Sandbox, base Spec, probes []ProbeEntry)
+  (CapabilitySet, error)` (llmkit-bk8.1.9): the base `Spec` carries
+  `RepoDir`/`Image`/mounts/`Env` instead of positional arguments; a
+  refusal (`InvalidSpecError`/`UnsupportedSpecError`) is returned as the
+  error instead of being read as "unavailable"; and results are no longer
+  cached per process — every call re-probes, and the returned
+  `CapabilitySet` shape is unchanged. `base.Image` must now be empty on
+  the Bwrap and HostExec backends — it was silently stripped before, so a
+  caller that (like bugbot) passes its configured image on every backend
+  must clear it for those two. A nil `Sandbox` is now an error instead of
+  an all-false result. An empty `base.RepoDir` with no `base.Workspace`
+  now returns `InvalidSpecError{Field: "RepoDir"}` instead of an all-false
+  set built without any `Exec` call. On HostExec, `base.ROMounts`,
+  `base.RWMounts`, and `base.SetupCmds` must also be empty. HostExec
+  refuses mounts with `UnsupportedSpecError`; the old mount arguments
+  read as all-false there, and the refusal is now returned. A positive
+  `base.Timeout` replaces the 30-second per-probe ceiling.
+  `sandbox.InvalidateCapabilityCache` is removed with no replacement —
+  there is no cache left to invalidate.
+
+### Fixed
+
+- `llmkit/sandbox` (llmkit-bk8.1.8): a command that cannot be launched now
+  reports through the shell's exit-code convention on every real backend —
+  `127` when the command is missing, `126` when it is not executable —
+  instead of an infrastructure error or a bare exit 1. Bwrap always execs
+  the command through `/bin/sh` (with no `SetupCmds` the wrapper script is
+  exactly `exec "$@"`), so bwrap's own execvp failure (exit 1) no longer
+  masks the cause. HostExec maps the launch failure to the exit code and
+  returns a nil error. A caller-owned `Workspace` the process cannot enter
+  (no search permission) is refused before the run with
+  `InvalidSpecError{Field: "Workspace"}` on every real backend, instead of
+  reading as a non-executable command (126) on HostExec. HostExec also no
+  longer reports a caller cancellation as `Result{ExitCode: -1}` with a nil
+  error — a caller whose context is cancelled or past its deadline gets the
+  shared `sandbox: execution cancelled` error, while `Spec.Timeout` expiry
+  still reports the timeout shape. A context that has already ended when
+  `Exec` is called, or that ends during Bwrap's admission (while it
+  resolves the resource-cap method), gets that same error on every real
+  backend before anything is written or launched; Bwrap used to report it
+  as `ErrBwrapNoCapMethod`, or as a cgroup write failure after writing
+  `WriteFiles` into a caller-owned `Workspace`.
+- `llmkit/sandbox` (security): an `Env` entry without `=` is refused with
+  `InvalidSpecError{Field: "Env"}` on every backend. The CLI backend used to
+  pass it to the runtime as `--env NAME`, which copies the HOST's value of
+  `NAME` into the container — a host-environment leak into an untrusted
+  command.
+- `llmkit/sandbox` (llmkit-bk8.1.16, security): the bwrap backend's
+  systemd-run resource-cap wrapper now passes `--expand-environment=no` to
+  systemd-run, so a model-driven `Spec.Cmd` element such as
+  `${NAME}`/`$NAME` is no longer expanded from the HOST environment before
+  bwrap starts (measured leak: with `ZZHOSTONLY` set on the host,
+  `sh -c 'echo ${ZZHOSTONLY}'` printed the host value inside the sandbox).
+  Every argv element now reaches the sandbox byte-for-byte. On a systemd
+  older than 254 (no `--expand-environment`), detection fails closed:
+  systemd-run is treated as unavailable (cgroup v2 or uncapped per
+  `WithCapPolicy`), never "capped but leaking".
+
+- `fsroot`: Resolve now fails closed on dangling symlinks and on any prefix
+  it cannot resolve; a dangling link whose target lies outside the root is
+  rejected with ErrPathEscape (previously resolved and let a write escape),
+  and `file.txt/child`-style paths (ENOTDIR) — including a non-directory
+  inside a symlink body — and unsearchable prefixes now return
+  ErrPathEscape instead of the lexical path.
 
 - **Breaking:** unknown non-APIError errors and cancellation are terminal
   under `WithRetry` — the hand-rolled root classifier used to retry any

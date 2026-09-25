@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -25,9 +26,8 @@ import (
 //     /proc/self/cgroup) and move the bwrap pid into it after launch.
 //
 // When NEITHER is available, resource limits would otherwise be silently
-// dropped. The run
-// FAILS with an actionable error unless the operator explicitly opts into
-// the WithCapPolicy(CapBestEffort) option.
+// dropped; the run fails with an actionable error unless the operator opts
+// into WithCapPolicy(CapBestEffort).
 
 // bwrapCapMethod names the resource-limit enforcement mechanism a Bwrap
 // backend resolved for the current host.
@@ -51,9 +51,11 @@ const systemdRunProbeTimeout = 5 * time.Second
 // Every step is best-effort and cheap; failures fall through to the next
 // method rather than erroring, since the ultimate "nothing worked" case is
 // handled by the caller (Exec), which decides whether that is fatal based on
-// capPolicy.
-func detectBwrapCapMethod(ctx context.Context) bwrapCapMethod {
-	if systemdRunUserAvailable(ctx) {
+// capPolicy. expandSupport answers whether this host's systemd-run accepts
+// --expand-environment=no (systemdRunExpandSupport, or a Bwrap instance's
+// cached answer).
+func detectBwrapCapMethod(ctx context.Context, expandSupport func(context.Context) bool) bwrapCapMethod {
+	if systemdRunUserAvailable(ctx) && expandSupport(ctx) {
 		return bwrapCapSystemdRun
 	}
 	if _, ok := delegatedCgroupV2Dir(); ok {
@@ -62,21 +64,104 @@ func detectBwrapCapMethod(ctx context.Context) bwrapCapMethod {
 	return bwrapCapNone
 }
 
+// systemdRunMinNoExpandVersion is the first systemd whose systemd-run
+// understands --expand-environment=no (v254). Passing the flag to an older
+// systemd-run fails the exec outright — preferred over silently launching
+// with host-env expansion.
+const systemdRunMinNoExpandVersion = 254
+
+// systemdRunVersionWaitDelay bounds how long the version probe waits for
+// its output pipe to close after systemd-run exits or is killed: a
+// systemd-run that leaves a child holding stdout open must not stretch the
+// probe past its own timeout.
+const systemdRunVersionWaitDelay = time.Second
+
+// systemdRunVersion runs `systemd-run --version` and returns its stdout.
+// Test seam: tests override it to feed systemdRunExpandSupport canned output.
+var systemdRunVersion = func(ctx context.Context) ([]byte, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, systemdRunProbeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(probeCtx, "systemd-run", "--version")
+	cmd.WaitDelay = systemdRunVersionWaitDelay
+	return cmd.Output()
+}
+
+// systemdRunExpandSupport reports whether this host's systemd-run accepts
+// --expand-environment=no. Without that flag, systemd-run expands ${NAME}
+// references inside the wrapped argv from the HOST environment before bwrap
+// starts (measured on systemd 261: with ZZHOSTONLY set on the host, sh -c
+// 'echo brace=${ZZHOSTONLY}' printed the host value inside the sandbox) — a
+// host-env leak a model-driven Cmd can read through. A NO answer — including
+// a probe that fails, times out, or prints anything but a parseable
+// "systemd <major>" first line — fails CLOSED: detectBwrapCapMethod never
+// resolves the systemd-run method, degrading to a delegated cgroup v2
+// subtree (or bwrapCapNone, honoring WithCapPolicy) — enforcement may be
+// absent, but never "enforcement plus a leak".
+func systemdRunExpandSupport(ctx context.Context) bool {
+	out, err := systemdRunVersion(ctx)
+	return err == nil && systemdRunSupportsNoExpand(out)
+}
+
+// systemdRunSupportsNoExpand parses `systemd-run --version` output: the
+// first line must be "systemd <major> ..." with an integer major of at
+// least systemdRunMinNoExpandVersion. Any other shape is a NO.
+func systemdRunSupportsNoExpand(versionOutput []byte) bool {
+	fields := strings.Fields(strings.SplitN(string(versionOutput), "\n", 2)[0])
+	if len(fields) < 2 || fields[0] != "systemd" {
+		return false
+	}
+	major, err := strconv.Atoi(fields[1])
+	if err != nil {
+		return false
+	}
+	return major >= systemdRunMinNoExpandVersion
+}
+
+// expandSupportCache remembers one Bwrap instance's systemdRunExpandSupport
+// answer, so the version probe runs once per instance instead of on every
+// Exec. Only an answer the probe reached with the caller's ctx still live is
+// cached: a probe cut short by the caller is asked again next time. A probe
+// that fails or times out on its own is a cached NO for the instance's
+// lifetime — fail-closed, and bounded to one probe timeout per instance
+// (the probe runs under mu, so re-probing on every Exec would serialize
+// concurrent Execs behind a hung systemd-run one timeout at a time). A fresh
+// Bwrap probes again. The zero value is ready to use.
+type expandSupportCache struct {
+	mu    sync.Mutex
+	known bool
+	ok    bool
+}
+
+// supported returns the cached answer, probing on first use.
+func (c *expandSupportCache) supported(ctx context.Context) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.known {
+		return c.ok
+	}
+	ok := systemdRunExpandSupport(ctx)
+	if ctx.Err() == nil {
+		c.known, c.ok = true, ok
+	}
+	return ok
+}
+
 // DescribeBwrapCapMethod reports the resource-limit enforcement mechanism
 // this host currently supports for the bwrap backend, for doctor's advisory
 // reporting: "enforced" (systemd-run --user --scope or cgroup v2 available,
 // so runs get their configured caps) or a reason why neither is available
-// (runs would fail unless the allow-uncapped option is set — see ErrBwrapNoCapMethod).
-// The label names the mechanism only; remediation guidance belongs to the
-// caller, which wraps ErrBwrapNoCapMethod with its own operator-facing hint.
+// (runs would fail unless the allow-uncapped option is set — see
+// ErrBwrapNoCapMethod). The label names the mechanism only; remediation
+// guidance belongs to the caller, which wraps ErrBwrapNoCapMethod with its
+// own operator-facing hint.
 func DescribeBwrapCapMethod(ctx context.Context) (label string, enforced bool) {
-	switch detectBwrapCapMethod(ctx) {
+	switch detectBwrapCapMethod(ctx, systemdRunExpandSupport) {
 	case bwrapCapSystemdRun:
 		return "systemd-run --user --scope", true
 	case bwrapCapCgroupV2:
 		return "delegated cgroup v2 subtree", true
 	default:
-		return "none (neither systemd-run --user --scope nor a delegated cgroup v2 subtree)", false
+		return fmt.Sprintf("none (neither systemd-run --user --scope on systemd >= %d nor a delegated cgroup v2 subtree)", systemdRunMinNoExpandVersion), false
 	}
 }
 
@@ -86,7 +171,8 @@ func DescribeBwrapCapMethod(ctx context.Context) (label string, enforced bool) {
 // trivial query within systemdRunProbeTimeout. A binary merely existing on
 // PATH is not sufficient — a container or minimal host can have the client
 // tools installed with no systemd PID 1 and no user session bus behind them.
-func systemdRunUserAvailable(ctx context.Context) bool {
+// Test seam: tests override it so detection does not depend on the host.
+var systemdRunUserAvailable = func(ctx context.Context) bool {
 	if _, err := exec.LookPath("systemd-run"); err != nil {
 		return false
 	}
@@ -106,8 +192,8 @@ const cgroupV2Root = "/sys/fs/cgroup"
 // cgroup v2 membership, if the host mounts cgroup v2 (cgroup.controllers
 // present at cgroupV2Root) AND that directory is writable by this process —
 // the signal that the cgroup was delegated to the (possibly unprivileged)
-// user rather than being root-owned. A subdirectory created there inherits
-// delegation and can set memory.max/cpu.max/pids.max for its own descendants.
+// user. A subdirectory created there inherits delegation and can set
+// memory.max/cpu.max/pids.max for its own descendants.
 func delegatedCgroupV2Dir() (string, bool) {
 	if _, err := os.Stat(cgroupV2Root + "/cgroup.controllers"); err != nil {
 		return "", false
@@ -134,12 +220,13 @@ func delegatedCgroupV2Dir() (string, bool) {
 	return dir, true
 }
 
-// ErrBwrapNoCapMethod is returned (possibly wrapped) by Bwrap.Exec
-// when resource limits were requested (the normal case) but neither enforcement
-// mechanism is available and the operator has not opted into running uncapped
-// via WithCapPolicy(CapBestEffort). Callers match it with errors.Is to attach
-// their own remediation (e.g. a config key) instead of string matching.
-var ErrBwrapNoCapMethod = errors.New("sandbox: bwrap backend found no resource-limit mechanism (systemd-run --user --scope or a delegated cgroup v2 subtree); set WithCapPolicy(CapBestEffort) to run without enforced memory/CPU/pids limits")
+// ErrBwrapNoCapMethod is returned (possibly wrapped) by Bwrap.Exec when
+// resource limits were requested (the normal case) but neither enforcement
+// mechanism is available and the operator has not opted into running
+// uncapped via WithCapPolicy(CapBestEffort). Callers match it with
+// errors.Is to attach their own remediation (e.g. a config key) instead of
+// string matching.
+var ErrBwrapNoCapMethod = errors.New("sandbox: bwrap backend found no resource-limit mechanism (systemd-run --user --scope on systemd >= " + strconv.Itoa(systemdRunMinNoExpandVersion) + ", which is required for --expand-environment=no, or a delegated cgroup v2 subtree); set WithCapPolicy(CapBestEffort) to run without enforced memory/CPU/pids limits")
 
 // systemdRunWrapArgs prepends a systemd-run --user --scope invocation (with
 // MemoryMax/CPUQuota/TasksMax properties) around the given bwrap binary +
@@ -147,7 +234,13 @@ var ErrBwrapNoCapMethod = errors.New("sandbox: bwrap backend found no resource-l
 // 0 omit the corresponding property, matching buildRunArgs' "omit when
 // unset" convention for --memory/--cpus/--pids-limit.
 func systemdRunWrapArgs(bwrapPath string, bwrapArgs []string, cpus float64, memoryMB, pidsLimit int) []string {
-	args := []string{"systemd-run", "--user", "--scope", "--quiet", "--collect"}
+	// --expand-environment=no: bwrapArgs is UNTRUSTED Spec.Cmd content and
+	// must reach bwrap byte-for-byte. Without the flag, systemd-run expands
+	// ${NAME} in the command line from the HOST environment (see
+	// systemdRunExpandSupport). The support probe behind
+	// detectBwrapCapMethod guarantees the flag is only ever passed to a
+	// systemd-run that accepts it.
+	args := []string{"systemd-run", "--user", "--scope", "--quiet", "--collect", "--expand-environment=no"}
 	if memoryMB > 0 {
 		args = append(args, "-p", fmt.Sprintf("MemoryMax=%dM", memoryMB))
 	}
@@ -190,5 +283,6 @@ func cgroupV2Limits(cpus float64, memoryMB, pidsLimit int) (memory, cpuMax, pids
 }
 
 // detectCapMethod is the seam Exec uses to probe the host's enforcement
-// mechanism; tests override it to force the "none" path deterministically.
+// mechanism (with the instance's cached expand-support answer); tests
+// override it to force the "none" path deterministically.
 var detectCapMethod = detectBwrapCapMethod

@@ -83,18 +83,81 @@ func TestBuildRunArgsSizesScratchTmpfs(t *testing.T) {
 	mustContainSeq(t, args, "--tmpfs", "/tmp:rw,exec,nosuid,size=1024m")
 }
 
-// TestBuildRunArgsDefaultScratchSize verifies that an unset (zero-value)
-// scratchSizeMB falls back to fallbackScratchSizeMB (512m), preserving the
-// historical hardcoded behavior byte-for-byte on an unconfigured host.
+// TestBuildRunArgsDefaultScratchSize pins the unconfigured scratch size: a
+// CLI with no options renders /tmp at the documented 512 MB.
 func TestBuildRunArgsDefaultScratchSize(t *testing.T) {
+	s := &CLI{runtime: "podman", defaultImage: "img", defaults: baseDefaults()}
+	var o options
+	o.applyDefaults(&s.defaults)
+	p, err := s.resolveParams(Spec{Cmd: []string{"true"}})
+	if err != nil {
+		t.Fatalf("resolveParams: %v", err)
+	}
+	mustContainSeq(t, buildRunArgs(p), "--tmpfs", "/tmp:rw,exec,nosuid,size=512m")
+}
+
+// TestBuildRunArgsNoPathOverrideWithoutToolchains pins that a CLI with no
+// host toolchains renders no --env PATH=, so the image's own ENV PATH
+// stays in effect.
+func TestBuildRunArgsNoPathOverrideWithoutToolchains(t *testing.T) {
+	s := &CLI{runtime: "podman", defaultImage: "img", defaults: baseDefaults()}
+	p, err := s.resolveParams(Spec{Cmd: []string{"true"}, Env: []string{"FOO=bar"}})
+	if err != nil {
+		t.Fatalf("resolveParams: %v", err)
+	}
+	args := buildRunArgs(p)
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--env" && strings.HasPrefix(args[i+1], "PATH=") {
+			t.Errorf("args = %q, want no --env PATH= without host toolchains", args)
+		}
+	}
+}
+
+// TestBuildRunArgsRendersToolchainBinds pins S1-2's CLI-side rendering:
+// WithHostToolchains' resolved mounts render as plain `-v host:ctr:ro`
+// (never :Z, regardless of ROMount.Shared — these are always host-owned
+// installs), and its PATH prefix renders as an --env PATH override BEFORE
+// any Spec.Env entry, so an explicit Spec.Env PATH still wins.
+func TestBuildRunArgsRendersToolchainBinds(t *testing.T) {
 	args := buildRunArgs(runParams{
-		containerName: "llmkit-default-scratch",
+		containerName: "llmkit-toolchains",
 		workspace:     "/ws",
 		image:         "img",
 		network:       "none",
+		scratchSizeMB: 512,
 		cmd:           []string{"true"},
+		toolchainBinds: []ROMount{
+			{HostPath: "/host/node", ContainerPath: "/opt/llmkit-toolchains/node", Shared: true},
+			{HostPath: "/host/py", ContainerPath: "/opt/llmkit-toolchains/py", Shared: true},
+		},
+		toolchainPathPrepend: "/opt/llmkit-toolchains/node/bin:/opt/llmkit-toolchains/py/bin",
+		env:                  []string{"PATH=/operator/bin"},
 	})
-	mustContainSeq(t, args, "--tmpfs", "/tmp:rw,exec,nosuid,size=512m")
+	mustContainSeq(t, args, "-v", "/host/node:/opt/llmkit-toolchains/node:ro")
+	mustContainSeq(t, args, "-v", "/host/py:/opt/llmkit-toolchains/py:ro")
+	wantToolchainPath := "--env PATH=/opt/llmkit-toolchains/node/bin:/opt/llmkit-toolchains/py/bin:" + defaultContainerPath
+	gotToolchainPath := false
+	gotOperatorPath := false
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] != "--env" {
+			continue
+		}
+		if args[i+1] == "PATH=/opt/llmkit-toolchains/node/bin:/opt/llmkit-toolchains/py/bin:"+defaultContainerPath {
+			gotToolchainPath = true
+		}
+		if args[i+1] == "PATH=/operator/bin" {
+			gotOperatorPath = true
+			if !gotToolchainPath {
+				t.Errorf("Spec.Env PATH rendered before the toolchain PATH override; want %q first", wantToolchainPath)
+			}
+		}
+	}
+	if !gotToolchainPath {
+		t.Errorf("args = %q, want an --env %s", args, wantToolchainPath)
+	}
+	if !gotOperatorPath {
+		t.Errorf("args = %q, want Spec.Env's --env PATH=/operator/bin after the toolchain override", args)
+	}
 }
 
 func TestBuildRunArgsRendersReadOnlyMounts(t *testing.T) {

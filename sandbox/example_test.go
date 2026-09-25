@@ -92,7 +92,7 @@ func ExampleResult_infraKilled() {
 			TimedOut: true,
 		},
 	})
-	res, _ := sb.Exec(context.Background(), sandbox.Spec{Cmd: []string{"slow-build"}})
+	res, _ := sb.Exec(context.Background(), sandbox.Spec{RepoDir: "/repo", Cmd: []string{"slow-build"}})
 
 	fmt.Println("infra killed:", res.InfraKilled())
 	fmt.Println("kill reason:", res.KillReason())
@@ -132,8 +132,8 @@ func ExampleUnsupportedSpecError() {
 
 // ExampleMock_materializeWorkspace shows the optional third step of a
 // run: creating one caller-owned workspace for repeated Execs. The Mock
-// implements the step trivially — it returns repoDir unchanged and
-// records nothing — which is enough to exercise the caller-side flow.
+// creates a fresh empty directory — never the repoDir it was handed —
+// and records every path it created. The caller removes it when done.
 func ExampleMock_materializeWorkspace() {
 	sb := sandbox.NewMock(sandbox.MockResponse{
 		Result: sandbox.Result{ExitCode: 0, Stdout: "ok\n"},
@@ -143,7 +143,16 @@ func ExampleMock_materializeWorkspace() {
 		fmt.Println("error:", err)
 		return
 	}
-	fmt.Println(ws)
+	defer func() { _ = os.RemoveAll(ws) }()
+
+	// The path is fresh (never the input) and is a real directory. The
+	// path itself is host-specific, so the example prints its properties,
+	// never its value.
+	fmt.Println("fresh workspace:", ws != "/tmp/repo")
+	if info, err := os.Stat(ws); err == nil && info.IsDir() {
+		fmt.Println("is a directory: true")
+	}
+	fmt.Println("materialized recorded:", len(sb.Materialized()) == 1)
 	if _, err := sb.Exec(context.Background(), sandbox.Spec{
 		Workspace: ws,
 		Cmd:       []string{"make", "test"},
@@ -154,6 +163,8 @@ func ExampleMock_materializeWorkspace() {
 	fmt.Println("calls recorded:", sb.CallCount())
 
 	// Output:
-	// /tmp/repo
+	// fresh workspace: true
+	// is a directory: true
+	// materialized recorded: true
 	// calls recorded: 1
 }

@@ -6,9 +6,9 @@ import (
 	"time"
 )
 
-// DefaultMaxOutputBytes is the per-stream cap applied to captured stdout and
-// stderr. Output beyond this size is discarded and Result records that it was
-// truncated.
+// DefaultMaxOutputBytes is the per-stream cap applied to captured stdout
+// and stderr. Output beyond this size is discarded and Result records
+// that it was truncated.
 const DefaultMaxOutputBytes = 1 << 20 // 1 MiB
 
 // NetworkMode selects a run's network posture. The zero value ("") means
@@ -33,11 +33,12 @@ const (
 )
 
 // UnsupportedSpecError is returned by Exec when a backend cannot honor a
-// non-empty per-call Spec field, and by NewCLI/NewBwrap when a WithNetwork
-// default names a mode that backend could never honor. A backend never
-// silently runs with a different posture than the Spec requested: refusing
-// the run IS the contract. Match with errors.As; Backend is "cli", "bwrap",
-// or "host".
+// well-formed per-call Spec field, and by NewCLI/NewBwrap when a
+// WithNetwork default names a mode that backend could never honor. A
+// backend never silently runs with a different posture than the Spec
+// requested: refusing the run IS the contract. Match with errors.As;
+// Backend is "cli", "bwrap", or "host". A Spec malformed for every backend
+// instead returns InvalidSpecError.
 type UnsupportedSpecError struct {
 	Backend string // "cli", "bwrap", or "host"
 	Field   string // Spec field name, e.g. "Network", "Image"
@@ -48,13 +49,45 @@ func (e *UnsupportedSpecError) Error() string {
 	return fmt.Sprintf("sandbox: %s backend cannot honor Spec.%s = %q", e.Backend, e.Field, e.Value)
 }
 
+// InvalidSpecError is returned by Exec — on EVERY backend, the Mock
+// included — when the Spec itself is malformed and no backend could run
+// it: an empty Cmd, neither RepoDir nor Workspace, a relative Workspace,
+// a WriteFiles key or CaptureFiles entry escaping the workspace, an
+// empty/relative mount path, a duplicate ContainerPath, or an Env entry
+// without "=" or with an empty key. The three real backends also refuse
+// a Workspace that does not exist, is not a directory, or cannot be
+// entered. Match with errors.As; Field names the offending Spec field.
+// Fix the Spec. (A Spec well-formed but impossible for ONE backend is
+// refused instead with UnsupportedSpecError.)
+type InvalidSpecError struct {
+	// Field names the Spec field that is malformed. It is one of:
+	//   - "Cmd": Cmd is empty.
+	//   - "RepoDir": neither RepoDir nor Workspace is set.
+	//   - "Workspace": Workspace is relative; or (real backends only) it
+	//     does not exist, is not a directory, or is not searchable.
+	//   - "WriteFiles": a key escapes the workspace.
+	//   - "CaptureFiles": an entry escapes the workspace.
+	//   - "ROMounts" or "RWMounts": the list holding a mount with an empty
+	//     or relative HostPath/ContainerPath, or — for a duplicate
+	//     ContainerPath — the list holding the SECOND occurrence (ROMounts
+	//     are checked before RWMounts).
+	//   - "Env": an entry has no "=" or an empty key.
+	Field string
+	// Reason is the human-readable explanation of what is wrong.
+	Reason string
+}
+
+func (e *InvalidSpecError) Error() string {
+	return "sandbox: invalid Spec." + e.Field + ": " + e.Reason
+}
+
 // resolveNetworkMode merges the backend default with the Spec's per-call
 // mode and validates the result against the backend's supported set. An
 // empty requested mode resolves to def; when both are empty the package
-// default NetworkNone applies (the constructors set it explicitly, so this
-// fallback only covers a zero-value backend struct). Anything outside
-// supported is refused with an UnsupportedSpecError — never silently
-// substituted.
+// default NetworkNone applies (the constructors set it explicitly, so
+// this fallback only covers a zero-value backend struct). Anything
+// outside supported is refused with an UnsupportedSpecError — never
+// silently substituted.
 func resolveNetworkMode(backend string, def, requested NetworkMode, supported ...NetworkMode) (NetworkMode, error) {
 	mode := requested
 	if mode == "" {
@@ -74,23 +107,22 @@ func resolveNetworkMode(backend string, def, requested NetworkMode, supported ..
 // Spec describes a single sandboxed execution.
 //
 // The Mock backend records every field verbatim and runs nothing; the
-// honor notes below cover the three real backends (CLI, Bwrap,
-// HostExec).
+// honor notes below cover the three real backends (CLI, Bwrap, HostExec).
 type Spec struct {
-	// RepoDir is the host path to the repository snapshot to run against. It is
-	// copied into a fresh temporary workspace before execution; the original is
-	// never mounted writable (and is not mutated). Required.
+	// RepoDir is the host path to the repository snapshot to run against.
+	// It is copied into a fresh temporary workspace before execution; the
+	// original is never mounted writable (and is not mutated). Required.
 	RepoDir string
 
 	// Workspace, when non-empty, overrides the fresh-copy-per-Exec default:
 	// Exec uses this host directory as the workspace directly instead of
-	// copying RepoDir into a new temp dir. Exec does not remove it afterward;
-	// the caller owns its entire lifecycle (creation via MaterializeWorkspace
-	// and removal). WriteFiles still apply onto it, so repeated Execs
-	// against the same Workspace accumulate and overwrite files exactly like
-	// repeated writes to a real working tree. The container backends require
-	// an absolute path; HostExec uses the path verbatim as the working
-	// directory.
+	// copying RepoDir into a new temp dir. Exec does not remove it
+	// afterward; the caller owns its entire lifecycle (creation via
+	// MaterializeWorkspace and removal). WriteFiles still apply onto it, so
+	// repeated Execs against the same Workspace accumulate and overwrite
+	// files exactly like repeated writes to a real working tree. The
+	// container backends require an absolute path; HostExec uses the path
+	// verbatim as the working directory.
 	//
 	// TRUST: only pass a directory the harness itself created (e.g. via
 	// MaterializeWorkspace). Exec does no provenance check, so an arbitrary
@@ -106,16 +138,17 @@ type Spec struct {
 	// container, in the same form as os.Environ.
 	Env []string
 
-	// Image overrides the backend's default image for this execution. When
-	// empty, the backend's configured default image is used. The Bwrap and
-	// HostExec backends have no image concept, so they refuse a non-empty
-	// Image at Exec instead of silently ignoring it.
+	// Image overrides the backend's default image for this execution.
+	// When empty, the backend's configured default image is used. The
+	// Bwrap and HostExec backends have no image concept, so they refuse a
+	// non-empty Image at Exec instead of silently ignoring it.
 	Image string
 
-	// Timeout bounds the execution wall-clock time as a HARD ceiling. When
-	// <= 0 the backend's default timeout is used (CLI and Bwrap default to
-	// 10m; HostExec has no default, so only the caller's context can cancel).
-	// On expiry the backend kills the command and sets Result.TimedOut.
+	// Timeout bounds the execution wall-clock time as a HARD ceiling.
+	// When <= 0 the backend's default timeout is used (CLI and Bwrap
+	// default to 10m; HostExec has no default, so only the caller's
+	// context can cancel). On expiry the backend kills the command and
+	// sets Result.TimedOut.
 	Timeout time.Duration
 
 	// Network selects the run's network posture (see NetworkMode). The zero
@@ -125,24 +158,24 @@ type Spec struct {
 	// silently substituted.
 	Network NetworkMode
 
-	// WriteFiles are files to write into the workspace before execution, keyed
-	// by path relative to the workspace root. This is how reproduction tests
-	// are injected into the snapshot. Parent directories are created as needed.
-	// Paths that escape the workspace (absolute, or containing "..") are
-	// rejected as an error.
+	// WriteFiles are files to write into the workspace before execution,
+	// keyed by path relative to the workspace root. This is how
+	// reproduction tests are injected into the snapshot. Parent
+	// directories are created as needed. Paths that escape the workspace
+	// (absolute, or containing "..") are rejected as an error.
 	WriteFiles map[string][]byte
 
 	// ROMounts are additional host directories bind-mounted read-only into
 	// the sandbox, in addition to the writable workspace. They exist so a
 	// dependency cache (e.g. a Go module cache) can be available to an
-	// otherwise network-none run without copying it into the workspace. The
-	// CLI and Bwrap backends honor them; HostExec refuses a non-empty
+	// otherwise network-none run without copying it into the workspace.
+	// The CLI and Bwrap backends honor them; HostExec refuses a non-empty
 	// ROMounts with an UnsupportedSpecError.
 	//
 	// A mount is NEVER writable. Both paths must be absolute; empty paths
-	// and ContainerPaths duplicate across ROMounts and RWMounts are rejected
-	// as an error by Exec. On the CLI backend each mount renders as
-	// `-v host:ctr:ro,Z` unless ROMount.Shared is true.
+	// and duplicate ContainerPaths across ROMounts and RWMounts are
+	// rejected as an error by Exec. On the CLI backend each mount renders
+	// as `-v host:ctr:ro,Z` unless ROMount.Shared is true.
 	//
 	// SECURITY: a read-only mount exposes host content to untrusted,
 	// model-driven code. Callers must only mount public/cache content and
@@ -188,10 +221,11 @@ type Spec struct {
 	// (a bare host process has no exit-125 environment-error contract to
 	// keep).
 	//
-	// Examples: ["npm","ci","--offline"] or ["pip","install","--no-index","--find-links=/pipcache","."]
+	// Examples: ["npm","ci","--offline"] or
+	// ["pip","install","--no-index","--find-links=/pipcache","."]
 	//
-	// When SetupCmds is non-empty, both container backends wrap the
-	// execution in /bin/sh: each command is shell-quoted and chained with
+	// When SetupCmds is non-empty, both container backends wrap execution
+	// in /bin/sh: each command is shell-quoted and chained with
 	// "|| exit 125", so any setup failure exits with code 125. Exit 125 is
 	// intentional: verdict classification treats container exit 125/126/127
 	// as an environment error, NOT a demonstrated result — a failed
@@ -221,140 +255,145 @@ type Spec struct {
 }
 
 // ROMount is a single read-only bind mount of a host directory into the
-// container. It is never writable.
+// container. Never writable.
 type ROMount struct {
 	// HostPath is the absolute host path to expose. Required.
 	HostPath string
 	// ContainerPath is the absolute path the mount appears at inside the
-	// sandbox. Required, and unique across the Spec's ROMounts and RWMounts
-	// combined.
+	// sandbox. Required, and unique across the Spec's ROMounts and
+	// RWMounts combined.
 	ContainerPath string
 	// Shared, when true, suppresses the SELinux :Z relabel suffix on this
-	// mount. Use Shared=true for host directories that are NOT owned exclusively
-	// by the sandboxing tool — in particular, the user's shared Go module cache
-	// (~/go/pkg/mod). On SELinux-enforcing hosts (Fedora, RHEL — rootless
-	// podman's home turf) :Z recursively relabels the target to a
-	// container-PRIVATE MCS label. That is correct for tool-owned dirs (it
-	// isolates them), but catastrophic for a shared cache: it is slow on
-	// multi-GB trees, breaks the host go toolchain, and breaks any other
-	// container concurrently sharing the same cache.
+	// mount. Use Shared=true for host directories that are NOT owned
+	// exclusively by the sandboxing tool — in particular, the user's shared
+	// Go module cache (~/go/pkg/mod). On SELinux-enforcing hosts (Fedora,
+	// RHEL — rootless podman's home turf) :Z recursively relabels the
+	// target to a container-PRIVATE MCS label: correct for tool-owned dirs,
+	// but catastrophic for a shared cache (slow on multi-GB trees, breaks
+	// the host go toolchain, breaks any other container sharing the cache).
 	//
-	// When Shared=true the mount is rendered :ro with NO label suffix. This
-	// means the container accesses the directory under its existing SELinux
-	// context. Under a strict enforcing policy the container may get EACCES if
-	// that policy does not allow the container domain to read the host user's
-	// home content. That is the correct conservative failure — a permission
-	// error is loud and actionable, whereas :Z silently corrupts shared state.
-	// Users who hit EACCES can opt in to :z (lowercase, shared relabel) by
-	// labeling the tree as shared at the host level, or by moving the
-	// directory under a tool-managed cache root that is safe to relabel
-	// (Shared=false, gets :Z).
+	// When Shared=true the mount is rendered :ro with NO label suffix; the
+	// container accesses the directory under its existing SELinux context.
+	// Under a strict enforcing policy the container may get EACCES — that
+	// is the correct conservative failure (loud and actionable), whereas
+	// :Z silently corrupts shared state. Users who hit EACCES can opt in to
+	// :z (lowercase, shared relabel) by labeling the tree as shared at the
+	// host level, or by moving it under a tool-managed cache root that is
+	// safe to relabel (Shared=false, gets :Z).
 	//
-	// Tool-managed dirs (dependency caches, prefetch RW targets) leave Shared
-	// false so they receive :Z isolation.
+	// Tool-managed dirs (dependency caches, prefetch RW targets) leave
+	// Shared false so they receive :Z isolation.
 	Shared bool
 }
 
 // Result is the faithful outcome of a sandboxed execution.
 //
-// A non-zero ExitCode is NOT reported as a Go error: callers interpret exit
-// codes themselves (a failing repro test is expected to exit non-zero). Only
-// infrastructure failures — a missing runtime, a failed workspace copy, an
-// inability to launch the container — are returned as errors from Exec.
+// A non-zero ExitCode is NOT reported as a Go error: callers interpret
+// exit codes themselves (a failing repro test is expected to exit
+// non-zero). A command that cannot be launched is an exit code too on
+// every real backend (127 missing, 126 not executable), and so is a
+// command killed by a signal (128+signo). Exec returns an error only for
+// a refused Spec (InvalidSpecError, UnsupportedSpecError), a caller
+// context that ended (cancel or deadline), or an infrastructure failure
+// — a missing runtime, a failed workspace copy, a runtime or wrapper
+// that could not be started.
 type Result struct {
 	// ExitCode is the process exit code of the sandboxed command. A
 	// watchdog kill (timeout or growth ceiling) reports -1; every other
-	// value is the command's own exit code. Set by Exec on every backend;
-	// a Mock script supplies whatever value its caller scripted.
+	// value is the command's own exit code — 128+signo when a signal the
+	// kit did not send killed it. Set by Exec on every backend; a Mock
+	// script supplies whatever value its caller scripted.
 	ExitCode int
 
-	// Stdout and Stderr are the captured output streams, each capped at the
-	// backend's max output size. Truncation is recorded in the Truncated flags
-	// and a trailing marker is appended to the captured text.
+	// Stdout and Stderr are the captured output streams, each capped at
+	// the backend's max output size. Truncation is recorded in the
+	// Truncated flags and a trailing marker is appended to the captured
+	// text.
 	Stdout string
 	Stderr string
 
-	// StdoutTruncated / StderrTruncated report whether the corresponding stream
-	// exceeded the cap and was truncated.
+	// StdoutTruncated / StderrTruncated report whether the corresponding
+	// stream exceeded the cap and was truncated.
 	StdoutTruncated bool
 	StderrTruncated bool
 
 	// Duration is the measured wall-clock time of the execution: process
-	// launch through exit. It covers container create + the command itself;
-	// a single `podman run` invocation does not expose a way to separate
-	// container-create time from command time, so this stays one number. See
-	// PrepDuration for the (separable) pre-container workspace-preparation
-	// cost.
+	// launch through exit. It covers container create + the command
+	// itself; a single `podman run` invocation does not expose a way to
+	// separate container-create time from command time, so this stays one
+	// number. See PrepDuration for the (separable) pre-container
+	// workspace-preparation cost.
 	Duration time.Duration
 
-	// TimedOut is true when the execution was killed because it exceeded the
-	// effective timeout OR because the idle watchdog observed no progress for
-	// the backend's WithIdleTimeout window. It is left false when
-	// WorkspaceQuotaExceeded is true (see below) — the two are mutually
-	// exclusive, distinct kill reasons.
+	// TimedOut is true when the execution was killed because it exceeded
+	// the effective timeout OR because the idle watchdog observed no
+	// progress for the backend's WithIdleTimeout window. It is left false
+	// when WorkspaceQuotaExceeded is true (see below) — the two are
+	// mutually exclusive, distinct kill reasons.
 	TimedOut bool
 
 	// WorkspaceQuotaExceeded is true when Exec killed the run because the
 	// workspace's NET regular-file size grew by more than the backend's
 	// configured growth-ceiling bytes since the run started (a
 	// write-then-delete churn nets out and never trips this). The CLI and
-	// Bwrap watchdogs set it; HostExec never does (no watchdog), and a Mock
-	// script supplies it verbatim.
+	// Bwrap watchdogs set it; HostExec never does (no watchdog), and a
+	// Mock script supplies it verbatim.
 	//
-	// This is deliberately NOT reported as TimedOut. A run that is actively
-	// filling disk reads as "making progress" to the idle check and would
-	// otherwise run undetected until the absolute Timeout. Callers that
-	// only check TimedOut must not mistake a disk-filler for a genuine
-	// stall or a legitimate long-running build.
+	// This is deliberately NOT reported as TimedOut. A run that is
+	// actively filling disk reads as "making progress" to the idle check
+	// and would otherwise run undetected until the absolute Timeout.
+	// Callers that only check TimedOut must not mistake a disk-filler for
+	// a genuine stall or a legitimate long-running build.
 	//
 	// ExitCode is -1, exactly like a TimedOut kill. If the process exited
 	// on its own after breaching the ceiling, the breach still overrides
-	// its own exit code: the ceiling is a measured invariant, not a racing
-	// heuristic.
+	// its own exit code: the ceiling is a measured invariant, not a
+	// racing heuristic.
 	WorkspaceQuotaExceeded bool
 
 	// PrepDuration is the wall-clock time spent preparing the workspace
 	// BEFORE the command ran: ensuring the pristine workspace copy
-	// (materializing on a cache miss, reusing it on a hit), cloning it into
-	// a fresh per-run workspace, and applying WriteFiles. It is disjoint
-	// from Duration. The three real backends set it; a Mock script supplies
-	// whatever its caller scripted.
+	// (materializing on a cache miss, reusing it on a hit), cloning it
+	// into a fresh per-run workspace, and applying WriteFiles. It is
+	// disjoint from Duration. The three real backends set it; a Mock
+	// script supplies whatever its caller scripted.
 	PrepDuration time.Duration
 
 	// WorkspaceCacheHit reports whether the backend's pristine-workspace
-	// cache already held a pristine copy matching this repo's current HEAD
-	// + working-tree state, so this Exec skipped materialization and only
-	// cloned it. CLI and Bwrap set it; always false on HostExec (no cache)
-	// and whenever RepoDir is not a git work tree, since the cache is
-	// bypassed entirely there. A Mock script supplies it verbatim.
+	// cache already held a pristine copy matching this repo's current
+	// HEAD + working-tree state, so this Exec skipped materialization and
+	// only cloned it. CLI and Bwrap set it; always false on HostExec (no
+	// cache) and whenever RepoDir is not a git work tree, since the cache
+	// is bypassed entirely there. A Mock script supplies it verbatim.
 	WorkspaceCacheHit bool
 
-	// Captured holds the workspace-relative files named in Spec.CaptureFiles,
-	// keyed by their (cleaned) relative path, each capped at the backend's max
-	// output size like Stdout/Stderr. A key is absent when the command never
-	// wrote that file — CaptureFiles is a best-effort "grab it if the tool
-	// produced it" contract, not a manifest every run must satisfy. Nil when
-	// Spec.CaptureFiles was empty or nothing was captured.
+	// Captured holds the workspace-relative files named in
+	// Spec.CaptureFiles, keyed by their (cleaned) relative path, each
+	// capped at the backend's max output size like Stdout/Stderr. A key is
+	// absent when the command never wrote that file — CaptureFiles is a
+	// best-effort "grab it if the tool produced it" contract, not a
+	// manifest every run must satisfy. Nil when Spec.CaptureFiles was
+	// empty or nothing was captured.
 	Captured map[string][]byte
 }
 
 // InfraKilled reports whether Exec killed this run for an infrastructure
 // reason — the absolute/idle timeout OR the workspace-growth ceiling —
-// rather than the command exiting (successfully or not) on
-// its own. Callers that classify a Result into a verdict MUST check this
-// BEFORE interpreting ExitCode/output: a run killed by us must never be
-// read as "the command completed and its output says X" (e.g.
-// misclassified as not-demonstrated or a rejected fix) regardless of which
-// specific kill reason fired. This is the shared seam every caller's
-// verdict-classification code uses so a new kill reason only needs to be
-// taught here once, not re-derived at every call site.
+// rather than the command exiting (successfully or not) on its own.
+// Callers that classify a Result into a verdict MUST check this BEFORE
+// interpreting ExitCode/output: a run killed by us must never be read as
+// "the command completed and its output says X" (e.g. misclassified as
+// not-demonstrated or a rejected fix) regardless of which specific kill
+// reason fired. This is the shared seam every caller's verdict-classification
+// code uses so a new kill reason only needs to be taught here once, not
+// re-derived at every call site.
 func (r Result) InfraKilled() bool {
 	return r.TimedOut || r.WorkspaceQuotaExceeded
 }
 
 // KillReason returns a short, human-readable label naming why Exec killed
-// this run when InfraKilled is true, for verdict/summary messages that want
-// to name the specific cause rather than a generic "timed out" — in
+// this run when InfraKilled is true, for verdict/summary messages that
+// want to name the specific cause rather than a generic "timed out" — in
 // particular so a WorkspaceQuotaExceeded kill (a disk-filler) reads
 // distinctly from a genuine idle-stall/absolute-timeout kill instead of
 // both collapsing into the same message. Returns "" when InfraKilled is
@@ -370,24 +409,31 @@ func (r Result) KillReason() string {
 	}
 }
 
-// Sandbox is an isolated command executor. Implementations must be safe for
-// concurrent use by multiple goroutines.
+// Sandbox is an isolated command executor. Implementations must be safe
+// for concurrent use by multiple goroutines.
 type Sandbox interface {
-	// Exec runs spec to completion (or until the timeout / ctx cancellation)
-	// and returns the captured Result. It returns a non-nil error only for
-	// infrastructure failures; a non-zero exit code is reported via
-	// Result.ExitCode, not as an error.
+	// Exec runs spec to completion (or until the timeout / ctx
+	// cancellation) and returns the captured Result. It returns a non-nil
+	// error in exactly three cases (the package doc's "Error contract"): a
+	// refused Spec (InvalidSpecError or UnsupportedSpecError), before
+	// anything is written or launched; a caller ctx that ended (cancel or
+	// deadline), as the "sandbox: execution cancelled" error wrapping
+	// ctx.Err(); or an infrastructure failure. A non-zero exit code is
+	// reported via Result.ExitCode, not as an error.
 	Exec(ctx context.Context, spec Spec) (Result, error)
 
 	// MaterializeWorkspace clones repoDir into a fresh, caller-owned
 	// workspace directory and returns its path, writing nothing into the
-	// clone itself. It is the public seam behind Spec.Workspace: a caller
-	// that wants to write into and run repeated Execs against ONE persistent
-	// workspace materializes it once here, then passes the returned path as
-	// Spec.Workspace on each Exec instead of letting Exec copy a fresh one
-	// every time. The caller owns the returned directory's entire lifecycle:
-	// Exec(Workspace: ...) never removes it, so the caller MUST os.RemoveAll
-	// it when done (typically via defer at the scope that bounds all the
-	// iteration's Execs).
+	// clone itself. (The Mock implements the same contract with an empty
+	// directory: its path is fresh and caller-owned, never repoDir — whose
+	// content the Mock has nothing to run, so it does not copy.) It is the
+	// public seam behind Spec.Workspace: a caller that wants to write into
+	// and run repeated Execs against ONE persistent workspace materializes
+	// it once here, then passes the returned path as Spec.Workspace on
+	// each Exec instead of letting Exec copy a fresh one every time. The
+	// caller owns the returned directory's entire lifecycle:
+	// Exec(Workspace: ...) never removes it, so the caller MUST
+	// os.RemoveAll it when done (typically via defer at the scope that
+	// bounds all the iteration's Execs).
 	MaterializeWorkspace(repoDir string) (string, error)
 }

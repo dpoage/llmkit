@@ -70,16 +70,129 @@ func TestHostExec_NonZeroExitIsNotAnError(t *testing.T) {
 	}
 }
 
-func TestHostExec_LaunchFailureIsAnError(t *testing.T) {
+// TestHostExec_LaunchFailureIsExitCode pins the launch-failure contract
+// (bead llmkit-bk8.1.8): a command that cannot be launched reports through
+// the shell's exit-code convention — 127 for a missing binary — with a nil
+// error, exactly like the container backends, instead of an
+// infrastructure error. (This test previously pinned the OPPOSITE
+// contract — a launch failure as an error; that pin retired with 1.8.)
+func TestHostExec_LaunchFailureIsExitCode(t *testing.T) {
 	repoDir := newHostExecRepoDir(t)
 	h := NewHostExec()
 
-	_, err := h.Exec(context.Background(), Spec{
+	res, err := h.Exec(context.Background(), Spec{
 		RepoDir: repoDir,
 		Cmd:     []string{"definitely-not-a-real-binary-xyz"},
 	})
-	if err == nil {
-		t.Fatal("want an infrastructure error for a binary that cannot be launched")
+	if err != nil {
+		t.Fatalf("Exec err = %v, want nil (a launch failure is an exit code, not an infra error)", err)
+	}
+	if res.ExitCode != 127 {
+		t.Errorf("ExitCode = %d, want 127 for a missing binary", res.ExitCode)
+	}
+	if res.InfraKilled() {
+		t.Errorf("InfraKilled = true, want false for a launch failure (res=%+v)", res)
+	}
+}
+
+// TestHostExec_LaunchFailureShapes pins the 127/126 mapping table on the
+// other observed launch-error shapes (premortem E9): an absolute missing
+// path is 127; a found-but-not-executable file is 126.
+func TestHostExec_LaunchFailureShapes(t *testing.T) {
+	repoDir := newHostExecRepoDir(t)
+	h := NewHostExec()
+
+	res, err := h.Exec(context.Background(), Spec{
+		RepoDir: repoDir,
+		Cmd:     []string{"/definitely/not/here"},
+	})
+	if err != nil {
+		t.Fatalf("absolute missing path: err = %v, want nil", err)
+	}
+	if res.ExitCode != 127 {
+		t.Errorf("absolute missing path: ExitCode = %d, want 127", res.ExitCode)
+	}
+
+	noexec := filepath.Join(repoDir, "noexec")
+	if err := os.WriteFile(noexec, []byte("#!/bin/sh\nexit 0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err = h.Exec(context.Background(), Spec{
+		RepoDir: repoDir,
+		Cmd:     []string{"./noexec"},
+	})
+	if err != nil {
+		t.Fatalf("non-executable: err = %v, want nil", err)
+	}
+	if res.ExitCode != 126 {
+		t.Errorf("non-executable: ExitCode = %d, want 126", res.ExitCode)
+	}
+}
+
+// TestHostExec_CallerCancelIsAnError pins the 1.8 caller-cancel contract:
+// a caller whose context is cancelled while the command runs gets a
+// context.Canceled error — NEVER a Result with ExitCode -1 and nil error.
+func TestHostExec_CallerCancelIsAnError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-based test assumes POSIX /bin/sh")
+	}
+	repoDir := newHostExecRepoDir(t)
+	h := NewHostExec()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		cancel()
+	}()
+	res, err := h.Exec(ctx, Spec{
+		RepoDir: repoDir,
+		Cmd:     []string{"/bin/sh", "-c", "sleep 30"},
+	})
+	if err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want errors.Is(context.Canceled)", err)
+	}
+	if res.ExitCode == -1 && err == nil {
+		t.Error("a cancelled run must never surface as ExitCode -1 with nil error")
+	}
+}
+
+// TestHostExec_CallerDeadlineIsAnError pins that a caller DEADLINE is a
+// caller end like a cancel: with the caller's deadline already past, even
+// a command that could never launch returns the cancelled error wrapping
+// context.DeadlineExceeded — cancellation precedes the 127 launch mapping.
+func TestHostExec_CallerDeadlineIsAnError(t *testing.T) {
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	res, err := NewHostExec().Exec(ctx, Spec{
+		RepoDir: newHostExecRepoDir(t),
+		Cmd:     []string{"definitely-not-a-real-binary-xyz"},
+	})
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.HasPrefix(err.Error(), "sandbox: execution cancelled") {
+		t.Fatalf("err = %v (res=%+v), want the cancelled error wrapping context.DeadlineExceeded", err, res)
+	}
+}
+
+// TestHostExec_SpecTimeoutStillTimesOut pins the OTHER half of the 1.8
+// contract: Spec.Timeout expiry still yields the timeout shape (TimedOut,
+// ExitCode -1, nil error) — the cancelled-error mapping applies only to the
+// CALLER's context.
+func TestHostExec_SpecTimeoutStillTimesOut(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-based test assumes POSIX /bin/sh")
+	}
+	repoDir := newHostExecRepoDir(t)
+	h := NewHostExec()
+
+	res, err := h.Exec(context.Background(), Spec{
+		RepoDir: repoDir,
+		Cmd:     []string{"/bin/sh", "-c", "sleep 30"},
+		Timeout: 300 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("err = %v, want nil for a Spec.Timeout kill", err)
+	}
+	if !res.TimedOut || res.ExitCode != -1 {
+		t.Errorf("res = %+v, want TimedOut with ExitCode -1", res)
 	}
 }
 

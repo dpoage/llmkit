@@ -2,20 +2,21 @@ package sandbox
 
 import (
 	"fmt"
+	"math"
 	"slices"
 	"time"
 )
 
 // Option configures a sandbox backend. One Option type serves both
-// option-taking constructors (NewCLI, NewBwrap); each constructor refuses
-// with an error naming any option its backend cannot honor, so a
-// misdirected option is a construction-time error instead of a silently
-// ignored knob. No option takes a bare bool: modes are named types
-// (NetworkMode, CapPolicy).
+// option-taking constructors (NewCLI, NewBwrap); each refuses with an
+// error naming any option its backend cannot honor, so a misdirected
+// option is a construction-time error instead of a silently ignored knob.
+// No option takes a bare bool: modes are named types (NetworkMode,
+// CapPolicy).
 type Option func(*options)
 
-// options is the accumulated state a sequence of Options produces. It is
-// unexported: callers configure exclusively through the With* functions.
+// options is the accumulated state a sequence of Options produces.
+// Unexported: callers configure exclusively through the With* functions.
 type options struct {
 	// Shared knobs (CLI + Bwrap).
 	cpus            float64
@@ -27,25 +28,29 @@ type options struct {
 	maxOutputBytes  int
 	scratchSizeMB   int
 	growthCeilingMB int
+	// toolchainBinds and toolchainPathPrepend are set together by
+	// WithHostToolchains (accepted by both constructors) from a
+	// ResolveHostToolchains value; each backend renders them its own way
+	// (see toolchain.go).
+	toolchainBinds       []ROMount
+	toolchainPathPrepend string
 
 	// CLI-only.
 	runtime string
 	image   string
 
 	// Bwrap-only.
-	capPolicy            CapPolicy
-	toolchainBinds       []ROMount
-	toolchainPathPrepend string
+	capPolicy CapPolicy
 
 	// requested names each applied option in application order, so a
 	// constructor can refuse options its backend does not understand
-	// (naming them) and apply only what was actually passed.
+	// (naming them) and apply only what was actually applied.
 	requested []string
 }
 
 // CapPolicy names what a Bwrap run does when the host offers no
-// resource-limit enforcement mechanism (neither systemd-run --user --scope
-// nor a delegated cgroup v2 subtree).
+// resource-limit enforcement mechanism (neither systemd-run --user
+// --scope nor a delegated cgroup v2 subtree).
 type CapPolicy int
 
 const (
@@ -66,9 +71,7 @@ var cliOnlyOptions = map[string]bool{"WithRuntime": true, "WithImage": true}
 // bwrapOnlyOptions names the options only the bwrap backend understands;
 // NewCLI refuses each of them.
 var bwrapOnlyOptions = map[string]bool{
-	"WithCapPolicy":      true,
-	"WithToolchainBinds": true,
-	"WithToolchainPath":  true,
+	"WithCapPolicy": true,
 }
 
 // cliNetworks / bwrapNetworks are the network modes each backend can honor,
@@ -103,10 +106,49 @@ func (o *options) checkSupported(backend string, unsupported map[string]bool) er
 	return nil
 }
 
-// validateNetworkDefault rejects a WithNetwork value the backend could never
-// honor — at construction, rather than on every later Exec. The refusal is
-// the same typed UnsupportedSpecError Exec uses, so a misdirected network
-// posture is matched the same way at both boundaries.
+// checkNumericOptions refuses an out-of-range numeric option value before
+// any runtime lookup (called from NewCLI/NewBwrap ahead of Detect /
+// DetectBwrap, so the refusal is hermetic). WithMemoryMB, WithTimeout,
+// WithScratchSizeMB, and WithMaxOutputBytes must be > 0, and WithCPUs must
+// be a positive finite number: each names a limit the backend enforces, and
+// a zero, negative, or non-finite value yields no usable limit (neither
+// backend renders a working CPU cap from NaN or ±Inf).
+// WithPidsLimit, WithWorkspaceGrowthCeilingMB, and WithIdleTimeout keep 0
+// as their documented explicit-disable value; only a negative value is
+// refused there. The error names the option (with its refused value) and
+// the backend, matching checkSupported's shape.
+func (o *options) checkNumericOptions(backend string) error {
+	if o.has("WithCPUs") && (!(o.cpus > 0) || math.IsInf(o.cpus, 0)) {
+		return fmt.Errorf("sandbox: option WithCPUs(%v) must be a positive finite number on the %s backend", o.cpus, backend)
+	}
+	if o.has("WithMemoryMB") && o.memoryMB <= 0 {
+		return fmt.Errorf("sandbox: option WithMemoryMB(%d) must be > 0 on the %s backend", o.memoryMB, backend)
+	}
+	if o.has("WithTimeout") && o.timeout <= 0 {
+		return fmt.Errorf("sandbox: option WithTimeout(%v) must be > 0 on the %s backend", o.timeout, backend)
+	}
+	if o.has("WithScratchSizeMB") && o.scratchSizeMB <= 0 {
+		return fmt.Errorf("sandbox: option WithScratchSizeMB(%d) must be > 0 on the %s backend", o.scratchSizeMB, backend)
+	}
+	if o.has("WithMaxOutputBytes") && o.maxOutputBytes <= 0 {
+		return fmt.Errorf("sandbox: option WithMaxOutputBytes(%d) must be > 0 on the %s backend", o.maxOutputBytes, backend)
+	}
+	if o.has("WithPidsLimit") && o.pidsLimit < 0 {
+		return fmt.Errorf("sandbox: option WithPidsLimit(%d) must be >= 0 on the %s backend", o.pidsLimit, backend)
+	}
+	if o.has("WithWorkspaceGrowthCeilingMB") && o.growthCeilingMB < 0 {
+		return fmt.Errorf("sandbox: option WithWorkspaceGrowthCeilingMB(%d) must be >= 0 on the %s backend", o.growthCeilingMB, backend)
+	}
+	if o.has("WithIdleTimeout") && o.idleTimeout < 0 {
+		return fmt.Errorf("sandbox: option WithIdleTimeout(%v) must be >= 0 on the %s backend", o.idleTimeout, backend)
+	}
+	return nil
+}
+
+// validateNetworkDefault rejects a WithNetwork value the backend could
+// never honor — at construction, rather than on every later Exec. The
+// refusal is the same typed UnsupportedSpecError Exec uses, so a
+// misdirected network posture is matched the same way at both boundaries.
 func validateNetworkDefault(backend string, m NetworkMode, supported []NetworkMode) error {
 	if m == "" {
 		return nil
@@ -122,8 +164,8 @@ func validateNetworkDefault(backend string, m NetworkMode, supported []NetworkMo
 // defaults is the shared per-run default state both option-taking backends
 // apply: every Spec field that resolves to a backend default when the Spec
 // leaves it unset, plus the knobs with no per-call counterpart. CLI and
-// Bwrap embed it, so their field names — and the option mapping below —
-// exist exactly once.
+// Bwrap embed it, so their field names — and the option mapping in
+// applyDefaults — exist exactly once.
 type defaults struct {
 	// defaultTimeout is the absolute wall-clock ceiling applied when a
 	// Spec leaves Timeout unset.
@@ -137,16 +179,24 @@ type defaults struct {
 	pidsLimit          int
 	maxOutputBytes     int
 	// defaultScratchSizeMB is the size (MB) of the writable tmpfs scratch
-	// space (/tmp, plus the tmpfs root under bwrap). <= 0 is treated as
-	// unset and falls back to fallbackScratchSizeMB in the argv builders.
+	// space (/tmp, plus the tmpfs root under bwrap). Always positive:
+	// checkNumericOptions refuses a <= 0 WithScratchSizeMB override, and
+	// baseScratchSizeMB seeds the unconfigured default.
 	defaultScratchSizeMB int
 	// defaultGrowthCeilingBytes bounds NET workspace growth (the fsSize
 	// delta, not cumulative bytes written — see workspaceProgress) since a
 	// run starts, tolerated by the shared idle watchdog before killing the
 	// run with the distinct Result.WorkspaceQuotaExceeded reason.
-	// <= 0 disables the ceiling.
+	// 0 disables the ceiling; checkNumericOptions refuses a negative
+	// WithWorkspaceGrowthCeilingMB at construction.
 	defaultGrowthCeilingBytes int64
 }
+
+// baseScratchSizeMB is the default /tmp (and, under bwrap, tmpfs root)
+// scratch size in MB applied when no WithScratchSizeMB override is
+// configured. checkNumericOptions guarantees any override is positive,
+// so the argv renderers render the configured size verbatim.
+const baseScratchSizeMB = 512
 
 // baseDefaults returns the out-of-the-box posture every backend starts
 // from, before any With* override is applied.
@@ -158,14 +208,14 @@ func baseDefaults() defaults {
 		defaultNetwork:            NetworkNone,
 		pidsLimit:                 256,
 		maxOutputBytes:            DefaultMaxOutputBytes,
-		defaultScratchSizeMB:      fallbackScratchSizeMB,
+		defaultScratchSizeMB:      baseScratchSizeMB,
 		defaultGrowthCeilingBytes: defaultWorkspaceGrowthCeilingBytes,
 	}
 }
 
 // applyDefaults copies each applied option's value over the base defaults.
-// This is the SINGLE site where an option reaches a backend's defaults: a
-// knob added to options without a line here is a compile-visible no-op the
+// The SINGLE site where an option reaches a backend's defaults: a knob
+// added to options without a line here is a compile-visible no-op the
 // option-application tests catch, and no constructor carries its own
 // hand-copied application block that can silently drift.
 func (o *options) applyDefaults(d *defaults) {
@@ -207,13 +257,14 @@ func WithRuntime(name string) Option {
 
 // WithImage sets the default container image used when a Spec leaves
 // Image unset. Accepted by NewCLI, which requires it (NewCLI errors
-// without an image); NewBwrap refuses it. There is no package default.
+// without an image); NewBwrap refuses it. No package default.
 func WithImage(image string) Option {
 	return func(o *options) { o.image = image; o.track("WithImage") }
 }
 
 // WithCPUs sets the default CPU limit applied to every run. Accepted by
-// NewCLI and NewBwrap. Default: 2.
+// NewCLI and NewBwrap. Default: 2. The value must be a positive finite
+// number: 0, a negative value, NaN, and ±Inf are refused at construction.
 func WithCPUs(c float64) Option {
 	return func(o *options) { o.cpus = c; o.track("WithCPUs") }
 }
@@ -234,22 +285,23 @@ func WithTimeout(d time.Duration) Option {
 // every run. A run is cancelled only after this long with no observable
 // progress; the absolute WithTimeout remains a hard ceiling. Accepted by
 // NewCLI and NewBwrap. Default: 0 — the idle watchdog is disabled, and
-// only the absolute timeout and the growth ceiling apply. (HostExec has
-// no watchdog and takes no options.)
+// only the absolute timeout and the growth ceiling apply. HostExec has no
+// watchdog and takes no options.
 func WithIdleTimeout(d time.Duration) Option {
 	return func(o *options) { o.idleTimeout = d; o.track("WithIdleTimeout") }
 }
 
 // WithNetwork sets the default network mode applied when a Spec leaves
-// Network unset. Accepted by NewCLI and NewBwrap. Default:
-// NetworkNone. A mode the backend cannot honor (bridge on NewBwrap) is
-// rejected by the constructor.
+// Network unset. Accepted by NewCLI and NewBwrap. Default: NetworkNone.
+// A mode the backend cannot honor (bridge on NewBwrap) is rejected by
+// the constructor.
 func WithNetwork(n NetworkMode) Option {
 	return func(o *options) { o.network = n; o.track("WithNetwork") }
 }
 
 // WithPidsLimit sets the process-count cap. Accepted by NewCLI and
-// NewBwrap. Default: 256. A value <= 0 disables the cap.
+// NewBwrap. Default: 256. 0 disables the cap; a negative value is refused
+// at construction.
 func WithPidsLimit(n int) Option {
 	return func(o *options) { o.pidsLimit = n; o.track("WithPidsLimit") }
 }
@@ -262,7 +314,7 @@ func WithMaxOutputBytes(n int) Option {
 
 // WithScratchSizeMB sets the size (MB) of the writable tmpfs scratch
 // space (/tmp, plus the tmpfs root under bwrap). Accepted by NewCLI and
-// NewBwrap. Default: 512 MB. Values <= 0 fall back to 512.
+// NewBwrap. Default: 512 MB. Must be > 0 (refused at construction).
 func WithScratchSizeMB(mb int) Option {
 	return func(o *options) { o.scratchSizeMB = mb; o.track("WithScratchSizeMB") }
 }
@@ -272,7 +324,8 @@ func WithScratchSizeMB(mb int) Option {
 // idle watchdog enforces independent of idle-stall detection: a run
 // whose workspace grows past this is killed with
 // Result.WorkspaceQuotaExceeded. Accepted by NewCLI and NewBwrap.
-// Default: 2048 MB (2 GiB). A value <= 0 disables the ceiling entirely.
+// Default: 2048 MB. 0 disables the ceiling; a negative value is refused
+// at construction.
 func WithWorkspaceGrowthCeilingMB(mb int) Option {
 	return func(o *options) { o.growthCeilingMB = mb; o.track("WithWorkspaceGrowthCeilingMB") }
 }
@@ -285,20 +338,16 @@ func WithCapPolicy(p CapPolicy) Option {
 	return func(o *options) { o.capPolicy = p; o.track("WithCapPolicy") }
 }
 
-// WithToolchainBinds adds extra read-only binds (beyond the fixed
-// allowlist) to every Bwrap run, resolved by the host-toolchain
-// resolver. Accepted by NewBwrap; NewCLI refuses it. Default: none
-// beyond the fixed allowlist.
-func WithToolchainBinds(mounts []ROMount) Option {
-	return func(o *options) { o.toolchainBinds = mounts; o.track("WithToolchainBinds") }
-}
-
-// WithToolchainPath sets the PATH prefix (ResolveHostToolchains'
-// PathPrepend) paired with WithToolchainBinds, so resolved toolchain
-// binaries are actually reachable via PATH inside the sandbox rather
-// than merely bind-mounted. Callers pass both options from the same
-// ToolchainResolution. Accepted by NewBwrap; NewCLI refuses it.
-// Default: empty (no PATH prepend).
-func WithToolchainPath(prepend string) Option {
-	return func(o *options) { o.toolchainPathPrepend = prepend; o.track("WithToolchainPath") }
+// WithHostToolchains configures the read-only binds and PATH prefix from
+// a ResolveHostToolchains resolution, so a sandbox image (or the bwrap
+// tmpfs root, which has none) that lacks a toolchain can still run it.
+// Accepted by NewCLI and NewBwrap — each backend renders the mounts and
+// composes PATH its own way (see toolchain.go); pass the same
+// ToolchainResolution value to either. Default: none.
+func WithHostToolchains(res ToolchainResolution) Option {
+	return func(o *options) {
+		o.toolchainBinds = res.mounts
+		o.toolchainPathPrepend = res.pathPrepend
+		o.track("WithHostToolchains")
+	}
 }

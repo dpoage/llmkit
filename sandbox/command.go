@@ -22,9 +22,9 @@ type runParams struct {
 	memoryMB  int
 	pidsLimit int
 	// scratchSizeMB is the size (MB) of the writable /tmp tmpfs scratch
-	// space, rendered as the --tmpfs size=... mount option.
-	// <= 0 falls back to fallbackScratchSizeMB — buildRunArgs always emits a
-	// sized tmpfs, never an unbounded one.
+	// space, rendered verbatim as the --tmpfs size=... mount option.
+	// Always positive: the constructor refuses a <= 0 WithScratchSizeMB
+	// override, so buildRunArgs applies no fallback here.
 	scratchSizeMB int
 	env           []string
 	cmd           []string
@@ -41,6 +41,14 @@ type runParams struct {
 	// shell-quoted and chained with "|| exit 125" so any setup failure aborts
 	// the run with an environment_error exit code (see Spec.SetupCmds).
 	setupCmds [][]string
+	// toolchainBinds are extra read-only binds resolved by the
+	// host-toolchain resolver (WithHostToolchains), rendered alongside
+	// roMounts. Always Shared=true (host-owned installs): never SELinux
+	// :Z relabeled.
+	toolchainBinds []ROMount
+	// toolchainPathPrepend is the PATH prefix paired with toolchainBinds;
+	// empty when no host toolchains were configured.
+	toolchainPathPrepend string
 }
 
 // WorkspaceMount is where the writable workspace copy is mounted inside the
@@ -49,17 +57,6 @@ type runParams struct {
 // dependency-resolution mounts, cross-references in Spec.CaptureFiles docs)
 // use the same path every backend mounts at.
 const WorkspaceMount = "/workspace"
-
-// fallbackScratchSizeMB is the writable tmpfs scratch-space size (MB)
-// applied to /tmp — and, under bwrap, the tmpfs root as well
-// (bwrap_command.go) — when a resolved runParams.scratchSizeMB /
-// bwrapParams.scratchSizeBytes is <= 0 (no operator override was ever
-// configured). Named distinctly from the
-// CLI/Bwrap struct fields also called "defaultScratchSizeMB" — this
-// constant is the LAST-RESORT fallback below even a zero-value backend
-// field, not "the backend's configured default". Matches the container
-// backend's historical hardcoded 512m.
-const fallbackScratchSizeMB = 512
 
 // buildRunArgs constructs the argv passed to the runtime CLI (excluding the
 // runtime binary itself) for a `run` invocation. It is a pure function so the
@@ -72,18 +69,22 @@ const fallbackScratchSizeMB = 512
 //   - --network=<network>       : "none" by default, no egress.
 //   - --read-only               : read-only root filesystem...
 //   - --tmpfs /tmp              : ...with a writable scratch tmpfs sized by
-//     p.scratchSizeMB (the WithScratchSizeMB value; <= 0 falls back to
-//     fallbackScratchSizeMB) — big enough for host language toolchain caches
-//     (Go's cold build cache alone can run to hundreds of MB) but explicitly
-//     bounded rather than left to the host's free RAM.
+//     p.scratchSizeMB (the WithScratchSizeMB value; always positive, see
+//     runParams.scratchSizeMB) — big enough for host language toolchain
+//     caches (Go's cold build cache alone can run to hundreds of MB) but
+//     explicitly bounded rather than left to the host's free RAM.
 //   - --env HOME=/tmp           : caches that default under $HOME (Go, pip,
 //     npm, ...) land on the writable tmpfs instead of dying on the read-only
 //     root; without this `go test` fails instantly with "failed to initialize
-//     build cache: read-only file system" before it ever compiles. Spec.Env
-//     entries are appended after and may override.
+//     build cache: read-only file system" before it ever compiles. A
+//     resolved host-toolchain PATH prefix (WithHostToolchains) renders here
+//     too, and Spec.Env entries are appended after and may override either.
 //   - -v ws:/workspace:rw,Z     : the workspace copy is the only writable mount
 //     (Z relabels for SELinux; harmless elsewhere). The original repo is never
 //     mounted.
+//   - -v host:ctr:ro            : resolved host-toolchain binds
+//     (WithHostToolchains) render next, always plain :ro — these are
+//     host-owned, Shared installs, never SELinux :Z relabeled.
 //   - -v host:ctr:ro[,Z]        : any Spec.ROMounts are mounted READ-ONLY (a
 //     dependency cache, for example). These are never writable, but they DO
 //     expose host content to untrusted code, so callers must only mount
@@ -101,22 +102,34 @@ const fallbackScratchSizeMB = 512
 //   - --pids-limit              : cap process count (fork-bomb resistance).
 //   - --memory / --cpus         : resource limits.
 func buildRunArgs(p runParams) []string {
-	scratchMB := p.scratchSizeMB
-	if scratchMB <= 0 {
-		scratchMB = fallbackScratchSizeMB
-	}
 	args := []string{
 		"run",
 		"--rm",
 		"--name", p.containerName,
 		"--network=" + string(p.network),
 		"--read-only",
-		"--tmpfs", fmt.Sprintf("/tmp:rw,exec,nosuid,size=%dm", scratchMB),
+		"--tmpfs", fmt.Sprintf("/tmp:rw,exec,nosuid,size=%dm", p.scratchSizeMB),
 		"--env", "HOME=/tmp",
+	}
+	// A resolved host-toolchain PATH prefix (WithHostToolchains) is
+	// rendered as an --env PATH override BEFORE any Spec.Env entry below,
+	// so an operator's explicit PATH in Spec.Env still wins (podman/docker
+	// --env is last-write-wins on a repeated key).
+	if p.toolchainPathPrepend != "" {
+		args = append(args, "--env", "PATH="+p.toolchainPathPrepend+":"+defaultContainerPath)
+	}
+	args = append(args,
 		"--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges",
 		"--workdir", WorkspaceMount,
 		"-v", fmt.Sprintf("%s:%s:rw,Z", p.workspace, WorkspaceMount),
+	)
+
+	// Host-toolchain binds (WithHostToolchains) are always host-owned,
+	// Shared toolchain installs — never SELinux :Z relabeled — rendered
+	// before any Spec.ROMounts.
+	for _, m := range p.toolchainBinds {
+		args = append(args, "-v", fmt.Sprintf("%s:%s:ro", m.HostPath, m.ContainerPath))
 	}
 
 	// Read-only mounts are rendered right after the writable workspace, in the
@@ -177,36 +190,39 @@ func buildRunArgs(p runParams) []string {
 	return args
 }
 
-// validateMounts checks that every extra bind mount (read-only and writable)
-// is well-formed: both paths absolute and non-empty, and no duplicate
-// ContainerPath across the combined set (two mounts at the same container path
-// is a configuration error and the runtime's behavior would be ambiguous). The
-// workspace mount at /workspace is implicit and not represented here. It
-// returns the first problem found.
+// validateMounts is the UNIVERSAL mount-shape class of validateSpec: every
+// extra bind mount (read-only and writable) must have non-empty absolute
+// HostPath and ContainerPath, and ContainerPaths must be unique across the
+// combined set (two mounts at the same container path is a configuration
+// error and the runtime's behavior would be ambiguous). The workspace mount
+// at /workspace is implicit and not represented here. A violation is
+// malformed for EVERY backend: *InvalidSpecError naming ROMounts or
+// RWMounts. It returns the first problem found.
 func validateMounts(ro, rw []ROMount) error {
 	seen := make(map[string]bool, len(ro)+len(rw))
-	check := func(mounts []ROMount, kind string) error {
+	check := func(mounts []ROMount, field string) error {
 		for _, m := range mounts {
-			if m.HostPath == "" || m.ContainerPath == "" {
-				return fmt.Errorf("sandbox: %s mount requires non-empty host and container paths", kind)
-			}
-			if !filepath.IsAbs(m.HostPath) {
-				return fmt.Errorf("sandbox: %s mount host path %q must be absolute", kind, m.HostPath)
-			}
-			if !filepath.IsAbs(m.ContainerPath) {
-				return fmt.Errorf("sandbox: %s mount container path %q must be absolute", kind, m.ContainerPath)
+			switch {
+			case m.HostPath == "":
+				return &InvalidSpecError{Field: field, Reason: "a mount HostPath must be non-empty"}
+			case !filepath.IsAbs(m.HostPath):
+				return &InvalidSpecError{Field: field, Reason: fmt.Sprintf("HostPath %q must be absolute", m.HostPath)}
+			case m.ContainerPath == "":
+				return &InvalidSpecError{Field: field, Reason: "a mount ContainerPath must be non-empty"}
+			case !filepath.IsAbs(m.ContainerPath):
+				return &InvalidSpecError{Field: field, Reason: fmt.Sprintf("ContainerPath %q must be absolute", m.ContainerPath)}
 			}
 			if seen[m.ContainerPath] {
-				return fmt.Errorf("sandbox: duplicate mount container path %q", m.ContainerPath)
+				return &InvalidSpecError{Field: field, Reason: fmt.Sprintf("duplicate ContainerPath %q across ROMounts and RWMounts", m.ContainerPath)}
 			}
 			seen[m.ContainerPath] = true
 		}
 		return nil
 	}
-	if err := check(ro, "read-only"); err != nil {
+	if err := check(ro, "ROMounts"); err != nil {
 		return err
 	}
-	return check(rw, "writable")
+	return check(rw, "RWMounts")
 }
 
 // shellQuote returns a POSIX single-quoted form of arg that is safe to embed in

@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"io"
 	"slices"
 
 	"github.com/dpoage/llmkit"
@@ -18,15 +19,16 @@ import (
 // never mints a span — only Completion emitters do. Populated fields:
 //   - Backend: the concrete backend — "cli", "bwrap", and "host" match
 //     UnsupportedSpecError.Backend; "mock" is this package's own name for
-//     the backend that refuses nothing; a nested Observe reports its
-//     inner backend; any other implementation is named by its Go type.
+//     the scripted backend, which refuses a malformed Spec exactly like
+//     every backend; a nested Observe reports its inner backend; any other
+//     implementation is named by its Go type.
 //   - Command: Spec.Cmd, copied — the event outlives the call, and the
 //     caller owns the Spec's backing arrays.
-//   - ExitCode: the command's own exit code; -1 when the process never ran
-//     to an exit — an infrastructure failure (Err non-empty) or a watchdog
-//     kill. Check Result.InfraKilled on the returned Result before
-//     classifying a verdict; the event records the summary, not the kill
-//     reason.
+//   - ExitCode: the command's own exit code; -1 when Exec returned an
+//     error (Err non-empty) or the process never ran to an exit because a
+//     watchdog killed it. Check Result.InfraKilled on the returned Result
+//     before classifying a verdict; the event records the summary, not
+//     the kill reason.
 //   - StdoutBytes / StderrBytes: the lengths of the captured
 //     Result.Stdout / Result.Stderr text — markers included, so a
 //     truncated stream can exceed the capture cap. In the common case
@@ -36,16 +38,29 @@ import (
 //   - Truncated: Result.StdoutTruncated or Result.StderrTruncated — either
 //     stream was cut off at the capture cap.
 //   - Duration: Result.Duration, the execution's measured wall time; 0
-//     whenever the backend measured none — an infrastructure failure
-//     produced no Result, and a scripted Mock may report none.
-//   - Err: the infrastructure error's text, non-empty exactly when Exec
-//     returned an error. A non-zero exit code is the command's own verdict
-//     and is never an error (see the Sandbox contract).
+//     whenever the backend measured none — an Exec error before the launch
+//     attempt (a refused Spec, for example) produced no Result, and a
+//     scripted Mock may report none. A launch failure on CLI or Bwrap
+//     (the runtime or launcher binary could not start) reports the launch
+//     attempt's wall time alongside its error.
+//   - Err: the text of Exec's error, non-empty exactly when Exec returned
+//     one: a refused Spec (InvalidSpecError, UnsupportedSpecError), a
+//     caller ctx that ended (the "sandbox: execution cancelled" error), or
+//     an infrastructure failure — the package doc's "Error contract". A
+//     non-zero exit code is the command's own verdict and is never an
+//     error.
 //
 // Result.TimedOut, Result.WorkspaceQuotaExceeded, and captured files are
 // not part of llmkit.ExecEvent — v1 exec events are a summary, so replaying
-// this boundary is not possible today. Close (CLI and Bwrap) is not on the
-// Sandbox interface: keep the concrete backend reference to call it.
+// this boundary is not possible today. With a non-nil obs, the value
+// Observe returns also implements io.Closer: Close forwards to the inner
+// backend's Close when it implements io.Closer (CLI, Bwrap), and returns
+// nil otherwise (Mock, HostExec). The return type stays Sandbox (the
+// optional-interface pattern), so callers that want to Close type-assert:
+//
+//	if c, ok := sb.(io.Closer); ok {
+//		defer c.Close()
+//	}
 //
 // Observers are synchronous data sinks: a panic in obs propagates to the
 // caller and obs never affects the returned Result.
@@ -64,6 +79,18 @@ type observedSandbox struct {
 }
 
 var _ Sandbox = (*observedSandbox)(nil)
+
+// Close forwards to the inner backend's Close when it implements io.Closer
+// (CLI, Bwrap), and returns nil otherwise (Mock, HostExec, or any other
+// Sandbox implementation with no Close method). This makes the value
+// Observe returns an io.Closer whenever the wrapped backend is one — see
+// Observe's doc comment for the type-assertion pattern callers use.
+func (w *observedSandbox) Close() error {
+	if c, ok := w.inner.(io.Closer); ok {
+		return c.Close()
+	}
+	return nil
+}
 
 func (w *observedSandbox) Exec(ctx context.Context, spec Spec) (Result, error) {
 	res, err := w.inner.Exec(ctx, spec)
@@ -89,21 +116,22 @@ func (w *observedSandbox) MaterializeWorkspace(repoDir string) (string, error) {
 	return w.inner.MaterializeWorkspace(repoDir)
 }
 
-// backendName names the backend for llmkit.ExecEvent.Backend: "cli",
-// "bwrap", and "host" match UnsupportedSpecError.Backend; "mock" is this
-// package's own name for the backend that refuses nothing; a wrapped
-// backend reports its inner backend; any other implementation is named by
-// its Go type.
+// backendName names the backend for llmkit.ExecEvent.Backend: the
+// backendCLI/backendBwrap/backendHost values match
+// UnsupportedSpecError.Backend; backendMock is this package's own name for
+// the scripted backend, which refuses a malformed Spec exactly like every
+// backend; a wrapped backend reports its inner backend; any other
+// implementation is named by its Go type.
 func backendName(s Sandbox) string {
 	switch t := s.(type) {
 	case *CLI:
-		return "cli"
+		return backendCLI
 	case *Bwrap:
-		return "bwrap"
+		return backendBwrap
 	case *HostExec:
-		return "host"
+		return backendHost
 	case *Mock:
-		return "mock"
+		return backendMock
 	case *observedSandbox:
 		return backendName(t.inner)
 	default:
@@ -112,9 +140,9 @@ func backendName(s Sandbox) string {
 }
 
 // execExitCode maps an Exec outcome onto llmkit.ExecEvent.ExitCode: the
-// command's own exit code from the Result, or -1 when an infrastructure
-// failure meant the process never produced one (a watchdog kill reports -1
-// in its Result itself).
+// command's own exit code from the Result, or -1 whenever Exec returned an
+// error, which leaves no command verdict (a watchdog kill reports -1 in its
+// Result itself).
 func execExitCode(res Result, err error) int {
 	if err != nil {
 		return -1

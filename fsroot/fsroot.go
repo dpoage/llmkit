@@ -1,15 +1,14 @@
-// Package fsroot provides tool-anchored path containment for agent tools.
-// An FSRoot anchors resolution at a single directory and maps
-// root-relative paths to absolute on-disk paths, rejecting absolute inputs
-// and any path that escapes the root lexically ("..") or through a symlink
-// that points outside it — the latter detected by resolving the longest
-// existing prefix of the path.
+// Package fsroot provides tool-anchored path containment. An FSRoot
+// resolves root-relative paths to absolute on-disk paths, rejecting absolute
+// inputs and any path that escapes the root lexically ("..") or via a symlink
+// pointing outside it (detected by resolving the longest existing prefix,
+// following dangling links to their final target, and failing closed when a
+// prefix cannot be resolved).
 //
 // Threat-model note: this package guards path RESOLUTION anchored at a
-// trusted root. It is deliberately not unified with llmkit/sandbox's
-// workspace write hardening (sanitizeRelPath/secureJoinForWrite,
-// O_NOFOLLOW), which defends a different threat model: post-exec writes
-// into an untrusted scratch workspace. The two boundaries share no code.
+// trusted root. It is deliberately separate from sandbox's workspace write
+// hardening (sanitizeRelPath/secureJoinForWrite, O_NOFOLLOW), which defends a
+// different threat model: post-exec writes into an untrusted scratch workspace.
 package fsroot
 
 import (
@@ -23,14 +22,9 @@ import (
 // requested path resolves outside the root.
 var ErrPathEscape = errors.New("path escapes the repository root")
 
-// FSRoot anchors tool path resolution at a single directory and resolves
-// tool-supplied, root-relative paths to absolute on-disk paths while
-// guaranteeing they cannot escape the root — including via "..", absolute
-// inputs, or symlinks that point outside the tree.
-//
-// It is the kit's shared containment primitive: any tool that takes
-// root-relative paths constructs one FSRoot and delegates resolution to it,
-// instead of duplicating the guard per tool.
+// FSRoot resolves root-relative paths to absolute on-disk paths under a
+// trusted directory, guaranteeing they cannot escape the root via "..",
+// absolute inputs, or symlinks pointing outside the tree.
 type FSRoot struct {
 	// root is the cleaned, symlink-resolved absolute repository root. All
 	// resolved paths must remain within it.
@@ -53,12 +47,16 @@ func NewFSRoot(dir string) (*FSRoot, error) {
 	return &FSRoot{root: filepath.Clean(abs)}, nil
 }
 
-// Resolve maps a model-supplied, repo-relative path to an absolute on-disk path
-// inside the root, rejecting absolute inputs and any path that escapes the root
-// either lexically ("..") or after symlink resolution.
+// Resolve maps a repo-relative path to an absolute on-disk path inside the
+// root, rejecting absolute inputs and any path that escapes the root either
+// lexically ("..") or after symlink resolution. Dangling symlinks are followed
+// to their final target — with ".." applied to the physically resolved
+// directory, as the kernel does — before the containment decision; any
+// prefix that cannot be resolved (non-directory component, unsearchable
+// directory, symlink loop) is rejected with ErrPathEscape rather than taken
+// at its lexical spelling.
 //
-// An empty path resolves to the root itself (useful for list_dir of the repo
-// root).
+// An empty path resolves to the root itself.
 func (r *FSRoot) Resolve(rel string) (string, error) {
 	// Normalize separators so callers may use forward slashes regardless of OS.
 	rel = filepath.FromSlash(rel)
@@ -76,13 +74,15 @@ func (r *FSRoot) Resolve(rel string) (string, error) {
 		return "", fmt.Errorf("%w: %q", ErrPathEscape, rel)
 	}
 
-	// Symlink containment: resolve the longest existing prefix and ensure it
-	// still lands inside the root. Non-existent tails are fine; validation runs
-	// only over what exists.
-	if resolved, err := evalExistingPrefixPath(cleaned); err == nil {
-		if !r.contains(resolved) {
-			return "", fmt.Errorf("%w: %q resolves outside the root via symlink", ErrPathEscape, rel)
-		}
+	// Symlink containment: resolve the longest existing prefix — dangling
+	// links included, bounded by the kernel's symlink budget — and require
+	// the physical result to stay inside the root.
+	resolved, err := evalExistingPrefixPath(cleaned)
+	if err != nil {
+		return "", fmt.Errorf("%w: %q: %w", ErrPathEscape, rel, err)
+	}
+	if !r.contains(resolved) {
+		return "", fmt.Errorf("%w: %q resolves outside the root via symlink", ErrPathEscape, rel)
 	}
 
 	return cleaned, nil

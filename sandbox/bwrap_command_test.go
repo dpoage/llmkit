@@ -3,7 +3,6 @@ package sandbox
 import (
 	"errors"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -68,10 +67,14 @@ func TestBuildBwrapArgsSecurityFlags(t *testing.T) {
 		t.Errorf("network=none must not add --share-net; args=%q", args)
 	}
 
-	// Command tail must be exactly the spec command, in order, at the end.
-	tail := args[len(args)-3:]
-	if !slices.Equal(tail, []string{"sh", "-c", "echo hi"}) {
-		t.Errorf("command tail = %q, want sh -c 'echo hi'", tail)
+	// Command tail must be the ALWAYS-ON sh exec wrapper followed by the
+	// spec command, byte-exact: with no SetupCmds the script is exactly
+	// `exec "$@"`, so a missing/non-executable command surfaces as sh's
+	// 127/126 instead of bwrap's execvp exit 1. Wrapping only when
+	// setupCmds exist would break both this shape and that contract.
+	tail := args[len(args)-7:]
+	if !slices.Equal(tail, []string{"/bin/sh", "-c", `exec "$@"`, "sh", "sh", "-c", "echo hi"}) {
+		t.Errorf("command tail = %q, want the exec wrapper tail", tail)
 	}
 }
 
@@ -101,22 +104,19 @@ func TestBuildBwrapArgsSizesTmpfsMounts(t *testing.T) {
 	}
 }
 
-// TestBuildBwrapArgsDefaultScratchSize verifies that an unset (zero-value)
-// scratchSizeBytes falls back to fallbackScratchSizeMB (the same 512m the
-// container backend historically hardcoded) rather than emitting an
-// unsized (or zero-sized) tmpfs.
+// TestBuildBwrapArgsDefaultScratchSize pins the unconfigured scratch size: a
+// Bwrap with no options renders both tmpfs mounts at the documented 512 MB.
 func TestBuildBwrapArgsDefaultScratchSize(t *testing.T) {
-	args := buildBwrapArgs(bwrapParams{
-		workspace: "/tmp/ws",
-		network:   "none",
-		cmd:       []string{"true"},
-	})
-	// Computed the same way buildBwrapArgs' own fallback is, so this test
-	// does not hardcode a byte count that would silently drift from the
-	// real default.
-	wantBytes := strconv.FormatInt(int64(fallbackScratchSizeMB)*1024*1024, 10)
-	mustContainSeq(t, args, "--size", wantBytes, "--tmpfs", "/")
-	mustContainSeq(t, args, "--size", wantBytes, "--tmpfs", "/tmp")
+	s := &Bwrap{defaults: baseDefaults()}
+	var o options
+	o.applyDefaults(&s.defaults)
+	p, err := s.resolveBwrapParams(Spec{Cmd: []string{"true"}})
+	if err != nil {
+		t.Fatalf("resolveBwrapParams: %v", err)
+	}
+	args := buildBwrapArgs(p)
+	mustContainSeq(t, args, "--size", "536870912", "--tmpfs", "/")
+	mustContainSeq(t, args, "--size", "536870912", "--tmpfs", "/tmp")
 }
 
 func TestBuildBwrapArgsNetworkNoneVsHost(t *testing.T) {
@@ -196,19 +196,6 @@ func TestBuildBwrapArgsToolchainBinds(t *testing.T) {
 		},
 	})
 	mustContainSeq(t, args, "--ro-bind", "/nix/store/xxx-go", "/opt/llmkit-toolchains/go")
-}
-
-func TestBuildBwrapArgsMalformedEnvSkipped(t *testing.T) {
-	args := buildBwrapArgs(bwrapParams{
-		workspace: "/ws",
-		network:   "none",
-		cmd:       []string{"true"},
-		env:       []string{"NOEQUALSSIGN", "GOOD=value"},
-	})
-	mustContainSeq(t, args, "--setenv", "GOOD", "value")
-	if slices.Contains(args, "NOEQUALSSIGN") {
-		t.Errorf("malformed env entry must be dropped, not passed through; args=%q", args)
-	}
 }
 
 // TestBuildBwrapArgsUserLogNameOverride verifies USER and LOGNAME get the
@@ -344,19 +331,5 @@ func TestValidateBwrapMountsRejectsAllowlistCollision(t *testing.T) {
 	}
 	if err := validateBwrapMounts([]ROMount{{HostPath: "/host/x", ContainerPath: "/modcache"}}, nil); err != nil {
 		t.Errorf("non-colliding mount should validate cleanly, got %v", err)
-	}
-}
-
-func TestSplitEnvKV(t *testing.T) {
-	key, value, ok := splitEnvKV("FOO=bar")
-	if !ok || key != "FOO" || value != "bar" {
-		t.Errorf("splitEnvKV(FOO=bar) = %q %q %v", key, value, ok)
-	}
-	key, value, ok = splitEnvKV("FOO=bar=baz")
-	if !ok || key != "FOO" || value != "bar=baz" {
-		t.Errorf("splitEnvKV(FOO=bar=baz) = %q %q %v, want split on first =", key, value, ok)
-	}
-	if _, _, ok := splitEnvKV("NOEQUALS"); ok {
-		t.Error("splitEnvKV(NOEQUALS) should report ok=false")
 	}
 }

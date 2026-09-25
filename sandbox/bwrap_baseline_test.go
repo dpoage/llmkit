@@ -29,7 +29,7 @@ func fakeResolver(resolved map[string]string) (func(string) (string, error), fun
 }
 
 // TestFilterBwrapBaseline_FHSNoOp pins the FHS no-op guarantee: utilities
-// whose symlink-resolved home is a DefaultContainerPath directory are
+// whose symlink-resolved home is a defaultContainerPath directory are
 // dropped, so a standard distro resolves an EMPTY baseline and the sandbox
 // argv stays byte-identical to the pre-baseline behavior.
 func TestFilterBwrapBaseline_FHSNoOp(t *testing.T) {
@@ -46,7 +46,7 @@ func TestFilterBwrapBaseline_FHSNoOp(t *testing.T) {
 }
 
 // TestFilterBwrapBaseline_StoreLayout pins the store-distro behavior: names
-// resolving outside DefaultContainerPath survive, names sharing one package
+// resolving outside defaultContainerPath survive, names sharing one package
 // directory collapse to the first (nix coreutils applets, findutils'
 // find+xargs), and unresolvable names are skipped.
 func TestFilterBwrapBaseline_StoreLayout(t *testing.T) {
@@ -88,7 +88,7 @@ func TestAppendBaselinePath(t *testing.T) {
 }
 
 // TestBuildBwrapArgsBaselinePath pins the composition order in the rendered
-// argv — [prepend:]DefaultContainerPath[:baseline] — and that a
+// argv — [prepend:]defaultContainerPath[:baseline] — and that a
 // caller-supplied PATH in env gets the baseline re-appended so utilities
 // survive caller-constructed probe PATHs.
 func TestBuildBwrapArgsBaselinePath(t *testing.T) {
@@ -98,11 +98,11 @@ func TestBuildBwrapArgsBaselinePath(t *testing.T) {
 		cmd:                  []string{"true"},
 		toolchainPathPrepend: "/opt/llmkit-toolchains/node/bin",
 		baselinePathAppend:   base,
-		env:                  []string{"PATH=/probe/bin:" + DefaultContainerPath},
+		env:                  []string{"PATH=/probe/bin:" + defaultContainerPath},
 	})
-	wantDefault := "/opt/llmkit-toolchains/node/bin:" + DefaultContainerPath + ":" + base
+	wantDefault := "/opt/llmkit-toolchains/node/bin:" + defaultContainerPath + ":" + base
 	mustContainSeq(t, args, "--setenv", "PATH", wantDefault)
-	wantEnv := "/probe/bin:" + DefaultContainerPath + ":" + base
+	wantEnv := "/probe/bin:" + defaultContainerPath + ":" + base
 	mustContainSeq(t, args, "--setenv", "PATH", wantEnv)
 
 	// Without a baseline the argv is byte-identical to the historical shape:
@@ -112,6 +112,6 @@ func TestBuildBwrapArgsBaselinePath(t *testing.T) {
 		cmd:       []string{"true"},
 		env:       []string{"PATH=/probe/bin"},
 	})
-	mustContainSeq(t, plain, "--setenv", "PATH", DefaultContainerPath)
+	mustContainSeq(t, plain, "--setenv", "PATH", defaultContainerPath)
 	mustContainSeq(t, plain, "--setenv", "PATH", "/probe/bin")
 }

@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -47,7 +50,7 @@ func TestObserveExecEmitsOneEvent(t *testing.T) {
 	runID := llmkit.NewRunID()
 	ctx := llmkit.WithRun(context.Background(), runID)
 
-	res, err := sb.Exec(ctx, sandbox.Spec{Cmd: []string{"echo", "hello"}})
+	res, err := sb.Exec(ctx, sandbox.Spec{RepoDir: "/repo", Cmd: []string{"echo", "hello"}})
 	if err != nil {
 		t.Fatalf("Exec: %v", err)
 	}
@@ -104,7 +107,7 @@ func TestObserveNonZeroExitIsNotAnError(t *testing.T) {
 	m := sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: 7, Stdout: "boom"}})
 	sb := sandbox.Observe(m, log)
 
-	res, err := sb.Exec(context.Background(), sandbox.Spec{Cmd: []string{"false"}})
+	res, err := sb.Exec(context.Background(), sandbox.Spec{RepoDir: "/repo", Cmd: []string{"false"}})
 	if err != nil {
 		t.Fatalf("Exec err = %v, want nil (a non-zero exit is the command's verdict)", err)
 	}
@@ -128,7 +131,7 @@ func TestObserveInfraErrorStillEmits(t *testing.T) {
 	m.EnqueueResponse(sandbox.MockResponse{Err: boom})
 	sb := sandbox.Observe(m, log)
 
-	res, err := sb.Exec(context.Background(), sandbox.Spec{Cmd: []string{"cmd"}})
+	res, err := sb.Exec(context.Background(), sandbox.Spec{RepoDir: "/repo", Cmd: []string{"cmd"}})
 	if !errors.Is(err, boom) {
 		t.Fatalf("Exec err = %v, want the scripted error", err)
 	}
@@ -171,7 +174,7 @@ func TestObserveTruncatedReflectsEitherStream(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			log := &execLog{}
 			sb := sandbox.Observe(sandbox.NewMock(sandbox.MockResponse{Result: tc.res}), log)
-			if _, err := sb.Exec(context.Background(), sandbox.Spec{Cmd: []string{"cmd"}}); err != nil {
+			if _, err := sb.Exec(context.Background(), sandbox.Spec{RepoDir: "/repo", Cmd: []string{"cmd"}}); err != nil {
 				t.Fatalf("Exec: %v", err)
 			}
 			if got := log.events()[0].Exec.Truncated; got != tc.want {
@@ -187,7 +190,7 @@ func TestObserveWatchdogKillCarriesMinusOne(t *testing.T) {
 	log := &execLog{}
 	sb := sandbox.Observe(sandbox.NewMock(sandbox.MockResponse{Result: sandbox.Result{ExitCode: -1, TimedOut: true}}), log)
 
-	res, err := sb.Exec(context.Background(), sandbox.Spec{Cmd: []string{"cmd"}})
+	res, err := sb.Exec(context.Background(), sandbox.Spec{RepoDir: "/repo", Cmd: []string{"cmd"}})
 	if err != nil {
 		t.Fatalf("Exec: %v", err)
 	}
@@ -201,11 +204,22 @@ func TestObserveWatchdogKillCarriesMinusOne(t *testing.T) {
 
 func TestObserveMaterializeWorkspacePassesThrough(t *testing.T) {
 	log := &execLog{}
-	sb := sandbox.Observe(sandbox.NewMock(sandbox.MockResponse{}), log)
+	m := sandbox.NewMock(sandbox.MockResponse{})
+	sb := sandbox.Observe(m, log)
 
 	got, err := sb.MaterializeWorkspace("/repo")
-	if err != nil || got != "/repo" {
-		t.Fatalf("MaterializeWorkspace = %q, %v; want /repo, nil", got, err)
+	if err != nil {
+		t.Fatalf("MaterializeWorkspace: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(got) }()
+	// The Mock's MaterializeWorkspace is pass-through in the OBSERVE sense:
+	// it reaches the inner backend unchanged and emits no event. The path
+	// itself is a fresh directory (never the input).
+	if got == "/repo" || strings.HasPrefix(got, "/repo/") {
+		t.Fatalf("MaterializeWorkspace = %q; must never return the caller's repoDir", got)
+	}
+	if info, statErr := os.Stat(got); statErr != nil || !info.IsDir() {
+		t.Fatalf("MaterializeWorkspace = %q (%v); want an existing directory", got, statErr)
 	}
 	if n := len(log.events()); n != 0 {
 		t.Errorf("got %d events from MaterializeWorkspace, want 0", n)
@@ -230,7 +244,7 @@ func TestObserveObserverPanicPropagates(t *testing.T) {
 			t.Fatalf("Exec recovered an observer panic, want it to propagate")
 		}
 	}()
-	_, _ = sb.Exec(context.Background(), sandbox.Spec{Cmd: []string{"cmd"}})
+	_, _ = sb.Exec(context.Background(), sandbox.Spec{RepoDir: "/repo", Cmd: []string{"cmd"}})
 }
 
 func TestObserveConcurrentExecs(t *testing.T) {
@@ -244,7 +258,7 @@ func TestObserveConcurrentExecs(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := sb.Exec(ctx, sandbox.Spec{Cmd: []string{"cmd"}}); err != nil {
+			if _, err := sb.Exec(ctx, sandbox.Spec{RepoDir: "/repo", Cmd: []string{"cmd"}}); err != nil {
 				t.Errorf("Exec: %v", err)
 			}
 		}()
@@ -265,7 +279,7 @@ func ExampleObserve() {
 		Result: sandbox.Result{ExitCode: 0, Stdout: "hello\n"},
 	}), log)
 
-	_, _ = sb.Exec(context.Background(), sandbox.Spec{Cmd: []string{"echo", "hello"}})
+	_, _ = sb.Exec(context.Background(), sandbox.Spec{RepoDir: "/repo", Cmd: []string{"echo", "hello"}})
 
 	for _, ev := range log.events() {
 		x := ev.Exec
@@ -281,7 +295,7 @@ func TestObserveCommandIsCopiedNotAliased(t *testing.T) {
 	sb := sandbox.Observe(sandbox.NewMock(sandbox.MockResponse{}), log)
 
 	cmd := []string{"go", "test", "./a"}
-	_, _ = sb.Exec(context.Background(), sandbox.Spec{Cmd: cmd})
+	_, _ = sb.Exec(context.Background(), sandbox.Spec{RepoDir: "/repo", Cmd: cmd})
 
 	// A sink retains events past the call; the caller owns the argv and
 	// may reuse its backing array. The event must hold its own copy.
@@ -307,7 +321,7 @@ func TestObservePopulatedResultWithErrorPassesThrough(t *testing.T) {
 	m.EnqueueResponse(sandbox.MockResponse{Result: want, Err: boom})
 	sb := sandbox.Observe(m, log)
 
-	res, err := sb.Exec(context.Background(), sandbox.Spec{Cmd: []string{"cmd"}})
+	res, err := sb.Exec(context.Background(), sandbox.Spec{RepoDir: "/repo", Cmd: []string{"cmd"}})
 	if err != boom {
 		t.Fatalf("err = %v, want the identical scripted error", err)
 	}
@@ -358,7 +372,7 @@ func TestObserveUnknownBackendNamedByGoType(t *testing.T) {
 	log := &execLog{}
 	sb := sandbox.Observe(customSandbox{}, log)
 
-	_, _ = sb.Exec(context.Background(), sandbox.Spec{Cmd: []string{"cmd"}})
+	_, _ = sb.Exec(context.Background(), sandbox.Spec{RepoDir: "/repo", Cmd: []string{"cmd"}})
 	if got := log.events()[0].Exec.Backend; got != "sandbox_test.customSandbox" {
 		t.Errorf("Backend = %q, want the Go type name", got)
 	}
@@ -368,7 +382,7 @@ func TestObserveNestedWrapperReportsInnerBackend(t *testing.T) {
 	log := &execLog{}
 	sb := sandbox.Observe(sandbox.Observe(sandbox.NewMock(sandbox.MockResponse{}), log), log)
 
-	_, _ = sb.Exec(context.Background(), sandbox.Spec{Cmd: []string{"cmd"}})
+	_, _ = sb.Exec(context.Background(), sandbox.Spec{RepoDir: "/repo", Cmd: []string{"cmd"}})
 
 	// One event per layer: [0] is the inner wrapper's (its Backend is
 	// trivially "mock"); [1] is the OUTER wrapper's, which must report
@@ -391,7 +405,7 @@ func TestObservePassesCallerCtxToObserver(t *testing.T) {
 	sb := sandbox.Observe(sandbox.NewMock(sandbox.MockResponse{}), obs)
 
 	ctx := context.WithValue(context.Background(), marker{}, "present")
-	_, _ = sb.Exec(ctx, sandbox.Spec{Cmd: []string{"cmd"}})
+	_, _ = sb.Exec(ctx, sandbox.Spec{RepoDir: "/repo", Cmd: []string{"cmd"}})
 	if got != "present" {
 		t.Errorf("observer saw ctx value %v, want \"present\" — the observer must receive the caller's context", got)
 	}
@@ -407,4 +421,63 @@ func (customSandbox) Exec(context.Context, sandbox.Spec) (sandbox.Result, error)
 
 func (customSandbox) MaterializeWorkspace(repoDir string) (string, error) {
 	return repoDir, nil
+}
+
+// closerSandbox is a fake Sandbox that also implements io.Closer, recording
+// whether Close was called and returning a sentinel error so
+// TestObserveCloseThroughIoCloser can prove the sentinel round-trips
+// through observedSandbox.Close rather than being swallowed.
+type closerSandbox struct {
+	closed   bool
+	closeErr error
+}
+
+func (*closerSandbox) Exec(context.Context, sandbox.Spec) (sandbox.Result, error) {
+	return sandbox.Result{}, nil
+}
+
+func (*closerSandbox) MaterializeWorkspace(repoDir string) (string, error) {
+	return repoDir, nil
+}
+
+func (c *closerSandbox) Close() error {
+	c.closed = true
+	return c.closeErr
+}
+
+// TestObserveCloseThroughIoCloser pins S1-4 (7.3): the Sandbox Observe
+// returns also implements io.Closer, forwarding to the inner backend's
+// Close when it has one and returning nil otherwise — Mock and HostExec
+// have no Close method.
+func TestObserveCloseThroughIoCloser(t *testing.T) {
+	sentinel := errors.New("sentinel close error")
+	inner := &closerSandbox{closeErr: sentinel}
+	sb := sandbox.Observe(inner, &execLog{})
+
+	c, ok := sb.(io.Closer)
+	if !ok {
+		t.Fatal("Observe's return value must implement io.Closer when the inner backend does")
+	}
+	if err := c.Close(); !errors.Is(err, sentinel) {
+		t.Errorf("Close() = %v, want the inner backend's sentinel error to round-trip", err)
+	}
+	if !inner.closed {
+		t.Error("Close must forward to the inner backend's Close")
+	}
+
+	for name, mkInner := range map[string]sandbox.Sandbox{
+		"Mock":     sandbox.NewMock(sandbox.MockResponse{}),
+		"HostExec": sandbox.NewHostExec(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			wrapped := sandbox.Observe(mkInner, &execLog{})
+			c, ok := wrapped.(io.Closer)
+			if !ok {
+				t.Fatal("Observe's return value must always implement io.Closer")
+			}
+			if err := c.Close(); err != nil {
+				t.Errorf("Close() = %v, want nil (%s has no Close method)", err, name)
+			}
+		})
+	}
 }

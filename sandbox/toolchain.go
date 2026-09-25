@@ -3,54 +3,48 @@ package sandbox
 // toolchain.go implements host toolchain provisioning: resolving named
 // toolchains (or explicit host directories) into read-only bind mounts, a
 // PATH prefix, and provenance fingerprints, so a sandbox image that lacks a
-// toolchain (node, python, cargo, ...) can still run it: the host demonstrably
-// has every toolchain it needs to build/test its own targets daily, and
-// mounting it read-only exposes that without granting the untrusted run
-// write access or network egress.
+// toolchain (node, python, cargo, ...) can still run it via the host's own
+// installation.
 //
 // # Security posture
 //
-// Exactly the same as any other ROMount (see the package doc and
-// ROMount.Shared): only PUBLIC, READ-ONLY content is exposed to the
-// container — the resolved binary and the directory that holds its runtime
-// dependencies (the symlink closure target's containing directory; for a
-// nix-store or asdf/nvm shim layout this is normally already a
-// self-contained, versioned directory). NEVER a secret or credential
-// directory. Operators configuring host toolchains are exposing
-// their own PATH's resolution of that name (or an explicit directory they
-// name directly) to whatever untrusted, model-driven code the sandbox runs —
+// Same as any other ROMount (see the package doc and ROMount.Shared): only
+// PUBLIC, READ-ONLY content is exposed — the resolved binary and the
+// directory that holds its runtime dependencies. NEVER a secret or
+// credential directory. Operators are exposing their PATH's resolution of
+// the name (or an explicit directory) to untrusted, model-driven code —
 // audit accordingly, exactly as for any operator-opted-in mount.
 //
 // # Resolution algorithm
 //
 //  1. Each requested entry is either a bare name (resolved via the HOST's
-//     `command -v <name>`, i.e. Go's exec.LookPath against the host PATH) or
-//     an absolute directory path (used directly, no lookup — lets an
-//     operator pin an exact toolchain install outside PATH, e.g. a specific
-//     nix store path).
+//     `command -v <name>`, i.e. Go's exec.LookPath) or an absolute directory
+//     path (used directly, no lookup — lets an operator pin an exact
+//     toolchain install outside PATH, e.g. a specific nix store path).
 //  2. A resolved executable's symlink chain is followed to its final target
-//     (filepath.EvalSymlinks) so nix/asdf/nvm shim layouts resolve to the
-//     real toolchain directory rather than a one-file shim that would be
-//     useless mounted alone.
-//  3. The mounted root is the resolved target's containing directory, or that
-//     directory's parent when the containing directory is named "bin" (the
-//     common `<toolchain-root>/bin/<name>` layout) — this pulls in sibling
-//     lib/ and share/ directories the runtime needs alongside the binary,
-//     in one mount.
+//     (filepath.EvalSymlinks), so nix/asdf/nvm shim layouts resolve to the
+//     real toolchain directory rather than a one-file shim.
+//  3. The mounted root is the resolved target's containing directory, or
+//     that directory's parent when the containing directory is named "bin"
+//     — this pulls in sibling lib/ and share/ the runtime needs, in one
+//     mount. The ascent only fires when the parent is narrow (a
+//     version-manager's own versioned dir, a nix store path); see
+//     isOverbroadToolchainRoot for the guard.
 //  4. A provenance fingerprint (resolved host path + `<name> --version`,
 //     run on the HOST, not in any sandbox) is recorded per toolchain.
-//     Hermeticity is knowingly traded for provisioning correctness here; the
+//     Hermeticity is knowingly traded for provisioning correctness; the
 //     fingerprint is what keeps a verdict attributable to the exact host
 //     toolchain build that produced it.
 //
-// # Contract for other sandbox backends
+// # Per-backend rendering
 //
 // ResolveHostToolchains is the single implementation of this algorithm, so
 // resolution/fingerprinting/PATH handling never drifts between backends.
-// Other Sandbox implementations (e.g. a bwrap backend) call it directly and
-// translate ToolchainResolution.Mounts into their own bind-mount mechanism
-// (this package's CLI backend renders them via Spec.ROMounts, same as any
-// other read-only mount).
+// Callers pass its ToolchainResolution to WithHostToolchains on NewCLI or
+// NewBwrap. The CLI backend renders each mount as `-v host:ctr:ro` and the
+// PATH prefix as an `--env PATH=` entry ahead of Spec.Env; the bwrap
+// backend renders `--ro-bind host ctr` and `--setenv PATH`.
+
 import (
 	"context"
 	"fmt"
@@ -62,30 +56,31 @@ import (
 )
 
 // hostToolchainMountRoot is the fixed container path prefix under which every
-// resolved host toolchain is mounted, one subdirectory per requested entry.
-// This keeps toolchain ContainerPaths from colliding with each other or with
-// the conventional dependency-cache mount paths (/modcache, /pipcache, ...).
+// resolved host toolchain is mounted, one subdirectory per requested entry,
+// so toolchain ContainerPaths cannot collide with each other or with
+// conventional dependency-cache mount paths (/modcache, /pipcache, ...).
 const hostToolchainMountRoot = "/opt/llmkit-toolchains"
 
-// DefaultContainerPath is appended after any resolved toolchain bin
+// defaultContainerPath is appended after any resolved toolchain bin
 // directories when building the container's PATH override. It mirrors a
 // standard Linux distribution's default PATH so images that already ship
-// their own toolchains (and set no ENV PATH override) keep working exactly
-// as before when no host toolchains are configured or resolve nothing.
-const DefaultContainerPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+// their own toolchains keep working exactly as before when no host
+// toolchains are configured or resolve nothing.
+const defaultContainerPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 // toolchainVersionProbeTimeout bounds the HOST-side `<bin> --version` probe
-// used to build a fingerprint. This runs directly on the host (not inside any
-// sandbox), so it must not be allowed to hang the caller on a broken binary.
+// used to build a fingerprint. Runs directly on the host (not inside any
+// sandbox), so it must not be allowed to hang the caller on a broken
+// binary.
 const toolchainVersionProbeTimeout = 3 * time.Second
 
 // ToolchainFingerprint records provenance for one resolved host toolchain
 // mount: the host path actually mounted and the toolchain's reported version
-// string. Recorded in run metadata so a demonstrated bug — or its absence —
-// can be attributed to the exact host toolchain build that produced it.
+// string. Recorded in run metadata so a verdict can be attributed to the
+// exact host toolchain build that produced it.
 type ToolchainFingerprint struct {
-	// Name is the requested toolchain entry (e.g. "node") or, for an
-	// explicit directory entry, the directory's base name.
+	// Name is the requested entry, trimmed: a bare name (e.g. "node") or an
+	// explicit directory's absolute path.
 	Name string
 	// Path is the resolved host directory that was mounted read-only.
 	Path string
@@ -97,25 +92,33 @@ type ToolchainFingerprint struct {
 // ToolchainResolution is the result of resolving a set of named host
 // toolchains (or explicit directories) for sandbox provisioning.
 type ToolchainResolution struct {
-	// Mounts are read-only bind mounts to add to a sandbox Spec (or a
-	// backend's own bind-mount list). Each is Shared=true: these are
-	// host-owned toolchain installs, not tool-managed dirs, so they must
-	// never be SELinux :Z relabeled (see ROMount.Shared).
-	Mounts []ROMount
-	// PathPrepend is a ":"-joined, request-ordered list of in-container
+	// mounts are read-only bind mounts to add to a sandbox Spec (or a
+	// backend's own bind-mount list). Each is Shared=true: host-owned
+	// toolchain installs must never be SELinux :Z relabeled (see
+	// ROMount.Shared).
+	mounts []ROMount
+	// pathPrepend is a ":"-joined, request-ordered list of in-container
 	// directories (the containing directory of each resolved executable,
 	// rewritten under its mount's ContainerPath) to place at the front of
-	// PATH inside the container. Empty when no requested entry resolved to
-	// an executable (e.g. every entry was an explicit non-executable dir).
-	PathPrepend string
+	// PATH inside the container. Empty when no entry resolved to an
+	// executable (e.g. every entry was an explicit non-executable dir).
+	pathPrepend string
 	// Fingerprints records provenance for each successfully resolved
-	// toolchain, in request order. Entries that failed to resolve are
-	// silently absent (see ResolveHostToolchains doc).
+	// toolchain, in request order. An entry that did not resolve has no
+	// fingerprint; it is listed in Unresolved instead.
 	Fingerprints []ToolchainFingerprint
+	// Unresolved lists, in request order, every trimmed non-empty entry
+	// that did not resolve on this host (not on PATH, a dangling symlink,
+	// or a named directory that does not exist). A blank entry (empty or
+	// whitespace-only) is silently skipped — never resolved, never
+	// unresolved. Nil when every entry resolved.
+	Unresolved []string
 }
 
 // ResolveHostToolchains resolves each entry in names into a read-only bind
-// mount, in-container PATH entry, and provenance fingerprint.
+// mount and a provenance fingerprint, plus an in-container PATH entry when
+// the entry resolved to an executable (a bare name; an explicit directory
+// contributes no PATH entry).
 //
 // An entry is either:
 //   - a bare name (e.g. "node"): resolved via the host's PATH
@@ -124,14 +127,15 @@ type ToolchainResolution struct {
 //   - an absolute directory path (starts with "/"): used directly as the
 //     mounted root, no PATH lookup or symlink following.
 //
-// Resolution is best-effort per entry: a name that cannot be resolved on the
-// host (not on PATH, dangling symlink, or a named directory that does not
-// exist) is skipped with no error. This mirrors ROMount's existing
-// best-effort ethos — a misconfigured entry degrades (the resulting
-// CapabilitySet probe will legitimately report that ecosystem unavailable),
-// it does not abort the run. Duplicate ContainerPaths (two entries resolving
-// to the same mount) are de-duplicated; only the first is kept.
-func ResolveHostToolchains(names []string) (ToolchainResolution, error) {
+// Resolution is best-effort per entry: a name that cannot be resolved on
+// the host (not on PATH, dangling symlink, or a named directory that does
+// not exist) is skipped and its trimmed name recorded in Unresolved, in
+// request order — never an error return. A misconfigured entry degrades
+// (the resulting CapabilitySet probe will report that ecosystem
+// unavailable); it does not abort the run. Duplicate ContainerPaths are
+// de-duplicated; only the first is kept, and a deduplicated entry is NOT
+// reported in Unresolved (it did resolve).
+func ResolveHostToolchains(names []string) ToolchainResolution {
 	var res ToolchainResolution
 	var pathDirs []string
 	seenContainerPaths := make(map[string]bool, len(names))
@@ -143,7 +147,7 @@ func ResolveHostToolchains(names []string) (ToolchainResolution, error) {
 		}
 		root, execPath, err := resolveToolchainRoot(name)
 		if err != nil {
-			// Not resolvable on this host: skip, best-effort (see doc).
+			res.Unresolved = append(res.Unresolved, name)
 			continue
 		}
 		ctrPath := hostToolchainMountRoot + "/" + sanitizeToolchainSegment(name)
@@ -152,7 +156,7 @@ func ResolveHostToolchains(names []string) (ToolchainResolution, error) {
 		}
 		seenContainerPaths[ctrPath] = true
 
-		res.Mounts = append(res.Mounts, ROMount{
+		res.mounts = append(res.mounts, ROMount{
 			HostPath:      root,
 			ContainerPath: ctrPath,
 			Shared:        true, // host-owned toolchain install; never :Z relabeled
@@ -173,8 +177,8 @@ func ResolveHostToolchains(names []string) (ToolchainResolution, error) {
 		})
 	}
 
-	res.PathPrepend = strings.Join(pathDirs, ":")
-	return res, nil
+	res.pathPrepend = strings.Join(pathDirs, ":")
+	return res
 }
 
 // resolveToolchainRoot resolves name to (mountedRootDir, resolvedExecPath).
@@ -204,13 +208,13 @@ func resolveToolchainRoot(name string) (root, execPath string, err error) {
 	root = dir
 	if filepath.Base(dir) == "bin" {
 		// Pull in the toolchain root (sibling lib/, share/, ...) alongside
-		// the bin/ directory, not just the single binary's own folder — but
-		// ONLY when that root is narrow (a version-manager's own versioned
-		// directory, a nix store path, ...). A $HOME/bin/node or
-		// ~/.local/bin/node layout would otherwise ascend straight to $HOME
-		// or ~/.local and RO-mount the user's entire home directory (SSH
-		// keys, git credentials, unrelated dotfiles) into whatever untrusted,
-		// model-driven code the sandbox runs. See isOverbroadToolchainRoot.
+		// the bin/ directory, but only when that root is narrow (a
+		// version-manager's own versioned directory, a nix store path, ...).
+		// A $HOME/bin/node or ~/.local/bin/node layout would otherwise
+		// ascend to $HOME or ~/.local and RO-mount the user's entire home
+		// directory (SSH keys, git credentials, unrelated dotfiles) into
+		// whatever untrusted, model-driven code the sandbox runs. See
+		// isOverbroadToolchainRoot.
 		if candidate := filepath.Dir(dir); !isOverbroadToolchainRoot(candidate) {
 			root = candidate
 		}
@@ -223,7 +227,6 @@ func resolveToolchainRoot(name string) (root, execPath string, err error) {
 // the user's home directory itself, or a broad catch-all subdirectory like
 // ~/.local that holds far more than one toolchain. A $HOME/bin/node or
 // ~/.local/bin/node layout ascends exactly here without this guard.
-//
 // Narrow, single-purpose version-manager directories
 // (~/.nvm/versions/node/vX, ~/.asdf/installs/..., a nix store path) are NOT
 // caught by this — they are exactly the layout the ascent exists to support.
@@ -245,11 +248,11 @@ func isOverbroadToolchainRoot(dir string) bool {
 	return false
 }
 
-// sanitizeToolchainSegment reduces name to a single, safe path component for
-// use under hostToolchainMountRoot: the base name only, so an absolute
+// sanitizeToolchainSegment reduces name to a single, safe path component
+// for use under hostToolchainMountRoot: the base name only, so an absolute
 // directory entry (e.g. "/nix/store/xxx-nodejs-18") mounts at a flat
 // "/opt/llmkit-toolchains/xxx-nodejs-18" rather than a nested, traversal-prone
-// path, and a bare name is used as-is (it is already a single component).
+// path. A bare name is used as-is (it is already a single component).
 func sanitizeToolchainSegment(name string) string {
 	base := filepath.Base(name)
 	if base == "" || base == "." || base == "/" || base == string(filepath.Separator) {
@@ -258,11 +261,11 @@ func sanitizeToolchainSegment(name string) string {
 	return base
 }
 
-// probeToolchainVersion best-effort runs `<bin> --version` on the HOST — not
-// inside any sandbox; this inspects the host toolchain being mounted, before
-// any container exists — and returns its first output line, trimmed. Returns
-// "" on any failure (binary rejects --version, times out, etc.); the
-// fingerprint remains useful with just the resolved path in that case.
+// probeToolchainVersion best-effort runs `<bin> --version` on the HOST —
+// not inside any sandbox; this inspects the host toolchain being mounted,
+// before any container exists — and returns its first output line,
+// trimmed. Returns "" on any failure (binary rejects --version, times
+// out, etc.); the fingerprint remains useful with just the resolved path.
 func probeToolchainVersion(name, execPath string) string {
 	bin := execPath
 	if bin == "" {

@@ -115,19 +115,19 @@ func hostToolForTest(t *testing.T, name string) ([]ROMount, func(args ...string)
 	if err != nil || execPath == "" {
 		t.Skipf("cannot resolve a host %q binary for this test", name)
 	}
-	res, rerr := ResolveHostToolchains([]string{name})
-	if rerr != nil || len(res.Mounts) == 0 {
+	res := ResolveHostToolchains([]string{name})
+	if len(res.mounts) == 0 {
 		t.Skipf("cannot resolve %q via the host-toolchain resolver", name)
 	}
 	rel, relErr := filepath.Rel(root, execPath)
 	if relErr != nil {
 		t.Skipf("cannot compute %q's in-mount relative path: %v", name, relErr)
 	}
-	mounts := []ROMount{res.Mounts[0]}
+	mounts := []ROMount{res.mounts[0]}
 	for _, dir := range hostSharedLibDirs(execPath) {
 		mounts = append(mounts, ROMount{HostPath: dir, ContainerPath: dir, Shared: true})
 	}
-	ctrPath := filepath.ToSlash(filepath.Join(res.Mounts[0].ContainerPath, rel))
+	ctrPath := filepath.ToSlash(filepath.Join(res.mounts[0].ContainerPath, rel))
 	multiCall := filepath.Base(execPath) == "coreutils"
 	invoke := func(args ...string) string {
 		if multiCall {
@@ -571,7 +571,7 @@ func TestBwrapLiteralBinShResolves(t *testing.T) {
 
 // TestBwrapBaselineUtilitiesReachable pins the baseline guarantee: the sandbox PATH
 // must reach POSIX core utilities with NO operator host_toolchains and NO
-// helper mounts. On store-based hosts DefaultContainerPath's FHS dirs hold
+// helper mounts. On store-based hosts defaultContainerPath's FHS dirs hold
 // only sh and env, so without the construction-time baseline resolution the
 // exact production shapes below die with "mkdir: command not found":
 // a caller's dependency-prefetch setup emits a bare `mkdir -p` SetupCmds entry,

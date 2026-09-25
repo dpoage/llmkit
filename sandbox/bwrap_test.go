@@ -1,10 +1,12 @@
 package sandbox
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -93,9 +95,8 @@ func TestBwrapOptionsApplyDefaults(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 
-	cpus, mem, pids := s.Limits()
-	if cpus != 3 || mem != 1024 || pids != 64 {
-		t.Errorf("Limits() = %v %v %v, want 3 1024 64", cpus, mem, pids)
+	if s.defaultCPUs != 3 || s.defaultMemory != 1024 || s.pidsLimit != 64 {
+		t.Errorf("defaultCPUs/defaultMemory/pidsLimit = %v %v %v, want 3 1024 64", s.defaultCPUs, s.defaultMemory, s.pidsLimit)
 	}
 	if s.defaultNetwork != NetworkHost {
 		t.Errorf("defaultNetwork = %q, want %q", s.defaultNetwork, NetworkHost)
@@ -185,21 +186,6 @@ func TestBwrapConstructorRejectsBridgeNetworkDefault(t *testing.T) {
 	}
 }
 
-// TestBwrapExec_RefusesImage pins the Spec honesty table's Image row for the
-// bwrap backend: a non-empty Image is a typed Exec refusal, never a silent
-// ignore.
-func TestBwrapExec_RefusesImage(t *testing.T) {
-	s := &Bwrap{}
-	_, err := s.resolveBwrapParams(Spec{Cmd: []string{"true"}, Image: "quay.io/example/img:latest"})
-	var ue *UnsupportedSpecError
-	if !errors.As(err, &ue) {
-		t.Fatalf("err = %v, want *UnsupportedSpecError", err)
-	}
-	if ue.Backend != "bwrap" || ue.Field != "Image" {
-		t.Errorf("UnsupportedSpecError = %+v, want backend=bwrap field=Image", ue)
-	}
-}
-
 func TestBwrapExecRejectsEmptyCmd(t *testing.T) {
 	s := &Bwrap{}
 	if _, err := s.Exec(nil, Spec{}); err == nil { //nolint:staticcheck // nil ctx is fine; Exec must fail before using it.
@@ -215,6 +201,38 @@ func TestBwrapExecRejectsMountCollisionBeforeAnyWork(t *testing.T) {
 	})
 	if err == nil {
 		t.Error("expected Exec to reject a mount colliding with the fixed allowlist")
+	}
+}
+
+// TestBwrapExecAsksTheInstanceExpandSupportCache pins the Exec→probe
+// wiring: the cap-method detection Exec runs is handed this instance's
+// cached systemd-run --expand-environment=no answer. A pre-254 systemd
+// answers no (so the host-env-expanding systemd-run is never chosen), and
+// the version probe runs once for the instance, not once per Exec.
+func TestBwrapExecAsksTheInstanceExpandSupportCache(t *testing.T) {
+	prevVersion := systemdRunVersion
+	t.Cleanup(func() { systemdRunVersion = prevVersion })
+	probes := 0
+	systemdRunVersion = func(context.Context) ([]byte, error) {
+		probes++
+		return []byte("systemd 253 (253.1)\n"), nil
+	}
+	prevDetect := detectCapMethod
+	t.Cleanup(func() { detectCapMethod = prevDetect })
+	var answers []bool
+	detectCapMethod = func(ctx context.Context, expandSupport func(context.Context) bool) bwrapCapMethod {
+		answers = append(answers, expandSupport(ctx))
+		return bwrapCapNone
+	}
+
+	s := &Bwrap{}
+	for range 2 {
+		if _, err := s.Exec(context.Background(), Spec{Workspace: t.TempDir(), Cmd: []string{"true"}}); !errors.Is(err, ErrBwrapNoCapMethod) {
+			t.Fatalf("Exec error = %v, want ErrBwrapNoCapMethod from the stubbed detection", err)
+		}
+	}
+	if !slices.Equal(answers, []bool{false, false}) || probes != 1 {
+		t.Fatalf("expandSupport answers = %v with %d version probe(s), want [false false] from one probe (systemd 253 lacks --expand-environment=no)", answers, probes)
 	}
 }
 
