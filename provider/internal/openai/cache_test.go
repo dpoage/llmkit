@@ -14,9 +14,12 @@ func TestOpenAICompatible_NoCachedTokensField(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(mockTextBody("hi", 130, 5)))
 	})
-	client := New("llama-test", Options{
+	client, err := New("llama-test", Options{
 		APIKey: "test-key", BaseURL: base, Compatible: true,
 	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 
 	resp, err := client.Complete(context.Background(), simpleRequest())
 	if err != nil {

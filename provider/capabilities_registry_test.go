@@ -8,51 +8,82 @@ import (
 	"github.com/dpoage/llmkit"
 )
 
-// overrideEveryField is a capability profile that differs from every
-// adapter's table defaults on every field, so a DeepEqual against
-// client.Capabilities() proves the Spec.Capabilities override REPLACED the
-// table wholesale — any field that falls through from the table fails.
-func overrideEveryField() llmkit.Capabilities {
-	return llmkit.Capabilities{
-		ContextWindow:     123_456,
-		ParallelToolCalls: false,
-		PromptCaching:     false,
-		StructuredOutput:  false,
-		Thinking:          false,
-		ToolChoice:        false,
-		Images:            false,
-		Documents:         false,
-		StopSequences:     false,
-		TopP:              false,
-		TopK:              true,
-		Seed:              true,
-	}
-}
-
 // TestCapabilities_SpecOverride_ReplacesTableWholesale walks every provider
 // type with a KNOWN model (so a table entry exists to be replaced) and
-// asserts the effective profile equals the override exactly.
+// asserts the effective profile equals a per-Type override exactly. Each
+// override differs from that Type's table default on every wire-gated
+// field INSIDE its ceiling (round bk8-r3 seam 2: ApplyOverride refuses an
+// effective profile that reports true for a wire-gated field the adapter's
+// ceiling forbids) — anthropic's Seed and openai/openai-compatible's
+// Thinking and TopK cannot differ from a false table default while
+// staying within ceiling, so those three stay false; every other field,
+// including every advisory/decorator one (never ceiling-checked), differs.
+// A field that falls through from the table instead of the override fails
+// the DeepEqual.
 func TestCapabilities_SpecOverride_ReplacesTableWholesale(t *testing.T) {
+	isolateBaseURLSources(t)
 	cases := []struct {
 		name  string
 		spec  Spec
 		model string
+		want  llmkit.Capabilities
 	}{
-		{"anthropic", Spec{Type: TypeAnthropic}, "claude-opus-4-5"},
-		{"openai", Spec{Type: TypeOpenAI}, "gpt-5"},
-		{"openai-compatible", Spec{Type: TypeOpenAICompatible, BaseURL: "http://example.invalid"}, "llama3"},
-		{"google", Spec{Type: TypeGoogle}, "gemini-2.5-pro"},
+		{
+			"anthropic", Spec{Type: TypeAnthropic}, "claude-opus-4-5",
+			llmkit.Capabilities{
+				ContextWindow: 1, ParallelToolCalls: false, PromptCaching: false,
+				StructuredOutput: false, Thinking: false, ToolChoice: false,
+				Images: false, Documents: false, StopSequences: false,
+				TopP: false, TopK: false,
+				Seed: false, // outside anthropic's ceiling; table is already false
+			},
+		},
+		{
+			"openai", Spec{Type: TypeOpenAI}, "gpt-5",
+			llmkit.Capabilities{
+				ContextWindow: 1, ParallelToolCalls: false, PromptCaching: false,
+				StructuredOutput: false,
+				Thinking:         false, // outside openai's ceiling; table is already false
+				ToolChoice:       false,
+				Images:           false, Documents: false, StopSequences: false,
+				TopP: false,
+				TopK: false, // outside openai's ceiling; table is already false
+				Seed: false,
+			},
+		},
+		{
+			"openai-compatible", Spec{Type: TypeOpenAICompatible, BaseURL: "http://example.invalid"}, "llama3",
+			llmkit.Capabilities{
+				ContextWindow: 1, ParallelToolCalls: true, PromptCaching: true,
+				StructuredOutput: true,  // compat's table default is false; within ceiling
+				Thinking:         false, // outside compat's ceiling; table is already false
+				ToolChoice:       false,
+				Images:           false, Documents: false, StopSequences: false,
+				TopP: false,
+				TopK: false, // outside compat's ceiling; table is already false
+				Seed: false,
+			},
+		},
+		{
+			"google", Spec{Type: TypeGoogle}, "gemini-2.5-pro",
+			llmkit.Capabilities{
+				ContextWindow: 1, ParallelToolCalls: false, PromptCaching: false,
+				StructuredOutput: false, Thinking: false, ToolChoice: false,
+				Images: false, Documents: false, StopSequences: false,
+				TopP: false, TopK: false, Seed: false, // google's ceiling permits every field
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.spec.Model = tc.model
 			tc.spec.Secret = "k"
-			tc.spec.Capabilities = func(llmkit.Capabilities) llmkit.Capabilities { return overrideEveryField() }
+			want := tc.want
+			tc.spec.Capabilities = func(llmkit.Capabilities) llmkit.Capabilities { return want }
 			client, err := New(context.Background(), tc.spec, Options{})
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
-			want := overrideEveryField()
 			if got := client.Capabilities(); !reflect.DeepEqual(got, want) {
 				t.Errorf("Capabilities() =\n  %+v\nwant the Spec.Capabilities override wholesale:\n  %+v", got, want)
 			}
@@ -66,6 +97,7 @@ func TestCapabilities_SpecOverride_ReplacesTableWholesale(t *testing.T) {
 // profile, so a one-field flip keeps the rest of the table while a closure
 // that ignores its input replaces the profile wholesale.
 func TestCapabilities_SpecOverride_ClosureSeesTableProfile(t *testing.T) {
+	isolateBaseURLSources(t)
 	cases := []struct {
 		name  string
 		spec  Spec
@@ -115,6 +147,7 @@ func TestCapabilities_SpecOverride_ClosureSeesTableProfile(t *testing.T) {
 // including the unknown-model rule (ContextWindow 0) and the conservative
 // openai-compatible defaults. The whole struct is compared.
 func TestCapabilities_NilSpec_KeepsTableProfile(t *testing.T) {
+	isolateBaseURLSources(t)
 	// anthropicProfile fills the shared Claude Messages API surface.
 	anthropicProfile := func(window int, thinking bool) llmkit.Capabilities {
 		return llmkit.Capabilities{

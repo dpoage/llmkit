@@ -603,7 +603,14 @@ type Response struct {
 //
 //   - Dropped silently when false: the adapter omits the request feature
 //     from the wire (no error). Check the field before relying on the
-//     feature.
+//     feature. Each provider type has a ceiling naming the wire-gated
+//     fields (StructuredOutput, Thinking, ToolChoice, StopSequences, TopP,
+//     TopK, Seed) it can actually put on the wire; an effective profile
+//     that reports true for a field above the ceiling is rejected at
+//     construction by provider.New with an error wrapping
+//     ErrInvalidRequest, before any network call. Anthropic's ceiling
+//     excludes Seed; OpenAI and openai-compatible's ceiling excludes
+//     Thinking and TopK; Google's ceiling has no excluded field.
 //   - Refused pre-wire: the adapter rejects the request with an error
 //     wrapping ErrInvalidRequest before any wire call.
 //   - Decorator: provider.New installs a wrapping Client whose behavior
@@ -650,22 +657,26 @@ type Capabilities struct {
 	// adapter reads it — document blocks are passed through to providers
 	// that accept them.
 	Documents bool
-	// Dropped silently when false: adapters whose profile reports false
-	// never serialize Request.StopSequences. The field reports the
-	// adapter's own mapping — it is not a gate a caller-pinned profile can
-	// use to disable a supported feature.
+	// Dropped silently when false: the effective profile gates
+	// Request.StopSequences off the wire. A caller-pinned override that
+	// reports the field false drops it, the same as an adapter's own
+	// table entry. An override that reports the field true above the
+	// adapter's wire ceiling is refused at construction by
+	// provider.New (provider package), never silently accepted.
 	StopSequences bool
-	// Dropped silently when false: adapters whose profile reports false
-	// never serialize Request.TopP (same adapter-mapping semantics as
+	// Dropped silently when false: the effective profile gates
+	// Request.TopP off the wire (same gate semantics as
 	// [Capabilities.StopSequences]).
 	TopP bool
-	// Dropped silently when false: adapters whose profile reports false
-	// never serialize Request.TopK (same adapter-mapping semantics as
-	// [Capabilities.StopSequences]).
+	// Dropped silently when false: the effective profile gates
+	// Request.TopK off the wire (same gate semantics as
+	// [Capabilities.StopSequences]). Example: the Chat Completions API has
+	// no top_k, so the OpenAI ceiling forbids TopK=true.
 	TopK bool
-	// Dropped silently when false: adapters whose profile reports false
-	// never serialize Request.Seed (same adapter-mapping semantics as
-	// [Capabilities.StopSequences]).
+	// Dropped silently when false: the effective profile gates
+	// Request.Seed off the wire (same gate semantics as
+	// [Capabilities.StopSequences]). Example: the Messages API has no seed
+	// parameter, so the Anthropic ceiling forbids Seed=true.
 	Seed bool
 }
 

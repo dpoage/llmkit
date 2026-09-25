@@ -24,6 +24,11 @@ import (
 type adapterFactory struct {
 	name  string
 	build func(t *testing.T, baseURL string) llmkit.Client
+	// buildWithCaps builds the same adapter with a Spec.Capabilities-style
+	// override applied to its table profile, for tests that need a
+	// non-default effective profile (e.g. forcing StructuredOutput or
+	// Thinking on/off). nil override behaves like build.
+	buildWithCaps func(t *testing.T, baseURL string, caps func(llmkit.Capabilities) llmkit.Capabilities) llmkit.Client
 }
 
 // allAdapters returns a factory per provider, each pointed at an httptest
@@ -34,29 +39,68 @@ func allAdapters() []adapterFactory {
 		{
 			name: "anthropic",
 			build: func(t *testing.T, baseURL string) llmkit.Client {
-				return anthropic.New("claude-test", anthropic.Options{
+				c, err := anthropic.New("claude-test", anthropic.Options{
 					APIKey:  "test-key",
 					BaseURL: baseURL,
 				})
+				if err != nil {
+					t.Fatalf("build anthropic adapter: %v", err)
+				}
+				return c
+			},
+			buildWithCaps: func(t *testing.T, baseURL string, caps func(llmkit.Capabilities) llmkit.Capabilities) llmkit.Client {
+				c, err := anthropic.New("claude-test", anthropic.Options{
+					APIKey: "test-key", BaseURL: baseURL, Capabilities: caps,
+				})
+				if err != nil {
+					t.Fatalf("build anthropic adapter: %v", err)
+				}
+				return c
 			},
 		},
 		{
 			name: "openai",
 			build: func(t *testing.T, baseURL string) llmkit.Client {
-				return openai.New("gpt-test", openai.Options{
+				c, err := openai.New("gpt-test", openai.Options{
 					APIKey:  "test-key",
 					BaseURL: baseURL,
 				})
+				if err != nil {
+					t.Fatalf("build openai adapter: %v", err)
+				}
+				return c
+			},
+			buildWithCaps: func(t *testing.T, baseURL string, caps func(llmkit.Capabilities) llmkit.Capabilities) llmkit.Client {
+				c, err := openai.New("gpt-test", openai.Options{
+					APIKey: "test-key", BaseURL: baseURL, Capabilities: caps,
+				})
+				if err != nil {
+					t.Fatalf("build openai adapter: %v", err)
+				}
+				return c
 			},
 		},
 		{
 			name: "openai-compatible",
 			build: func(t *testing.T, baseURL string) llmkit.Client {
-				return openai.New("llama-test", openai.Options{
+				c, err := openai.New("llama-test", openai.Options{
 					APIKey:     "test-key",
 					BaseURL:    baseURL,
 					Compatible: true,
 				})
+				if err != nil {
+					t.Fatalf("build openai-compatible adapter: %v", err)
+				}
+				return c
+			},
+			buildWithCaps: func(t *testing.T, baseURL string, caps func(llmkit.Capabilities) llmkit.Capabilities) llmkit.Client {
+				c, err := openai.New("llama-test", openai.Options{
+					APIKey: "test-key", BaseURL: baseURL, Compatible: true, Capabilities: caps,
+				})
+				if err != nil {
+					t.Fatalf("build openai-compatible adapter: %v", err)
+				}
+				return c
 			},
 		},
 		{
@@ -65,6 +109,15 @@ func allAdapters() []adapterFactory {
 				c, err := google.New(context.Background(), "gemini-test", google.Options{
 					APIKey:  "test-key",
 					BaseURL: baseURL,
+				})
+				if err != nil {
+					t.Fatalf("build google adapter: %v", err)
+				}
+				return c
+			},
+			buildWithCaps: func(t *testing.T, baseURL string, caps func(llmkit.Capabilities) llmkit.Capabilities) llmkit.Client {
+				c, err := google.New(context.Background(), "gemini-test", google.Options{
+					APIKey: "test-key", BaseURL: baseURL, Capabilities: caps,
 				})
 				if err != nil {
 					t.Fatalf("build google adapter: %v", err)

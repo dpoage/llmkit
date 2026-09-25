@@ -29,7 +29,10 @@ func TestOpenAIRefusal_SurfacedAsStopRefusal(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	client := New("gpt-test", Options{APIKey: "k", BaseURL: srv.URL})
+	client, err := New("gpt-test", Options{APIKey: "k", BaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	resp, err := client.Complete(context.Background(), simpleRequest())
 	if err != nil {
 		t.Fatalf("Complete: %v", err)

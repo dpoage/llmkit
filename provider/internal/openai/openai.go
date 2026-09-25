@@ -19,21 +19,21 @@ import (
 )
 
 // openaiAdapter maps the normalized types onto the OpenAI Go SDK's Chat
-// Completions API. It backs both the "openai" provider and the
-// "openai-compatible" provider (Ollama/vLLM/Groq/etc.) — the only difference is
-// the base URL and capability profile, set at construction.
+// Completions API for both the "openai" and "openai-compatible" provider
+// (Ollama/vLLM/Groq/etc.); the only difference is the base URL and capability
+// profile, set at construction.
 type openaiAdapter struct {
-	client   openai.Client
+	client   openai.ChatCompletionService
 	model    string
 	caps     llmkit.Capabilities
 	provider string // "openai" or "openai-compatible", for error tagging
 	// requireBoolAdditionalProps forces every object/array-valued
 	// "additionalProperties" in outbound tool-parameter and response_format
-	// schemas down to a permissive boolean. Strict openai-compatible schema
-	// validators (notably MiniMax) reject the JSON-Schema subschema form with a
-	// 400 before any tokens are generated. Off for first-party OpenAI, which
-	// accepts the subschema form in lenient mode. See
-	// adapter.CoerceBoolAdditionalProperties.
+	// schemas down to a permissive boolean — strict openai-compatible schema
+	// validators (notably MiniMax) reject the JSON-Schema subschema form with
+	// HTTP 400 before any tokens are generated. Off for first-party OpenAI,
+	// which accepts the subschema form in lenient mode. See
+	// coerceBoolAdditionalProperties.
 	requireBoolAdditionalProps bool
 }
 
@@ -44,11 +44,12 @@ type openaiAdapter struct {
 // boolean downgrades for object-valued additionalProperties, and the
 // "openai-compatible" provider label on errors.
 //
-// Capabilities, when non-nil, receives the selected profile (first-party
-// table or openai-compatible) and returns the effective one; it is applied
-// once at construction. Flip a single field in a closure, or return a
-// fixed profile to pin exact values for models neither table knows.
-// nil = profile default.
+// Capabilities, when non-nil, receives the selected profile and returns the
+// effective one, applied once at construction. Flip a single field in a
+// closure, or return a fixed profile to pin exact values for models the
+// tables do not know. nil = profile default. An effective profile that
+// reports true for a wire-gated field above the adapter's ceiling
+// (Thinking, TopK) is refused — see New.
 type Options struct {
 	APIKey     string
 	BaseURL    string       // optional; for testing or non-default endpoints
@@ -58,40 +59,74 @@ type Options struct {
 	Capabilities func(llmkit.Capabilities) llmkit.Capabilities
 }
 
+// openAICeiling names every wire-gated field this adapter can put on the
+// wire for both the first-party and openai-compatible profiles. The Chat
+// Completions API has no reasoning-budget parameter (Thinking) and no
+// top_k, so an effective profile reporting either true is refused at
+// construction rather than silently mismapped.
+var openAICeiling = llmkit.Capabilities{
+	StructuredOutput: true,
+	Thinking:         false,
+	ToolChoice:       true,
+	StopSequences:    true,
+	TopP:             true,
+	TopK:             false,
+	Seed:             true,
+}
+
 // New builds an OpenAI-backed Client. With a custom BaseURL it serves any
 // OpenAI-compatible endpoint (set Compatible=true). The vendor SDK's retries
-// are disabled so the shared retry wrapper governs retry policy.
-func New(model string, opts Options) llmkit.Client {
+// are disabled so the shared retry wrapper governs retry policy. New
+// returns an error wrapping llmkit.ErrInvalidRequest, with no network I/O,
+// when the effective capability profile (table or Options.Capabilities
+// override) reports Thinking or TopK true — see openAICeiling.
+//
+// The client is built with openai.NewChatCompletionService rather than
+// openai.NewClient: the service constructor never calls DefaultClientOptions,
+// so it reads no environment variable and no config file (openai-go has no
+// WithoutEnvironmentDefaults marker; the service constructor is the only
+// env-free entry point). option.WithEnvironmentProduction supplies the vendor
+// default host explicitly since the service constructor would otherwise have
+// none; option.WithBaseURL always overrides it regardless of option order.
+// A nil opts.HTTPClient gets an explicit &http.Client{} rather than the
+// process-global client the SDK falls back to without one.
+func New(model string, opts Options) (llmkit.Client, error) {
+	provider := "openai"
+	table := openAICapabilities(model)
+	requireBoolAdditionalProps := false
+	if opts.Compatible {
+		provider = "openai-compatible"
+		table = openAICompatibleCapabilities(model)
+		// Strict openai-compatible validators (MiniMax) reject object-valued
+		// additionalProperties; downgrade it to a boolean on the wire. First-party
+		// OpenAI keeps the subschema.
+		requireBoolAdditionalProps = true
+	}
+	caps, err := adapter.ApplyOverride(provider, openAICeiling, table, opts.Capabilities)
+	if err != nil {
+		return nil, err
+	}
+
+	httpClient := opts.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{}
+	}
 	reqOpts := []option.RequestOption{
+		option.WithEnvironmentProduction(),
 		option.WithAPIKey(opts.APIKey),
+		option.WithHTTPClient(httpClient),
 		option.WithMaxRetries(0),
 	}
 	if opts.BaseURL != "" {
 		reqOpts = append(reqOpts, option.WithBaseURL(opts.BaseURL))
 	}
-	if opts.HTTPClient != nil {
-		reqOpts = append(reqOpts, option.WithHTTPClient(opts.HTTPClient))
-	}
-	provider := "openai"
-	caps := openAICapabilities(model)
-	requireBoolAdditionalProps := false
-	if opts.Compatible {
-		provider = "openai-compatible"
-		caps = openAICompatibleCapabilities(model)
-		// Strict openai-compatible validators (MiniMax) reject object-valued
-		// additionalProperties; downgrade it to a boolean on the wire. See
-		// adapter.CoerceBoolAdditionalProperties. First-party OpenAI keeps the
-		// subschema.
-		requireBoolAdditionalProps = true
-	}
-	caps = adapter.ApplyOverride(caps, opts.Capabilities)
 	return &openaiAdapter{
-		client:                     openai.NewClient(reqOpts...),
+		client:                     openai.NewChatCompletionService(reqOpts...),
 		model:                      model,
 		caps:                       caps,
 		provider:                   provider,
 		requireBoolAdditionalProps: requireBoolAdditionalProps,
-	}
+	}, nil
 }
 
 func (o *openaiAdapter) Capabilities() llmkit.Capabilities { return o.caps }
@@ -101,72 +136,65 @@ func (o *openaiAdapter) Complete(ctx context.Context, req llmkit.Request) (llmki
 	if err != nil {
 		return llmkit.Response{}, err
 	}
-	cc, err := o.client.Chat.Completions.New(ctx, params)
+	cc, err := o.client.New(ctx, params)
 	if err != nil {
 		return llmkit.Response{}, o.normalizeErr(ctx, err)
 	}
 	return o.toResponse(cc), nil
 }
 
+// buildParams applies the shared rules once via adapter.Prepare and maps the
+// Prepared value onto Chat Completions params without re-checking anything
+// Prepare already validated or gated.
 func (o *openaiAdapter) buildParams(req llmkit.Request) (openai.ChatCompletionNewParams, error) {
-	params := openai.ChatCompletionNewParams{
-		Model: shared.ChatModel(o.model),
+	p, err := adapter.Prepare(o.provider, o.caps, req)
+	if err != nil {
+		return openai.ChatCompletionNewParams{}, err
 	}
-	maxTokens := req.MaxTokens
-	if maxTokens <= 0 {
-		// Uniform rule: the same documented default on every adapter instead
-		// of relying on each backend's unset behavior.
-		maxTokens = llmkit.DefaultMaxTokens
-	}
-	params.MaxCompletionTokens = openai.Int(int64(maxTokens))
-	if req.Temperature != nil {
-		params.Temperature = openai.Float(*req.Temperature)
-	}
-	if len(req.StopSequences) > 0 {
-		params.Stop = openai.ChatCompletionNewParamsStopUnion{OfStringArray: req.StopSequences}
-	}
-	if req.TopP != nil {
-		params.TopP = openai.Float(*req.TopP)
-	}
-	if req.Seed != nil {
-		params.Seed = openai.Int(*req.Seed)
-	}
-	// Request.TopK: the Chat Completions API has no top_k parameter, so it
-	// is dropped here and documented via Capabilities.TopK = false.
-	// Request.Thinking: not mapped onto reasoning_effort (a coarse
-	// low/medium/high dial, not a token budget), so it is dropped and
-	// documented via Capabilities.Thinking = false.
 
-	msgs := make([]openai.ChatCompletionMessageParamUnion, 0, len(req.Messages)+1)
-	if req.System != "" {
-		msgs = append(msgs, openai.SystemMessage(req.System))
+	params := openai.ChatCompletionNewParams{
+		Model:               shared.ChatModel(o.model),
+		MaxCompletionTokens: openai.Int(int64(p.MaxTokens)),
 	}
-	converted, err := toOpenAIMessages(o.provider, req.Messages)
+	if p.Temperature != nil {
+		params.Temperature = openai.Float(*p.Temperature)
+	}
+	if len(p.StopSequences) > 0 {
+		params.Stop = openai.ChatCompletionNewParamsStopUnion{OfStringArray: p.StopSequences}
+	}
+	if p.TopP != nil {
+		params.TopP = openai.Float(*p.TopP)
+	}
+	if p.Seed != nil {
+		params.Seed = openai.Int(*p.Seed)
+	}
+	// Prepared.TopK and Prepared.Thinking are always nil here: the Chat
+	// Completions API has no top_k, and reasoning_effort is a coarse dial
+	// rather than a token budget — never mapped. Every openai profile reports
+	// both false, and Prepare drops both.
+
+	msgs := make([]openai.ChatCompletionMessageParamUnion, 0, len(p.Messages)+1)
+	if p.System != "" {
+		msgs = append(msgs, openai.SystemMessage(p.System))
+	}
+	converted, err := toOpenAIMessages(o.provider, p.Messages)
 	if err != nil {
 		return openai.ChatCompletionNewParams{}, err
 	}
 	msgs = append(msgs, converted...)
 	params.Messages = msgs
 
-	if len(req.Tools) > 0 {
-		tools := make([]openai.ChatCompletionToolUnionParam, 0, len(req.Tools))
-		for _, t := range req.Tools {
-			fn := shared.FunctionDefinitionParam{Name: t.Name}
-			if t.Description != "" {
-				fn.Description = openai.String(t.Description)
+	if len(p.Tools) > 0 {
+		tools := make([]openai.ChatCompletionToolUnionParam, 0, len(p.Tools))
+		for _, t := range p.Tools {
+			fn := shared.FunctionDefinitionParam{Name: t.Def.Name}
+			if t.Def.Description != "" {
+				fn.Description = openai.String(t.Def.Description)
 			}
-			if len(t.Parameters) > 0 {
-				var schema map[string]any
-				if err := json.Unmarshal(t.Parameters, &schema); err != nil {
-					return openai.ChatCompletionNewParams{}, &llmkit.APIError{
-						Kind:     llmkit.ErrInvalidRequest,
-						Provider: o.provider,
-						Message:  "tool " + t.Name + ": invalid parameters JSON schema",
-						Err:      err,
-					}
-				}
+			if t.Schema != nil {
+				schema := t.Schema
 				if o.requireBoolAdditionalProps {
-					adapter.CoerceBoolAdditionalProperties(schema)
+					coerceBoolAdditionalProperties(schema)
 				}
 				fn.Parameters = shared.FunctionParameters(schema)
 			}
@@ -175,46 +203,27 @@ func (o *openaiAdapter) buildParams(req llmkit.Request) (openai.ChatCompletionNe
 		params.Tools = tools
 	}
 
-	// Request.ToolChoice. Auto (and the zero value) is the provider default
-	// and is never serialized. Unlike Anthropic, no synthetic forcing
-	// competes here: response_format coexists with tool_choice.
-	if err := o.applyToolChoice(&params, req.ToolChoice); err != nil {
-		return openai.ChatCompletionNewParams{}, err
-	}
+	// Request.ToolChoice is already validated and gated by Prepare. Auto (and
+	// the zero value) is the provider default and is never serialized.
+	applyOpenAIToolChoice(&params, p.ToolChoice)
 
-	// Schema-constrained output. Honored even when tools are present
-	// (OpenAI permits response_format alongside tools; compatible backends
-	// that don't will surface a 4xx, which is the correct failure mode
-	// rather than silent loss). Skipped when the capability is off so a
-	// provider with StructuredOutput=false (e.g. conservative
-	// openai-compatible endpoint without opt-in) does not get a schema it
-	// can't honor.
-	if len(req.ResponseSchema) > 0 && o.caps.StructuredOutput {
-		// ParseResponseSchema unmarshals the JSON Schema and returns the
-		// resolved name (caller's name, or "response" if unset). The OpenAI
-		// SDK expects the verbatim schema object, not the properties/required
-		// unwrap that Anthropic's ToolInputSchemaParam requires, so we
-		// deliberately do NOT call ParseToolParameters here — the on-the-wire
-		// shape would change.
-		defaultName := req.ResponseSchemaName
-		if defaultName == "" {
-			defaultName = "response"
+	// Schema-constrained output is honored even when tools are present: OpenAI
+	// permits response_format alongside tools, and a compatible backend that
+	// refuses the combination will surface a 4xx, which is the correct
+	// failure mode. p.ResponseSchema is already nil when the capability is off
+	// or the caller supplied none.
+	if p.ResponseSchema != nil {
+		name := p.ResponseSchema.Name
+		if name == "" {
+			name = "response"
 		}
-		schema, name, err := adapter.ParseResponseSchema(req.ResponseSchema, defaultName)
-		if err != nil {
-			return openai.ChatCompletionNewParams{}, &llmkit.APIError{
-				Kind:     llmkit.ErrInvalidRequest,
-				Provider: o.provider,
-				Message:  "ResponseSchema: invalid JSON",
-				Err:      err,
-			}
-		}
+		schema := p.ResponseSchema.Value
 		if o.requireBoolAdditionalProps {
-			schema = adapter.CoerceBoolAdditionalProperties(schema)
+			coerceBoolAdditionalProperties(schema)
 		}
 		// strict=false: our schemas are not strict-mode-clean (extra fields,
-		// union types) and lenient mode still drives grammar-constrained
-		// decoding on OpenAI and on compatible backends that implement it.
+		// union types); lenient mode still drives grammar-constrained decoding
+		// on OpenAI and on compatible backends that implement it.
 		params.ResponseFormat = openai.ChatCompletionNewParamsResponseFormatUnion{
 			OfJSONSchema: &shared.ResponseFormatJSONSchemaParam{
 				JSONSchema: shared.ResponseFormatJSONSchemaJSONSchemaParam{
@@ -227,23 +236,12 @@ func (o *openaiAdapter) buildParams(req llmkit.Request) (openai.ChatCompletionNe
 	return params, nil
 }
 
-// applyToolChoice maps the normalized tool-choice request onto the Chat
-// Completions tool_choice parameter.
-func (o *openaiAdapter) applyToolChoice(params *openai.ChatCompletionNewParams, tc llmkit.ToolChoice) error {
-	// Capability gate: models without function calling (o1-mini/o1-preview
-	// — see openAICapabilities) report ToolChoice=false, and every explicit
-	// steering mode is then REJECTED before the wire call. Silently dropping
-	// "none" would escalate permissions (the model stays free to call the
-	// offered tools) and dropping "required"/"tool" would silently degrade;
-	// auto and the zero value are the provider default and pass. An
-	// unrecognized mode falls through so the mapper below produces its
-	// precise unknown-mode error.
-	if err := adapter.GateToolChoice(o.provider, tc, o.caps.ToolChoice); err != nil {
-		return err
-	}
+// applyOpenAIToolChoice maps an already-validated ToolChoice onto the Chat
+// Completions tool_choice parameter. Prepare has already applied the
+// capability gate and validated Mode and Name; auto (the only remaining
+// unmapped mode) is the provider default and is never serialized.
+func applyOpenAIToolChoice(params *openai.ChatCompletionNewParams, tc llmkit.ToolChoice) {
 	switch tc.Mode {
-	case "", llmkit.ToolChoiceAuto:
-		return nil
 	case llmkit.ToolChoiceNone:
 		params.ToolChoice = openai.ChatCompletionToolChoiceOptionUnionParam{
 			OfAuto: openai.String("none"),
@@ -253,56 +251,35 @@ func (o *openaiAdapter) applyToolChoice(params *openai.ChatCompletionNewParams, 
 			OfAuto: openai.String("required"),
 		}
 	case llmkit.ToolChoiceTool:
-		if tc.Name == "" {
-			return &llmkit.APIError{
-				Kind:     llmkit.ErrInvalidRequest,
-				Provider: o.provider,
-				Message:  "ToolChoice.Mode=tool requires ToolChoice.Name",
-			}
-		}
 		params.ToolChoice = openai.ChatCompletionToolChoiceOptionUnionParam{
 			OfFunctionToolChoice: &openai.ChatCompletionNamedToolChoiceParam{
 				Function: openai.ChatCompletionNamedToolChoiceFunctionParam{Name: tc.Name},
 			},
 		}
-	default:
-		return &llmkit.APIError{
-			Kind:     llmkit.ErrInvalidRequest,
-			Provider: o.provider,
-			Message:  "unknown ToolChoice.Mode " + string(tc.Mode),
-		}
 	}
-	return nil
 }
 
 // toOpenAIMessages converts normalized messages into Chat Completions
 // messages. Content blocks map in order: text → text part, image →
 // image_url part, document → file part; assistant and tool-result messages
-// carry their concatenated text.
-//
-// Per-role block rule (ValidateMessageBlocks, before any mapping):
-// user text/image/document; assistant text/thinking (no thinking is
-// re-emitted on OpenAI — Capabilities.Thinking=false); system and
-// tool-result text only. Violations are ErrInvalidRequest. Image/document source validation happens
-// here, BEFORE any wire call.
+// carry their concatenated text. Every role and block-kind rule
+// (adapter.Prepare) already holds — this is a pure mapping except for the
+// vendor-specific constraint the file part imposes: no URL source for
+// documents (openAIUserParts).
 func toOpenAIMessages(provider string, msgs []llmkit.Message) ([]openai.ChatCompletionMessageParamUnion, error) {
 	out := make([]openai.ChatCompletionMessageParamUnion, 0, len(msgs))
 	for _, m := range msgs {
-		// Per-role block-kind rule + media source rule, before any mapping.
-		if err := adapter.ValidateMessageBlocks(provider, m); err != nil {
-			return nil, err
-		}
 		switch m.Role {
 		case llmkit.RoleSystem:
 			out = append(out, openai.SystemMessage(m.Text()))
 		case llmkit.RoleUser:
-			parts, err := openAIUserParts(m)
+			parts, err := openAIUserParts(provider, m)
 			if err != nil {
 				return nil, err
 			}
 			if len(parts) == 1 && parts[0].OfText != nil {
 				// Common text-only form: keep the flat string content the
-				// API (and compatible backends) have always accepted.
+				// API and compatible backends have always accepted.
 				out = append(out, openai.UserMessage(parts[0].OfText.Text))
 			} else {
 				out = append(out, openai.UserMessage(parts))
@@ -332,30 +309,26 @@ func toOpenAIMessages(provider string, msgs []llmkit.Message) ([]openai.ChatComp
 			out = append(out, openai.ChatCompletionMessageParamUnion{OfAssistant: &am})
 		case llmkit.RoleToolResult:
 			out = append(out, openai.ToolMessage(m.Text(), m.ToolCallID))
-		default:
-			return nil, &llmkit.APIError{
-				Kind:     llmkit.ErrInvalidRequest,
-				Provider: "openai",
-				Message:  "unknown message role " + string(m.Role),
-			}
 		}
 	}
 	return out, nil
 }
 
-// dataURI renders inline block bytes as an RFC-2397 data URL, the form the
-// image_url and file content parts accept for embedded media.
+// dataURI renders inline block bytes as an RFC-2397 data URL — the form
+// the image_url and file content parts accept for embedded media.
 func dataURI(mediaType string, data []byte) string {
 	return "data:" + mediaType + ";base64," + base64.StdEncoding.EncodeToString(data)
 }
 
 // openAIUserParts maps a user message's content blocks onto Chat Completions
 // content parts: image → image_url part (data: URI for inline bytes, URL
-// verbatim), document → file part (file_data as a data: URI). Document URLs
-// are rejected: the Chat Completions file part has no URL source. A message
-// with no blocks yields one empty text part so an empty user turn still
-// serializes the same wire shape.
-func openAIUserParts(m llmkit.Message) ([]openai.ChatCompletionContentPartUnionParam, error) {
+// verbatim), document → file part (file_data as a data: URI). The media
+// source rule (exactly one of Data/URL, MediaType required with Data) is
+// already enforced by adapter.Prepare; the constraint left here is
+// vendor-specific — document URLs are rejected, since the file part has no
+// URL source. A message with no blocks yields one empty text part so an
+// empty user turn still serializes the same wire shape.
+func openAIUserParts(provider string, m llmkit.Message) ([]openai.ChatCompletionContentPartUnionParam, error) {
 	parts := make([]openai.ChatCompletionContentPartUnionParam, 0, len(m.Content))
 	for _, b := range m.Content {
 		switch b.Kind {
@@ -364,9 +337,6 @@ func openAIUserParts(m llmkit.Message) ([]openai.ChatCompletionContentPartUnionP
 				OfText: &openai.ChatCompletionContentPartTextParam{Text: b.Text},
 			})
 		case llmkit.BlockImage:
-			if err := adapter.ValidateMediaBlock("openai", b); err != nil {
-				return nil, err
-			}
 			url := b.URL
 			if len(b.Data) > 0 {
 				url = dataURI(b.MediaType, b.Data)
@@ -377,15 +347,9 @@ func openAIUserParts(m llmkit.Message) ([]openai.ChatCompletionContentPartUnionP
 				},
 			})
 		case llmkit.BlockDocument:
-			if err := adapter.ValidateMediaBlock("openai", b); err != nil {
-				return nil, err
-			}
 			if b.URL != "" {
-				return nil, &llmkit.APIError{
-					Kind:     llmkit.ErrInvalidRequest,
-					Provider: "openai",
-					Message:  "document block: the Chat Completions file part accepts inline data only, not URLs",
-				}
+				return nil, adapter.Refuse(provider,
+					"document block: the Chat Completions file part accepts inline data only, not URLs", nil)
 			}
 			filename := b.Title
 			if filename == "" {
@@ -415,7 +379,7 @@ func (o *openaiAdapter) toResponse(cc *openai.ChatCompletion) llmkit.Response {
 		choice := cc.Choices[0]
 		// message.refusal: when the model declines on policy grounds OpenAI
 		// puts the explanation here and leaves content empty. Surface it as
-		// the response text with StopRefusal, so a caller sees WHY the turn
+		// the response text with StopRefusal so a caller sees why the turn
 		// ended instead of an empty StopEndTurn.
 		refused := choice.Message.Refusal != ""
 		if refused {
@@ -440,12 +404,12 @@ func (o *openaiAdapter) toResponse(cc *openai.ChatCompletion) llmkit.Response {
 			resp.StopReason = mapOpenAIStop(choice.FinishReason, len(resp.ToolCalls) > 0)
 		}
 	}
-	// prompt_tokens already INCLUDES cached tokens (OpenAI convention), which
-	// matches the normalized Usage semantics directly. Caching is automatic
+	// prompt_tokens already INCLUDES cached tokens (OpenAI convention),
+	// matching the normalized Usage semantics directly. Caching is automatic
 	// server-side for OpenAI; prompt_tokens_details.cached_tokens reports the
 	// discounted subset. OpenAI-compatible endpoints (Ollama/vLLM/MiniMax/...)
-	// often omit prompt_tokens_details entirely, in which case the SDK leaves
-	// CachedTokens at zero — exactly the "no cache activity" value.
+	// often omit prompt_tokens_details entirely, leaving CachedTokens at
+	// zero — exactly the "no cache activity" value.
 	resp.Usage = llmkit.Usage{
 		InputTokens:          cc.Usage.PromptTokens,
 		OutputTokens:         cc.Usage.CompletionTokens,
@@ -454,9 +418,20 @@ func (o *openaiAdapter) toResponse(cc *openai.ChatCompletion) llmkit.Response {
 	return resp
 }
 
+// mapOpenAIStop is this adapter's recognized finish_reason table: "stop" is
+// tool-call-aware (a compatible backend that emits "stop" alongside
+// tool_calls means the model wants to call them, not that it finished
+// naturally); "tool_calls" and "function_call" always mean ToolUse; "length"
+// and "content_filter" map directly. Every other reason — including "abort"
+// and an empty string, which some openai-compatible servers send — falls to
+// adapter.StopFallback: ToolUse when tool calls are present, StopError
+// otherwise (never assumed to be a natural end-turn).
 func mapOpenAIStop(reason string, hasToolCalls bool) llmkit.StopReason {
 	switch reason {
 	case "stop":
+		if hasToolCalls {
+			return llmkit.StopToolUse
+		}
 		return llmkit.StopEndTurn
 	case "tool_calls", "function_call":
 		return llmkit.StopToolUse
@@ -465,12 +440,7 @@ func mapOpenAIStop(reason string, hasToolCalls bool) llmkit.StopReason {
 	case "content_filter":
 		return llmkit.StopContentFilter
 	default:
-		// Some OpenAI-compatible servers return tool calls with an empty or
-		// nonstandard finish_reason; trust the presence of tool calls.
-		if hasToolCalls {
-			return llmkit.StopToolUse
-		}
-		return llmkit.StopEndTurn
+		return adapter.StopFallback(hasToolCalls)
 	}
 }
 
@@ -545,7 +515,7 @@ func decodeSSEError(data []byte) (typ, msg string) {
 //     ToolChoice and ParallelToolCalls are false too.
 //
 // The table is matched by LONGEST key with a "-" segment boundary
-// (adapter.MatchesModelFamily), so "gpt-4-turbo" and "gpt-4.1" win over the
+// (adapter.BestMatchingFamily), so "gpt-4-turbo" and "gpt-4.1" win over the
 // shorter "gpt-4" key, "o1-mini" wins over "o1", and the dotted sibling
 // "gpt-4.5" needs — and has — its own key. Only the fields that genuinely
 // vary by model are stored per entry (window + the
@@ -555,15 +525,15 @@ func decodeSSEError(data []byte) (typ, msg string) {
 // An unknown first-party model reports ContextWindow 0 — unknown is never
 // fabricated into a number — while the feature bools keep the API-level
 // defaults: an unrecognized name on the first-party endpoint is most likely
-// a NEW model with the modern feature set, and the server is the final
+// a new model with the modern feature set, and the server is the final
 // validator. Pin exact values for unknown models via Options.Capabilities.
 type openAIModelCaps struct {
 	prefix string
 	caps   llmkit.Capabilities
 }
 
-// firstPartyCaps fills a first-party profile: the API-level defaults with
-// the per-model fields supplied by the caller.
+// firstPartyCaps fills a first-party profile with the API-level defaults
+// and the per-model fields supplied by the caller.
 func firstPartyCaps(window int, parallel, caching, structured, toolChoice bool) llmkit.Capabilities {
 	return llmkit.Capabilities{
 		ContextWindow:     window,
@@ -584,19 +554,19 @@ func firstPartyCaps(window int, parallel, caching, structured, toolChoice bool) 
 var openAIModelTable = []openAIModelCaps{
 	{"gpt-5", firstPartyCaps(400_000, true, true, true, true)},
 	{"gpt-4.1", firstPartyCaps(1_047_576, true, true, true, true)},
-	// gpt-4.5: a dotted sibling of gpt-4 — under segment matching it can
-	// never inherit the gpt-4 entry, so it carries its own key.
+	// gpt-4.5: a dotted sibling of gpt-4 — segment matching can never
+	// inherit the gpt-4 entry, so it carries its own key.
 	{"gpt-4.5", firstPartyCaps(128_000, true, true, true, true)},
 	{"gpt-4o", firstPartyCaps(128_000, true, true, true, true)},
 	{"gpt-4-turbo", firstPartyCaps(128_000, true, false, false, true)},
 	// The GPT-4 Turbo Preview snapshots (128k, parallel function calling
-	// since the 1106 generation) — without these keys the 8,192 gpt-4
-	// entry would swallow them via the "-" continuation.
+	// since the 1106 generation): without these keys the 8,192 gpt-4 entry
+	// would swallow them via the "-" continuation.
 	{"gpt-4-0125", firstPartyCaps(128_000, true, false, false, true)},
 	{"gpt-4-1106", firstPartyCaps(128_000, true, false, false, true)},
-	// gpt-4-vision-preview: the retired vision variant of the 1106 Turbo
-	// generation (128k, parallel function calling) — without its own key it
-	// would inherit the 8,192 gpt-4 entry.
+	// gpt-4-vision: the retired vision variant of the 1106 Turbo generation
+	// (128k, parallel function calling) — without its own key it would
+	// inherit the 8,192 gpt-4 entry.
 	{"gpt-4-vision", firstPartyCaps(128_000, true, false, false, true)},
 	{"gpt-4-32k", firstPartyCaps(32_768, false, false, false, true)},
 	{"gpt-4", firstPartyCaps(8_192, false, false, false, true)},
@@ -617,17 +587,18 @@ func openAICapabilities(model string) llmkit.Capabilities {
 }
 
 // openAICompatibleCapabilities returns a conservative profile for arbitrary
-// OpenAI-compatible endpoints (Ollama/vLLM/Groq/etc.). We can't know the
-// backend's true capabilities, so we assume no parallel tool calls (the
-// degraded path serializes them) and no caching. The adapter still parses
-// usage.prompt_tokens_details.cached_tokens opportunistically when the
-// endpoint reports it (e.g. MiniMax), so cache hits are ledgered even with
-// PromptCaching=false. Callers can override.
+// OpenAI-compatible endpoints (Ollama/vLLM/Groq/etc.). The backend's true
+// capabilities are unknown, so the profile assumes no parallel tool calls
+// (the degraded path serializes them) and no caching. The adapter still
+// parses usage.prompt_tokens_details.cached_tokens opportunistically when
+// the endpoint reports it (e.g. MiniMax), so cache hits are ledgered even
+// with PromptCaching=false. Callers can override.
 //
-// Thinking is false: this adapter does not map Request.Thinking onto
-// reasoning_effort. TopK is false: the Chat Completions API has no top_k.
-// Tool choice, images, documents, stop sequences, top_p, and seed are part
-// of the base Chat Completions contract and are sent when requested.
+// Thinking is false (this adapter does not map Request.Thinking onto
+// reasoning_effort) and TopK is false (the Chat Completions API has no
+// top_k). Tool choice, images, documents, stop sequences, top_p, and seed
+// are part of the base Chat Completions contract and are sent when
+// requested.
 //
 // The model parameter is accepted for symmetry with other capability
 // constructors; no per-model lookup is available for arbitrary endpoints,

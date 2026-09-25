@@ -48,8 +48,12 @@ func cacheControlOf(t *testing.T, block any) map[string]any {
 }
 
 func TestAnthropic_CacheBreakpointPlacement(t *testing.T) {
-	a := New("claude-test", Options{APIKey: "k"}).(*anthropicAdapter)
-	params, err := a.buildParams(breakpointRequest())
+	client, err := New("claude-test", Options{APIKey: "k"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	a := client.(*anthropicAdapter)
+	params, _, err := a.buildParams(breakpointRequest())
 	if err != nil {
 		t.Fatalf("buildParams: %v", err)
 	}
@@ -127,8 +131,12 @@ func TestAnthropic_CacheBreakpointPlacement(t *testing.T) {
 // iteration: no tools, one user message. Breakpoints degrade gracefully —
 // system + the single message — without exceeding the budget or panicking.
 func TestAnthropic_CacheBreakpoints_MinimalRequest(t *testing.T) {
-	a := New("claude-test", Options{APIKey: "k"}).(*anthropicAdapter)
-	params, err := a.buildParams(llmkit.Request{
+	client, err := New("claude-test", Options{APIKey: "k"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	a := client.(*anthropicAdapter)
+	params, _, err := a.buildParams(llmkit.Request{
 		System:    "sys",
 		Messages:  []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "hello")},
 		MaxTokens: 16,

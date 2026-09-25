@@ -1,10 +1,7 @@
 package adapter
 
 import (
-	"errors"
 	"testing"
-
-	"github.com/dpoage/llmkit"
 )
 
 // TestMatchesModelFamily pins the segment-boundary rule shared by all three
@@ -31,8 +28,8 @@ func TestMatchesModelFamily(t *testing.T) {
 		{"gpt", "gpt-4", false},
 	}
 	for _, tc := range cases {
-		if got := MatchesModelFamily(tc.model, tc.key); got != tc.want {
-			t.Errorf("MatchesModelFamily(%q, %q) = %v, want %v", tc.model, tc.key, got, tc.want)
+		if got := matchesModelFamily(tc.model, tc.key); got != tc.want {
+			t.Errorf("matchesModelFamily(%q, %q) = %v, want %v", tc.model, tc.key, got, tc.want)
 		}
 	}
 }
@@ -56,28 +53,5 @@ func TestBestMatchingFamily(t *testing.T) {
 	}
 	if got := BestMatchingFamily("gemini-9", table, key); got != -1 {
 		t.Errorf("unmatched index = %d, want -1", got)
-	}
-}
-
-// TestGateToolChoice pins the rejection contract: explicit modes are refused
-// when the profile reports ToolChoice=false, auto/zero pass, unknown modes
-// fall through to the adapter's mapper, and no error surfaces when supported.
-func TestGateToolChoice(t *testing.T) {
-	for _, mode := range []llmkit.ToolChoiceMode{llmkit.ToolChoiceNone, llmkit.ToolChoiceRequired, llmkit.ToolChoiceTool} {
-		err := GateToolChoice("test", llmkit.ToolChoice{Mode: mode, Name: "f"}, false)
-		if !errors.Is(err, llmkit.ErrInvalidRequest) {
-			t.Errorf("GateToolChoice(mode=%s, unsupported) = %v, want ErrInvalidRequest", mode, err)
-		}
-	}
-	for _, mode := range []llmkit.ToolChoiceMode{"", llmkit.ToolChoiceAuto} {
-		if err := GateToolChoice("test", llmkit.ToolChoice{Mode: mode}, false); err != nil {
-			t.Errorf("GateToolChoice(mode=%q, unsupported) = %v, want nil (provider default)", mode, err)
-		}
-	}
-	if err := GateToolChoice("test", llmkit.ToolChoice{Mode: "bogus-mode"}, false); err != nil {
-		t.Errorf("GateToolChoice(unknown mode, unsupported) = %v, want nil (mapper owns that error)", err)
-	}
-	if err := GateToolChoice("test", llmkit.ToolChoice{Mode: llmkit.ToolChoiceRequired}, true); err != nil {
-		t.Errorf("GateToolChoice(required, supported) = %v, want nil", err)
 	}
 }

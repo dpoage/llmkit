@@ -61,12 +61,15 @@ func captureBody(t *testing.T, captured *map[string]any) string {
 func TestSchemaCompat_OpenAICompatible_DowngradesResponseFormat(t *testing.T) {
 	var captured map[string]any
 	base := captureBody(t, &captured)
-	adapter := New("llama-test", Options{
+	adapter, err := New("llama-test", Options{
 		APIKey:       "k",
 		BaseURL:      base,
 		Compatible:   true,
 		Capabilities: structuredOutputOverride(true),
 	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	req := simpleRequest()
 	req.ResponseSchema = mapSchemaForTest
 	if _, err := adapter.Complete(context.Background(), req); err != nil {
@@ -88,12 +91,15 @@ func TestSchemaCompat_OpenAICompatible_DowngradesResponseFormat(t *testing.T) {
 func TestSchemaCompat_OpenAICompatible_DowngradesToolParameters(t *testing.T) {
 	var captured map[string]any
 	base := captureBody(t, &captured)
-	adapter := New("llama-test", Options{
+	adapter, err := New("llama-test", Options{
 		APIKey:       "k",
 		BaseURL:      base,
 		Compatible:   true,
 		Capabilities: structuredOutputOverride(true),
 	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	req := simpleRequest()
 	req.Tools = []llmkit.ToolDef{{Name: "sandbox_exec", Parameters: mapSchemaForTest}}
 	if _, err := adapter.Complete(context.Background(), req); err != nil {
@@ -116,12 +122,15 @@ func TestSchemaCompat_OpenAICompatible_DowngradesToolParameters(t *testing.T) {
 func TestSchemaCompat_OpenAI_PreservesSubschema(t *testing.T) {
 	var captured map[string]any
 	base := captureBody(t, &captured)
-	adapter := New("gpt-test", Options{
+	adapter, err := New("gpt-test", Options{
 		APIKey:  "k",
 		BaseURL: base,
 		// Compatible deliberately left false: first-party OpenAI keeps the
 		// subschema form.
 	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	req := simpleRequest()
 	req.ResponseSchema = mapSchemaForTest
 	if _, err := adapter.Complete(context.Background(), req); err != nil {

@@ -112,10 +112,25 @@ provider-plus-model pair. Every field belongs to one of four enforcement
 classes: dropped silently, refused pre-wire, decorator, or advisory. No
 adapter fabricates a context window; an unknown model reports `0`.
 
+`internal/adapter.Prepare` applies every request-side rule of
+`Capabilities` exactly once, shared by all three vendor adapters: message
+validation, defaulting, the sampler gates, and the `ToolChoice` refusal. An
+adapter maps a `Prepared` value onto its SDK types without re-checking any
+of it. Each adapter's `New` pins a ceiling naming the wire-gated fields
+(`StructuredOutput`, `Thinking`, `ToolChoice`, `StopSequences`, `TopP`,
+`TopK`, `Seed`) it can put on the wire; `internal/adapter.ApplyOverride`
+refuses a `Spec.Capabilities` override that reports a field above the
+ceiling, so the profile can never claim a feature the adapter cannot send.
+
 - **What it buys:** one profile answers "what happens if I send this". A
-  refusal is an error before the wire call; a drop is visible in the profile.
-- **What it costs:** callers read the profile instead of assuming support.
-  See [capabilities](capabilities.md) for the per-field table.
+  refusal is an error before the wire call; a drop is visible in the profile
+  and enforced even when a caller's own override reports the field false.
+  One shared rule set means the four sampler fields, the message rules, and
+  the `ToolChoice` refusal cannot drift between adapters.
+- **What it costs:** callers read the profile instead of assuming support,
+  and an override above an adapter's ceiling fails at construction instead
+  of silently mismapping. See [capabilities](capabilities.md) for the
+  per-field table.
 
 ## Vendor SDKs, not hand-rolled wire types
 

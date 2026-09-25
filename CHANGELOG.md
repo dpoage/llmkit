@@ -307,6 +307,104 @@ entry below is marked.
   padded or multi-megabyte in-band error message reached `Message`
   verbatim.
 
+- **Breaking:** `llmkit.Capabilities`' `StopSequences`, `TopP`, `TopK`, and
+  `Seed` are now real gates on the effective profile: a caller-pinned
+  `Spec.Capabilities` override that reports one of them `false` drops the
+  matching `Request` field from the wire on every adapter, the same as an
+  adapter's own table entry reporting `false` — previously the field only
+  recorded the adapter's own mapping, and a caller override reporting
+  `false` did not stop the value from reaching the wire. A wholesale
+  profile override (`return llmkit.Capabilities{...}`) now enforces every
+  wire-gated field it leaves at its Go zero value: `StructuredOutput`,
+  `Thinking`, `ToolChoice`, `StopSequences`, `TopP`, `TopK`, and `Seed`.
+  The advisory and decorator fields (`ContextWindow`,
+  `ParallelToolCalls`, `PromptCaching`, `Images`, `Documents`) are not
+  gated — the profile's `Images` and `Documents` fields gate no block,
+  so an inline image block reaches the wire on every adapter even when
+  the wholesale profile reports `Images: false`. Block validation is
+  unchanged: the OpenAI adapters still refuse URL-sourced document
+  blocks and the Anthropic adapter still refuses inline documents that
+  are not `application/pdf`.
+- **Breaking:** `provider.New` refuses an effective `Spec.Capabilities`
+  profile that reports `true` for a wire-gated field above the adapter
+  Type's ceiling — `Thinking` or `TopK` on `TypeOpenAI`/
+  `TypeOpenAICompatible`, `Seed` on `TypeAnthropic` — with an error
+  wrapping `llmkit.ErrInvalidRequest` naming the field and the Type,
+  before any network call. `TypeGoogle` has no refused field.
+- **Breaking:** a tool's `Parameters` or a request's `ResponseSchema` that
+  is a JSON array, string, number, or malformed JSON is refused with
+  `llmkit.ErrInvalidRequest` before any network call. `Parameters` is
+  checked on every adapter and profile. `ResponseSchema` is checked only
+  when the effective profile reports `StructuredOutput: true`; on a
+  profile that reports it false (openai-compatible's default, `o1-mini`
+  on openai, or any override) the schema is dropped without validation.
+  Previously: anthropic, openai, and openai-compatible already refused a
+  non-object `Parameters` ("invalid parameters JSON schema"); google
+  refused malformed JSON and sent an array, string, or number verbatim.
+  With no tools in the request and `StructuredOutput: true`, openai,
+  openai-compatible, and google sent an array, string, or number
+  `ResponseSchema` verbatim and refused malformed JSON, and anthropic
+  refused any non-object `ResponseSchema`; with tools in the request,
+  anthropic and google ignored the `ResponseSchema` (see the next
+  entry). A
+  zero-length input and the JSON literal `null` count as "not supplied"
+  and are never refused.
+- **Breaking:** on anthropic and google, a malformed `ResponseSchema` is
+  now refused even when the request also carries tools, provided the
+  effective profile reports `StructuredOutput: true` — previously it was
+  silently ignored there.
+- **Breaking:** anthropic no longer wraps a bare schema object
+  (`{"q":{"type":"string"}}`) into a `properties:{q:...}` envelope: the
+  object now rides through the `input_schema` root, with `type` set to
+  `"object"` (a caller-supplied `type` is replaced). The Anthropic SDK's wire
+  `ToolInputSchemaParam` maps the caller's typed `properties` and
+  `required` fields onto its own typed fields and places every other
+  root key under `ExtraFields`; the empty-string root key `""` is
+  refused (see below). OpenAI and Google send the bare object
+  unchanged.
+- **Breaking:** the openai-compatible adapter's pre-wire refusals now
+  carry `Provider: "openai-compatible"` — previously a few carried the
+  literal `"openai"` label.
+- **Breaking:** an openai/openai-compatible completion whose
+  `finish_reason` is unrecognized or empty now maps to `llmkit.StopError`
+  (or `StopToolUse` when the response carries tool calls) instead of
+  `StopEndTurn`; under `agent.Runner` this now surfaces as
+  `*agent.StopReasonError` where the run previously treated the turn as
+  a normal finish. `"stop"` with tool calls present now maps to
+  `StopToolUse` instead of `StopEndTurn` (llmkit-bk8.1.10). Anthropic's
+  `"pause_turn"` and Google's `"OTHER"` use the same mapping for their
+  own unrecognized reasons (anthropic: `StopToolUse` when the response
+  carries a `tool_use` block, `StopError` otherwise; google: `StopError`
+  with tool calls mapped to `StopToolUse`).
+- **Breaking:** the anthropic adapter's tool `input_schema` now carries
+  every non-typed root key of the caller's JSON Schema verbatim —
+  `$defs`, `additionalProperties`, `description`, and any other custom
+  keys. Typed omitzero rules still apply: an empty `required` array is
+  omitted; `properties:{}` and `additionalProperties:false` reach the
+  wire as written. The empty-string root key `""` is refused (see the next
+  bullet). Previously only `properties` and `required` reached the wire,
+  and a root object without a `properties` key (e.g. `{"q":...}` or
+  `{"type":"object"}`) was sent as a property literally named `"q"` or
+  `"type"` (or, for `Parameters: null`, as `properties: null`)
+  (llmkit-bk8.1.4).
+- **Breaking:** a `ResponseSchema` that is the JSON literal `null` no
+  longer turns structured output on when the effective profile reports
+  `StructuredOutput: true`: no structured-output key reaches the wire on
+  any adapter (no `response_format` on openai/openai-compatible, no
+  `responseMimeType` on google, no synthetic structured-output tool on
+  anthropic). User tools the request also carries still ride through
+  unchanged. Previously openai and openai-compatible sent a
+  `json_schema` `response_format` with no schema, google set
+  `responseMimeType` to `application/json`, and anthropic forced its
+  synthetic structured-output tool with `properties: null`.
+- **Breaking:** the anthropic adapter refuses a JSON Schema that has the
+  empty-string root key `""`, with `llmkit.ErrInvalidRequest` before any
+  network call. This applies to a tool's `Parameters` and to a
+  `ResponseSchema` sent as the synthetic structured-output tool.
+  Previously a root object without a `properties` key was sent with `""`
+  as a property name inside `input_schema.properties`; a root object
+  with a `properties` key was sent with the `""` key dropped.
+
 ### Removed
 
 - **Breaking:** `sandbox.WithToolchainBinds` and
@@ -367,6 +465,36 @@ entry below is marked.
 - **Breaking:** `embed.Config.CacheEnabled` and `embed.Config.CacheSize`.
   Replacement: pass the `Embedder` that `embed.New(cfg)` returns to
   `embed.NewCachedEmbedder(e, maxSize)`.
+- **Breaking:** `provider.New`'s adapters no longer read any SDK-level
+  environment variable or profile file for anything that reaches the wire
+  (llmkit-bk8.1.2). Removed: `OPENAI_ORG_ID`, `OPENAI_PROJECT_ID`, and
+  `OPENAI_CUSTOM_HEADERS` (openai/openai-compatible); `ANTHROPIC_API_KEY`,
+  `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_PROFILE` (and its
+  `ANTHROPIC_CONFIG_DIR` profile file), `ANTHROPIC_CUSTOM_HEADERS`, and the
+  `$HOME/.config/anthropic/configs/default.json` fallback profile
+  (anthropic) — `Spec.Secret`/`Spec.Auth` are now the only credential
+  source, and a profile's `workspace_id` no longer contributes the
+  `Anthropic-Workspace-Id` header. `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`,
+  and `GOOGLE_GEMINI_BASE_URL` no longer set the host for an empty
+  `Spec.BaseURL`, and neither does the `base_url` of an Anthropic profile
+  file. Instead `New` refuses an empty `Spec.BaseURL` in two cases: the
+  Type's variable is present in the environment (an empty value included),
+  or, for `TypeAnthropic`, the profile file the Anthropic SDK would have
+  loaded sets `base_url`. The error names the variable or the file and
+  tells you to set `Spec.BaseURL`. If you relied on one of these sources to
+  reach a gateway, set `Spec.BaseURL` to that host before upgrading.
+  Workaround for the removed
+  `OPENAI_ORG_ID` / `OPENAI_PROJECT_ID` / `OPENAI_CUSTOM_HEADERS` /
+  `ANTHROPIC_CUSTOM_HEADERS` headers: install an `Options.HTTPClient` whose
+  `Transport` adds them. With a nil `Options.HTTPClient`, the openai and
+  anthropic adapters install a plain `http.Client{}` rather than the vendor
+  SDK's own 10-minute `ResponseHeaderTimeout` client; the google adapter
+  was already using a plain client. `retry.Default`'s 5-minute per-attempt
+  `RequestTimeout` bounds every attempt. Note: `genai`'s `SetDefaultBaseURLs`
+  is not consulted either — google.New sets `cc.HTTPOptions.BaseURL`
+  unconditionally to either `Spec.BaseURL` or the vendor default, and the
+  genai SDK checks an explicit `HTTPOptions.BaseURL` ahead of any
+  process-global tier.
 
 ### Fixed
 
@@ -530,6 +658,25 @@ entry below is marked.
   (llmkit-bk8.8.1): `insert` now stores a private copy, so an inner
   `Embedder` that keeps and later mutates a slice it returned can no
   longer corrupt a subsequent cache hit.
+
+- llmkit-bk8.1.10: openai/openai-compatible unrecognized and empty
+  `finish_reason` values mapped to `StopEndTurn`; `"stop"` with tool
+  calls present mapped to `StopEndTurn`; anthropic's unrecognized
+  `stop_reason` (including `pause_turn`) carrying a `tool_use` block
+  mapped to `StopError`; google's `"OTHER"` (no tool calls) mapped to
+  `StopError`. The new mapping: on openai and openai-compatible an
+  unrecognized or empty `finish_reason` is `StopError`, or `StopToolUse`
+  when the response carries tool calls, and `"stop"` with tool calls is
+  `StopToolUse`; on anthropic an unrecognized, empty, or absent
+  `stop_reason` (`pause_turn` included) is `StopError`, or `StopToolUse`
+  with a `tool_use` block; on google an unrecognized reason such as
+  `"OTHER"` is `StopError`, or `StopToolUse` with a function call, while
+  an empty, absent, or `FINISH_REASON_UNSPECIFIED` reason still maps to
+  `StopEndTurn` (or `StopToolUse`).
+- llmkit-bk8.1.4: anthropic tool and response-schema conversion dropped
+  `$defs`, `additionalProperties`, and `description` at the schema root,
+  producing a dangling `$ref` for any caller schema that used `$defs`;
+  every non-typed root key now carries through to the wire verbatim.
 
 ## [0.5.0] - 2026-09-20
 

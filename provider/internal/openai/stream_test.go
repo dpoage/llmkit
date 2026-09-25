@@ -112,7 +112,10 @@ func sseTruncated(chunks ...string) http.HandlerFunc {
 // path.
 func stream(t *testing.T, baseURL string, req llmkit.Request, fn func(llmkit.Delta) error) (llmkit.Response, []llmkit.Delta, error) {
 	t.Helper()
-	client := New(streamModel, Options{APIKey: "k", BaseURL: baseURL})
+	client, err := New(streamModel, Options{APIKey: "k", BaseURL: baseURL})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	sc, ok := client.(llmkit.StreamingClient)
 	if !ok {
 		t.Fatalf("openai adapter does not implement llmkit.StreamingClient")
@@ -180,8 +183,11 @@ func TestOpenAIStream_ResponseIdentityIsComplete(t *testing.T) {
 		}
 	}, identityChunks...))
 
-	completeResp, err := New(streamModel, Options{APIKey: "k", BaseURL: plain}).
-		Complete(context.Background(), simpleRequest())
+	client, err := New(streamModel, Options{APIKey: "k", BaseURL: plain})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	completeResp, err := client.Complete(context.Background(), simpleRequest())
 	if err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
@@ -365,8 +371,11 @@ func TestOpenAIStream_NilFnEqualsComplete(t *testing.T) {
 	})
 	sse := newServer(t, sseHandler(nil, identityChunks...))
 
-	completeResp, err := New(streamModel, Options{APIKey: "k", BaseURL: plain}).
-		Complete(context.Background(), simpleRequest())
+	client2, err := New(streamModel, Options{APIKey: "k", BaseURL: plain})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	completeResp, err := client2.Complete(context.Background(), simpleRequest())
 	if err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
@@ -541,7 +550,11 @@ func TestStream_InBandSSEErrorClassifiedByType(t *testing.T) {
 				hits++
 				sseHandler(nil, tc.event)(w, r)
 			})
-			client := llmkit.WithRetry(New(streamModel, Options{APIKey: "k", BaseURL: base}), retry.Config{
+			adapterClient, err := New(streamModel, Options{APIKey: "k", BaseURL: base})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			client := llmkit.WithRetry(adapterClient, retry.Config{
 				MaxAttempts: 2,
 				BaseDelay:   time.Millisecond,
 				Sleep:       func(context.Context, time.Duration) error { return nil },

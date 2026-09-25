@@ -53,7 +53,10 @@ func jsonHandler(body string) http.HandlerFunc {
 
 func newStreamAdapter(t *testing.T, base string) *anthropicAdapter {
 	t.Helper()
-	cl := New("claude-test", Options{APIKey: "test-key", BaseURL: base})
+	cl, err := New("claude-test", Options{APIKey: "test-key", BaseURL: base})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	ad, ok := cl.(*anthropicAdapter)
 	if !ok {
 		t.Fatalf("New returned %T, want *anthropicAdapter", cl)
@@ -301,7 +304,10 @@ func TestAnthropicStreamMatchesComplete(t *testing.T) {
 // than synthesize from Complete.
 func TestAnthropicStreamViaHelper(t *testing.T) {
 	base := newServer(t, sseHandler(streamReasoningEvents()))
-	cl := New("claude-test", Options{APIKey: "test-key", BaseURL: base})
+	cl, err := New("claude-test", Options{APIKey: "test-key", BaseURL: base})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	if _, ok := cl.(llmkit.StreamingClient); !ok {
 		t.Fatalf("adapter does not satisfy llmkit.StreamingClient")
 	}

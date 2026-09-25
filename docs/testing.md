@@ -85,16 +85,22 @@ The credentials gate keys on the compat key. A missing typesafe secret skips the
 
 ## LLMKIT_LIVE_COMPAT_CAPS
 
-`LLMKIT_LIVE_COMPAT_CAPS` is a comma-separated list of `llmkit.Capabilities` field names in snake_case (see [capabilities](capabilities.md)). The suite forces each listed capability to true through `provider.Spec.Capabilities`, so the gated cases run and must pass instead of skipping. A cap you assert must pass on your endpoint, so leave out any that fail.
+`LLMKIT_LIVE_COMPAT_CAPS` is a comma-separated list of `llmkit.Capabilities` field names in Go field-name snake_case (see [capabilities](capabilities.md)). The suite forces each listed capability to true through `provider.Spec.Capabilities`, so the gated cases run and must pass instead of skipping. A cap you assert must pass on your endpoint, so leave out any that fail.
 
-The set exported above is **MiniMax-M3-verified, not universal**. Probed 2026-09-18 against MiniMax-M3:
+Listing a field above the `openai-compatible` ceiling makes `provider.New` refuse at construction instead of running the case: the Chat Completions adapter has no wire field for `top_k` or `thinking`, so listing either value here fails every compat case (a `t.Fatalf` in the live runner for each compat model, under `-tags live`), not just the gated case that names the cap. See [capabilities](capabilities.md#overriding-the-profile) for the full ceiling.
+
+### Probed 2026-09-18 against MiniMax-M3
+
+The compat set below is **MiniMax-M3-verified, not universal**.
 
 - `parallel_tool_calls` passes: two tool calls arrive in one response.
 - `prompt_caching` passes: a repeated prefix yields `CacheReadInputTokens > 0` on the second call.
-- `top_k` passes trivially: the Chat Completions adapter never serializes `top_k`, so the vendor accepts the request.
 - `structured_output` fails: `response_format` with `json_schema` is accepted but ignored, and the model answers in prose.
-- `thinking` fails: M3 emits inline `<think>` text, and the adapter never produces `BlockThinking`.
 - `stop_sequences` is claimed by the compat profile, but MiniMax-M3 ignores the `stop` parameter at the raw wire. The case skips, with the evidence in its message.
+
+### Above the ceiling: failed at construction, not at the case
+
+The two caps above the `openai-compatible` ceiling — `top_k` and `thinking` — were added to the list above as part of the same MiniMax-M3 probe, but they do not behave like the other bullets. Listing either one fails `provider.New` for every compat case, before any wire call; the live runner reports each failure with `t.Fatalf` and never reaches the gated case. Leave both out unless the endpoint actually has those wire parameters.
 
 ## Fixture replay
 

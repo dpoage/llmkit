@@ -19,7 +19,10 @@
 //
 // [Spec.BaseURL] overrides the vendor endpoint per type. Anthropic, OpenAI,
 // and Google have vendor defaults; TypeOpenAICompatible has none, so New
-// refuses an empty BaseURL there.
+// refuses an empty BaseURL there. New also refuses an empty BaseURL when
+// the Type's base-URL environment variable is present, or when the
+// Anthropic SDK profile file the SDK would load sets a base_url (see
+// [Spec.BaseURL] for the exact rules).
 //
 // # Credentials
 //
@@ -27,7 +30,8 @@
 // sends Secret as the provider's standard API-key credential;
 // [AuthOAuthToken] sends it as an OAuth bearer token and is Anthropic-only.
 // [Spec.Secret] must be a non-empty value without surrounding whitespace.
-// New never reads the environment for credentials and never logs the Secret.
+// Secret is the only credential New sends: no vendor-SDK environment
+// variable or profile file supplies one. New never logs the Secret.
 // A credential-less endpoint (a local Ollama or vLLM server) takes any
 // non-empty placeholder.
 //
@@ -44,9 +48,15 @@
 //
 // [New] validates the spec and returns an error wrapping
 // llmkit.ErrInvalidRequest for a malformed Auth, Model, Secret, BaseURL, or
-// Type; [New] lists the exact rejections. New performs no network I/O and no
-// environment lookups of its own (see [Spec.BaseURL] for the SDK-level env
-// fallbacks), so construction is hermetic.
+// Type; [New] lists the exact rejections. New also refuses an empty
+// [Spec.BaseURL] when a vendor-SDK base-URL environment variable or an
+// Anthropic SDK profile file would have sent the request to another host:
+// OpenAI's `OPENAI_BASE_URL`, Anthropic's `ANTHROPIC_BASE_URL` and its
+// profile files, Google's `GOOGLE_GEMINI_BASE_URL`. No value read from
+// those sources — or from any other vendor-SDK environment variable or
+// profile file — sets a request's host or any of its headers: every request
+// goes to Spec.BaseURL when set, else to the vendor default host, and its
+// credential header carries Spec.Secret. New performs no network I/O.
 //
 // The returned client is decorated, outer to inner:
 //
@@ -65,8 +75,10 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 
+	"github.com/anthropics/anthropic-sdk-go/config"
 	"github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/provider/internal/anthropic"
 	"github.com/dpoage/llmkit/provider/internal/google"
@@ -131,14 +143,42 @@ type Spec struct {
 	// BaseURL overrides the vendor endpoint; mainly for tests, proxies, and
 	// self-hosted gateways. Empty means the vendor default: the Anthropic
 	// SDK targets api.anthropic.com, the OpenAI SDK api.openai.com/v1, and
-	// the Google GenAI SDK generativelanguage.googleapis.com. The SDKs
-	// themselves (not New) also honor ANTHROPIC_BASE_URL, OPENAI_BASE_URL,
-	// and GOOGLE_GEMINI_BASE_URL when BaseURL is empty, so an unset
-	// Spec.BaseURL can still route the caller's Secret to an
-	// ambient-configured host.
+	// the Google GenAI SDK generativelanguage.googleapis.com. The openai
+	// adapter selects its SDK's production environment explicitly, the
+	// google adapter passes the vendor host itself, and the anthropic
+	// adapter runs its SDK with environment defaults off so the SDK's
+	// built-in production host applies. No vendor-SDK
+	// environment variable or profile file sets the host or a request
+	// header.
 	// TypeOpenAICompatible is the exception: it has no vendor default of
 	// its own — empty would silently target first-party api.openai.com/v1
 	// — so New refuses it with an error wrapping ErrInvalidRequest.
+	//
+	// For TypeOpenAI, TypeAnthropic, and TypeGoogle, an empty BaseURL is
+	// refused when one of these sources would have set the host:
+	//
+	//   - The Type's base-URL variable (OPENAI_BASE_URL, ANTHROPIC_BASE_URL,
+	//     or GOOGLE_GEMINI_BASE_URL) is present in the process environment.
+	//     An empty value counts as present.
+	//   - For TypeAnthropic, the Anthropic SDK profile file that
+	//     anthropic-sdk-go would load has a base_url. The SDK looks for
+	//     configs/<profile>.json in ANTHROPIC_CONFIG_DIR, else
+	//     $XDG_CONFIG_HOME/anthropic, else $HOME/.config/anthropic outside
+	//     Windows, else the CWD-relative configs/<profile>.json when HOME
+	//     is unset or empty and XDG_CONFIG_HOME is unset or empty, or when
+	//     ANTHROPIC_CONFIG_DIR is present but empty. The profile is
+	//     ANTHROPIC_PROFILE when that variable is non-empty (present but
+	//     empty: no profile is read), else the one the active_config file
+	//     names, else "default". The SDK reads no profile when ANTHROPIC_API_KEY
+	//     or ANTHROPIC_AUTH_TOKEN is non-empty. When environment federation
+	//     is fully configured, the SDK reads only a profile named by
+	//     ANTHROPIC_PROFILE and skips the active_config-named and default
+	//     profiles. New follows the same rules.
+	//
+	// The error wraps ErrInvalidRequest, names the variable or the profile
+	// file, and tells you to set BaseURL; nothing is sent. New reads these
+	// sources only to decide the refusal. To use the host they name, set
+	// BaseURL to it; to reach the vendor default, remove the source.
 	BaseURL string
 	// Auth selects the credential mode. The zero value [AuthAPIKey] sends
 	// Secret as the provider's standard API-key credential (see the const
@@ -151,8 +191,9 @@ type Spec struct {
 	// Secret is the resolved credential: an API key in AuthAPIKey mode, an
 	// OAuth bearer token in AuthOAuthToken mode. New refuses a Secret that
 	// is empty or whitespace-padded, with an error wrapping
-	// ErrInvalidRequest; the value is never echoed. New never reads the
-	// environment for credentials and never logs the Secret. For a
+	// ErrInvalidRequest; the value is never echoed. Secret is the only
+	// credential New sends: no vendor-SDK environment variable or profile
+	// file supplies one. New never logs the Secret. For a
 	// credential-less endpoint — a local Ollama or vLLM server — pass any
 	// non-empty placeholder; New only checks that Secret is present, never
 	// that the backend accepts it.
@@ -172,7 +213,21 @@ type Spec struct {
 	// before the wire call (auto stays allowed); StructuredOutput=false
 	// gates response_format (OpenAI) and the synthetic forced-output tool
 	// (Anthropic) off; ParallelToolCalls=false installs the tool-call
-	// serializer.
+	// serializer. StopSequences, TopP, TopK, and Seed gate the same way:
+	// false drops the matching Request field from the wire, including
+	// when the override replaces the whole profile.
+	//
+	// Each Type has a ceiling naming the wire-gated fields it can
+	// actually send (StructuredOutput, Thinking, ToolChoice,
+	// StopSequences, TopP, TopK, Seed): anthropic can send everything but
+	// Seed (the Messages API has no seed parameter); openai and
+	// openai-compatible can send everything but Thinking and TopK (the
+	// Chat Completions API has neither); google can send all seven. An
+	// effective profile that reports true for a field above its Type's
+	// ceiling makes New refuse with an error wrapping
+	// llmkit.ErrInvalidRequest naming the field and the Type — the
+	// profile can never claim a feature the adapter cannot put on the
+	// wire.
 	Capabilities func(llmkit.Capabilities) llmkit.Capabilities
 }
 
@@ -206,8 +261,11 @@ type Options struct {
 	// ledger keys on a config-map name rather than the provider type.
 	Provider string
 	// HTTPClient overrides the transport used by the underlying SDKs.
-	// Primarily for tests (httptest) and proxies. nil uses the SDK
-	// default.
+	// Primarily for tests (httptest) and proxies. Headers that its
+	// Transport adds reach the wire. nil gives each adapter its own plain
+	// http.Client, which sends through http.DefaultTransport and never
+	// through http.DefaultClient; Retry's RequestTimeout bounds each
+	// attempt.
 	HTTPClient *http.Client
 }
 
@@ -228,8 +286,13 @@ type Options struct {
 // llmkit.Observe for bare-client capture, or let the agent Runner emit it.
 //
 // spec.Secret is the resolved credential (callers obtain it via their own
-// config); New performs no network I/O and no environment lookups of its
-// own, so construction is hermetic and testable without real keys.
+// config); New performs no network I/O and is testable without real keys.
+// New reads the process environment and the Anthropic SDK profile files
+// only to decide the empty-BaseURL refusal (see [Spec.BaseURL]). For
+// TypeGoogle, the GenAI SDK also reads its own GOOGLE_* and GEMINI_*
+// variables while New builds the client, and it logs a warning when both
+// GOOGLE_API_KEY and GEMINI_API_KEY are set to non-empty values. No value
+// read from either source sets a request's host or headers.
 // spec.Auth routes the secret to the right credential field.
 //
 // New returns an error wrapping ErrInvalidRequest for any of:
@@ -240,7 +303,13 @@ type Options struct {
 //   - a spec.Secret that is empty, whitespace-only, or differs from its own
 //     strings.TrimSpace;
 //   - an empty spec.BaseURL on TypeOpenAICompatible;
-//   - an unknown spec.Type.
+//   - an empty spec.BaseURL when the Type's base-URL environment variable
+//     is present, or, for TypeAnthropic, when the Anthropic SDK profile
+//     file would supply a base_url (see [Spec.BaseURL]);
+//   - an unknown spec.Type;
+//   - a spec.Capabilities override (or the table it left untouched) that
+//     reports true for a wire-gated field above the Type's ceiling — see
+//     [Spec.Capabilities].
 func New(ctx context.Context, spec Spec, opts Options) (llmkit.Client, error) {
 	switch spec.Auth {
 	case AuthAPIKey, AuthOAuthToken:
@@ -272,6 +341,31 @@ func New(ctx context.Context, spec Spec, opts Options) (llmkit.Client, error) {
 	if spec.Type == TypeOpenAICompatible && spec.BaseURL == "" {
 		return nil, fmt.Errorf("llmkit: base URL must not be empty for provider %q: the endpoint must be given: %w", spec.Type, llmkit.ErrInvalidRequest)
 	}
+	// A deployment that the base-URL variable, or an Anthropic SDK profile
+	// file, routed to a gateway must not have its Secret silently sent to
+	// the vendor's default host. The adapters read neither source (see
+	// [Spec.BaseURL]), so New refuses instead.
+	if spec.BaseURL == "" {
+		var baseURLVar string
+		switch spec.Type {
+		case TypeOpenAI:
+			baseURLVar = "OPENAI_BASE_URL"
+		case TypeAnthropic:
+			baseURLVar = "ANTHROPIC_BASE_URL"
+		case TypeGoogle:
+			baseURLVar = "GOOGLE_GEMINI_BASE_URL"
+		}
+		if _, set := os.LookupEnv(baseURLVar); set && baseURLVar != "" {
+			return nil, fmt.Errorf("llmkit: %s is set but Spec.BaseURL is empty for provider %q: set Spec.BaseURL explicitly — New no longer falls back to %s: %w",
+				baseURLVar, spec.Type, baseURLVar, llmkit.ErrInvalidRequest)
+		}
+		if spec.Type == TypeAnthropic {
+			if path := anthropicProfileBaseURLFile(); path != "" {
+				return nil, fmt.Errorf("llmkit: Anthropic profile file %q sets base_url but Spec.BaseURL is empty for provider %q: set Spec.BaseURL explicitly — New does not send requests to a profile's base_url: %w",
+					path, spec.Type, llmkit.ErrInvalidRequest)
+			}
+		}
+	}
 
 	var adapter llmkit.Client
 	switch spec.Type {
@@ -289,22 +383,34 @@ func New(ctx context.Context, spec Spec, opts Options) (llmkit.Client, error) {
 		} else {
 			aopts.APIKey = spec.Secret
 		}
-		adapter = anthropic.New(spec.Model, aopts)
+		a, err := anthropic.New(spec.Model, aopts)
+		if err != nil {
+			return nil, err
+		}
+		adapter = a
 	case TypeOpenAI:
-		adapter = openai.New(spec.Model, openai.Options{
+		a, err := openai.New(spec.Model, openai.Options{
 			APIKey:       spec.Secret,
 			BaseURL:      spec.BaseURL,
 			HTTPClient:   opts.HTTPClient,
 			Capabilities: spec.Capabilities,
 		})
+		if err != nil {
+			return nil, err
+		}
+		adapter = a
 	case TypeOpenAICompatible:
-		adapter = openai.New(spec.Model, openai.Options{
+		a, err := openai.New(spec.Model, openai.Options{
 			APIKey:       spec.Secret,
 			BaseURL:      spec.BaseURL,
 			HTTPClient:   opts.HTTPClient,
 			Compatible:   true,
 			Capabilities: spec.Capabilities,
 		})
+		if err != nil {
+			return nil, err
+		}
+		adapter = a
 	case TypeGoogle:
 		ga, err := google.New(ctx, spec.Model, google.Options{
 			APIKey:       spec.Secret,
@@ -337,6 +443,57 @@ func New(ctx context.Context, spec Spec, opts Options) (llmkit.Client, error) {
 	// providers short-circuit inside the wrapper, so this is a free check
 	// for anthropic/google/openai and the safety net for openai-compatible.
 	return llmkit.WithSerializedToolCalls(client), nil
+}
+
+// anthropicProfileBaseURLFile returns the path of the Anthropic SDK profile
+// file whose base_url anthropic.DefaultClientOptions (anthropic-sdk-go
+// v1.58.0) would apply to this process's clients, or "" when it would apply
+// none. It follows the SDK's order using its own config loaders:
+//
+//  1. A non-empty ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN ends the lookup
+//     before any profile is read.
+//  2. A non-empty ANTHROPIC_PROFILE loads that profile only; a load error
+//     contributes no base_url.
+//  3. Complete environment federation (ANTHROPIC_FEDERATION_RULE_ID and
+//     ANTHROPIC_ORGANIZATION_ID present, plus a non-empty
+//     ANTHROPIC_IDENTITY_TOKEN_FILE or ANTHROPIC_IDENTITY_TOKEN) skips the
+//     fallback profile.
+//  4. Otherwise the fallback profile loads: the active_config file names
+//     it, else "default".
+//
+// New calls it only after refusing a present ANTHROPIC_BASE_URL, which the
+// SDK would apply ahead of any profile. It reads files and sends nothing.
+func anthropicProfileBaseURLFile() string {
+	if os.Getenv("ANTHROPIC_API_KEY") != "" || os.Getenv("ANTHROPIC_AUTH_TOKEN") != "" {
+		return ""
+	}
+	dir := config.DefaultDir()
+	if profile := os.Getenv("ANTHROPIC_PROFILE"); profile != "" {
+		if cfg, err := config.LoadProfile(dir, profile); err == nil && cfg.BaseURL != "" {
+			return config.ProfilePath(dir, profile)
+		}
+		return ""
+	}
+	_, fedRule := os.LookupEnv("ANTHROPIC_FEDERATION_RULE_ID")
+	_, orgID := os.LookupEnv("ANTHROPIC_ORGANIZATION_ID")
+	token := os.Getenv("ANTHROPIC_IDENTITY_TOKEN_FILE") != "" || os.Getenv("ANTHROPIC_IDENTITY_TOKEN") != ""
+	if fedRule && orgID && token {
+		return ""
+	}
+	cfg, err := config.LoadConfig()
+	if err != nil || cfg.BaseURL == "" {
+		return ""
+	}
+	// LoadConfig succeeded, so ANTHROPIC_PROFILE is absent: an empty value
+	// fails the SDK's profile-name check. The two remaining tiers of the
+	// SDK's unexported resolveProfile name the file.
+	profile := "default"
+	if data, err := os.ReadFile(config.ActiveConfigPath(dir)); err == nil {
+		if name := strings.TrimSpace(string(data)); name != "" {
+			profile = name
+		}
+	}
+	return config.ProfilePath(dir, profile)
 }
 
 // Tag resolves the provider tag that [New] puts on usage and Attempt

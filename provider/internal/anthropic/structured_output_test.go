@@ -33,10 +33,13 @@ func captureAnthropicBody(t *testing.T, captured *map[string]any, respBody strin
 func TestStructuredOutput_Anthropic_InjectsForcedTool(t *testing.T) {
 	var captured map[string]any
 	base := captureAnthropicBody(t, &captured, `{"id":"msg","type":"message","role":"assistant","model":"claude-test","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
-	adapter := New("claude-test", Options{
+	adapter, err := New("claude-test", Options{
 		APIKey:  "k",
 		BaseURL: base,
 	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	req := simpleRequest()
 	req.ResponseSchema = schemaForTest
 	req.ResponseSchemaName = "emit_answer"
@@ -72,10 +75,13 @@ func TestStructuredOutput_Anthropic_InjectsForcedTool(t *testing.T) {
 func TestStructuredOutput_Anthropic_DefaultToolName(t *testing.T) {
 	var captured map[string]any
 	base := captureAnthropicBody(t, &captured, `{"id":"msg","type":"message","role":"assistant","model":"claude-test","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
-	adapter := New("claude-test", Options{
+	adapter, err := New("claude-test", Options{
 		APIKey:  "k",
 		BaseURL: base,
 	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	req := simpleRequest()
 	req.ResponseSchema = schemaForTest
 	if _, err := adapter.Complete(context.Background(), req); err != nil {
@@ -97,10 +103,13 @@ func TestStructuredOutput_Anthropic_DefaultToolName(t *testing.T) {
 func TestStructuredOutput_Anthropic_SkippedWithUserTools(t *testing.T) {
 	var captured map[string]any
 	base := captureAnthropicBody(t, &captured, mockTextBody("ok", 1, 1))
-	adapter := New("claude-test", Options{
+	adapter, err := New("claude-test", Options{
 		APIKey:  "k",
 		BaseURL: base,
 	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	req := simpleRequest()
 	req.ResponseSchema = schemaForTest
 	req.Tools = []llmkit.ToolDef{{Name: "user_tool", Parameters: json.RawMessage(`{"type":"object"}`)}}
@@ -130,10 +139,13 @@ func TestStructuredOutput_Anthropic_SurfacesForcedToolAsText(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(mockToolCallBody("tu_1", "emit_answer", forcedArgs, 5, 7)))
 	})
-	adapter := New("claude-test", Options{
+	adapter, err := New("claude-test", Options{
 		APIKey:  "k",
 		BaseURL: base,
 	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	req := simpleRequest()
 	req.ResponseSchema = schemaForTest
 	resp, err := adapter.Complete(context.Background(), req)
@@ -159,10 +171,13 @@ func TestStructuredOutput_Anthropic_LeavesOtherToolCallsAlone(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(mockToolCallBody("tu_x", "some_other_tool", `{}`, 1, 1)))
 	})
-	adapter := New("claude-test", Options{
+	adapter, err := New("claude-test", Options{
 		APIKey:  "k",
 		BaseURL: base,
 	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	req := simpleRequest()
 	req.ResponseSchema = schemaForTest
 	resp, err := adapter.Complete(context.Background(), req)
@@ -178,7 +193,10 @@ func TestStructuredOutput_Anthropic_LeavesOtherToolCallsAlone(t *testing.T) {
 // returns the response.
 func completeSchemaRequest(t *testing.T, base string) llmkit.Response {
 	t.Helper()
-	ad := New("claude-test", Options{APIKey: "k", BaseURL: base})
+	ad, err := New("claude-test", Options{APIKey: "k", BaseURL: base})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	req := simpleRequest()
 	req.ResponseSchema = schemaForTest
 	resp, err := ad.Complete(context.Background(), req)

@@ -44,7 +44,7 @@ func (e streamProtocolError) Error() string { return e.msg }
 // position in Response.ToolCalls), not wire content-block indices — text and
 // thinking blocks occupy wire indices too.
 func (a *anthropicAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(llmkit.Delta) error) (llmkit.Response, error) {
-	params, err := a.buildParams(req)
+	params, prepared, err := a.buildParams(req)
 	if err != nil {
 		return llmkit.Response{}, err
 	}
@@ -57,7 +57,7 @@ func (a *anthropicAdapter) Stream(ctx context.Context, req llmkit.Request, fn fu
 	// The synthetic structured-output tool's call becomes Response.Text (see
 	// finalize), so its argument fragments stream as DeltaText and it
 	// produces no DeltaToolCall fragments.
-	synthTool, hasSynthetic := structuredOutputToolName(req, a.caps)
+	synthTool, hasSynthetic := structuredOutputToolName(prepared)
 
 	var (
 		acc     anthropic.Message // Accumulate's output feeds toResponse
@@ -137,7 +137,7 @@ func (a *anthropicAdapter) Stream(ctx context.Context, req llmkit.Request, fn fu
 		// failure.
 		return llmkit.Response{}, a.normalizeErr(ctx, errEarlyStreamEnd)
 	}
-	return a.finalize(req, a.toResponse(&acc)), nil
+	return a.finalize(prepared, a.toResponse(&acc)), nil
 }
 
 // startedTool remembers one in-flight input-bearing block: a tool_use
@@ -161,7 +161,6 @@ func (a *anthropicAdapter) forwardBlockDelta(ev anthropic.ContentBlockDeltaEvent
 	case anthropic.ThinkingDelta:
 		return forward(llmkit.Delta{Kind: llmkit.DeltaThinking, Text: d.Thinking}), nil
 	case anthropic.InputJSONDelta:
-		// Empty partials carry nothing to concatenate; skip them.
 		if d.PartialJSON == "" {
 			return nil, nil
 		}

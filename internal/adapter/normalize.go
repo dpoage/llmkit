@@ -10,8 +10,8 @@ import (
 	"github.com/dpoage/llmkit"
 )
 
-// ClassifyStatus maps an HTTP status code to a sentinel error Kind. body is the
-// (optional) error message, used to disambiguate 400s into ErrContextTooLong.
+// ClassifyStatus maps an HTTP status code to a sentinel error Kind. body is
+// the (optional) error message, used to disambiguate 400s into ErrContextTooLong.
 func ClassifyStatus(status int, body string) error {
 	switch {
 	case status == http.StatusTooManyRequests:
@@ -21,7 +21,7 @@ func ClassifyStatus(status int, body string) error {
 	case status == http.StatusRequestEntityTooLarge:
 		return llmkit.ErrContextTooLong
 	case status == http.StatusBadRequest:
-		if LooksLikeContextLength(body) {
+		if looksLikeContextLength(body) {
 			return llmkit.ErrContextTooLong
 		}
 		return llmkit.ErrInvalidRequest
@@ -34,10 +34,9 @@ func ClassifyStatus(status int, body string) error {
 	}
 }
 
-// LooksLikeContextLength heuristically detects a context-window-exceeded error
-// from a provider's 400 message. Providers phrase this differently, so we match
-// a few well-known fragments.
-func LooksLikeContextLength(msg string) bool {
+// looksLikeContextLength heuristically detects a context-window-exceeded
+// error from a provider's 400 message.
+func looksLikeContextLength(msg string) bool {
 	m := strings.ToLower(msg)
 	for _, frag := range []string{
 		"context length",

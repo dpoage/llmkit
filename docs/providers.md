@@ -10,7 +10,7 @@ Every construction follows the same shape:
 2. Call `provider.New(ctx, spec, opts)`.
 3. New validates the spec and returns a fully wrapped `llmkit.Client`.
 
-New performs no network I/O and no environment lookups of its own. Construction is hermetic and testable with placeholder credentials. An invalid spec returns an error wrapping `llmkit.ErrInvalidRequest`; the error never echoes the secret.
+New performs no network I/O. New reads three vendor-SDK base-URL environment variables (`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, `GOOGLE_GEMINI_BASE_URL`) and the Anthropic SDK profile files only to decide whether to refuse an empty `BaseURL`. The vendor SDKs still read their own environment variables at construction (the Google SDK logs a warning when both `GOOGLE_API_KEY` and `GEMINI_API_KEY` are non-empty), but no value from a vendor-SDK environment variable or profile file sets a request's host or a header, so construction is testable with placeholder credentials. An invalid spec returns an error wrapping `llmkit.ErrInvalidRequest`; the error never echoes the secret.
 
 ### Anthropic
 
@@ -78,7 +78,14 @@ No `BaseURL` targets the vendor default, `generativelanguage.googleapis.com`.
 
 ## Base URL rules
 
-`Spec.BaseURL` overrides the endpoint for tests, proxies, and self-hosted gateways. The vendor SDKs themselves also honor `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, and `GOOGLE_GEMINI_BASE_URL` when `Spec.BaseURL` is empty. An unset field can still route your secret to an ambient-configured host. Only `TypeOpenAICompatible` requires the field.
+`Spec.BaseURL` overrides the endpoint for tests, proxies, and self-hosted gateways. Empty means the vendor default host. No SDK base-URL environment variable or profile file changes the host. `TypeOpenAICompatible` requires the field unconditionally — it has no vendor default.
+
+For `TypeOpenAI`, `TypeAnthropic`, and `TypeGoogle`, `New` refuses an empty `Spec.BaseURL` when the vendor SDK would have taken the host from one of these sources:
+
+- The Type's base-URL variable (`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, or `GOOGLE_GEMINI_BASE_URL`) is present in the process environment. An empty value counts as present.
+- For `TypeAnthropic`, the Anthropic SDK profile file that `anthropic-sdk-go` would load has a `base_url`. The SDK looks for `configs/<profile>.json` in `ANTHROPIC_CONFIG_DIR`, else `$XDG_CONFIG_HOME/anthropic`, else `$HOME/.config/anthropic` outside Windows, else `configs/<profile>.json` relative to the current working directory when `HOME` is unset or empty and `XDG_CONFIG_HOME` is unset or empty, or when `ANTHROPIC_CONFIG_DIR` is present but empty. The profile is `ANTHROPIC_PROFILE` when that variable is non-empty (when it is present but empty, no profile is read), else the one the `active_config` file names, else `default`. The SDK reads no profile when `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` is non-empty. When environment federation is fully configured, the SDK reads only a profile named by `ANTHROPIC_PROFILE` and skips the `active_config`-named and `default` profiles. `New` follows the same rules.
+
+The error wraps `llmkit.ErrInvalidRequest`, names the variable or the profile file, and tells you to set `Spec.BaseURL`. Nothing is sent. To use the host the source names, set `Spec.BaseURL` to it. To reach the vendor default, remove the source.
 
 ## Credentials
 
@@ -131,7 +138,7 @@ All three decorators compose over streaming. Retry stops once a delta reaches th
 | `Recorder` | Receives a `llmkit.UsageEvent` after each successful completion. | nil (no recording) |
 | `Observer` | Receives one `llmkit.AttemptEvent` per provider attempt (failures included) from the retry stage, tagged with the resolved provider name and model. `New` emits no `Completion` events — see the next section. | nil (no attempt events) |
 | `Provider` | Overrides the provider tag on usage and attempt events; set it when your ledger keys on a config name. | `string(spec.Type)` |
-| `HTTPClient` | Overrides the transport the SDKs use; for `httptest` and proxies. | SDK default |
+| `HTTPClient` | Overrides the transport the SDKs use; for `httptest` and proxies. Headers its `Transport` adds reach the wire. | a plain `http.Client` per adapter over `http.DefaultTransport` (never `http.DefaultClient`); `Retry`'s per-attempt timeout bounds each attempt |
 
 ## Observing completions and attempts
 

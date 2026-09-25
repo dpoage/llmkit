@@ -31,11 +31,11 @@ Every `Capabilities` field belongs to exactly one enforcement class. The class t
 | `Thinking` | Dropped silently | `Request.Thinking` is omitted from the wire and no thinking blocks are returned. When true, a non-positive `BudgetTokens` is refused pre-wire. On Anthropic, `Thinking` combined with forced tool use — `ResponseSchema`, an explicit `ToolChoice` of `required`, or a named `tool` — is also refused pre-wire. Manual extended thinking admits only `tool_choice` `auto` or `none`. | Adapter, at request build |
 | `ToolChoice` | Refused pre-wire | Any explicit mode other than `auto` returns an error wrapping `ErrInvalidRequest` before the wire call. `auto` and the zero value stay allowed. Dropping an explicit `none` would let the model call tools the caller tried to forbid, so the adapter refuses it instead of ignoring it. On Anthropic, `required` and a named `tool` also refuse pre-wire when combined with `Thinking` — see the `Thinking` row. | Adapter, before the wire call |
 | `Images` | Advisory | Nothing: no adapter reads it. Image blocks still go to the provider. A provider that cannot render them rejects the request itself. The caller checks the field before sending images. | Caller |
-| `Documents` | Advisory | Nothing: no adapter reads it. Document blocks pass through on every provider, with one source restriction that is block validation rather than a read of this field. The OpenAI adapter refuses URL-sourced document blocks pre-wire (the Chat Completions file part accepts inline data only). Inline document bytes pass everywhere. Anthropic and Google accept URL-sourced documents too. | Caller; OpenAI adapter refuses URL-sourced documents pre-wire |
-| `StopSequences` | Dropped silently | The adapter never serializes `Request.StopSequences`. The field reports the adapter's own mapping: a caller-pinned profile cannot use it to disable a feature the adapter supports. | Adapter mapping (fixed per provider) |
-| `TopP` | Dropped silently | The adapter never serializes `Request.TopP` (same adapter-mapping semantics as `StopSequences`). | Adapter mapping (fixed per provider) |
-| `TopK` | Dropped silently | The adapter never serializes `Request.TopK` (same adapter-mapping semantics as `StopSequences`). Example: the Chat Completions API has no `top_k`, so OpenAI profiles report `false`. | Adapter mapping (fixed per provider) |
-| `Seed` | Dropped silently | The adapter never serializes `Request.Seed` (same adapter-mapping semantics as `StopSequences`). | Adapter mapping (fixed per provider) |
+| `Documents` | Advisory | Nothing: no adapter reads it. Document blocks pass through on every provider, with one source restriction that is block validation rather than a read of this field. The OpenAI adapter refuses URL-sourced document blocks pre-wire (the Chat Completions file part accepts inline data only). Inline PDF bytes pass everywhere; the Anthropic adapter refuses inline documents that are not `application/pdf`. Anthropic and Google accept URL-sourced documents too. | Caller; OpenAI adapter refuses URL-sourced documents pre-wire |
+| `StopSequences` | Dropped silently | The effective profile gates `Request.StopSequences` off the wire: a caller-pinned override reporting `false` drops the field, the same as an adapter's own table entry reporting `false`. An override reporting `true` above the adapter's ceiling (the field it can actually send) is refused at construction — see [Where the classes are pinned](#where-the-classes-are-pinned). | Effective profile, checked at request build |
+| `TopP` | Dropped silently | The effective profile gates `Request.TopP` off the wire (same gate semantics as `StopSequences`). | Effective profile, checked at request build |
+| `TopK` | Dropped silently | The effective profile gates `Request.TopK` off the wire (same gate semantics as `StopSequences`). Example: the Chat Completions API has no `top_k`, so the OpenAI ceiling forbids `TopK: true`. | Effective profile, checked at request build |
+| `Seed` | Dropped silently | The effective profile gates `Request.Seed` off the wire (same gate semantics as `StopSequences`). Example: the Messages API has no seed parameter, so the Anthropic ceiling forbids `Seed: true`. | Effective profile, checked at request build |
 
 The field classes above match each field's doc comment in `llmkit.Capabilities`.
 
@@ -65,12 +65,26 @@ spec := provider.Spec{
 client, err := provider.New(context.Background(), spec, provider.Options{})
 ```
 
-Or replace the profile wholesale to pin exact values for a model no table knows. See [providers](providers.md) for the construction rules. See `provider/example_test.go` (`ExampleSpec_capabilities`) for the runnable version of the snippet above.
+Replace the profile wholesale to pin exact values for a model no table knows:
+
+```go
+Capabilities: func(llmkit.Capabilities) llmkit.Capabilities {
+	return llmkit.Capabilities{ContextWindow: 131072}
+}
+```
+
+A wholesale profile enforces every wire-gated field it leaves at its Go zero value: the closure above sends a profile with every wire-gated field false, so `StopSequences`, `TopP`, `TopK`, `Seed`, `ToolChoice`, `Thinking`, and `StructuredOutput` are all dropped or refused, not only the fields the closure names. The advisory and decorator fields (`ContextWindow`, `ParallelToolCalls`, `PromptCaching`, `Images`, `Documents`) are not gated by this rule: the profile's `Images` and `Documents` fields gate no block, so an inline image block reaches the wire on every adapter even when the wholesale profile reports `Images: false`. Block validation is unchanged and does not depend on the profile: the OpenAI adapters refuse URL-sourced document blocks and the Anthropic adapter refuses inline documents that are not `application/pdf`. Flip each field you need explicitly, or start from the table-derived input the closure receives instead of ignoring it.
+
+Each provider type has a ceiling: the wire-gated fields (`StructuredOutput`, `Thinking`, `ToolChoice`, `StopSequences`, `TopP`, `TopK`, `Seed`) it can actually put on the wire. `provider.New` refuses an override that reports `true` for a field above the ceiling, with an error wrapping `llmkit.ErrInvalidRequest` naming the field and the Type — before any network call. Anthropic's ceiling excludes `Seed`; OpenAI and `openai-compatible`'s ceiling excludes `Thinking` and `TopK`; Google's ceiling has no excluded field.
+
+See [providers](providers.md) for the construction rules. See `provider/example_test.go` (`ExampleSpec_capabilities`) for the runnable version of the first snippet above.
 
 ## Where the classes are pinned
 
-`provider/capability_gate_test.go` pins the behavioral classes where adapters gate on them.
+`provider/capability_gate_test.go` pins the ToolChoice and Thinking classes where adapters gate on them. `provider/prepare_gate_test.go` pins the `StopSequences`/`TopP`/`TopK`/`Seed` gate, one row per (field, adapter) whose ceiling allows the field, plus the wholesale-override case. `provider/prepare_ceiling_test.go` pins the ceiling refusal.
 
 A profile with `ToolChoice=false` rejects each explicit mode pre-wire on every adapter. Anthropic rejects through the `Spec.Capabilities` override. Google rejects through the tool-less `gemini-2.0-flash-lite` table entry.
 
 A profile with `Thinking=false` drops the thinking config from the wire body on the two adapters that gate a wire parameter on it: Anthropic and Google.
+
+A profile with a sampler field false drops that field's wire key even when the caller's request sets it; a profile with the field true carries the caller's value. The wire keys are `top_p`, `seed`, and `stop` on OpenAI and openai-compatible (the Chat Completions API has no `top_k`); `top_p`, `top_k`, `stop_sequences`, and `thinking` on Anthropic (the Messages API has no `seed`); and `generationConfig.topP`, `topK`, `seed`, `stopSequences`, and `thinkingConfig` on Google. `provider.New` refuses `TypeOpenAI`/`TypeOpenAICompatible` `Thinking` or `TopK` overrides and `TypeAnthropic` `Seed` overrides before any network call; `TypeGoogle` has no refused field.

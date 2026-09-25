@@ -30,10 +30,13 @@ func TestStructuredOutput_OpenAI_AttachesResponseFormat(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(mockTextBody("ok", 1, 1)))
 		})
-		adapter := New("gpt-test", Options{
+		adapter, err := New("gpt-test", Options{
 			APIKey:  "k",
 			BaseURL: base,
 		})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
 		req := simpleRequest()
 		req.ResponseSchema = schemaForTest
 		req.ResponseSchemaName = "answer"
@@ -80,10 +83,13 @@ func TestStructuredOutput_OpenAI_AttachesResponseFormat(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(mockTextBody("ok", 1, 1)))
 		})
-		adapter := New("gpt-test", Options{
+		adapter, err := New("gpt-test", Options{
 			APIKey:  "k",
 			BaseURL: base,
 		})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
 		req := simpleRequest()
 		req.ResponseSchema = schemaForTest
 		req.Tools = []llmkit.ToolDef{{Name: "lookup", Parameters: json.RawMessage(`{"type":"object"}`)}}
@@ -111,12 +117,15 @@ func TestStructuredOutput_OpenAICompatible_AttachesResponseFormat(t *testing.T) 
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(mockTextBody("ok", 1, 1)))
 	})
-	adapter := New("llama-test", Options{
+	adapter, err := New("llama-test", Options{
 		APIKey:       "k",
 		BaseURL:      base,
 		Compatible:   true,
 		Capabilities: structuredOutputOverride(true),
 	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	req := simpleRequest()
 	req.ResponseSchema = schemaForTest
 	if _, err := adapter.Complete(context.Background(), req); err != nil {
@@ -142,11 +151,14 @@ func TestStructuredOutput_OpenAI_GatedByCapability(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(mockTextBody("ok", 1, 1)))
 	})
-	adapter := New("gpt-test", Options{
+	adapter, err := New("gpt-test", Options{
 		APIKey:       "k",
 		BaseURL:      base,
 		Capabilities: structuredOutputOverride(false),
 	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	req := simpleRequest()
 	req.ResponseSchema = schemaForTest
 	if _, err := adapter.Complete(context.Background(), req); err != nil {

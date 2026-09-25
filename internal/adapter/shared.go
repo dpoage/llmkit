@@ -2,7 +2,6 @@ package adapter
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -17,58 +16,13 @@ import (
 //     injection when the caller also supplies tools (Google cannot mix
 //     structured output with function-calling at all; Anthropic's
 //     tool_choice + synthetic tool is ambiguous). OpenAI honors
-//     response_format alongside tools. The caller's repair round-trip
-//     drops tools to restore native schema, then re-adds them.
+//     response_format alongside tools.
 //   CacheCreationInputTokens: only Anthropic exposes a cache-write
 //     primitive; the field is 0 on OpenAI and Google Usage.
 //   MaxTokens: zero (or negative) req.MaxTokens sends
 //     llmkit.DefaultMaxTokens — max_tokens on Anthropic,
 //     max_completion_tokens on OpenAI, maxOutputTokens on Google.
 //     Explicit values pass through verbatim.
-
-// ParseToolParameters returns the JSON-Schema "properties" and "required"
-// keys in the Anthropic SDK's wire shape (the SDK's ToolInputSchemaParam
-// carries the decoded properties directly, not an envelope). OpenAI and
-// Google adapters, which expect the envelope on the wire, call this for
-// validation only. A zero-length input returns nil, nil, nil.
-func ParseToolParameters(params json.RawMessage) (properties map[string]any, required []string, err error) {
-	if len(params) == 0 {
-		return nil, nil, nil
-	}
-	var raw map[string]any
-	if err := json.Unmarshal(params, &raw); err != nil {
-		return nil, nil, err
-	}
-
-	if p, ok := raw["properties"]; ok {
-		if pm, ok := p.(map[string]any); ok {
-			properties = pm
-		}
-	} else {
-		// Caller passed a bare properties object rather than a full schema.
-		properties = raw
-	}
-	if r, ok := raw["required"]; ok {
-		if rs, ok := r.([]any); ok {
-			for _, v := range rs {
-				if s, ok := v.(string); ok {
-					required = append(required, s)
-				}
-			}
-		}
-	}
-	return properties, required, nil
-}
-
-// ParseResponseSchema returns the unmarshaled schema and exactly the
-// caller-supplied defaultName — the helper does not inspect the schema
-// for a "name" key, so each adapter decides the name itself.
-func ParseResponseSchema(raw json.RawMessage, defaultName string) (schema any, name string, err error) {
-	if err := json.Unmarshal(raw, &schema); err != nil {
-		return nil, "", err
-	}
-	return schema, defaultName, nil
-}
 
 // VendorError is what an SDK reported for one failed call, before
 // classification.
@@ -114,10 +68,9 @@ var vendorKind = map[string]error{
 // NormalizeSDKError classifies one VendorError and wraps the result as a
 // *llmkit.APIError. A status >= 400 classifies from the status
 // ([ClassifyStatus], body-disambiguated); a status < 400 classifies from
-// the vendor type in band, falling back to ErrServer (a sub-400 failure
-// the vendor did not type is a server-class failure). Retry-After is
-// parsed for every status: RetryAfter/HasRetryAfter are set whenever the
-// header is present and parses. v.Err is preserved for Unwrap chaining.
+// the vendor type in band, falling back to ErrServer. Retry-After is parsed
+// for every status: RetryAfter/HasRetryAfter are set whenever the header is
+// present and parses. v.Err is preserved for Unwrap chaining.
 func NormalizeSDKError(provider string, v VendorError) error {
 	var kind error
 	if v.Status >= 400 {
@@ -165,13 +118,13 @@ func ResponseHeader(resp *http.Response) http.Header {
 // would run against a dead context). Every other case, including a
 // DeadlineExceeded from the per-attempt RequestTimeout, is a retryable
 // *llmkit.APIError{Kind: ErrServer, StatusCode: 0} with the SDK error
-// chained, so errors.Is still reaches the context cause.
+// chained.
 func TransportError(provider string, ctx context.Context, err error) error {
 	if cerr := ctx.Err(); errors.Is(cerr, context.Canceled) {
 		// Chain the cancellation so errors.Is finds Canceled even when the
-		// SDK's error does not carry it — but wrap an SDK error that
-		// already chains Canceled once, so the text names the provider
-		// once and the cause once instead of repeating "context canceled".
+		// SDK's error does not carry it. When the SDK already chains it,
+		// wrap once to keep the text naming the provider and the cause
+		// each once instead of repeating "context canceled".
 		if errors.Is(err, context.Canceled) {
 			return fmt.Errorf("llmkit: %s: %w", provider, err)
 		}

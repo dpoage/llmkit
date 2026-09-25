@@ -47,7 +47,10 @@ func TestAnthropicStopReason_Mapping(t *testing.T) {
 		t.Run(tc.wire, func(t *testing.T) {
 			srv := httptest.NewServer(mockStopBody(tc.wire))
 			t.Cleanup(srv.Close)
-			client := New("claude-test", Options{APIKey: "k", BaseURL: srv.URL})
+			client, err := New("claude-test", Options{APIKey: "k", BaseURL: srv.URL})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
 			resp, err := client.Complete(context.Background(), simpleRequest())
 			if err != nil {
 				t.Fatalf("Complete: %v", err)

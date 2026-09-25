@@ -90,18 +90,26 @@ func TestStructuredOutput_AllGatedByCapability(t *testing.T) {
 
 	t.Run("openai", func(t *testing.T) {
 		runOne(t, "openai", func(base string) llmkit.Client {
-			return openai.New("gpt-test", openai.Options{
+			c, err := openai.New("gpt-test", openai.Options{
 				APIKey: "k", BaseURL: base,
 				Capabilities: structuredOutputOverride(false),
 			})
+			if err != nil {
+				t.Fatalf("openai.New: %v", err)
+			}
+			return c
 		}, hasNestedField("response_format"))
 	})
 	t.Run("openai-compatible", func(t *testing.T) {
 		runOne(t, "openai-compatible", func(base string) llmkit.Client {
-			return openai.New("llama-test", openai.Options{
+			c, err := openai.New("llama-test", openai.Options{
 				APIKey: "k", BaseURL: base, Compatible: true,
 				Capabilities: structuredOutputOverride(false),
 			})
+			if err != nil {
+				t.Fatalf("openai.New: %v", err)
+			}
+			return c
 		}, hasNestedField("response_format"))
 	})
 	t.Run("google", func(t *testing.T) {
@@ -118,10 +126,14 @@ func TestStructuredOutput_AllGatedByCapability(t *testing.T) {
 	})
 	t.Run("anthropic", func(t *testing.T) {
 		runOne(t, "anthropic", func(base string) llmkit.Client {
-			return anthropic.New("claude-test", anthropic.Options{
+			c, err := anthropic.New("claude-test", anthropic.Options{
 				APIKey: "k", BaseURL: base,
 				Capabilities: structuredOutputOverride(false),
 			})
+			if err != nil {
+				t.Fatalf("anthropic.New: %v", err)
+			}
+			return c
 		}, func(body map[string]any) bool {
 			tools, ok := body["tools"].([]any)
 			return ok && len(tools) > 0
@@ -154,6 +166,7 @@ func TestStructuredOutput_ConfigOverride_FlipsOpenAICompatibleCapabilities(t *te
 // override forcing StructuredOutput off suppresses it even on a first-party
 // provider that would default to true.
 func TestStructuredOutput_ConfigOverride_OffUnaffected(t *testing.T) {
+	isolateBaseURLSources(t)
 	provider := Spec{
 		Type:         TypeOpenAI,
 		Model:        "gpt-test",
@@ -173,6 +186,7 @@ func TestStructuredOutput_ConfigOverride_OffUnaffected(t *testing.T) {
 // guard: a provider without the override must keep its default capability
 // (true for first-party, false for openai-compatible).
 func TestStructuredOutput_ConfigOverride_UnaffectedWhenUnset(t *testing.T) {
+	isolateBaseURLSources(t)
 	t.Run("first-party default true", func(t *testing.T) {
 		provider := Spec{Type: TypeOpenAI, Model: "gpt-x", Secret: "k"}
 		client, err := New(context.Background(), provider, Options{})

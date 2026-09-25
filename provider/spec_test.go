@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -260,6 +259,7 @@ func TestNew_RejectsOpenAICompatibleEmptyBaseURL(t *testing.T) {
 // against their SDK defaults. New never dials — the unroutable BaseURL in
 // the accepted case would hang visibly if it did.
 func TestNew_BaseURLRules(t *testing.T) {
+	isolateBaseURLSources(t)
 	t.Run("openai-compatible accepts explicit BaseURL", func(t *testing.T) {
 		spec := Spec{Type: TypeOpenAICompatible, Model: "test-model", Secret: "k", BaseURL: "http://10.255.255.1:1"}
 		client, err := New(context.Background(), spec, Options{})
@@ -305,28 +305,14 @@ func (t *hostCapturingTransport) observed() *url.URL {
 }
 
 // TestNew_VendorHosts pins the vendor-default endpoint each Type resolves
-// to with an empty spec.BaseURL. The test unsets
-// ANTHROPIC_BASE_URL, OPENAI_BASE_URL, and GOOGLE_GEMINI_BASE_URL because
-// the Anthropic and OpenAI SDKs key off os.LookupEnv's ok result — an
-// empty-but-present var still overrides the default, so t.Setenv to ""
-// is not equivalent (t.Setenv has no unset form). A RoundTripper is
-// bound and the resolved req.URL is read, so an SDK bump that silently
-// changes the default host fails this test. Retry is capped at one
-// attempt since the transport always fails and the shared retry wrapper
-// would otherwise back off the induced failure.
+// to with an empty spec.BaseURL. isolateBaseURLSources removes the ambient
+// sources New refuses an empty BaseURL on, so the result does not depend on
+// the calling shell. A RoundTripper is bound and the resolved req.URL is
+// read, so an SDK bump that silently changes the default host fails this
+// test. Retry is capped at one attempt since the transport always fails and
+// the shared retry wrapper would otherwise back off the induced failure.
 func TestNew_VendorHosts(t *testing.T) {
-	for _, name := range []string{"ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "GOOGLE_GEMINI_BASE_URL"} {
-		if old, had := os.LookupEnv(name); had {
-			if err := os.Unsetenv(name); err != nil {
-				t.Fatalf("unsetenv %s: %v", name, err)
-			}
-			t.Cleanup(func() {
-				if err := os.Setenv(name, old); err != nil {
-					t.Errorf("restore %s: %v", name, err)
-				}
-			})
-		}
-	}
+	isolateBaseURLSources(t)
 
 	for _, tc := range []struct {
 		typ  Type

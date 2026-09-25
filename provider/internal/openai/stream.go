@@ -16,14 +16,14 @@ var _ llmkit.StreamingClient = (*openaiAdapter)(nil)
 // streaming: the same params builder Complete uses, plus
 // stream_options.include_usage so the final usage-only chunk arrives (a
 // stream carries usage nowhere else). Fragments map onto llmkit deltas in
-// wire order: delta.content → DeltaText, the delta's reasoning_content
-// extra field (MiniMax/DeepSeek-style compatible endpoints) → DeltaThinking,
-// and each delta.tool_calls entry → DeltaToolCall with the vendor's wire
-// index renumbered to the call's position in Response.ToolCalls. Refusal
-// deltas emit nothing — the final response normalizes them exactly as
-// Complete does. The accumulated completion goes through the same
-// toResponse normalizer Complete uses, so the returned Response is what
-// Complete would have returned for the same wire exchange.
+// wire order: delta.content → DeltaText; the delta's reasoning_content
+// extra field (MiniMax/DeepSeek-style compatible endpoints) → DeltaThinking;
+// each delta.tool_calls entry → DeltaToolCall with the vendor's wire index
+// renumbered to the call's position in Response.ToolCalls. Refusal deltas
+// emit nothing — the final response normalizes them exactly as Complete
+// does. The accumulated completion goes through the same toResponse
+// normalizer Complete uses, so the returned Response is what Complete
+// would have returned for the same wire exchange.
 //
 // A non-nil fn error cancels the stream: it is returned wrapped as
 // "llmkit: stream fn: ..." with a zero Response. Open and transport errors
@@ -37,7 +37,7 @@ func (o *openaiAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(
 		IncludeUsage: openai.Bool(true),
 	}
 
-	stream := o.client.Chat.Completions.NewStreaming(ctx, params)
+	stream := o.client.NewStreaming(ctx, params)
 
 	var acc openai.ChatCompletionAccumulator
 	calls := newToolCallTracker()
@@ -84,8 +84,8 @@ func (o *openaiAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(
 // compactGhostToolCalls drops never-populated entries the accumulator
 // leaves when the wire's tool-call indices are non-contiguous: the
 // accumulator places each fragment by the raw vendor index, so a gap
-// becomes a zero entry — no fragment ever carried it an ID, name, or
-// arguments — and dropping it keeps Response.ToolCalls aligned with the
+// becomes a zero entry (no fragment ever carried it an ID, name, or
+// arguments), and dropping it keeps Response.ToolCalls aligned with the
 // renumbered Delta.Index positions.
 func compactGhostToolCalls(cc *openai.ChatCompletion) {
 	if len(cc.Choices) == 0 {
@@ -131,7 +131,7 @@ func deltas(d openai.ChatCompletionChunkChoiceDelta, calls *toolCallTracker) []l
 // toolCallTracker renumbers the vendor's per-fragment tool_calls index onto
 // the 0-based position of the call in Response.ToolCalls (first-appearance
 // order; well-behaved endpoints send 0,1,2,... so the numbers coincide) and
-// remembers each call's ID and name, so every fragment of a call repeats
+// remembers each call's ID and name so every fragment of a call repeats
 // them whether or not the wire does.
 type toolCallTracker struct {
 	pos   map[int64]int
@@ -155,8 +155,8 @@ func (t *toolCallTracker) delta(tc openai.ChatCompletionChunkChoiceDeltaToolCall
 	}
 	// IDs travel whole on the wire (never fragmented), so the latest wins;
 	// names may fragment across chunks, so they concatenate exactly like
-	// the accumulator does — every fragment then repeats the same
-	// accumulated name the final Response carries.
+	// the accumulator does — every fragment then repeats the accumulated
+	// name the final Response carries.
 	if tc.ID != "" {
 		t.ids[p] = tc.ID
 	}

@@ -28,12 +28,15 @@ func TestAnthropicAuth_APIKeyMode(t *testing.T) {
 	})
 
 	// Build the adapter in api_key mode directly.
-	adapter := New("claude-test", Options{
+	adapter, err := New("claude-test", Options{
 		APIKey:  "sk-ant-test-key",
 		BaseURL: base,
 	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 
-	_, err := adapter.Complete(context.Background(), simpleRequest())
+	_, err = adapter.Complete(context.Background(), simpleRequest())
 	if err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
@@ -68,12 +71,15 @@ func TestAnthropicAuth_OAuthMode(t *testing.T) {
 	})
 
 	// Build the adapter in oauth-token mode directly.
-	adapter := New("claude-test", Options{
+	adapter, err := New("claude-test", Options{
 		AuthToken: "claude-oauth-bearer-token-xyz",
 		BaseURL:   base,
 	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 
-	_, err := adapter.Complete(context.Background(), simpleRequest())
+	_, err = adapter.Complete(context.Background(), simpleRequest())
 	if err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
@@ -94,10 +100,11 @@ func TestAnthropicAuth_OAuthMode(t *testing.T) {
 }
 
 // TestAnthropicAuth_OAuthModeIgnoresHostAPIKeyEnv pins the env-poisoning guard:
-// anthropic.NewClient applies env defaults BEFORE explicit options, and a host
-// ANTHROPIC_API_KEY eagerly sets the X-Api-Key header. Without the adapter's
-// WithHeaderDel, an oauth-mode request would carry BOTH credentials and the API
-// would reject it. t.Setenv simulates the poisoned host.
+// New builds the client with option.WithoutEnvironmentDefaults, so
+// anthropic.NewClient never reads ANTHROPIC_API_KEY (or any other env
+// credential source) in the first place — a poisoned host env var must
+// contribute nothing, not merely get its header deleted afterward.
+// t.Setenv simulates the poisoned host.
 func TestAnthropicAuth_OAuthModeIgnoresHostAPIKeyEnv(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-host-env-key")
 
@@ -109,10 +116,13 @@ func TestAnthropicAuth_OAuthModeIgnoresHostAPIKeyEnv(t *testing.T) {
 		_, _ = w.Write([]byte(mockAnthropicResponse()))
 	})
 
-	adapter := New("claude-test", Options{
+	adapter, err := New("claude-test", Options{
 		AuthToken: "oauth-test-token",
 		BaseURL:   base,
 	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	if _, err := adapter.Complete(context.Background(), simpleRequest()); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
@@ -126,9 +136,9 @@ func TestAnthropicAuth_OAuthModeIgnoresHostAPIKeyEnv(t *testing.T) {
 }
 
 // TestAnthropicAuth_APIKeyModeIgnoresHostAuthTokenEnv pins the symmetric guard:
-// a host ANTHROPIC_AUTH_TOKEN (with no ANTHROPIC_API_KEY) makes the env
-// defaults eagerly set Authorization; api_key mode must strip it so only
-// x-api-key is sent.
+// a host ANTHROPIC_AUTH_TOKEN (with no ANTHROPIC_API_KEY) must also
+// contribute nothing — WithoutEnvironmentDefaults skips the SDK's env
+// autoload entirely, so api_key mode sends only x-api-key.
 func TestAnthropicAuth_APIKeyModeIgnoresHostAuthTokenEnv(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("ANTHROPIC_AUTH_TOKEN", "host-env-bearer")
@@ -141,10 +151,13 @@ func TestAnthropicAuth_APIKeyModeIgnoresHostAuthTokenEnv(t *testing.T) {
 		_, _ = w.Write([]byte(mockAnthropicResponse()))
 	})
 
-	adapter := New("claude-test", Options{
+	adapter, err := New("claude-test", Options{
 		APIKey:  "sk-ant-config-key",
 		BaseURL: base,
 	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	if _, err := adapter.Complete(context.Background(), simpleRequest()); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}

@@ -16,7 +16,6 @@ import (
 	"github.com/dpoage/llmkit/internal/adapter"
 )
 
-// anthropicAdapter maps the normalized types onto the official Anthropic SDK.
 type anthropicAdapter struct {
 	client anthropic.Client
 	model  string
@@ -32,9 +31,10 @@ type anthropicAdapter struct {
 // (the Anthropic API rejects requests that carry both credentials).
 //
 // Capabilities, when non-nil, receives the adapter's model-table profile
-// and returns the effective one; it is applied once at construction. Flip
-// a single field in a closure, or return a fixed profile to pin exact
-// values for models the table doesn't know. nil = model-table default.
+// and returns the effective one; it is applied once at construction. Return
+// a fixed profile to pin exact values for models the table doesn't know.
+// nil = model-table default. An effective profile that reports Seed=true
+// is refused — see New.
 type Options struct {
 	APIKey     string
 	AuthToken  string       // OAuth bearer token; mutually exclusive with APIKey
@@ -44,17 +44,58 @@ type Options struct {
 	Capabilities func(llmkit.Capabilities) llmkit.Capabilities
 }
 
+// anthropicCeiling names every wire-gated field this adapter can put on the
+// wire: the Messages API has no seed parameter, so an effective profile
+// reporting Seed=true is refused at construction rather than silently
+// dropped.
+var anthropicCeiling = llmkit.Capabilities{
+	StructuredOutput: true,
+	Thinking:         true,
+	ToolChoice:       true,
+	StopSequences:    true,
+	TopP:             true,
+	TopK:             true,
+	Seed:             false,
+}
+
 // New builds an Anthropic-backed Client. The vendor SDK's built-in retries are
 // disabled (WithMaxRetries(0)) so the shared retry wrapper is the single
-// source of retry policy.
+// source of retry policy. New returns an error wrapping
+// llmkit.ErrInvalidRequest, with no network I/O, when the effective
+// capability profile (table or Options.Capabilities override) reports
+// Seed=true — see anthropicCeiling.
 //
 // When opts.AuthToken is non-empty the adapter uses OAuth bearer-token
 // authentication: the SDK sets Authorization: Bearer <token> via
 // option.WithAuthToken, and option.WithHeaderAdd appends the required
 // "oauth-2025-04-20" value to the anthropic-beta header without clobbering any
 // other beta values the SDK may already have set.
-func New(model string, opts Options) llmkit.Client {
+//
+// option.WithoutEnvironmentDefaults makes anthropic.NewClient skip
+// DefaultClientOptions entirely — no ANTHROPIC_API_KEY/AUTH_TOKEN/PROFILE/
+// CONFIG_DIR/CUSTOM_HEADERS, env federation, or the $HOME/.config/anthropic
+// dotfile profile is read — and keep only the hardcoded production base-URL
+// default, so an explicit option.WithBaseURL below (when opts.BaseURL is set)
+// is the sole source of a non-default host. Because no env credential can
+// reach the request anymore, an env-derived X-Api-Key or Authorization header
+// cannot appear; the SDK sets neither on its own. A nil opts.HTTPClient gets
+// an explicit &http.Client{} rather than the process-global client the SDK
+// falls back to when no explicit HTTP client option is applied
+// (WithoutEnvironmentDefaults keeps none of DefaultClientOptions's own
+// client default).
+func New(model string, opts Options) (llmkit.Client, error) {
+	caps, err := adapter.ApplyOverride("anthropic", anthropicCeiling, anthropicCapabilities(model), opts.Capabilities)
+	if err != nil {
+		return nil, err
+	}
+
+	httpClient := opts.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{}
+	}
 	reqOpts := []option.RequestOption{
+		option.WithoutEnvironmentDefaults(),
+		option.WithHTTPClient(httpClient),
 		option.WithMaxRetries(0),
 	}
 	if opts.AuthToken != "" {
@@ -63,37 +104,23 @@ func New(model string, opts Options) llmkit.Client {
 		// Append rather than replace so other anthropic-beta values set by the SDK
 		// are preserved alongside the oauth beta flag.
 		reqOpts = append(reqOpts, option.WithHeaderAdd("anthropic-beta", "oauth-2025-04-20"))
-		// anthropic.NewClient applies env defaults BEFORE explicit options, and a
-		// host ANTHROPIC_API_KEY eagerly sets the X-Api-Key header (WithAPIKey
-		// applies WithHeader internally). The API rejects requests carrying both
-		// credentials, so strip the env-derived header; the SDK documents this
-		// exact WithHeaderDel pattern for parent-client key suppression.
-		reqOpts = append(reqOpts, option.WithHeaderDel("X-Api-Key"))
 	} else {
-		// API-key mode: standard x-api-key authentication.
 		reqOpts = append(reqOpts, option.WithAPIKey(opts.APIKey))
-		// Symmetric guard: a host ANTHROPIC_AUTH_TOKEN env default would have
-		// eagerly set Authorization; strip it so only x-api-key is sent.
-		reqOpts = append(reqOpts, option.WithHeaderDel("Authorization"))
 	}
 	if opts.BaseURL != "" {
 		reqOpts = append(reqOpts, option.WithBaseURL(opts.BaseURL))
 	}
-	if opts.HTTPClient != nil {
-		reqOpts = append(reqOpts, option.WithHTTPClient(opts.HTTPClient))
-	}
-	caps := adapter.ApplyOverride(anthropicCapabilities(model), opts.Capabilities)
 	return &anthropicAdapter{
 		client: anthropic.NewClient(reqOpts...),
 		model:  model,
 		caps:   caps,
-	}
+	}, nil
 }
 
 func (a *anthropicAdapter) Capabilities() llmkit.Capabilities { return a.caps }
 
 func (a *anthropicAdapter) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
-	params, err := a.buildParams(req)
+	params, prepared, err := a.buildParams(req)
 	if err != nil {
 		return llmkit.Response{}, err
 	}
@@ -102,7 +129,7 @@ func (a *anthropicAdapter) Complete(ctx context.Context, req llmkit.Request) (ll
 	if err != nil {
 		return llmkit.Response{}, a.normalizeErr(ctx, err)
 	}
-	return a.finalize(req, a.toResponse(msg)), nil
+	return a.finalize(prepared, a.toResponse(msg)), nil
 }
 
 // finalize coerces the synthetic structured-output tool's lone call into
@@ -110,15 +137,14 @@ func (a *anthropicAdapter) Complete(ctx context.Context, req llmkit.Request) (ll
 // (downstream layers have no handler for the synthetic tool), and
 // Anthropic's "tool_use" stop reason for the forced call would otherwise
 // mis-classify the completion. The surfaced text is also appended as a
-// BlockText, the same way the openai and google toResponse emit surfaced
-// text: under forced tool_choice the wire cannot also carry a visible text
-// block, so this appends the ONE BlockText the Response's invariant (Text
-// equals the concatenation of BlockText blocks) needs — without it,
+// BlockText: under forced tool_choice the wire cannot also carry a visible
+// text block, so this appends the ONE BlockText the Response's invariant
+// (Text equals the concatenation of BlockText blocks) needs — without it,
 // verbatim-block consumers such as the agent's assistant history would
-// drop the text. Complete and Stream both go through this step so the same
-// wire exchange returns identical Responses.
-func (a *anthropicAdapter) finalize(req llmkit.Request, resp llmkit.Response) llmkit.Response {
-	if toolName, ok := structuredOutputToolName(req, a.caps); ok &&
+// drop the text. Complete and Stream both go through this step over the
+// same Prepared value, so the same wire exchange returns identical Responses.
+func (a *anthropicAdapter) finalize(p adapter.Prepared, resp llmkit.Response) llmkit.Response {
+	if toolName, ok := structuredOutputToolName(p); ok &&
 		len(resp.ToolCalls) == 1 && resp.ToolCalls[0].Name == toolName {
 		resp.Text = string(resp.ToolCalls[0].Arguments)
 		resp.ToolCalls = nil
@@ -130,119 +156,91 @@ func (a *anthropicAdapter) finalize(req llmkit.Request, resp llmkit.Response) ll
 	return resp
 }
 
-func (a *anthropicAdapter) buildParams(req llmkit.Request) (anthropic.MessageNewParams, error) {
-	maxTokens := int64(req.MaxTokens)
-	if maxTokens <= 0 {
-		// Anthropic requires max_tokens; the uniform default applies.
-		maxTokens = llmkit.DefaultMaxTokens
+// buildParams applies the shared rules exactly once via adapter.Prepare,
+// then maps the Prepared value onto Anthropic Messages params without
+// re-checking anything Prepare already validated or gated. It returns the
+// Prepared value alongside params so Complete and Stream can reuse it for
+// the synthetic-tool bookkeeping (structuredOutputToolName, finalize).
+func (a *anthropicAdapter) buildParams(req llmkit.Request) (anthropic.MessageNewParams, adapter.Prepared, error) {
+	p, err := adapter.Prepare("anthropic", a.caps, req)
+	if err != nil {
+		return anthropic.MessageNewParams{}, adapter.Prepared{}, err
 	}
 
 	params := anthropic.MessageNewParams{
 		Model:     anthropic.Model(a.model),
-		MaxTokens: maxTokens,
+		MaxTokens: int64(p.MaxTokens),
 	}
-	if req.System != "" {
-		params.System = []anthropic.TextBlockParam{{Text: req.System}}
+	if p.System != "" {
+		params.System = []anthropic.TextBlockParam{{Text: p.System}}
 	}
-	if req.Temperature != nil {
-		params.Temperature = anthropic.Float(*req.Temperature)
+	if p.Temperature != nil {
+		params.Temperature = anthropic.Float(*p.Temperature)
 	}
 
-	// Extended thinking. The budget rides through verbatim; Anthropic
-	// enforces budget < MaxTokens and its 1024 floor server-side. Gated on
-	// the capability profile: extended thinking exists only on Claude 3.7+
-	// (see anthropicCapabilities), and the documented contract for a false
-	// feature is a silent drop rather than a server 400. thinkingSent is
-	// reused by the forced-tool-use refusal below.
-	thinkingSent := req.Thinking != nil && a.caps.Thinking
+	// p.Thinking is nil unless a.caps.Thinking is true AND the caller
+	// supplied one; BudgetTokens is already validated >= 1. thinkingSent
+	// is reused by the forced-tool-use refusal below.
+	thinkingSent := p.Thinking != nil
 	if thinkingSent {
-		if req.Thinking.BudgetTokens <= 0 {
-			return anthropic.MessageNewParams{}, &llmkit.APIError{
-				Kind:     llmkit.ErrInvalidRequest,
-				Provider: "anthropic",
-				Message:  "Thinking.BudgetTokens must be positive",
-			}
-		}
 		params.Thinking = anthropic.ThinkingConfigParamUnion{
 			OfEnabled: &anthropic.ThinkingConfigEnabledParam{
-				BudgetTokens: int64(req.Thinking.BudgetTokens),
+				BudgetTokens: int64(p.Thinking.BudgetTokens),
 			},
 		}
 	}
-	if len(req.StopSequences) > 0 {
-		params.StopSequences = req.StopSequences
+	if len(p.StopSequences) > 0 {
+		params.StopSequences = p.StopSequences
 	}
-	if req.TopP != nil {
-		params.TopP = anthropic.Float(*req.TopP)
+	if p.TopP != nil {
+		params.TopP = anthropic.Float(*p.TopP)
 	}
-	if req.TopK != nil {
-		params.TopK = anthropic.Int(int64(*req.TopK))
+	if p.TopK != nil {
+		params.TopK = anthropic.Int(int64(*p.TopK))
 	}
 	// Request.Seed: the Anthropic Messages API has no seed parameter, so it
-	// is dropped here and documented via Capabilities.Seed = false.
-	msgs, err := toAnthropicMessages(req.Messages)
+	// is always nil here (Capabilities.Seed = false on every profile).
+	msgs, err := toAnthropicMessages(p.Messages)
 	if err != nil {
-		return anthropic.MessageNewParams{}, err
+		return anthropic.MessageNewParams{}, adapter.Prepared{}, err
 	}
 	params.Messages = msgs
 
-	if len(req.Tools) > 0 {
-		tools := make([]anthropic.ToolUnionParam, 0, len(req.Tools))
-		for _, t := range req.Tools {
+	if len(p.Tools) > 0 {
+		tools := make([]anthropic.ToolUnionParam, 0, len(p.Tools))
+		for _, t := range p.Tools {
 			tp, err := toAnthropicTool(t)
 			if err != nil {
-				return anthropic.MessageNewParams{}, err
+				return anthropic.MessageNewParams{}, adapter.Prepared{}, err
 			}
 			tools = append(tools, anthropic.ToolUnionParam{OfTool: tp})
 		}
 		params.Tools = tools
 	}
 
-	// Capability gate first: a profile with ToolChoice=false must reject
-	// every explicit mode before the wire call (dropping "none" would
-	// escalate permissions; dropping "required"/"tool" would silently
-	// degrade). Request-level tool choice is then validated UNCONDITIONALLY
-	// — an unknown mode or a missing Name must error even when a schema
-	// below forces the synthetic tool. The synthetic forcing then overwrites
-	// whatever was mapped: a structured-output request is meaningless
-	// without the forced tool call, so it keeps precedence over
-	// req.ToolChoice.
-	if err := adapter.GateToolChoice("anthropic", req.ToolChoice, a.caps.ToolChoice); err != nil {
-		return anthropic.MessageNewParams{}, err
-	}
-	if err := applyAnthropicToolChoice(&params, req.ToolChoice); err != nil {
-		return anthropic.MessageNewParams{}, err
-	}
+	// Request-level tool choice: already validated and gated by Prepare.
+	// The synthetic forcing below then overwrites whatever was mapped: a
+	// structured-output request is meaningless without the forced tool
+	// call, so it keeps precedence over p.ToolChoice.
+	applyAnthropicToolChoice(&params, p.ToolChoice)
 
 	// Schema-constrained output. Anthropic has no native response_format, so
 	// we inject a single synthetic tool and force tool_choice to it — the
 	// model returns a tool_use block whose `input` is the schema-conformant
 	// JSON, which Complete surfaces as Response.Text. Only valid when the
 	// caller didn't supply user tools (structuredOutputToolName gates this).
-	synthTool, syntheticOutput := structuredOutputToolName(req, a.caps)
+	synthName, syntheticOutput := structuredOutputToolName(p)
 	if syntheticOutput {
-		// Mirror toAnthropicTool's schema unwrapping via the shared helper
-		// so the synthetic tool gets the same ToolInputSchemaParam shape
-		// the SDK would receive for a user tool.
-		properties, required, err := adapter.ParseToolParameters(req.ResponseSchema)
+		inputSchema, err := toAnthropicInputSchema("ResponseSchema", p.ResponseSchema.Value)
 		if err != nil {
-			return anthropic.MessageNewParams{}, &llmkit.APIError{
-				Kind:     llmkit.ErrInvalidRequest,
-				Provider: "anthropic",
-				Message:  "ResponseSchema: invalid JSON",
-				Err:      err,
-			}
-		}
-		schema := anthropic.ToolInputSchemaParam{
-			Properties: properties,
-			Required:   required,
+			return anthropic.MessageNewParams{}, adapter.Prepared{}, err
 		}
 		params.Tools = append(params.Tools, anthropic.ToolUnionParam{OfTool: &anthropic.ToolParam{
-			Name:        synthTool,
-			InputSchema: schema,
+			Name:        synthName,
+			InputSchema: inputSchema,
 			Description: anthropic.String("Emit the final answer that conforms to the response schema."),
 		}})
-		params.ToolChoice = anthropic.ToolChoiceParamOfTool(synthTool)
+		params.ToolChoice = anthropic.ToolChoiceParamOfTool(synthName)
 	}
 
 	// Forced tool use cannot coexist with manual extended thinking: "tool
@@ -256,11 +254,9 @@ func (a *anthropicAdapter) buildParams(req llmkit.Request) (anthropic.MessageNew
 	// for llmkit's surface today. The forcing may come from the caller
 	// (ToolChoice required or a named tool) or from the synthetic
 	// structured-output tool above, which overwrites whatever the caller
-	// mapped — so the built params here are the one place both sources are
-	// visible, and one predicate covers both. A guaranteed remote 400 is
-	// refused locally, naming the field that did the forcing. When
-	// caps.Thinking is false the thinking config is dropped earlier and the
-	// combination stays legal.
+	// mapped, so the built params here are the one place both sources are
+	// visible and one predicate covers both. A guaranteed remote 400 is
+	// refused locally, naming the field that did the forcing.
 	if thinkingSent &&
 		(params.ToolChoice.OfAny != nil || params.ToolChoice.OfTool != nil) {
 		forcing := "ToolChoice.Mode=required forces tool_choice any"
@@ -268,49 +264,31 @@ func (a *anthropicAdapter) buildParams(req llmkit.Request) (anthropic.MessageNew
 			forcing = "ToolChoice.Mode=tool forces tool_choice to the " + params.ToolChoice.OfTool.Name + " tool"
 		}
 		if syntheticOutput {
-			forcing = "ResponseSchema forces tool_choice to the " + synthTool + " tool"
+			forcing = "ResponseSchema forces tool_choice to the " + synthName + " tool"
 		}
-		return anthropic.MessageNewParams{}, &llmkit.APIError{
-			Kind:     llmkit.ErrInvalidRequest,
-			Provider: "anthropic",
-			Message:  "Thinking cannot be combined with forced tool use: manual extended thinking only supports tool_choice auto or none, and " + forcing,
-		}
+		return anthropic.MessageNewParams{}, adapter.Prepared{}, adapter.Refuse("anthropic",
+			"Thinking cannot be combined with forced tool use: manual extended thinking only supports tool_choice auto or none, and "+forcing, nil)
 	}
 
 	applyCacheBreakpoints(&params)
-	return params, nil
+	return params, p, nil
 }
 
-// applyAnthropicToolChoice maps the normalized tool-choice request onto the
-// Anthropic tool_choice parameter. Auto (and the zero value) is the provider
-// default and is never serialized.
-func applyAnthropicToolChoice(params *anthropic.MessageNewParams, tc llmkit.ToolChoice) error {
+// applyAnthropicToolChoice maps an already-validated ToolChoice onto the
+// Anthropic tool_choice parameter. Prepare has already applied the
+// ToolChoice gate and validated Mode and Name, so this is a pure mapping —
+// auto is the provider default and is never serialized.
+func applyAnthropicToolChoice(params *anthropic.MessageNewParams, tc llmkit.ToolChoice) {
 	switch tc.Mode {
-	case "", llmkit.ToolChoiceAuto:
-		return nil
 	case llmkit.ToolChoiceNone:
 		params.ToolChoice = anthropic.ToolChoiceUnionParam{OfNone: &anthropic.ToolChoiceNoneParam{}}
 	case llmkit.ToolChoiceRequired:
 		params.ToolChoice = anthropic.ToolChoiceUnionParam{OfAny: &anthropic.ToolChoiceAnyParam{}}
 	case llmkit.ToolChoiceTool:
-		if tc.Name == "" {
-			return &llmkit.APIError{
-				Kind:     llmkit.ErrInvalidRequest,
-				Provider: "anthropic",
-				Message:  "ToolChoice.Mode=tool requires ToolChoice.Name",
-			}
-		}
 		params.ToolChoice = anthropic.ToolChoiceUnionParam{
 			OfTool: &anthropic.ToolChoiceToolParam{Name: tc.Name},
 		}
-	default:
-		return &llmkit.APIError{
-			Kind:     llmkit.ErrInvalidRequest,
-			Provider: "anthropic",
-			Message:  "unknown ToolChoice.Mode " + string(tc.Mode),
-		}
 	}
-	return nil
 }
 
 // applyCacheBreakpoints marks ephemeral prompt-cache breakpoints on the
@@ -362,61 +340,116 @@ func markLastBlock(m *anthropic.MessageParam) bool {
 	return false
 }
 
-func toAnthropicTool(t llmkit.ToolDef) (*anthropic.ToolParam, error) {
-	properties, required, err := adapter.ParseToolParameters(t.Parameters)
+// toAnthropicTool maps a prepared tool onto the Anthropic SDK's ToolParam.
+// t.Schema is already decoded and validated by adapter.Prepare; the only
+// refusal left is toAnthropicInputSchema's.
+func toAnthropicTool(t adapter.Tool) (*anthropic.ToolParam, error) {
+	inputSchema, err := toAnthropicInputSchema("tool "+t.Def.Name+": Parameters", t.Schema)
 	if err != nil {
-		return nil, &llmkit.APIError{
-			Kind:     llmkit.ErrInvalidRequest,
-			Provider: "anthropic",
-			Message:  "tool " + t.Name + ": invalid parameters JSON schema",
-			Err:      err,
-		}
-	}
-	schema := anthropic.ToolInputSchemaParam{
-		Properties: properties,
-		Required:   required,
+		return nil, err
 	}
 	tp := &anthropic.ToolParam{
-		Name:        t.Name,
-		InputSchema: schema,
+		Name:        t.Def.Name,
+		InputSchema: inputSchema,
 	}
-	if t.Description != "" {
-		tp.Description = anthropic.String(t.Description)
+	if t.Def.Description != "" {
+		tp.Description = anthropic.String(t.Def.Description)
 	}
 	return tp, nil
 }
 
+// toAnthropicInputSchema converts a decoded JSON-Schema root object into the
+// Anthropic SDK's ToolInputSchemaParam: "properties" and "required" lift
+// into the typed fields, Type is always forced to the literal "object" (a
+// caller's root "type" is discarded, NEVER copied into ExtraFields — the
+// SDK's ExtraFields marshal alongside and OVERRIDE a same-named typed
+// field, so copying "type" would let a caller's "array" silently replace
+// the constant on the wire), and every other root key — $defs,
+// additionalProperties, description, and anything else except "" (below) —
+// rides in ExtraFields so it reaches the wire verbatim.
+//
+// Type is set explicitly, not left at its Go zero value, because
+// ToolParam.InputSchema carries its own `omitzero` tag: a
+// ToolInputSchemaParam whose Properties, Required, Type, and ExtraFields
+// are ALL at their zero value reflects as zero itself, and omitzero would
+// then drop the whole `input_schema` key — even though the SDK's `default`
+// tag on Type documents it as always "object" once the key IS present. An
+// explicit Type is what keeps the struct non-zero so a nil schema (no
+// Parameters/ResponseSchema supplied) still sends {"type":"object"}:
+// input_schema is api:"required" and must always be present.
+//
+// A root key the SDK cannot marshal is refused before the wire, naming
+// label: the empty-string key "" fails the SDK's ExtraFields encoding
+// ("path cannot be empty"), which would otherwise surface from the HTTP
+// call as a retried ErrServer. Absent or empty "properties"/"required"
+// entries are dropped — the typed fields are omitzero.
+func toAnthropicInputSchema(label string, schema map[string]any) (anthropic.ToolInputSchemaParam, error) {
+	out := anthropic.ToolInputSchemaParam{Type: "object"}
+	if schema == nil {
+		return out, nil
+	}
+	if _, ok := schema[""]; ok {
+		return anthropic.ToolInputSchemaParam{}, adapter.Refuse("anthropic",
+			label+`: the empty-string root key "" cannot be sent: the Anthropic SDK cannot encode it`, nil)
+	}
+	if p, ok := schema["properties"]; ok {
+		out.Properties = p
+	}
+	if r, ok := schema["required"]; ok {
+		if rs, ok := r.([]any); ok {
+			for _, v := range rs {
+				if s, ok := v.(string); ok {
+					out.Required = append(out.Required, s)
+				}
+			}
+		}
+	}
+	var extra map[string]any
+	for k, v := range schema {
+		switch k {
+		case "type", "properties", "required":
+			continue
+		default:
+			if extra == nil {
+				extra = make(map[string]any, len(schema))
+			}
+			extra[k] = v
+		}
+	}
+	out.ExtraFields = extra
+	return out, nil
+}
+
 // structuredOutputToolName returns the synthetic tool name this adapter
 // injects to coerce schema-constrained output from Anthropic, and reports
-// whether injection is active for the given request. The bool is false when
-// the cap is off, the caller didn't ask for a schema, or the caller also
-// asked for user tools (Anthropic can combine tool_choice with user tools
-// but injecting a synthetic tool on top is ambiguous — better to fall back
-// to the prompt-embedded schema, matching the Google adapter's behavior).
-func structuredOutputToolName(req llmkit.Request, caps llmkit.Capabilities) (string, bool) {
-	if len(req.ResponseSchema) == 0 || !caps.StructuredOutput || len(req.Tools) > 0 {
+// whether injection is active for the given Prepared request. The bool is
+// false when p.ResponseSchema is nil (the cap was off, or the caller
+// didn't ask for a schema — adapter.Prepare already applied both) or the
+// caller also asked for user tools (Anthropic can combine tool_choice with
+// user tools but injecting a synthetic tool on top is ambiguous — better to
+// fall back to the prompt-embedded schema, matching the Google adapter's
+// behavior).
+func structuredOutputToolName(p adapter.Prepared) (string, bool) {
+	if p.ResponseSchema == nil || len(p.Tools) > 0 {
 		return "", false
 	}
-	if req.ResponseSchemaName != "" {
-		return req.ResponseSchemaName, true
+	if p.ResponseSchema.Name != "" {
+		return p.ResponseSchema.Name, true
 	}
 	return "emit_answer", true
 }
 
 // toAnthropicMessages converts normalized messages into Anthropic message
 // params, coalescing consecutive tool-result turns into a single user message
-// (Anthropic requires tool_result blocks to ride in a user turn).
-//
-// Per-role block rule (ValidateMessageBlocks, before any mapping):
-// user text/image/document; assistant text/thinking (Provider-matched only);
-// system and tool-result text only. Violations are ErrInvalidRequest.
+// (Anthropic requires tool_result blocks to ride in a user turn). Every
+// role and block-kind rule (adapter.Prepare) already holds — this is a
+// pure mapping.
 //
 // Content blocks map in order: text → text blocks, image → image source
 // (base64 data or URL), document → document source (base64 PDF or URL),
 // thinking → thinking/redacted_thinking blocks re-emitted verbatim from Raw.
 // Thinking blocks whose Provider is not "anthropic" (including empty) are
-// dropped silently per the llmkit.Block contract. Validation of image and
-// document sources happens here, BEFORE any wire call.
+// dropped silently per the llmkit.Block contract.
 func toAnthropicMessages(msgs []llmkit.Message) ([]anthropic.MessageParam, error) {
 	out := make([]anthropic.MessageParam, 0, len(msgs))
 	var pendingResults []anthropic.ContentBlockParamUnion
@@ -429,10 +462,6 @@ func toAnthropicMessages(msgs []llmkit.Message) ([]anthropic.MessageParam, error
 	}
 
 	for _, m := range msgs {
-		// Per-role block-kind rule + media source rule, before any mapping.
-		if err := adapter.ValidateMessageBlocks("anthropic", m); err != nil {
-			return nil, err
-		}
 		switch m.Role {
 		case llmkit.RoleSystem:
 			// System messages are hoisted into params.System by the caller; if one
@@ -456,12 +485,6 @@ func toAnthropicMessages(msgs []llmkit.Message) ([]anthropic.MessageParam, error
 		case llmkit.RoleToolResult:
 			pendingResults = append(pendingResults,
 				anthropic.NewToolResultBlock(m.ToolCallID, m.Text(), m.IsError))
-		default:
-			return nil, &llmkit.APIError{
-				Kind:     llmkit.ErrInvalidRequest,
-				Provider: "anthropic",
-				Message:  "unknown message role " + string(m.Role),
-			}
 		}
 	}
 	flush()
@@ -469,8 +492,10 @@ func toAnthropicMessages(msgs []llmkit.Message) ([]anthropic.MessageParam, error
 }
 
 // anthropicUserBlocks maps a user message's content blocks onto Anthropic
-// content blocks. A message with no blocks yields one empty text block so
-// an empty user turn still serializes the same wire shape.
+// content blocks. The media source rule (adapter.Prepare) already holds;
+// the one constraint left here is vendor-specific: inline document bytes
+// must be application/pdf. A message with no blocks yields one empty text
+// block so an empty user turn still serializes the same wire shape.
 func anthropicUserBlocks(m llmkit.Message) ([]anthropic.ContentBlockParamUnion, error) {
 	blocks := make([]anthropic.ContentBlockParamUnion, 0, len(m.Content))
 	for _, b := range m.Content {
@@ -478,9 +503,6 @@ func anthropicUserBlocks(m llmkit.Message) ([]anthropic.ContentBlockParamUnion, 
 		case llmkit.BlockText:
 			blocks = append(blocks, anthropic.NewTextBlock(b.Text))
 		case llmkit.BlockImage:
-			if err := adapter.ValidateMediaBlock("anthropic", b); err != nil {
-				return nil, err
-			}
 			src := anthropic.ImageBlockParamSourceUnion{}
 			if b.URL != "" {
 				src.OfURL = &anthropic.URLImageSourceParam{URL: b.URL}
@@ -494,15 +516,9 @@ func anthropicUserBlocks(m llmkit.Message) ([]anthropic.ContentBlockParamUnion, 
 				OfImage: &anthropic.ImageBlockParam{Source: src},
 			})
 		case llmkit.BlockDocument:
-			if err := adapter.ValidateMediaBlock("anthropic", b); err != nil {
-				return nil, err
-			}
 			if len(b.Data) > 0 && b.MediaType != "application/pdf" {
-				return nil, &llmkit.APIError{
-					Kind:     llmkit.ErrInvalidRequest,
-					Provider: "anthropic",
-					Message:  "document block: Anthropic base64 documents support application/pdf only",
-				}
+				return nil, adapter.Refuse("anthropic",
+					"document block: Anthropic base64 documents support application/pdf only", nil)
 			}
 			src := anthropic.DocumentBlockParamSourceUnion{}
 			if b.URL != "" {
@@ -554,12 +570,8 @@ func anthropicAssistantBlocks(m llmkit.Message) ([]anthropic.ContentBlockParamUn
 		var input any
 		if len(tc.Arguments) > 0 {
 			if err := json.Unmarshal(tc.Arguments, &input); err != nil {
-				return nil, &llmkit.APIError{
-					Kind:     llmkit.ErrInvalidRequest,
-					Provider: "anthropic",
-					Message:  "assistant tool call " + tc.Name + ": invalid arguments JSON",
-					Err:      err,
-				}
+				return nil, adapter.Refuse("anthropic",
+					"assistant tool call "+tc.Name+": invalid arguments JSON", err)
 			}
 		}
 		blocks = append(blocks, anthropic.ContentBlockParamUnion{
@@ -598,19 +610,12 @@ func anthropicThinkingBlock(b llmkit.Block) (anthropic.ContentBlockParamUnion, e
 	// does not permit (e.g. U+00A0) stays malformed below.
 	trimmed := bytes.Trim(b.Raw, " \t\n\r")
 	if len(trimmed) == 0 || string(trimmed) == "null" {
-		return anthropic.ContentBlockParamUnion{}, &llmkit.APIError{
-			Kind:     llmkit.ErrInvalidRequest,
-			Provider: "anthropic",
-			Message:  "thinking block: Raw is empty; the verbatim provider payload is required",
-		}
+		return anthropic.ContentBlockParamUnion{}, adapter.Refuse("anthropic",
+			"thinking block: Raw is empty; the verbatim provider payload is required", nil)
 	}
 	if err := json.Unmarshal(b.Raw, &probe); err != nil {
-		return anthropic.ContentBlockParamUnion{}, &llmkit.APIError{
-			Kind:     llmkit.ErrInvalidRequest,
-			Provider: "anthropic",
-			Message:  "thinking block: malformed Raw JSON",
-			Err:      err,
-		}
+		return anthropic.ContentBlockParamUnion{}, adapter.Refuse("anthropic",
+			"thinking block: malformed Raw JSON", err)
 	}
 	// A payload that DECODES to nothing carries nothing the API accepts on
 	// replay either: forwarding would put an unsigned
@@ -619,37 +624,27 @@ func anthropicThinkingBlock(b llmkit.Block) (anthropic.ContentBlockParamUnion, e
 	// in the same ErrInvalidRequest class as the missing-Raw case.
 	if probe.Type == "redacted_thinking" {
 		if probe.Data == "" {
-			return anthropic.ContentBlockParamUnion{}, &llmkit.APIError{
-				Kind:     llmkit.ErrInvalidRequest,
-				Provider: "anthropic",
-				Message:  "thinking block: Raw decodes to an empty payload; the verbatim provider payload is required",
-			}
+			return anthropic.ContentBlockParamUnion{}, adapter.Refuse("anthropic",
+				"thinking block: Raw decodes to an empty payload; the verbatim provider payload is required", nil)
 		}
 		return anthropic.ContentBlockParamUnion{
 			OfRedactedThinking: &anthropic.RedactedThinkingBlockParam{Data: probe.Data},
 		}, nil
 	}
 	if probe.Thinking == "" && probe.Signature == "" {
-		return anthropic.ContentBlockParamUnion{}, &llmkit.APIError{
-			Kind:     llmkit.ErrInvalidRequest,
-			Provider: "anthropic",
-			Message:  "thinking block: Raw decodes to an empty payload; the verbatim provider payload is required",
-		}
+		return anthropic.ContentBlockParamUnion{}, adapter.Refuse("anthropic",
+			"thinking block: Raw decodes to an empty payload; the verbatim provider payload is required", nil)
 	}
 	// Every thinking block the API emits carries a signature, and the API
-	// verifies it on replay (URL in the anthropicThinkingBlock doc
-	// comment). After the empty-payload guard above, an empty signature
-	// means thinking text without one — e.g. a hand-built
+	// verifies it on replay. After the empty-payload guard above, an empty
+	// signature means thinking text without one — e.g. a hand-built
 	// {"type":"thinking","thinking":"why"} — which would go out unsigned
 	// and fail remotely. Fail locally instead, in the same
 	// ErrInvalidRequest class. A block with an empty thinking field and a
 	// live signature (the display "omitted" wire shape) still replays.
 	if probe.Signature == "" {
-		return anthropic.ContentBlockParamUnion{}, &llmkit.APIError{
-			Kind:     llmkit.ErrInvalidRequest,
-			Provider: "anthropic",
-			Message:  "thinking block: Raw decodes to an unsigned thinking payload; the signature is verified on replay, so the signed provider payload is required",
-		}
+		return anthropic.ContentBlockParamUnion{}, adapter.Refuse("anthropic",
+			"thinking block: Raw decodes to an unsigned thinking payload; the signature is verified on replay, so the signed provider payload is required", nil)
 	}
 	return anthropic.ContentBlockParamUnion{
 		OfThinking: &anthropic.ThinkingBlockParam{
@@ -701,11 +696,20 @@ func (a *anthropicAdapter) toResponse(msg *anthropic.Message) llmkit.Response {
 		CacheReadInputTokens:     msg.Usage.CacheReadInputTokens,
 		CacheCreationInputTokens: msg.Usage.CacheCreationInputTokens,
 	}
-	resp.StopReason = mapAnthropicStop(msg.StopReason)
+	resp.StopReason = mapAnthropicStop(msg.StopReason, len(resp.ToolCalls) > 0)
 	return resp
 }
 
-func mapAnthropicStop(sr anthropic.StopReason) llmkit.StopReason {
+// mapAnthropicStop is this adapter's recognized stop_reason table:
+// end_turn/stop_sequence map to EndTurn, tool_use to ToolUse, max_tokens to
+// MaxTokens, refusal to Refusal. Every other reason — including
+// "pause_turn", a server-paused turn that is NOT a natural completion —
+// falls to adapter.StopFallback: ToolUse when the response carries tool
+// calls, StopError otherwise. The raw provider reason is not exposed on
+// llmkit.Response, so a caller seeing StopError should treat the step as
+// failed — surface it and re-issue the request if continuing matters —
+// never assume the conversation reached a natural end.
+func mapAnthropicStop(sr anthropic.StopReason, hasToolCalls bool) llmkit.StopReason {
 	switch sr {
 	case anthropic.StopReasonEndTurn, anthropic.StopReasonStopSequence:
 		return llmkit.StopEndTurn
@@ -716,14 +720,7 @@ func mapAnthropicStop(sr anthropic.StopReason) llmkit.StopReason {
 	case anthropic.StopReasonRefusal:
 		return llmkit.StopRefusal
 	default:
-		// Catch-all per llmkit.StopError's contract. This includes
-		// pause_turn: a server-paused turn is NOT a natural completion, and
-		// reporting StopEndTurn made an agent loop treat it as one. The raw
-		// provider reason is not exposed on llmkit.Response, so a caller
-		// seeing StopError should treat the step as failed — surface it and
-		// re-issue the request if continuing matters — never assume the
-		// conversation reached a natural end.
-		return llmkit.StopError
+		return adapter.StopFallback(hasToolCalls)
 	}
 }
 
@@ -756,22 +753,20 @@ func (a *anthropicAdapter) normalizeErr(ctx context.Context, err error) error {
 //     extended thinking requires Claude 3.7 Sonnet or newer.
 //
 // Keys name exactly the generations the cited docs verify, and matching
-// (adapter.MatchesModelFamily) requires a "-" segment boundary, so an
+// (adapter.BestMatchingFamily) requires a "-" segment boundary, so an
 // unverified future ID such as "claude-opus-4-9" reports ContextWindow 0
 // instead of inheriting a stale window. The two date-stamped 4.0 first
 // snapshots (May 2025) are listed explicitly — the vendor overview page
-// (https://platform.claude.com/docs/en/about-claude/models/overview) gives
-// both a 200K window with extended thinking — while the retired bare
+// gives both a 200K window with extended thinking — while the retired bare
 // aliases (claude-opus-4 / claude-sonnet-4, deprecated 2026-06) stay
 // unlisted: the API rejects those IDs outright, and unknown reports 0
 // rather than resurrecting a stale window. Pin exact values for unknown
 // models via Options.Capabilities.
 //
-// Only the fields that genuinely vary by model are stored per entry;
-// everything else is shared (parallel tool calls, prompt caching,
-// synthetic-tool structured output, tool choice, images, documents, stop
-// sequences, top_p, and top_k are supported across the 3+ families; there
-// is no seed parameter).
+// Per-entry fields are only those that vary by model: window and thinking.
+// Everything else (parallel tool calls, prompt caching, synthetic-tool
+// structured output, tool choice, images, documents, stop sequences, top_p,
+// top_k) is shared across the 3+ families; there is no seed parameter.
 type anthropicModelCaps struct {
 	prefix   string
 	window   int

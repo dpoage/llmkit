@@ -15,8 +15,6 @@ import (
 	"google.golang.org/genai"
 )
 
-// googleAdapter maps the normalized types onto the google.golang.org/genai SDK
-// (Gemini API backend).
 type googleAdapter struct {
 	client *genai.Client
 	model  string
@@ -26,9 +24,10 @@ type googleAdapter struct {
 // Options configures a Gemini adapter.
 //
 // Capabilities, when non-nil, receives the adapter's model-table profile
-// and returns the effective one; it is applied once at construction. Flip
-// a single field in a closure, or return a fixed profile to pin exact
-// values for models the table doesn't know. nil = model-table default.
+// and returns the effective one; it is applied once at construction. Return
+// a fixed profile to pin exact values for models the table doesn't know.
+// nil = model-table default. Every wire-gated field is within Google's
+// ceiling — see New.
 type Options struct {
 	APIKey     string
 	BaseURL    string       // optional; for testing or non-default endpoints
@@ -37,18 +36,48 @@ type Options struct {
 	Capabilities func(llmkit.Capabilities) llmkit.Capabilities
 }
 
+// googleCeiling names every wire-gated field this adapter can put on the
+// wire: the Gemini API has a wire field for all seven, so no override is
+// ever refused at construction — the one documented case where every field
+// is within ceiling.
+var googleCeiling = llmkit.Capabilities{
+	StructuredOutput: true,
+	Thinking:         true,
+	ToolChoice:       true,
+	StopSequences:    true,
+	TopP:             true,
+	TopK:             true,
+	Seed:             true,
+}
+
 // New builds a Gemini-backed Client. genai's only built-in retry path is for
 // file uploads, so the shared retry wrapper is the sole retry layer for
 // completions. The installed HTTP client wraps the caller's transport with
 // a status recorder so error classification can fall back to the transport
 // status when genai drops it (see normalizeErr).
+//
+// HTTPOptions.BaseURL is always set explicitly — opts.BaseURL, or the
+// vendor default when empty — because genai's getBaseURL checks an explicit
+// HTTPOptions.BaseURL first, before a process-global SetDefaultBaseURLs
+// tier and GOOGLE_GEMINI_BASE_URL; only setting it unconditionally keeps
+// both of those from ever being consulted. Backend is always the explicit
+// BackendGeminiAPI (never BackendUnspecified), so GOOGLE_GENAI_USE_VERTEXAI
+// has no effect; APIKey is always the non-empty Spec.Secret, so genai
+// never uses GOOGLE_API_KEY or GEMINI_API_KEY. genai.NewClient still reads
+// both on every call, and logs a warning when both are set.
 func New(ctx context.Context, model string, opts Options) (llmkit.Client, error) {
+	caps, err := adapter.ApplyOverride("google", googleCeiling, googleCapabilities(model), opts.Capabilities)
+	if err != nil {
+		return nil, err
+	}
+
 	cc := &genai.ClientConfig{
 		APIKey:  opts.APIKey,
 		Backend: genai.BackendGeminiAPI,
 	}
-	if opts.BaseURL != "" {
-		cc.HTTPOptions.BaseURL = opts.BaseURL
+	cc.HTTPOptions.BaseURL = opts.BaseURL
+	if cc.HTTPOptions.BaseURL == "" {
+		cc.HTTPOptions.BaseURL = "https://generativelanguage.googleapis.com/"
 	}
 	// Always install the recording client (see recordStatusTransport):
 	// genai substitutes its own default client when HTTPClient is nil, so
@@ -65,14 +94,8 @@ func New(ctx context.Context, model string, opts Options) (llmkit.Client, error)
 	cc.HTTPClient = &wrapped
 	client, err := genai.NewClient(ctx, cc)
 	if err != nil {
-		return nil, &llmkit.APIError{
-			Kind:     llmkit.ErrInvalidRequest,
-			Provider: "google",
-			Message:  "failed to construct genai client: " + err.Error(),
-			Err:      err,
-		}
+		return nil, adapter.Refuse("google", "failed to construct genai client: "+err.Error(), err)
 	}
-	caps := adapter.ApplyOverride(googleCapabilities(model), opts.Capabilities)
 	return &googleAdapter{
 		client: client,
 		model:  model,
@@ -128,110 +151,80 @@ func (g *googleAdapter) Complete(ctx context.Context, req llmkit.Request) (llmki
 	return g.toResponse(resp), nil
 }
 
-// buildRequest maps a normalized request onto the genai wire types: the
-// conversation Contents and the GenerateContentConfig. Request validation,
-// capability gating, and config assembly happen exactly here, once —
-// Complete and Stream both send this builder's result to the wire.
+// buildRequest applies the shared rules exactly once via adapter.Prepare,
+// then maps the Prepared value onto the genai wire types (Contents and
+// GenerateContentConfig) without re-checking anything Prepare already
+// validated or gated. Complete and Stream both send this builder's result
+// to the wire.
 func (g *googleAdapter) buildRequest(req llmkit.Request) ([]*genai.Content, *genai.GenerateContentConfig, error) {
-	contents, err := toGoogleContents(req.Messages)
+	p, err := adapter.Prepare("google", g.caps, req)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	contents, err := toGoogleContents(p.Messages)
 	if err != nil {
 		return nil, nil, err
 	}
 	cfg := &genai.GenerateContentConfig{}
-	if req.System != "" {
+	if p.System != "" {
 		cfg.SystemInstruction = &genai.Content{
-			Parts: []*genai.Part{{Text: req.System}},
+			Parts: []*genai.Part{{Text: p.System}},
 		}
 	}
-	maxTokens := req.MaxTokens
-	if maxTokens <= 0 {
-		// Uniform rule: the same documented default on every adapter instead
-		// of leaving the cap unset.
-		maxTokens = llmkit.DefaultMaxTokens
-	}
-	cfg.MaxOutputTokens = int32(maxTokens)
-	if req.Temperature != nil {
-		t := float32(*req.Temperature)
+	cfg.MaxOutputTokens = int32(p.MaxTokens)
+	if p.Temperature != nil {
+		t := float32(*p.Temperature)
 		cfg.Temperature = &t
 	}
-	if len(req.StopSequences) > 0 {
-		cfg.StopSequences = req.StopSequences
+	if len(p.StopSequences) > 0 {
+		cfg.StopSequences = p.StopSequences
 	}
-	if req.TopP != nil {
-		t := float32(*req.TopP)
+	if p.TopP != nil {
+		t := float32(*p.TopP)
 		cfg.TopP = &t
 	}
-	if req.TopK != nil {
-		k := float32(*req.TopK)
+	if p.TopK != nil {
+		k := float32(*p.TopK)
 		cfg.TopK = &k
 	}
-	if req.Seed != nil {
+	if p.Seed != nil {
 		// genai carries seed as int32; reject out-of-range values instead of
-		// silently truncating to a different deterministic seed.
-		if *req.Seed < int64(math.MinInt32) || *req.Seed > int64(math.MaxInt32) {
-			return nil, nil, &llmkit.APIError{
-				Kind:     llmkit.ErrInvalidRequest,
-				Provider: "google",
-				Message:  "Seed out of range for int32",
-			}
+		// silently truncating to a different deterministic seed. Vendor-
+		// specific: no llmkit.Capabilities field describes an int range.
+		if *p.Seed < int64(math.MinInt32) || *p.Seed > int64(math.MaxInt32) {
+			return nil, nil, adapter.Refuse("google", "Seed out of range for int32", nil)
 		}
-		s := int32(*req.Seed)
+		s := int32(*p.Seed)
 		cfg.Seed = &s
 	}
-	// Gated on the capability profile: thinkingConfig exists only on the
-	// 2.5 family (see googleCapabilities). The documented contract for a
-	// false feature is a silent drop rather than a server 400.
-	if req.Thinking != nil && g.caps.Thinking {
-		if req.Thinking.BudgetTokens <= 0 {
-			return nil, nil, &llmkit.APIError{
-				Kind:     llmkit.ErrInvalidRequest,
-				Provider: "google",
-				Message:  "Thinking.BudgetTokens must be positive",
-			}
-		}
-		// IncludeThoughts makes the model return thought-summary parts so
-		// reasoning is visible (and round-trippable) in Response.Blocks.
-		budget := int32(req.Thinking.BudgetTokens)
+	// p.Thinking is nil unless g.caps.Thinking is true AND the caller
+	// supplied one; BudgetTokens is already validated >= 1. IncludeThoughts
+	// makes the model return thought-summary parts so reasoning is visible
+	// (and round-trippable) in Response.Blocks.
+	if p.Thinking != nil {
+		budget := int32(p.Thinking.BudgetTokens)
 		cfg.ThinkingConfig = &genai.ThinkingConfig{
 			ThinkingBudget:  &budget,
 			IncludeThoughts: true,
 		}
 	}
 
-	// Capability gate first: a profile with ToolChoice=false (e.g.
-	// gemini-2.0-flash-lite, which launched without function calling) must
-	// reject every explicit mode before the wire call — dropping "none"
-	// would escalate permissions, dropping "required"/"tool" would silently
-	// degrade. Request.ToolChoice then maps onto function_calling_config;
-	// auto (and the zero value) is the provider default and is never
-	// serialized.
-	if err := adapter.GateToolChoice("google", req.ToolChoice, g.caps.ToolChoice); err != nil {
-		return nil, nil, err
-	}
-	if err := applyGoogleToolChoice(cfg, req.ToolChoice); err != nil {
-		return nil, nil, err
-	}
+	// Request.ToolChoice: already validated and gated by Prepare. auto (and
+	// the zero value) is the provider default and is never serialized.
+	applyGoogleToolChoice(cfg, p.ToolChoice)
 
-	if len(req.Tools) > 0 {
-		decls := make([]*genai.FunctionDeclaration, 0, len(req.Tools))
-		for _, t := range req.Tools {
+	if len(p.Tools) > 0 {
+		decls := make([]*genai.FunctionDeclaration, 0, len(p.Tools))
+		for _, t := range p.Tools {
 			fd := &genai.FunctionDeclaration{
-				Name:        t.Name,
-				Description: t.Description,
+				Name:        t.Def.Name,
+				Description: t.Def.Description,
 			}
-			if len(t.Parameters) > 0 {
-				var schema any
-				if err := json.Unmarshal(t.Parameters, &schema); err != nil {
-					return nil, nil, &llmkit.APIError{
-						Kind:     llmkit.ErrInvalidRequest,
-						Provider: "google",
-						Message:  "tool " + t.Name + ": invalid parameters JSON schema",
-						Err:      err,
-					}
-				}
-				// ParametersJsonSchema accepts a raw JSON-schema object, avoiding a
-				// lossy conversion into genai's typed *Schema.
-				fd.ParametersJsonSchema = schema
+			if t.Schema != nil {
+				// ParametersJsonSchema accepts a raw JSON-schema object,
+				// avoiding a lossy conversion into genai's typed *Schema.
+				fd.ParametersJsonSchema = t.Schema
 			}
 			decls = append(decls, fd)
 		}
@@ -242,71 +235,47 @@ func (g *googleAdapter) buildRequest(req llmkit.Request) ([]*genai.Content, *gen
 	// with function-calling, so we only attach the schema when the caller
 	// didn't ask for tools — when they did, we silently fall back to the
 	// prompt-embedded schema, which is the same behavior the caller would
-	// have gotten before this field existed.
-	if len(req.ResponseSchema) > 0 && g.caps.StructuredOutput && len(req.Tools) == 0 {
-		// ParseResponseSchema unmarshals the JSON Schema; the returned name
-		// is unused on Google (ResponseJsonSchema has no name field) but the
-		// helper takes one for symmetry with the other adapters. We pass
-		// "response" as the default; callers can supply ResponseSchemaName
-		// to override if they want a name surfaced in logs.
-		defaultName := req.ResponseSchemaName
-		if defaultName == "" {
-			defaultName = "response"
-		}
-		schema, _, err := adapter.ParseResponseSchema(req.ResponseSchema, defaultName)
-		if err != nil {
-			return nil, nil, &llmkit.APIError{
-				Kind:     llmkit.ErrInvalidRequest,
-				Provider: "google",
-				Message:  "ResponseSchema: invalid JSON",
-				Err:      err,
-			}
-		}
+	// have gotten before this field existed. p.ResponseSchema is already
+	// nil when the capability is off or the caller supplied none.
+	if p.ResponseSchema != nil && len(p.Tools) == 0 {
 		// ResponseJsonSchema accepts a raw JSON Schema object, mirroring
-		// ParametersJsonSchema — no lossy conversion to genai's typed *Schema.
+		// ParametersJsonSchema — no lossy conversion to genai's typed
+		// *Schema. The name is unused on Google (ResponseJsonSchema has no
+		// name field).
 		cfg.ResponseMIMEType = "application/json"
-		cfg.ResponseJsonSchema = schema
+		cfg.ResponseJsonSchema = p.ResponseSchema.Value
 	}
 
 	return contents, cfg, nil
 }
 
-// applyGoogleToolChoice maps the normalized tool-choice request onto the
+// applyGoogleToolChoice maps an already-validated ToolChoice onto the
 // Gemini function_calling_config: required → mode ANY, none → mode NONE,
-// and a named tool → mode ANY restricted to that function's name.
-func applyGoogleToolChoice(cfg *genai.GenerateContentConfig, tc llmkit.ToolChoice) error {
+// and a named tool → mode ANY restricted to that function's name. Prepare
+// has already applied the capability gate and validated Mode and Name, so
+// this is a pure mapping — auto is the provider default and is never
+// serialized.
+func applyGoogleToolChoice(cfg *genai.GenerateContentConfig, tc llmkit.ToolChoice) {
+	if tc.Mode == llmkit.ToolChoiceAuto {
+		return
+	}
 	fcc := &genai.FunctionCallingConfig{}
 	switch tc.Mode {
-	case "", llmkit.ToolChoiceAuto:
-		return nil
 	case llmkit.ToolChoiceNone:
 		fcc.Mode = genai.FunctionCallingConfigModeNone
 	case llmkit.ToolChoiceRequired:
 		fcc.Mode = genai.FunctionCallingConfigModeAny
 	case llmkit.ToolChoiceTool:
-		if tc.Name == "" {
-			return &llmkit.APIError{
-				Kind:     llmkit.ErrInvalidRequest,
-				Provider: "google",
-				Message:  "ToolChoice.Mode=tool requires ToolChoice.Name",
-			}
-		}
 		fcc.Mode = genai.FunctionCallingConfigModeAny
 		fcc.AllowedFunctionNames = []string{tc.Name}
-	default:
-		return &llmkit.APIError{
-			Kind:     llmkit.ErrInvalidRequest,
-			Provider: "google",
-			Message:  "unknown ToolChoice.Mode " + string(tc.Mode),
-		}
 	}
 	cfg.ToolConfig = &genai.ToolConfig{FunctionCallingConfig: fcc}
-	return nil
 }
 
 // toGoogleContents converts normalized messages into genai Contents. Gemini
 // uses "user"/"model" roles; tool results are sent as user-turn
-// functionResponse parts.
+// functionResponse parts. Every role and block-kind rule (adapter.Prepare)
+// already holds — this is a pure mapping.
 //
 // A tool result's FunctionResponse.name must be the DECLARED tool name
 // (Gemini correlates responses to declarations by name; the id is
@@ -315,26 +284,17 @@ func applyGoogleToolChoice(cfg *genai.GenerateContentConfig, tc llmkit.ToolChoic
 // assistant turn declares (e.g. a truncated history) falls back to the id
 // itself.
 //
-// Per-role block rule (ValidateMessageBlocks, before any mapping):
-// user text/image/document; assistant text/thinking (Provider-matched only);
-// system and tool-result text only. Violations are ErrInvalidRequest.
-//
 // Content blocks map in order: text → text parts, image/document →
 // inline_data (bytes) or file_data (URL) parts. Assistant thinking blocks
 // re-emit Text/Thought/ThoughtSignature from Raw (Provider "google" only —
 // foreign thinking blocks are dropped silently per the llmkit.Block
-// contract). Image/document source validation happens here, BEFORE any wire
-// call.
+// contract).
 func toGoogleContents(msgs []llmkit.Message) ([]*genai.Content, error) {
 	out := make([]*genai.Content, 0, len(msgs))
 	// toolNames maps a tool-call id to its declared function name, filled in
 	// from each assistant turn as it is converted.
 	toolNames := make(map[string]string)
 	for _, m := range msgs {
-		// Per-role block-kind rule + media source rule, before any mapping.
-		if err := adapter.ValidateMessageBlocks("google", m); err != nil {
-			return nil, err
-		}
 		switch m.Role {
 		case llmkit.RoleSystem:
 			// Hoisted into SystemInstruction by the caller; if inline, attach as a
@@ -383,18 +343,13 @@ func toGoogleContents(msgs []llmkit.Message) ([]*genai.Content, error) {
 					},
 				}},
 			})
-		default:
-			return nil, &llmkit.APIError{
-				Kind:     llmkit.ErrInvalidRequest,
-				Provider: "google",
-				Message:  "unknown message role " + string(m.Role),
-			}
 		}
 	}
 	return out, nil
 }
 
 // googleUserParts maps a user message's content blocks onto genai parts.
+// The media source rule (adapter.Prepare) already holds.
 func googleUserParts(m llmkit.Message) ([]*genai.Part, error) {
 	parts := make([]*genai.Part, 0, len(m.Content))
 	for _, b := range m.Content {
@@ -402,9 +357,6 @@ func googleUserParts(m llmkit.Message) ([]*genai.Part, error) {
 		case llmkit.BlockText:
 			parts = append(parts, &genai.Part{Text: b.Text})
 		case llmkit.BlockImage, llmkit.BlockDocument:
-			if err := adapter.ValidateMediaBlock("google", b); err != nil {
-				return nil, err
-			}
 			if len(b.Data) > 0 {
 				parts = append(parts, &genai.Part{InlineData: &genai.Blob{
 					MIMEType: b.MediaType,
@@ -464,12 +416,7 @@ func googleAssistantParts(m llmkit.Message) ([]*genai.Part, error) {
 			}
 			var p genai.Part
 			if err := json.Unmarshal(b.Raw, &p); err != nil {
-				return nil, &llmkit.APIError{
-					Kind:     llmkit.ErrInvalidRequest,
-					Provider: "google",
-					Message:  "thinking block: malformed Raw JSON",
-					Err:      err,
-				}
+				return nil, adapter.Refuse("google", "thinking block: malformed Raw JSON", err)
 			}
 			if p.FunctionCall != nil {
 				// Signature carrier, not a thought part.
@@ -485,12 +432,8 @@ func googleAssistantParts(m llmkit.Message) ([]*genai.Part, error) {
 		var args map[string]any
 		if len(tc.Arguments) > 0 {
 			if err := json.Unmarshal(tc.Arguments, &args); err != nil {
-				return nil, &llmkit.APIError{
-					Kind:     llmkit.ErrInvalidRequest,
-					Provider: "google",
-					Message:  "assistant tool call " + tc.Name + ": invalid arguments JSON",
-					Err:      err,
-				}
+				return nil, adapter.Refuse("google",
+					"assistant tool call "+tc.Name+": invalid arguments JSON", err)
 			}
 		}
 		part := &genai.Part{
@@ -604,6 +547,13 @@ func functionCallArgs(args any) json.RawMessage {
 	return b
 }
 
+// mapGoogleStop is this adapter's recognized finishReason table: STOP,
+// FINISH_REASON_UNSPECIFIED, and "" (no candidates) all map to a
+// tool-call-aware end-turn — ToolUse when the response carries tool calls,
+// EndTurn otherwise; MAX_TOKENS maps to MaxTokens; SAFETY, RECITATION,
+// PROHIBITED_CONTENT, BLOCKLIST, and SPII all map to ContentFilter. Every
+// other reason — including "OTHER" — falls to adapter.StopFallback:
+// ToolUse when tool calls are present, StopError otherwise.
 func mapGoogleStop(reason genai.FinishReason, hasToolCalls bool) llmkit.StopReason {
 	switch reason {
 	case genai.FinishReasonStop, genai.FinishReasonUnspecified, "":
@@ -618,10 +568,7 @@ func mapGoogleStop(reason genai.FinishReason, hasToolCalls bool) llmkit.StopReas
 		genai.FinishReasonSPII:
 		return llmkit.StopContentFilter
 	default:
-		if hasToolCalls {
-			return llmkit.StopToolUse
-		}
-		return llmkit.StopError
+		return adapter.StopFallback(hasToolCalls)
 	}
 }
 
@@ -677,13 +624,13 @@ func (g *googleAdapter) normalizeErr(ctx context.Context, err error) error {
 //     function calling, so its ParallelToolCalls and ToolChoice are false.
 //
 // The table is matched by LONGEST key with a "-" segment boundary
-// (adapter.MatchesModelFamily), so "gemini-2.5-flash-lite" and the
+// (adapter.BestMatchingFamily), so "gemini-2.5-flash-lite" and the
 // non-text variant keys win over "gemini-2.5-flash", while a mid-token
-// extension like "gemini-2.5-flashy" matches nothing. Image/document
-// parts, stop sequences, top_p, top_k, and seed hold for every entry and
-// stay in the shared defaults; window, thinking, tools, structured output,
-// and caching are stored per entry because the 2.5 flash non-text variants
-// genuinely differ.
+// extension like "gemini-2.5-flashy" matches nothing. Per-entry fields are
+// only those that genuinely vary by model — window, thinking, tools,
+// structured output, caching — because the 2.5 flash non-text variants
+// differ; image/document parts, stop sequences, top_p, top_k, and seed hold
+// for every entry and stay in the shared defaults.
 //
 // An unknown model reports ContextWindow 0 — unknown is never fabricated
 // into a number — with the API-level feature defaults; the server is the

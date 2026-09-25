@@ -18,15 +18,13 @@ var roleBlockKinds = map[llmkit.Role]map[llmkit.BlockKind]bool{
 	llmkit.RoleToolResult: {llmkit.BlockText: true},
 }
 
-// ValidateMessageBlocks enforces the per-role block-kind rule and the media
+// validateMessageBlocks enforces the per-role block-kind rule and the media
 // source rule for every message BEFORE the adapter touches its wire format.
 // A block kind outside the role's set, or an image/document failing
-// ValidateMediaBlock, is an error wrapping llmkit.ErrInvalidRequest, returned
-// verbatim by the caller; every adapter calls it in its message-conversion
-// entry point.
+// validateMediaBlock, is an error wrapping llmkit.ErrInvalidRequest.
 //
 // provider names the adapter for the error message only.
-func ValidateMessageBlocks(provider string, m llmkit.Message) error {
+func validateMessageBlocks(provider string, m llmkit.Message) error {
 	allowed := roleBlockKinds[m.Role]
 	for _, b := range m.Content {
 		if !allowed[b.Kind] {
@@ -37,7 +35,7 @@ func ValidateMessageBlocks(provider string, m llmkit.Message) error {
 			}
 		}
 		if b.Kind == llmkit.BlockImage || b.Kind == llmkit.BlockDocument {
-			if err := ValidateMediaBlock(provider, b); err != nil {
+			if err := validateMediaBlock(provider, b); err != nil {
 				return err
 			}
 		}
@@ -45,17 +43,14 @@ func ValidateMessageBlocks(provider string, m llmkit.Message) error {
 	return nil
 }
 
-// ValidateMediaBlock enforces the source rule for image and document
+// validateMediaBlock enforces the source rule for image and document
 // blocks: exactly one of Data and URL must be set, and inline Data requires
 // a MediaType (every provider wire format carries the MIME type next to the
-// bytes). Both sources set — or neither — would otherwise force every
-// adapter to silently pick a source, so the rule is checked here — once,
-// for all three adapters — and each adapter calls it BEFORE any wire call,
-// returning the error verbatim.
+// bytes).
 //
 // provider names the adapter for the error message only. The returned
 // error wraps llmkit.ErrInvalidRequest.
-func ValidateMediaBlock(provider string, b llmkit.Block) error {
+func validateMediaBlock(provider string, b llmkit.Block) error {
 	switch {
 	case len(b.Data) > 0 && b.URL != "":
 		return &llmkit.APIError{

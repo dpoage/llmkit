@@ -1,22 +1,9 @@
-package adapter
+package openai
 
 import (
 	"encoding/json"
 	"testing"
 )
-
-// mapSchemaForTest mirrors the real reproducer/patch "files" contract: a
-// free-form string map expressed as an object-valued additionalProperties,
-// wrapped in a root object that itself closes with additionalProperties:false.
-// This is the exact shape MiniMax rejects with a 400.
-var mapSchemaForTest = json.RawMessage(`{
-  "type":"object",
-  "properties":{
-    "files":{"type":"object","additionalProperties":{"type":"string"},"minProperties":1}
-  },
-  "required":["files"],
-  "additionalProperties":false
-}`)
 
 func mustUnmarshalSchema(t *testing.T, raw string) map[string]any {
 	t.Helper()
@@ -27,23 +14,15 @@ func mustUnmarshalSchema(t *testing.T, raw string) map[string]any {
 	return m
 }
 
-func childMap(t *testing.T, m map[string]any, key string) map[string]any {
-	t.Helper()
-	c, ok := m[key].(map[string]any)
-	if !ok {
-		t.Fatalf("key %q is %T, want object", key, m[key])
-	}
-	return c
-}
-
 // TestCoerceBoolAdditionalProperties exercises the schema-aware downgrade in
 // isolation: object/array additionalProperties become boolean true, booleans
 // (including false) are preserved, and the walk never touches additionalProperties
 // that appears as a PROPERTY NAME or as instance data inside enum/const.
+// mapSchemaForTest and childMap are shared with schema_compat_test.go.
 func TestCoerceBoolAdditionalProperties(t *testing.T) {
 	t.Run("object additionalProperties downgraded, bool false preserved", func(t *testing.T) {
 		m := mustUnmarshalSchema(t, string(mapSchemaForTest))
-		CoerceBoolAdditionalProperties(m)
+		coerceBoolAdditionalProperties(m)
 		files := childMap(t, childMap(t, m, "properties"), "files")
 		if files["additionalProperties"] != true {
 			t.Errorf("files.additionalProperties = %#v, want true", files["additionalProperties"])
@@ -61,7 +40,7 @@ func TestCoerceBoolAdditionalProperties(t *testing.T) {
 		for _, raw := range []string{`{"additionalProperties":true}`, `{"additionalProperties":false}`} {
 			m := mustUnmarshalSchema(t, raw)
 			want := m["additionalProperties"]
-			CoerceBoolAdditionalProperties(m)
+			coerceBoolAdditionalProperties(m)
 			if m["additionalProperties"] != want {
 				t.Errorf("%s: additionalProperties = %#v, want %#v", raw, m["additionalProperties"], want)
 			}
@@ -70,7 +49,7 @@ func TestCoerceBoolAdditionalProperties(t *testing.T) {
 
 	t.Run("array-valued additionalProperties downgraded to true", func(t *testing.T) {
 		m := mustUnmarshalSchema(t, `{"additionalProperties":["weird"]}`)
-		CoerceBoolAdditionalProperties(m)
+		coerceBoolAdditionalProperties(m)
 		if m["additionalProperties"] != true {
 			t.Errorf("additionalProperties = %#v, want true", m["additionalProperties"])
 		}
@@ -82,7 +61,7 @@ func TestCoerceBoolAdditionalProperties(t *testing.T) {
 		  "items":{"type":"object","additionalProperties":{"type":"number"}},
 		  "$defs":{"M":{"type":"object","additionalProperties":{"type":"string"}}}
 		}`)
-		CoerceBoolAdditionalProperties(m)
+		coerceBoolAdditionalProperties(m)
 		if childMap(t, m, "items")["additionalProperties"] != true {
 			t.Error("items.additionalProperties not downgraded")
 		}
@@ -95,7 +74,7 @@ func TestCoerceBoolAdditionalProperties(t *testing.T) {
 		// A schema describing an object that HAS a property called
 		// "additionalProperties" — the inner value is a subschema, not the keyword.
 		m := mustUnmarshalSchema(t, `{"type":"object","properties":{"additionalProperties":{"type":"string"}}}`)
-		CoerceBoolAdditionalProperties(m)
+		coerceBoolAdditionalProperties(m)
 		prop := childMap(t, m, "properties")
 		ap, ok := prop["additionalProperties"].(map[string]any)
 		if !ok {
@@ -111,7 +90,7 @@ func TestCoerceBoolAdditionalProperties(t *testing.T) {
 		  "enum":[{"additionalProperties":{"x":1}}],
 		  "const":{"additionalProperties":{"y":2}}
 		}`)
-		CoerceBoolAdditionalProperties(m)
+		coerceBoolAdditionalProperties(m)
 		enum, ok := m["enum"].([]any)
 		if !ok || len(enum) != 1 {
 			t.Fatalf("enum mangled: %#v", m["enum"])
