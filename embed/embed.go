@@ -44,19 +44,71 @@
 //
 // # Retries
 //
-// Both backends retry transient failures through the shared
-// [retry.Config]: HTTP 429 and 5xx (honoring Retry-After when the
-// server supplies it) and timeout-classified network errors. Other errors,
-// including context cancellation, are terminal.
+// Both backends turn a failed backend call into the kit's error
+// vocabulary through the same normalization the chat adapters use. A
+// non-200 response, a transport failure (dial, TLS, EOF while reading
+// the body, or a stalled attempt reaped by the per-attempt timeout), and
+// an openai-compatible 200 whose body carries an error object each
+// become a [llmkit.APIError]. [llmkit.Classify] alone decides
+// retryability. The retryable Kinds are [llmkit.ErrRateLimited],
+// [llmkit.ErrServer], and [llmkit.ErrOverloaded]. They cover:
+//
+//   - HTTP 429.
+//   - Any status 500 or above: 529 is ErrOverloaded, every other such
+//     status is ErrServer.
+//   - Any non-200 status below 400, such as a 204 or a 302 without a
+//     Location header.
+//   - A transport failure.
+//   - An openai-compatible 200 error object whose type is missing,
+//     unknown, or maps to a retryable Kind.
+//
+// A retry honors the server's Retry-After header when the response
+// reaches the adapter with its headers intact. A non-200 response that
+// the adapter reads all the way through carries Retry-After; a body read
+// that fails before headers can be parsed does not (the result is
+// {ErrServer, 0}). Every other APIError is terminal. A decode, count,
+// index, or dimension error is a plain error, and Classify never retries
+// a plain error. The caller's context cancellation is never an APIError:
+// it surfaces as the plain context error and is always terminal.
+//
 // The per-attempt bound depends on [Config.HTTPClient]. When nil, the
 // embedder uses a client with no [http.Client.Timeout], and
 // Config.Retry.RequestTimeout is the only per-attempt bound. An injected
 // client is used as-is, including its Timeout: an attempt then ends at the
-// earlier of RequestTimeout and the client's Timeout. Unset knobs resolve
-// at construction to the embed defaults of 3 attempts and a 60s
-// per-attempt timeout. BaseDelay and MaxDelay fall back to
-// [retry.Default]. Jitter is taken literally: 0 means no
-// jitter, and [LoadConfig] seeds the default of 20%.
+// earlier of RequestTimeout and the client's Timeout. [Config.Retry] is
+// completed at construction by [retry.Config.Or] against the embed
+// defaults of 3 attempts, a 60s per-attempt timeout, and the kit's
+// BaseDelay/MaxDelay/Jitter. Jitter 0 counts as unset like every other
+// field. For the defaults without jitter, set Retry.Rand to a function
+// that returns 0.5: every jitter factor is then exactly 1. [LoadConfig]
+// sets only Retry.RequestTimeout, from <PREFIX>_EMBED_TIMEOUT; every other
+// Retry field stays zero and resolves to the same defaults.
+//
+// # Errors
+//
+// A caller matches a backend failure with errors.Is against the kit's
+// sentinels ([llmkit.ErrRateLimited], [llmkit.ErrAuth], [llmkit.ErrServer],
+// ...) or errors.As against [llmkit.APIError] for the status code and
+// Retry-After. Three routes produce an APIError:
+//
+//   - A non-200 response. StatusCode is the HTTP status, and the Kind
+//     comes from the status. A 400 whose body reports a context-length
+//     overflow is [llmkit.ErrContextTooLong]. A status below 400 is
+//     ErrServer. Message is the trimmed response body — the first 200
+//     bytes plus "..." when the body is longer.
+//   - An openai-compatible 200 whose body carries an error object.
+//     StatusCode is 200, and the Kind comes from the object's type field.
+//     A missing or unknown type is ErrServer.
+//   - A transport failure. StatusCode is 0 and the Kind is ErrServer. The
+//     underlying error stays reachable through errors.Is.
+//
+// A cancelled or expired caller context surfaces as the context error
+// (errors.Is(err, context.Canceled) or context.DeadlineExceeded), never
+// an APIError. [Config.Validate], [NewEmbedder], [NewOllamaEmbedder],
+// and [NewOpenAICompatibleEmbedder] reject a bad Config or an unknown
+// backend name with an error wrapping [llmkit.ErrInvalidRequest].
+// [ErrEmptyVector] and a decode/count/dimension mismatch are plain
+// errors: match the specific error, not the kit vocabulary.
 //
 // # Caching
 //
@@ -86,6 +138,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/dpoage/llmkit"
 	"sync"
 )
 
@@ -121,13 +174,13 @@ func NewEmbedder(cfg Config) (Embedder, error) {
 
 	switch cfg.Embedder {
 	case "hugot":
-		return nil, fmt.Errorf("hugot embedder not bundled in llmkit; implement embed.Embedder in your application")
+		return nil, fmt.Errorf("hugot embedder not bundled in llmkit; implement embed.Embedder in your application: %w", llmkit.ErrInvalidRequest)
 	case "ollama":
 		emb, err = NewOllamaEmbedder(cfg)
 	case "openai-compatible":
 		emb, err = NewOpenAICompatibleEmbedder(cfg)
 	default:
-		return nil, fmt.Errorf("unknown embedder type %q: expected \"ollama\" or \"openai-compatible\"", cfg.Embedder)
+		return nil, fmt.Errorf("unknown embedder type %q: expected \"ollama\" or \"openai-compatible\": %w", cfg.Embedder, llmkit.ErrInvalidRequest)
 	}
 	if err != nil {
 		return nil, err

@@ -752,12 +752,12 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	if cfg.CacheEnabled {
 		t.Error("default CacheEnabled should be false")
 	}
-	if cfg.Retry.Jitter != retry.Default().Jitter {
-		t.Errorf("default Jitter = %v, want kit default %v", cfg.Retry.Jitter, retry.Default().Jitter)
-	}
 	p := cfg.retryPolicy()
 	if p.MaxAttempts != 3 || p.RequestTimeout != 60*time.Second {
 		t.Errorf("resolved default attempts/timeout = %d/%v, want 3/60s (embed bounds)", p.MaxAttempts, p.RequestTimeout)
+	}
+	if p.Jitter != retry.Default().Jitter {
+		t.Errorf("resolved default Jitter = %v, want kit default %v (LoadConfig leaves Retry unset; Or fills it)", p.Jitter, retry.Default().Jitter)
 	}
 }
 

@@ -9,7 +9,8 @@ import (
 )
 
 // retryClient wraps a Client with exponential-backoff-with-jitter retries on
-// transient failures (429/5xx/timeouts), honoring Retry-After when present.
+// transient failures (429/5xx, transport failures the inner client reports
+// as retryable *APIErrors), honoring Retry-After when present.
 // When obs is non-nil it also emits one Attempt event per attempt, failures
 // included — the retry stage is the only layer that sees attempt boundaries.
 type retryClient struct {
@@ -23,6 +24,13 @@ type retryClient struct {
 // WithRetry wraps c so that Complete and Stream retry transient failures per
 // cfg. Capabilities is delegated unchanged. Wrapping is composable with
 // WithRecorder and WithSerializedToolCalls.
+//
+// Failures are classified by [Classify] and run through [retry.Do], so when
+// the caller's context is done as the stage returns, the error is never
+// retryable: a retryable last error (a transport failure cut short by the
+// caller's deadline included) is replaced by a plain error chaining
+// ctx.Err() that carries its text, and a terminal one — an auth
+// [*APIError], a stream callback's sentinel — is returned as-is.
 func WithRetry(c Client, cfg retry.Config) Client {
 	return WithRetryObserver(c, cfg, nil, "", "")
 }
@@ -40,10 +48,10 @@ func WithRetry(c Client, cfg retry.Config) Client {
 // Completion event their emitter minted ([Observe] or the agent Runner) on
 // SpanID; Step follows the context ([WithStep]) the same way, so an attempt
 // inside a Runner turn carries the enclosing turn. On final failure the
-// stage returns the zero Response to the caller — WithRetry behaviour,
-// unchanged; [Observe], by contrast, passes the inner (response, error)
-// pair through. The stage never emits a Completion event — the outermost
-// harness layer owns that.
+// stage returns the zero Response to the caller — the [WithRetry]
+// behaviour, unchanged; [Observe], by contrast, passes the inner
+// (response, error) pair through. The stage never emits a Completion
+// event; the outermost harness layer owns that.
 func WithRetryObserver(c Client, cfg retry.Config, obs Observer, provider, model string) Client {
 	return &retryClient{inner: c, cfg: cfg, obs: obs, provider: provider, model: model}
 }
@@ -52,14 +60,17 @@ func (r *retryClient) Capabilities() Capabilities { return r.inner.Capabilities(
 
 // Complete retries transient failures per cfg. Each attempt runs the inner
 // Complete under a per-attempt RequestTimeout child context, so a stalled
-// round-trip aborts as context.DeadlineExceeded and is retried like any
-// other transient transport failure. retry.Do invokes the action exactly
-// once per attempt, so the local counter is the 1-based attempt number.
+// round-trip aborts as context.DeadlineExceeded. That stall is retried
+// only when the inner client reports it as a retryable *APIError — what
+// the adapters' TransportError produces; a bare context error (say a
+// third-party Client returning ctx.Err()) is terminal under Classify.
+// retry.Do invokes the action exactly once per attempt, so the local
+// counter is the 1-based attempt number.
 func (r *retryClient) Complete(ctx context.Context, req Request) (Response, error) {
 	var resp Response
 	var err error
 	attempt := 0
-	err = retry.Do(ctx, r.cfg, retryableClass, func(actx context.Context) error {
+	err = retry.Do(ctx, r.cfg, Classify, func(actx context.Context) error {
 		attempt++
 		start := time.Now()
 		resp, err = r.inner.Complete(actx, req)
@@ -75,17 +86,20 @@ func (r *retryClient) Complete(ctx context.Context, req Request) (Response, erro
 // Stream streams from the wrapped client under the same retry policy as
 // Complete, the per-attempt RequestTimeout bounding the whole attempt. An
 // error that follows an already-delivered delta is terminal and returned
-// as-is: the caller holds partial output, and a retry would replay or
-// diverge from it.
+// as-is while the caller's context is live: the caller holds partial
+// output, and a retry would replay or diverge from it. Once the caller's
+// context is done, [Classify] decides it like any other failure, so a
+// retryable one is replaced by a plain error chaining ctx.Err().
 func (r *retryClient) Stream(ctx context.Context, req Request, fn func(Delta) error) (Response, error) {
 	// delivered marks a delta that reached the caller inside the current
-	// attempt; the classifier turns it into a terminal error.
+	// attempt; while the caller's ctx is live the classifier turns it into
+	// a terminal error.
 	delivered := false
 	classify := func(err error) (time.Duration, bool, bool) {
-		if delivered {
+		if delivered && ctx.Err() == nil {
 			return 0, false, false
 		}
-		return retryableClass(err)
+		return Classify(err)
 	}
 	// A nil fn is replaced with a no-op so the inner Stream never sees a nil
 	// callback; the wrapper still marks progress.
@@ -144,14 +158,4 @@ func (r *retryClient) observe(ctx context.Context, n int, req Request, resp Resp
 	ev.Duration = d
 	ev.Attempt = ae
 	r.obs.Observe(ctx, ev)
-}
-
-// retryableClass classifies err per the shared retry policy: retryable errors
-// carry any server Retry-After the error chains; everything else is terminal.
-func retryableClass(err error) (time.Duration, bool, bool) {
-	if !isRetryable(err) {
-		return 0, false, false
-	}
-	after, hasAfter := retryAfter(err)
-	return after, hasAfter, true
 }

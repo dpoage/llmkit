@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/internal/adapter"
 	"github.com/dpoage/llmkit/retry"
 	"io"
 	"net/http"
@@ -57,7 +59,7 @@ type ollamaResponse struct {
 // Embed returns the embedding for a single text.
 func (o *OllamaEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
 	var out [][]float32
-	err := retry.Do(ctx, o.retry, retryable, func(actx context.Context) error {
+	err := retry.Do(ctx, o.retry, llmkit.Classify, func(actx context.Context) error {
 		res, err := o.doEmbed(actx, text)
 		if err == nil {
 			out = res
@@ -86,7 +88,7 @@ func (o *OllamaEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]fl
 		n := batchChunkSize(len(texts)-start, o.maxBatch)
 		chunk := texts[start : start+n]
 		var res [][]float32
-		err := retry.Do(ctx, o.retry, retryable, func(actx context.Context) error {
+		err := retry.Do(ctx, o.retry, llmkit.Classify, func(actx context.Context) error {
 			r, err := o.doEmbed(actx, chunk)
 			if err == nil {
 				res = r
@@ -132,17 +134,17 @@ func (o *OllamaEmbedder) doEmbed(ctx context.Context, input any) ([][]float32, e
 
 	resp, err := o.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("ollama: request failed: %w", err)
+		return nil, adapter.TransportError("ollama", ctx, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("ollama: read response: %w", err)
+		return nil, adapter.TransportError("ollama", ctx, err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, newStatusError("ollama", resp.StatusCode, resp.Header.Get("Retry-After"), string(respBody))
+		return nil, responseError("ollama", resp, respBody)
 	}
 
 	var result ollamaResponse
@@ -172,6 +174,22 @@ func (o *OllamaEmbedder) doEmbed(ctx context.Context, input any) ([][]float32, e
 	}
 
 	return out, nil
+}
+
+// responseError normalizes a non-200 response into the kit's vocabulary.
+// [adapter.NormalizeSDKError] classifies the status against the full
+// trimmed body (a 400's context-length phrase can sit past any cap);
+// only the returned APIError's Message is capped at 200 bytes.
+func responseError(backend string, resp *http.Response, body []byte) error {
+	err := adapter.NormalizeSDKError(backend, adapter.VendorError{
+		Status:  resp.StatusCode,
+		Message: strings.TrimSpace(string(body)),
+		Header:  resp.Header,
+	})
+	if apiErr, ok := err.(*llmkit.APIError); ok {
+		apiErr.Message = truncate(apiErr.Message, 200)
+	}
+	return err
 }
 
 func truncate(s string, n int) string {

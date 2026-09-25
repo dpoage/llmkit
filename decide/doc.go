@@ -55,50 +55,70 @@
 // # Errors
 //
 // Every error from [Client.Ask] is an [*llmkit.APIError] with Provider
-// "typesafe". Its Kind unwraps to one of the llmkit sentinels. HTTP
-// statuses map as in docs/providers.md:
+// "typesafe", except the caller's cancellation or a deadline it set,
+// which is an error chaining the context error (errors.Is(err,
+// ctx.Err()); never retryable — see Retries). An *llmkit.APIError's Kind
+// unwraps to one of the llmkit sentinels. HTTP statuses map as in
+// docs/providers.md:
 //
-//	429                  -> ErrRateLimited (Retry-After honored)
-//	401, 403             -> ErrAuth
-//	413                  -> ErrContextTooLong
-//	400                  -> ErrContextTooLong when the body reads like a
-//	                        context-length error, else ErrInvalidRequest
-//	422                  -> ErrInvalidRequest
-//	529                  -> ErrOverloaded
-//	other 5xx            -> ErrServer
-//	other 4xx            -> ErrInvalidRequest
-//	transport failure    -> ErrServer (StatusCode 0)
+//	429                        -> ErrRateLimited (Retry-After honored)
+//	401, 403                   -> ErrAuth
+//	413                        -> ErrContextTooLong
+//	400                        -> ErrContextTooLong when the body reads like
+//	                              a context-length error, else ErrInvalidRequest
+//	422                        -> ErrInvalidRequest
+//	529                        -> ErrOverloaded
+//	any other status >= 500    -> ErrServer
+//	any other 4xx              -> ErrInvalidRequest
+//	any other non-200, < 400   -> ErrServer (a 3xx or unexpected 2xx the
+//	                              vendor never documents a Type for)
+//	transport failure          -> ErrServer (StatusCode 0)
+//	request could not be built (a BaseURL net/url cannot parse) -> ErrInvalidRequest
 //
 // A response that violates the answer contract — a missing model or
 // usage block, a missing or extra answer, a type that does not match
 // its question, a sparse legend — is a server contract violation: Kind
-// ErrServer with StatusCode 200, returned after the first attempt
-// without retrying. Pre-wire validation failures (nil state, empty
-// question id, nil instructions, a Choice without options, a Score with
-// fewer than two levels, a JSON number or boolean where only text
-// kinds are accepted) never touch the network and wrap
-// llmkit.ErrInvalidRequest. Error messages carry the vendor body text
-// truncated to 200 characters. The package never places the API key
-// into an error.
+// ErrServer with StatusCode 200, retried like any other ErrServer (each
+// retry re-sends the same request). Pre-wire validation failures (nil
+// state, empty question id, nil instructions, a Choice without options,
+// a Score with fewer than two levels, a JSON number or boolean where
+// only text kinds are accepted) never touch the network and wrap
+// llmkit.ErrInvalidRequest, terminal. Error messages carry the vendor
+// body text truncated to 200 characters. The package never places the
+// API key into an error.
 //
 // # Retries
 //
-// Ask retries HTTP 429, every 5xx (529 included), and timeout-classified
-// transport errors through the shared retry loop, [retry.Do]. Each attempt runs
-// under a per-attempt RequestTimeout deadline, and parent cancellation
-// is always terminal. The client parses the Retry-After header for
-// every status. When a status is retried, a server-supplied delay
-// replaces the exponential backoff and is capped at MaxDelay. A
-// present header whose delay clamps to zero (a zero value or a past
-// HTTP-date) means an immediate retry. One Ask may therefore issue
-// several HTTP requests. Every other status — and a 200 response that
-// violates the answer contract — is terminal and returned after the
-// first attempt.
+// Ask retries every *llmkit.APIError [llmkit.Classify] marks retryable —
+// ErrRateLimited, ErrOverloaded, and every ErrServer (any status 500 or
+// above, a sub-400 non-200 status, a transport failure, a 200
+// answer-contract violation) — through the shared retry loop, [retry.Do].
+// Each attempt runs under a per-attempt RequestTimeout deadline; a
+// stalled attempt is retried like any other ErrServer. For a non-200
+// response the client parses the Retry-After header and carries its
+// presence as [llmkit.APIError.HasRetryAfter]: when a retried non-200
+// status carried the header, its delay — a present zero included —
+// replaces the exponential backoff and is capped at MaxDelay; absence
+// falls back to the schedule. A 200 that violates the answer contract
+// always takes the schedule: the client does not read its headers. One
+// Ask may therefore issue several HTTP requests.
 //
-// Unset knobs resolve at construction to the decide defaults:
-// 3 attempts and a 30s per-attempt timeout (Jev answers in under a
-// second). BaseDelay and MaxDelay come from [retry.Default],
-// and Jitter is taken literally (explicit 0 means no jitter).
+// The caller's ctx bounds the whole call. Its cancellation, or a
+// deadline it set, ends the loop immediately — whether that happens
+// mid-attempt or while waiting between retries — without another
+// attempt. The error Ask returns then chains the context error, so
+// errors.Is(err, context.Canceled) or errors.Is(err,
+// context.DeadlineExceeded) reaches it, and it is not an
+// *llmkit.APIError. One exception: a terminal error keeps its identity
+// even when the ctx is already done. An already-cancelled ctx with a
+// BaseURL net/url cannot parse returns ErrInvalidRequest. A per-attempt
+// RequestTimeout expiring under a live parent is not a parent
+// cancellation and is retried like any other ErrServer.
+//
+// Unset knobs resolve at construction, via [retry.Config.Or], to the
+// decide defaults: 3 attempts and a 30s per-attempt timeout (Jev
+// answers in under a second). BaseDelay, MaxDelay, and Jitter (20%)
+// come from [retry.Default].
 //
 // # Vendor limits and jaggedness
 //

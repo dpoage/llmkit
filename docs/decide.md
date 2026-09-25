@@ -48,7 +48,7 @@ placeholder key. An invalid field returns an error wrapping
 | `Model` | Yes | A versioned id (`jev-1.13.0`) or alias (`jev-latest`, `jev-preview`). There is no default alias. |
 | `BaseURL` | No | Endpoint root for tests and gateways. Default: `https://api.typesafe.ai`; the path `/v1/systemone` is appended. |
 | `HTTPClient` | No | Used as-is, including its `Timeout`. Default: a plain client with no `http.Client.Timeout`, so the per-attempt `RequestTimeout` is the only bound. |
-| `Retry` | No | Unset knobs resolve at construction: 3 attempts, 30 s per-attempt timeout. `BaseDelay` (500 ms) and `MaxDelay` (30 s) come from `retry.Default`. `Jitter` is literal: 0 means no jitter. |
+| `Retry` | No | Resolved at construction via `retry.Config.Or`: 3 attempts, 30 s per-attempt timeout, `BaseDelay` (500 ms), `MaxDelay` (30 s), and `Jitter` (20%) from `retry.Default`. An explicit `Jitter` of 0 resolves like every other unset field; pin `Retry.Rand` for the resolved defaults with no jitter. |
 | `Recorder` | No | Receives one `llmkit.UsageEvent` per successful `Ask` through its `Record(llmkit.UsageEvent)` method. Default: nil (no recording). |
 
 ## The three question types
@@ -299,8 +299,10 @@ date on the page; verified 2026-09-19).
 
 ## Errors
 
-Every error from `Ask` is an `*llmkit.APIError` with `Provider` `"typesafe"`.
-Match the `Kind` with `errors.Is`. The status mapping mirrors
+Every error from `Ask` is an `*llmkit.APIError` with `Provider` `"typesafe"`,
+except the caller's cancellation or a deadline it set, which is an error
+chaining the context error: `errors.Is(err, ctx.Err())`, never retryable.
+Match an `*llmkit.APIError`'s `Kind` with `errors.Is`. The status mapping mirrors
 [providers](providers.md#error-normalization); the decide-specific rows are
 marked:
 
@@ -313,14 +315,18 @@ marked:
 | 400, other | `ErrInvalidRequest` | No |
 | 422 | `ErrInvalidRequest` | No (decide row) |
 | 529 | `ErrOverloaded` | Yes (same `Retry-After` rules as 429) |
-| Other 5xx | `ErrServer` | Yes |
+| Any other status 500 or above | `ErrServer` | Yes |
 | Any other 4xx (404, 409, ...) | `ErrInvalidRequest` | No |
+| Any other non-200 status below 400 (a 3xx, an unexpected 2xx) | `ErrServer` | Yes (decide row: no vendor `Type` to classify from) |
 | Transport failure (timeout, connection reset) | `ErrServer` (`StatusCode` 0) | Yes |
-| 200 body that violates the answer contract | `ErrServer` (`StatusCode` 200) | No (decide row: terminal) |
+| 200 body that violates the answer contract | `ErrServer` (`StatusCode` 200) | Yes (decide row: retried like any `ErrServer`) |
+| The HTTP request could not be built (a `BaseURL` that `net/url` cannot parse) | `ErrInvalidRequest` | No (decide row) |
 
 A 200 response that violates the answer contract is a server contract
-violation. The client returns `ErrServer` with `StatusCode` 200 after the
-first attempt without retrying. Violations are: a missing model or usage
+violation. The client returns `ErrServer` with `StatusCode` 200 and retries
+it like any other `ErrServer` — each retry re-sends the same request, so a
+persistently misbehaving server still exhausts `MaxAttempts` rather than
+failing after one attempt. Violations are: a missing model or usage
 block; a missing or extra answer; an answer type that does not match its
 question; a sparse legend.
 
@@ -334,14 +340,24 @@ An unknown model arrives as a 400 in the live lane (observed 2026-09-20).
 The vendor's API doc reserves 422 for validation failures. Both map to
 `ErrInvalidRequest`.
 
-The client parses the `Retry-After` header on every status. On a retried
-status (429 and every 5xx, 529 included), a server-supplied delay
-replaces the exponential backoff for the sleep. The sleep is capped at
-`retry.Config.MaxDelay` (30 s by default); `APIError.RetryAfter` carries
-the raw server value.
+For a non-200 response, the client parses the `Retry-After` header and
+carries its presence as `APIError.HasRetryAfter`. On a retried non-200
+status, a server-supplied delay — present zero included — replaces the
+exponential backoff for the sleep and is capped at `retry.Config.MaxDelay`
+(30 s by default); absence falls back to the schedule. A 200 response that
+violates the answer contract always takes the schedule: the client does not
+read its headers. `APIError.RetryAfter` carries the raw server value; it is
+meaningful only when `HasRetryAfter` is true.
 
-A present header that clamps to zero — a zero value or a past HTTP-date
-— retries immediately. Every other status is terminal.
+The caller's `ctx` bounds the whole call. Its cancellation, or a deadline it
+set, ends the loop immediately — whether that happens mid-attempt or while
+waiting between retries — without another attempt. The error `Ask` returns
+then chains the context error and is not an `*llmkit.APIError`. One
+exception: a terminal error keeps its identity even when the `ctx` is
+already done. An already-cancelled `ctx` with a `BaseURL` that `net/url`
+cannot parse returns `ErrInvalidRequest`. A per-attempt `RequestTimeout`
+expiring under a live parent is not a parent cancellation and is retried
+like any other `ErrServer`.
 
 Error messages carry the vendor body text, truncated to 200 characters plus
 an appended `...`. llmkit never places the API key into an error.

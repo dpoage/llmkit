@@ -14,6 +14,7 @@ import (
 	"github.com/dpoage/llmkit/internal/adapter"
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/packages/ssestream"
 	"github.com/openai/openai-go/v3/shared"
 )
 
@@ -102,7 +103,7 @@ func (o *openaiAdapter) Complete(ctx context.Context, req llmkit.Request) (llmki
 	}
 	cc, err := o.client.Chat.Completions.New(ctx, params)
 	if err != nil {
-		return llmkit.Response{}, o.normalizeErr(err)
+		return llmkit.Response{}, o.normalizeErr(ctx, err)
 	}
 	return o.toResponse(cc), nil
 }
@@ -473,17 +474,55 @@ func mapOpenAIStop(reason string, hasToolCalls bool) llmkit.StopReason {
 	}
 }
 
-func (o *openaiAdapter) normalizeErr(err error) error {
+func (o *openaiAdapter) normalizeErr(ctx context.Context, err error) error {
 	var apiErr *openai.Error
 	if errors.As(err, &apiErr) {
-		return adapter.NormalizeSDKError(o.provider, apiErr.StatusCode, apiErr.Error(), apiErr.Response, err)
+		return adapter.NormalizeSDKError(o.provider, adapter.VendorError{
+			Status:  apiErr.StatusCode,
+			Type:    apiErr.Type,
+			Message: apiErr.Error(),
+			Header:  adapter.ResponseHeader(apiErr.Response),
+			Err:     err,
+		})
 	}
-	return &llmkit.APIError{
-		Kind:     llmkit.ErrServer,
-		Provider: o.provider,
-		Message:  err.Error(),
-		Err:      err,
+	// In-band SSE error: the stream was opened on a 2xx response, so the SDK
+	// reports the body's error object as a StreamError with no status and no
+	// headers. Status 200 is the status the wire actually returned.
+	var streamErr *ssestream.StreamError
+	if errors.As(err, &streamErr) {
+		typ, msg := decodeSSEError(streamErr.Event.Data)
+		if msg == "" {
+			msg = streamErr.Error()
+		}
+		return adapter.NormalizeSDKError(o.provider, adapter.VendorError{
+			Status:  http.StatusOK,
+			Type:    typ,
+			Message: msg,
+			Err:     err,
+		})
 	}
+	// No HTTP response: transport failure or caller's context ending mid-call.
+	return adapter.TransportError(o.provider, ctx, err)
+}
+
+// sseErrorBody is the error object an OpenAI-compatible server sends inside
+// an SSE data line of an already-committed 2xx stream.
+type sseErrorBody struct {
+	Error struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// decodeSSEError extracts the vendor type and message from a StreamError's
+// raw Event.Data (JSON with a trailing newline); an unparseable event
+// leaves both empty.
+func decodeSSEError(data []byte) (typ, msg string) {
+	var body sseErrorBody
+	if err := json.Unmarshal(data, &body); err != nil {
+		return "", ""
+	}
+	return body.Error.Type, body.Error.Message
 }
 
 // Sources (vendor docs consulted for this table):

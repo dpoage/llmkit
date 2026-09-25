@@ -100,7 +100,7 @@ func (a *anthropicAdapter) Complete(ctx context.Context, req llmkit.Request) (ll
 
 	msg, err := a.client.Messages.New(ctx, params)
 	if err != nil {
-		return llmkit.Response{}, a.normalizeErr(err)
+		return llmkit.Response{}, a.normalizeErr(ctx, err)
 	}
 	return a.finalize(req, a.toResponse(msg)), nil
 }
@@ -727,19 +727,19 @@ func mapAnthropicStop(sr anthropic.StopReason) llmkit.StopReason {
 	}
 }
 
-func (a *anthropicAdapter) normalizeErr(err error) error {
+func (a *anthropicAdapter) normalizeErr(ctx context.Context, err error) error {
 	var apiErr *anthropic.Error
 	if errors.As(err, &apiErr) {
-		return adapter.NormalizeSDKError("anthropic", apiErr.StatusCode, apiErr.Error(), apiErr.Response, err)
+		return adapter.NormalizeSDKError("anthropic", adapter.VendorError{
+			Status:  apiErr.StatusCode,
+			Type:    string(apiErr.Type()),
+			Message: apiErr.Error(),
+			Header:  adapter.ResponseHeader(apiErr.Response),
+			Err:     err,
+		})
 	}
-	// Transport/timeout error: leave status 0, mark as server-class so it is
-	// retried.
-	return &llmkit.APIError{
-		Kind:     llmkit.ErrServer,
-		Provider: "anthropic",
-		Message:  err.Error(),
-		Err:      err,
-	}
+	// No HTTP response: transport failure or caller's context ending mid-call.
+	return adapter.TransportError("anthropic", ctx, err)
 }
 
 // Sources (vendor docs consulted for this table):

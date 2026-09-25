@@ -68,8 +68,19 @@ func TestNew_Defaults(t *testing.T) {
 	if c.retry.BaseDelay != def.BaseDelay || c.retry.MaxDelay != def.MaxDelay {
 		t.Errorf("delays = %v/%v, want kit defaults %v/%v", c.retry.BaseDelay, c.retry.MaxDelay, def.BaseDelay, def.MaxDelay)
 	}
-	if c.retry.Jitter != 0 {
-		t.Errorf("Jitter = %v, want 0 (literal: unset means no jitter until resolved)", c.retry.Jitter)
+	if c.retry.Jitter != def.Jitter {
+		t.Errorf("Jitter = %v, want %v (R2: an explicit 0 is unset like every other field, so Config{} takes retry.Default's jitter via Config.Or)", c.retry.Jitter, def.Jitter)
+	}
+
+	// A partial Retry keeps its set fields and takes every other field from decide's defaults.
+	p, err := New(Config{APIKey: "key", Model: "jev-latest", Retry: retry.Config{MaxAttempts: 5}})
+	if err != nil {
+		t.Fatalf("New(partial Retry): %v", err)
+	}
+	if r := p.retry; r.MaxAttempts != 5 || r.RequestTimeout != 30*time.Second ||
+		r.BaseDelay != 500*time.Millisecond || r.MaxDelay != 30*time.Second || r.Jitter != 0.2 {
+		t.Errorf("partial Retry{MaxAttempts: 5} resolved to MaxAttempts=%d RequestTimeout=%v BaseDelay=%v MaxDelay=%v Jitter=%v, want 5/30s/500ms/30s/0.2",
+			r.MaxAttempts, r.RequestTimeout, r.BaseDelay, r.MaxDelay, r.Jitter)
 	}
 
 	if got := (Config{}).httpClient().Timeout; got != 0 {

@@ -14,9 +14,15 @@
 //  1. Each attempt runs fn under a RequestTimeout child context derived
 //     from ctx. A stalled attempt aborts as context.DeadlineExceeded and
 //     is classified like any other failure.
-//  2. After a failed attempt, Do checks the parent ctx. When it is done,
-//     the loop returns fn's last error immediately. Do never retries and
-//     never swallows a cancellation.
+//  2. After a failed attempt, Do classifies the error and checks the
+//     parent ctx. When Do observes the parent done — during an attempt,
+//     including a parent deadline that expires mid-attempt, or while
+//     sleeping between attempts — the loop stops immediately and never
+//     returns a last error classify marked retryable. A terminal one is
+//     returned as-is, identity kept; a retryable one is replaced by a
+//     plain error chaining ctx.Err() whose text carries it. The
+//     replacement is terminal under a classify that treats context errors
+//     as terminal, which llmkit.Classify does.
 //  3. classify decides whether the error is retryable. Its hasRetryAfter
 //     value is a presence bit, not a nonzero check: the loop applies
 //     retryAfter only when hasRetryAfter is true. A present zero delay
@@ -26,11 +32,14 @@
 //     uncapped); a negative Retry-After is treated as zero.
 //  5. The loop stops when fn succeeds, when classify marks the error
 //     terminal, or after MaxAttempts attempts, and it returns fn's last
-//     error.
+//     error — except where step 2 replaces it.
 //
 // Do normalizes cfg itself: MaxAttempts below 1 becomes 1; RequestTimeout
 // at or below 0 becomes [DefaultRequestTimeout]; Jitter is clamped to
-// [0, 1]. Every entry point accepts the same configs as a result.
+// [0, 1]. A partial Config — one with unset (zero) schedule fields — is
+// completed with [Config.Or] by the constructor that owns the retry
+// policy (provider.New, decide.New, and embed.NewEmbedder), while Do
+// normalizes only those three fields on whatever config it is given.
 //
 // [Config.Sleep] and [Config.Rand] exist for deterministic tests. nil
 // means a real timer and the package-level random source; Sleep observes
@@ -39,6 +48,9 @@ package retry
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"math"
 	"math/rand/v2"
 	"net/http"
 	"strconv"
@@ -48,7 +60,10 @@ import (
 
 // Config tunes a retry loop — the schedule [Do] applies to fn's failures.
 // Do clamps a zero or negative MaxAttempts to 1, so the zero value means
-// "one attempt, no retries" — not usable as-is: start from [Default].
+// "one attempt, no retries". A partial Config (unset schedule fields left
+// zero) is meant to be completed with [Config.Or] by the constructor that
+// owns the retry policy; handing a bare zero Config straight to Do is a
+// one-shot loop, never a default schedule.
 type Config struct {
 	// MaxAttempts is the total number of attempts (initial try + retries).
 	// Do clamps values below 1 to 1.
@@ -108,26 +123,68 @@ func Default() Config {
 	}
 }
 
+// Or returns c with each unset schedule field taken from base: MaxAttempts <= 0,
+// BaseDelay <= 0, MaxDelay <= 0, Jitter == 0, RequestTimeout <= 0. Sleep and Rand
+// are test hooks and pass through from c unchanged.
+//
+// Or is how the constructor that owns a retry policy completes a caller's
+// partial [Config] — provider.New does `opts.Retry.Or(retry.Default())`,
+// and decide.New and embed.NewEmbedder run their own equivalent against
+// their defaults. Or is never applied by [Do] or the llmkit retry stage:
+// they run the config they are given, and Do normalizes only
+// MaxAttempts, RequestTimeout, and Jitter. Jitter 0 counts as unset under
+// Or — a caller who wants the completed defaults but no jitter pins the
+// [Config.Rand] hook, which Or preserves.
+func (c Config) Or(base Config) Config {
+	if c.MaxAttempts <= 0 {
+		c.MaxAttempts = base.MaxAttempts
+	}
+	if c.BaseDelay <= 0 {
+		c.BaseDelay = base.BaseDelay
+	}
+	if c.MaxDelay <= 0 {
+		c.MaxDelay = base.MaxDelay
+	}
+	if c.Jitter == 0 {
+		c.Jitter = base.Jitter
+	}
+	if c.RequestTimeout <= 0 {
+		c.RequestTimeout = base.RequestTimeout
+	}
+	return c
+}
+
 // Do runs fn up to cfg.MaxAttempts times and returns nil on the first
 // success. It retries the failures classify marks retryable.
 //
-// Each attempt runs under a RequestTimeout child context derived from ctx, so
-// a stalled round-trip aborts as context.DeadlineExceeded and is classified
-// like any other failure. The caller's ctx is never modified; once it is
-// done, Do returns the last error immediately and never retries.
+// Each attempt runs under a RequestTimeout child context derived from ctx.
+// A stalled round-trip aborts as context.DeadlineExceeded and is
+// classified like any other failure. The caller's ctx is never modified;
+// once it is done, the loop stops immediately and never retries.
 //
-// classify decides which errors are worth retrying. hasRetryAfter carries a
-// server-supplied delay that replaces the computed backoff for that sleep.
-// Presence with a zero delay means an immediate retry; absence means the
-// exponential schedule. A delay above cfg.MaxDelay is capped at MaxDelay, and
-// a negative one is treated as zero.
+// classify decides which errors are worth retrying. hasRetryAfter carries
+// a server-supplied delay that replaces the computed backoff for that
+// sleep: a present zero retries immediately; absence falls back to the
+// exponential schedule. A delay above cfg.MaxDelay caps at MaxDelay; a
+// negative one is treated as zero.
 //
 // Do applies the normalization described on [Config]: MaxAttempts below 1
 // becomes 1, RequestTimeout at or below 0 becomes [DefaultRequestTimeout],
 // and Jitter is clamped to [0,1].
 //
-// If the wait between attempts is cut short by a cancelled ctx, Do returns
-// fn's last error. Cancellation is never retried and never swallowed.
+// When Do observes the parent ctx done after a failed attempt — a
+// mid-attempt cancellation, a parent deadline expiring mid-attempt, or a
+// wait between attempts cut short — it never returns a last error
+// classify marked retryable. A terminal one is returned as-is, identity
+// kept (an auth failure, a callback's sentinel, an adapter's own
+// cancellation error). A retryable one is replaced by a plain error
+// chaining ctx.Err() whose text carries it (%v, never %w, so the
+// retryable error is not reachable through the chain); the replacement
+// is terminal under a classify that treats context errors as terminal,
+// which llmkit.Classify does. The chain holds ctx.Err(), not a cause
+// set with context.WithCancelCause; read that with context.Cause(ctx).
+// A per-attempt RequestTimeout under a live parent is not a parent
+// cancellation and is retried as classify says.
 func Do(ctx context.Context, cfg Config, classify func(err error) (retryAfter time.Duration, hasRetryAfter, retryable bool), fn func(ctx context.Context) error) error {
 	if cfg.MaxAttempts < 1 {
 		cfg.MaxAttempts = 1
@@ -155,38 +212,62 @@ func Do(ctx context.Context, cfg Config, classify func(err error) (retryAfter ti
 		if err == nil {
 			return nil
 		}
+		after, hasAfter, retryable := classify(err)
 		// Check the PARENT ctx, not the per-attempt child: a per-attempt
 		// RequestTimeout expires only the child as context.DeadlineExceeded
 		// and must not be mistaken for parent cancellation.
 		if ctx.Err() != nil {
-			return err
+			if !retryable {
+				return err // terminal: returned as-is, identity kept
+			}
+			return ctxEnded(ctx, err)
 		}
-		after, hasAfter, retryable := classify(err)
 		if !retryable || attempt >= cfg.MaxAttempts {
 			return err
 		}
 		if serr := sleepBeforeRetry(ctx, cfg, backoffDelay(cfg, attempt, after, hasAfter)); serr != nil {
-			return err
+			return ctxEnded(ctx, err) // only a retryable error reaches the sleep
 		}
 	}
 }
 
+// ctxEnded builds the value Do returns for a last error classify marked
+// retryable when the loop stops on the parent ctx. A live parent ctx — a
+// Sleep hook that failed on its own, not a cancellation — returns the error
+// unchanged. A done parent replaces it with a plain error chaining ctx.Err()
+// whose text carries it, formatted with %v, never %w, so nothing retryable
+// (an *APIError, say) is reachable through the chain and a caller cannot
+// mistake a cancelled path for a retryable failure.
+func ctxEnded(ctx context.Context, err error) error {
+	cerr := ctx.Err()
+	if cerr == nil {
+		return err
+	}
+	return fmt.Errorf("%w (last attempt: %v)", cerr, err)
+}
+
 // ParseRetryAfter parses a Retry-After header value: an integer delay in
-// seconds or an HTTP-date. A past date, or a negative delay, clamps to 0 with
-// ok true — the server supplied the header, so the wait is immediate. ok is
-// false for empty or malformed values: no delay was supplied, and the caller
-// falls back to its own backoff schedule.
+// seconds or an HTTP-date. A past date, or a negative integer, clamps to 0
+// with ok true — the server supplied the header, so the wait is immediate.
+// An integer too large for time.Duration — including one strconv cannot
+// parse — saturates to the maximum, so MaxDelay caps it. ok is false for
+// empty or malformed values: no delay was supplied, and the caller falls
+// back to its own backoff schedule.
 func ParseRetryAfter(v string, now time.Time) (time.Duration, bool) {
 	v = strings.TrimSpace(v)
 	if v == "" {
 		return 0, false
 	}
-	if secs, err := strconv.Atoi(v); err == nil {
-		d := time.Duration(secs) * time.Second
-		if d < 0 {
-			d = 0
+	// ParseInt reports an out-of-range integer as ErrRange with the value
+	// saturated by sign, so the sign checks below cover it too.
+	if secs, err := strconv.ParseInt(v, 10, 64); err == nil || errors.Is(err, strconv.ErrRange) {
+		switch {
+		case secs < 0:
+			return 0, true
+		case secs > int64(math.MaxInt64/time.Second):
+			return time.Duration(math.MaxInt64), true
 		}
-		return d, true
+		return time.Duration(secs) * time.Second, true
 	}
 	if t, err := http.ParseTime(v); err == nil {
 		d := t.Sub(now)
@@ -234,6 +315,12 @@ func backoffDelay(cfg Config, attempt int, after time.Duration, hasAfter bool) t
 		// factor in [1-jitter, 1+jitter].
 		factor := 1 + cfg.Jitter*(2*jitterSource(cfg)-1)
 		delay = time.Duration(float64(delay) * factor)
+		// The factor can push a MaxDelay-sized delay above MaxDelay, so the
+		// cap is re-applied AFTER jitter: jitter never moves a sleep past
+		// MaxDelay. MaxDelay <= 0 stays uncapped, as above.
+		if cfg.MaxDelay > 0 && delay > cfg.MaxDelay {
+			delay = cfg.MaxDelay
+		}
 	}
 	return delay
 }

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/internal/adapter"
@@ -13,7 +12,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // Questions indexes one Ask's question set by id. Ids are echoed back in the
@@ -86,30 +84,22 @@ type answerBody struct {
 	Confidence    float64            `json:"confidence"`
 }
 
-// statusAttempt carries one HTTP attempt's classified APIError plus the
-// Retry-After presence bit: llmkit.APIError records the parsed delay but
-// not presence, and presence — including a 0 or past-date HTTP-date, which
-// ParseRetryAfter clamps to 0 — is the embed-parity signal that the retry
-// loop should ignore exponential backoff. Ask unwraps the APIError.
-type statusAttempt struct {
-	*llmkit.APIError
-	hasRetryAfter bool
-}
-
 // Ask evaluates state against questions in one request: validates and
 // marshals the envelope, POSTs to <BaseURL>/v1/systemone with an
 // "Authorization: Bearer" header, retries transient failures, validates the
 // response, and reports usage to the configured Recorder — once, on success.
-// ctx bounds the call; its cancellation is never retried. Every returned
-// error is an *llmkit.APIError with Provider "typesafe" (see the package doc
-// for the status mapping).
+// ctx bounds the call. Every error from Ask is an *llmkit.APIError with
+// Provider "typesafe", except the caller's cancellation or a deadline it
+// set, which is an error chaining the context error
+// (errors.Is(err, ctx.Err()); never retryable) — see the package doc for
+// the status mapping.
 func (c *Client) Ask(ctx context.Context, state any, questions Questions) (Response, error) {
 	body, err := buildRequest(state, c.model, questions)
 	if err != nil {
 		return Response{}, err
 	}
 	var resp Response
-	err = retry.Do(ctx, c.retry, classifyRetryable, func(actx context.Context) error {
+	err = retry.Do(ctx, c.retry, llmkit.Classify, func(actx context.Context) error {
 		r, err := c.attempt(actx, body, questions)
 		if err != nil {
 			return err
@@ -118,10 +108,6 @@ func (c *Client) Ask(ctx context.Context, state any, questions Questions) (Respo
 		return nil
 	})
 	if err != nil {
-		var st *statusAttempt
-		if errors.As(err, &st) {
-			return Response{}, st.APIError
-		}
 		return Response{}, err
 	}
 	if c.recorder != nil {
@@ -139,7 +125,7 @@ func (c *Client) Ask(ctx context.Context, state any, questions Questions) (Respo
 func (c *Client) attempt(ctx context.Context, body []byte, questions Questions) (Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
 	if err != nil {
-		return Response{}, serverError(0, fmt.Sprintf("build request: %s", err))
+		return Response{}, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, Provider: providerName, Message: fmt.Sprintf("build request: %s", err), Err: err}
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
@@ -149,41 +135,33 @@ func (c *Client) attempt(ctx context.Context, body []byte, questions Questions) 
 	if err != nil {
 		// url.Error text carries the URL and cause, never the Authorization
 		// header, so the API key cannot leak through it.
-		return Response{}, &llmkit.APIError{Kind: llmkit.ErrServer, StatusCode: 0, Provider: providerName, Message: "request failed", Err: err}
+		return Response{}, adapter.TransportError(providerName, ctx, err)
 	}
 	defer func() { _ = httpResp.Body.Close() }()
 
 	respBody, err := io.ReadAll(httpResp.Body)
 	if err != nil {
-		return Response{}, &llmkit.APIError{Kind: llmkit.ErrServer, StatusCode: 0, Provider: providerName, Message: "read response", Err: err}
+		return Response{}, adapter.TransportError(providerName, ctx, err)
 	}
 
 	if httpResp.StatusCode != http.StatusOK {
-		return Response{}, newAPIStatusError(httpResp, respBody)
+		msg := strings.TrimSpace(string(respBody))
+		if msg == "" {
+			msg = fmt.Sprintf("HTTP %d", httpResp.StatusCode)
+		}
+		// Classify on the full body: a context-length phrase can sit past
+		// byte 200. Only the Message the caller sees is truncated.
+		err := adapter.NormalizeSDKError(providerName, adapter.VendorError{
+			Status:  httpResp.StatusCode,
+			Message: msg,
+			Header:  httpResp.Header,
+		})
+		if apiErr, ok := err.(*llmkit.APIError); ok {
+			apiErr.Message = truncate(apiErr.Message, 200)
+		}
+		return Response{}, err
 	}
 	return parseResponse(httpResp.StatusCode, respBody, questions)
-}
-
-// newAPIStatusError maps a non-200 response to a sentinel-classified
-// *llmkit.APIError, wrapped with the Retry-After presence bit. The header
-// is parsed for every status; the retry loop honors it whenever the status
-// is retried. The Message carries the truncated vendor body text — never
-// the request's credential.
-func newAPIStatusError(resp *http.Response, body []byte) error {
-	kind := adapter.ClassifyStatus(resp.StatusCode, string(body))
-	msg := strings.TrimSpace(string(body))
-	if msg == "" {
-		msg = fmt.Sprintf("HTTP %d", resp.StatusCode)
-	}
-	apiErr := &llmkit.APIError{
-		Kind:       kind,
-		StatusCode: resp.StatusCode,
-		Provider:   providerName,
-		Message:    truncate(msg, 200),
-	}
-	after, hasAfter := retry.ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
-	apiErr.RetryAfter = after
-	return &statusAttempt{APIError: apiErr, hasRetryAfter: hasAfter}
 }
 
 // parseResponse validates the answer set against the questions and converts
@@ -288,49 +266,8 @@ func denseSlice[T any](status int, id, field string, m map[string]T, n int) ([]T
 	return out, nil
 }
 
-// classifyRetryable reports whether an Ask attempt is worth retrying,
-// mirroring embed's boundary exactly: HTTP 429, every 5xx (529 included),
-// and transport failures. Everything else — auth, invalid request,
-// context-too-long, a 200 that violates the body contract — is terminal: a
-// deterministic server-side violation must not burn the retry budget. When a
-// retried status carried a Retry-After header, its delay replaces the
-// computed backoff; presence alone — even the 0 a past HTTP-date clamps to
-// — means an immediate retry.
-func classifyRetryable(err error) (time.Duration, bool, bool) {
-	var st *statusAttempt
-	if errors.As(err, &st) {
-		if !retryWorthy(st.APIError) {
-			return 0, false, false
-		}
-		return st.RetryAfter, st.hasRetryAfter, true
-	}
-	var apiErr *llmkit.APIError
-	if errors.As(err, &apiErr) {
-		if !retryWorthy(apiErr) {
-			return 0, false, false
-		}
-		return apiErr.RetryAfter, apiErr.RetryAfter > 0, true
-	}
-	return 0, false, false
-}
-
-// retryWorthy is the status boundary for retries: 429, any 5xx (529
-// included), and transport failures — the only StatusCode-0 errors attempt
-// produces, guarded by their ErrServer kind so a pre-wire validation error
-// can never look transient.
-func retryWorthy(apiErr *llmkit.APIError) bool {
-	switch {
-	case apiErr.StatusCode == http.StatusTooManyRequests, apiErr.StatusCode >= 500:
-		return true
-	case apiErr.StatusCode == 0:
-		return apiErr.Kind == llmkit.ErrServer
-	default:
-		return false
-	}
-}
-
-// serverError builds the ErrServer-class APIError: transport failures carry
-// StatusCode 0; response contract violations carry the serving status.
+// serverError builds the ErrServer-class APIError for a response that
+// violates the answer contract; it carries the serving status.
 func serverError(status int, message string) error {
 	return &llmkit.APIError{
 		Kind:       llmkit.ErrServer,

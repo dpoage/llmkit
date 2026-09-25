@@ -192,11 +192,12 @@ func ExampleObserve() {
 
 func ExampleAPIError() {
 	var err error = &llmkit.APIError{
-		Kind:       llmkit.ErrRateLimited,
-		StatusCode: 429,
-		RetryAfter: 2 * time.Second,
-		Provider:   "anthropic",
-		Message:    "rate limit exceeded",
+		Kind:          llmkit.ErrRateLimited,
+		StatusCode:    429,
+		RetryAfter:    2 * time.Second,
+		HasRetryAfter: true,
+		Provider:      "anthropic",
+		Message:       "rate limit exceeded",
 	}
 	fmt.Println(errors.Is(err, llmkit.ErrRateLimited))
 	fmt.Println(errors.Is(err, llmkit.ErrAuth))

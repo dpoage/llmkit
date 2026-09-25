@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/internal/adapter"
 	"github.com/dpoage/llmkit/retry"
 	"io"
 	"net/http"
@@ -73,7 +75,7 @@ type openaiError struct {
 // Embed returns the embedding for a single text.
 func (o *OpenAICompatibleEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
 	var out []float32
-	err := retry.Do(ctx, o.retry, retryable, func(actx context.Context) error {
+	err := retry.Do(ctx, o.retry, llmkit.Classify, func(actx context.Context) error {
 		res, err := o.doEmbed(actx, []string{text})
 		if err == nil {
 			out = res[0]
@@ -102,7 +104,7 @@ func (o *OpenAICompatibleEmbedder) EmbedBatch(ctx context.Context, texts []strin
 		n := batchChunkSize(len(texts)-start, o.maxBatch)
 		chunk := texts[start : start+n]
 		var res [][]float32
-		err := retry.Do(ctx, o.retry, retryable, func(actx context.Context) error {
+		err := retry.Do(ctx, o.retry, llmkit.Classify, func(actx context.Context) error {
 			r, err := o.doEmbed(actx, chunk)
 			if err == nil {
 				res = r
@@ -150,17 +152,17 @@ func (o *OpenAICompatibleEmbedder) doEmbed(ctx context.Context, texts []string) 
 
 	resp, err := o.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("openai-compatible: request failed: %w", err)
+		return nil, adapter.TransportError("openai-compatible", ctx, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("openai-compatible: read response: %w", err)
+		return nil, adapter.TransportError("openai-compatible", ctx, err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, newStatusError("openai-compatible", resp.StatusCode, resp.Header.Get("Retry-After"), string(respBody))
+		return nil, responseError("openai-compatible", resp, respBody)
 	}
 
 	var result openaiResponse
@@ -168,7 +170,12 @@ func (o *OpenAICompatibleEmbedder) doEmbed(ctx context.Context, texts []string) 
 		return nil, fmt.Errorf("openai-compatible: decode response: %w", err)
 	}
 	if result.Error != nil {
-		return nil, fmt.Errorf("openai-compatible: API error: %s", result.Error.Message)
+		return nil, adapter.NormalizeSDKError("openai-compatible", adapter.VendorError{
+			Status:  200,
+			Type:    result.Error.Type,
+			Message: result.Error.Message,
+			Header:  resp.Header,
+		})
 	}
 	if len(result.Data) != len(texts) {
 		return nil, fmt.Errorf("openai-compatible: expected %d embeddings, got %d", len(texts), len(result.Data))

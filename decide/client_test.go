@@ -18,8 +18,7 @@ import (
 	"github.com/dpoage/llmkit/retry"
 )
 
-// testAPIKey is a distinctive fake credential used to prove keys never leak
-// into error strings.
+// testAPIKey is a distinctive fake credential used to prove keys never leak into error strings.
 const testAPIKey = "sk-super-secret-do-not-echo"
 
 var fastRetry = retry.Config{
@@ -29,8 +28,12 @@ var fastRetry = retry.Config{
 }
 
 // newTestClient points a client at srv with a jitter-free retry policy.
+// A policy without its own Rand gets one pinned to 0.5, a jitter factor of exactly 1.
 func newTestClient(t *testing.T, srvURL string, policy retry.Config) *Client {
 	t.Helper()
+	if policy.Rand == nil {
+		policy.Rand = func() float64 { return 0.5 }
+	}
 	c, err := New(Config{APIKey: testAPIKey, Model: "jev-latest", BaseURL: srvURL, Retry: policy})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -38,8 +41,7 @@ func newTestClient(t *testing.T, srvURL string, policy retry.Config) *Client {
 	return c
 }
 
-// capture records one request's bytes and headers under a lock, so tests can
-// read them after Ask returns without racing the server goroutine.
+// capture records one request's bytes and headers under a lock so tests can read them after Ask returns without racing the server goroutine.
 type capture struct {
 	mu     sync.Mutex
 	body   []byte
@@ -172,8 +174,7 @@ func TestAsk_ResponseNormalized(t *testing.T) {
 	}
 }
 
-// TestAsk_UnaskedKindsAreNil pins that response maps stay nil for question
-// kinds the caller did not ask.
+// TestAsk_UnaskedKindsAreNil pins response maps stay nil for unasked question kinds.
 func TestAsk_UnaskedKindsAreNil(t *testing.T) {
 	srv := httptest.NewServer(okHandler(`{"model":"jev-1.13.0","answers":{"b":{"type":"noul","noul":0.5}},"usage":{"input_tokens":1,"output_tokens":0}}`))
 	defer srv.Close()
@@ -210,6 +211,7 @@ func TestAsk_StatusMapping(t *testing.T) {
 		{"413 too large", http.StatusRequestEntityTooLarge, `{"error":"too large"}`, llmkit.ErrContextTooLong},
 		{"400 plain", http.StatusBadRequest, `{"error":"bad field"}`, llmkit.ErrInvalidRequest},
 		{"400 context length", http.StatusBadRequest, `{"error":"prompt is too long"}`, llmkit.ErrContextTooLong},
+		{"400 context length past byte 200", http.StatusBadRequest, `{"error":"` + strings.Repeat("x", 250) + ` prompt is too long: context length exceeded"}`, llmkit.ErrContextTooLong},
 		{"422 validation", 422, `{"error":"state must be a string"}`, llmkit.ErrInvalidRequest},
 		{"529 overloaded", 529, `{"error":"overloaded"}`, llmkit.ErrOverloaded},
 		{"500 server", http.StatusInternalServerError, `{"error":"boom"}`, llmkit.ErrServer},
@@ -240,6 +242,9 @@ func TestAsk_StatusMapping(t *testing.T) {
 			if apiErr.StatusCode != tt.status {
 				t.Errorf("StatusCode = %d, want %d", apiErr.StatusCode, tt.status)
 			}
+			if len(apiErr.Message) > 200+len("...") {
+				t.Errorf("len(Message) = %d, want at most 200 plus the ellipsis", len(apiErr.Message))
+			}
 			if apiErr.Provider != "typesafe" {
 				t.Errorf("Provider = %q, want typesafe", apiErr.Provider)
 			}
@@ -250,8 +255,7 @@ func TestAsk_StatusMapping(t *testing.T) {
 	}
 }
 
-// TestAsk_RetryAfterCappedAtMaxDelay proves the cap: Retry-After is an hour,
-// MaxDelay 50ms, so an uncapped sleep would stall the test for an hour.
+// TestAsk_RetryAfterCappedAtMaxDelay pins the cap: a one-hour Retry-After must not stall past MaxDelay.
 func TestAsk_RetryAfterCappedAtMaxDelay(t *testing.T) {
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -353,16 +357,23 @@ func TestAsk_ParentCancellationTerminal(t *testing.T) {
 	if got := hits.Load(); got != 1 {
 		t.Errorf("hits = %d, want 1 (parent cancellation is terminal, never retried)", got)
 	}
+	// adapter.TransportError chains the caller's already-Canceled ctx as a
+	// plain error (never as an *llmkit.APIError), so Classify's cancellation
+	// row makes it terminal before the retry loop asks about a transport
+	// ErrServer.
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("err = %v, want it to unwrap to context.Canceled", err)
 	}
-	if !errors.Is(err, llmkit.ErrServer) {
-		t.Errorf("err = %v, want it to unwrap to ErrServer (transport failure)", err)
+	var apiErr *llmkit.APIError
+	if errors.As(err, &apiErr) {
+		t.Errorf("err = %v (%T), want no *llmkit.APIError once the caller cancelled", err, err)
+	}
+	if !strings.Contains(err.Error(), providerName) {
+		t.Errorf("err = %v, want the provider named in the text", err)
 	}
 }
 
-// TestAsk_PerAttemptTimeoutRetried mirrors the embed hardening guarantee: a
-// stalled round-trip is aborted by the per-attempt deadline and retried.
+// TestAsk_PerAttemptTimeoutRetried pins a stalled round-trip is aborted by the per-attempt deadline and retried.
 func TestAsk_PerAttemptTimeoutRetried(t *testing.T) {
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -382,10 +393,48 @@ func TestAsk_PerAttemptTimeoutRetried(t *testing.T) {
 	if got := hits.Load(); got != 2 {
 		t.Errorf("hits = %d, want 2 (timeouts are retried)", got)
 	}
+	var apiErr *llmkit.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %T, want *llmkit.APIError (RequestTimeout under a live parent is not a parent cancellation)", err)
+	}
+	if !errors.Is(err, llmkit.ErrServer) || apiErr.StatusCode != 0 {
+		t.Errorf("Kind = %v, StatusCode = %d, want ErrServer/0 (adapter.TransportError's shape)", apiErr.Kind, apiErr.StatusCode)
+	}
 }
 
-// TestAsk_LegendOrderingFollowsIndex serves legend and probability keys out
-// of order to prove conversion sorts by numeric index, not server key order.
+// TestAsk_ParentDeadlineDuringBackoffTerminal pins a parent deadline that
+// expires while the loop sleeps between attempts (not mid-attempt) is
+// terminal: the retryable 500 that triggered the wait never returns as
+// an APIError.
+func TestAsk_ParentDeadlineDuringBackoffTerminal(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		writeStatus(w, http.StatusInternalServerError, `{"error":"boom"}`)
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+
+	c := newTestClient(t, srv.URL, retry.Config{MaxAttempts: 3, BaseDelay: 300 * time.Millisecond, MaxDelay: 300 * time.Millisecond, Jitter: 0})
+	_, err := c.Ask(ctx, "s", Questions{"q": Noul{Instructions: "i"}})
+	if err == nil {
+		t.Fatal("expected a deadline error")
+	}
+	if got := hits.Load(); got != 1 {
+		t.Errorf("hits = %d, want 1 (the deadline fires during the backoff sleep, before a second attempt)", got)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want it to unwrap to context.DeadlineExceeded", err)
+	}
+	var apiErr *llmkit.APIError
+	if errors.As(err, &apiErr) {
+		t.Errorf("err = %v (%T), want no *llmkit.APIError once the parent deadline ends the loop", err, err)
+	}
+}
+
+// TestAsk_LegendOrderingFollowsIndex pins conversion sorts by numeric index, not server key order.
 func TestAsk_LegendOrderingFollowsIndex(t *testing.T) {
 	srv := httptest.NewServer(okHandler(`{"model":"jev-1.13.0","answers":{"quality":{"type":"score","score":0.75,` +
 		`"legend":{"2":"good","0":"bad","1":"ok"},"probabilities":{"2":0.1,"0":0.6,"1":0.3},"confidence":0.5}},"usage":{}}`))
@@ -540,8 +589,7 @@ func TestAsk_RecorderFiresOnceWithResponseModel(t *testing.T) {
 	if ev.Provider != "typesafe" {
 		t.Errorf("Provider = %q, want typesafe", ev.Provider)
 	}
-	// The alias sent was jev-latest; the ledger must show the versioned id
-	// the server reported.
+	// The ledger records the versioned id the server reported, not the alias sent.
 	if ev.Model != "jev-1.13.0" {
 		t.Errorf("Model = %q, want the response model jev-1.13.0, not the requested alias", ev.Model)
 	}
@@ -574,8 +622,7 @@ func TestAsk_RecorderSilentOnFailure(t *testing.T) {
 	}
 }
 
-// TestAsk_APIKeyNeverInErrorStrings runs every error path with a distinctive
-// key and asserts the key appears in neither Error() nor the %+v dump.
+// TestAsk_APIKeyNeverInErrorStrings pins the credential never appears in Error() nor %+v dumps across every error path.
 func TestAsk_APIKeyNeverInErrorStrings(t *testing.T) {
 	run := func(t *testing.T, err error) {
 		t.Helper()
@@ -645,10 +692,7 @@ func TestAsk_ConcurrentAsksRaceClean(t *testing.T) {
 	}
 }
 
-// TestAsk_RetryAfterSecondsHonored proves the server delay wins over
-// exponential backoff for every retried status: BaseDelay is an hour, so
-// only the one-second Retry-After can let the test finish this fast. 429 and
-// 503 cover both halves of the retried boundary.
+// TestAsk_RetryAfterSecondsHonored pins the server delay wins over exponential backoff for every retried status.
 func TestAsk_RetryAfterSecondsHonored(t *testing.T) {
 	for _, status := range []int{http.StatusTooManyRequests, http.StatusServiceUnavailable} {
 		t.Run(fmt.Sprintf("%d", status), func(t *testing.T) {
@@ -683,9 +727,7 @@ func TestAsk_RetryAfterSecondsHonored(t *testing.T) {
 	}
 }
 
-// TestAsk_RetryAfterImmediateHint pins the presence rule: a Retry-After
-// header whose delay clamps to 0 — a literal zero, or a past HTTP-date —
-// means an immediate retry, not a BaseDelay-sized sleep.
+// TestAsk_RetryAfterImmediateHint pins a Retry-After whose delay clamps to 0 (literal zero or past HTTP-date) means an immediate retry.
 func TestAsk_RetryAfterImmediateHint(t *testing.T) {
 	pastDate := time.Now().Add(-time.Minute).UTC().Format(http.TimeFormat)
 	tests := []struct {
@@ -708,8 +750,7 @@ func TestAsk_RetryAfterImmediateHint(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			// BaseDelay 500ms: an exponential or honored-as-written sleep
-			// would blow the 400ms budget; only the immediate hint fits.
+			// BaseDelay 500ms: any honored-as-written or exponential sleep would blow the 400ms budget.
 			c := newTestClient(t, srv.URL, retry.Config{MaxAttempts: 2, BaseDelay: 500 * time.Millisecond, MaxDelay: 30 * time.Second, Jitter: 0})
 			start := time.Now()
 			_, err := c.Ask(context.Background(), "s", mixedQuestions())
@@ -727,10 +768,7 @@ func TestAsk_RetryAfterImmediateHint(t *testing.T) {
 	}
 }
 
-// TestAsk_RetryBoundary pins the terminal side of the retry boundary: auth
-// and validation statuses, and a 200 response violating the body contract,
-// end the loop after one attempt even with retries available — a
-// deterministic violation must not burn the retry budget.
+// TestAsk_RetryBoundary pins auth and validation statuses end the loop after one attempt — a deterministic client-error status must not burn the retry budget.
 func TestAsk_RetryBoundary(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -739,7 +777,6 @@ func TestAsk_RetryBoundary(t *testing.T) {
 	}{
 		{"401 auth", http.StatusUnauthorized, `{"error":"bad key"}`},
 		{"422 validation", 422, `{"error":"state must be a string"}`},
-		{"violating 200 body", http.StatusOK, `{"model":"m","answers":{},"usage":{}}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -759,5 +796,114 @@ func TestAsk_RetryBoundary(t *testing.T) {
 				t.Errorf("hits = %d, want 1 (terminal errors never retry)", got)
 			}
 		})
+	}
+}
+
+// TestAsk_AnswerContractViolationRetried pins a 200 response that violates the answer contract is retried like any other ErrServer.
+func TestAsk_AnswerContractViolationRetried(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		writeStatus(w, http.StatusOK, `{"model":"m","answers":{},"usage":{}}`)
+	}))
+	defer srv.Close()
+
+	var sleeps []time.Duration
+	policy := retry.Config{
+		MaxAttempts: 3,
+		BaseDelay:   time.Millisecond,
+		MaxDelay:    5 * time.Millisecond,
+		Sleep: func(_ context.Context, d time.Duration) error {
+			sleeps = append(sleeps, d)
+			return nil
+		},
+	}
+	c := newTestClient(t, srv.URL, policy)
+	_, err := c.Ask(context.Background(), "s", mixedQuestions())
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if got := hits.Load(); got != 3 {
+		t.Errorf("hits = %d, want 3 (R4: a 200 contract violation retries like any ErrServer)", got)
+	}
+	if len(sleeps) != 2 {
+		t.Errorf("sleeps = %v, want 2 waits between 3 attempts", sleeps)
+	}
+	var apiErr *llmkit.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %T, want *llmkit.APIError", err)
+	}
+	if !errors.Is(err, llmkit.ErrServer) {
+		t.Errorf("Kind = %v, want ErrServer", apiErr.Kind)
+	}
+	if apiErr.StatusCode != http.StatusOK {
+		t.Errorf("StatusCode = %d, want 200", apiErr.StatusCode)
+	}
+}
+
+// TestAsk_SubBadRequestStatusIsErrServerRetried pins a sub-400 status with no vendor Type falls back to ErrServer and is retried.
+func TestAsk_SubBadRequestStatusIsErrServerRetried(t *testing.T) {
+	for _, status := range []int{http.StatusFound, http.StatusNoContent} {
+		t.Run(fmt.Sprintf("%d", status), func(t *testing.T) {
+			var hits atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits.Add(1)
+				w.WriteHeader(status)
+			}))
+			defer srv.Close()
+
+			c := newTestClient(t, srv.URL, fastRetry)
+			_, err := c.Ask(context.Background(), "s", Questions{"q": Noul{Instructions: "i"}})
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			var apiErr *llmkit.APIError
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("err = %T, want *llmkit.APIError", err)
+			}
+			if !errors.Is(err, llmkit.ErrServer) {
+				t.Errorf("Kind = %v, want ErrServer", apiErr.Kind)
+			}
+			if apiErr.StatusCode != status {
+				t.Errorf("StatusCode = %d, want %d", apiErr.StatusCode, status)
+			}
+			if got := hits.Load(); got != int32(fastRetry.MaxAttempts) {
+				t.Errorf("hits = %d, want %d (retried like any ErrServer)", got, fastRetry.MaxAttempts)
+			}
+		})
+	}
+}
+
+// TestAsk_MalformedBaseURLIsErrInvalidRequest pins a BaseURL that cannot become a valid request is a deterministic client-side defect: ErrInvalidRequest, terminal, no retry.
+func TestAsk_MalformedBaseURLIsErrInvalidRequest(t *testing.T) {
+	var sleeps []time.Duration
+	policy := retry.Config{
+		MaxAttempts: 3,
+		BaseDelay:   time.Millisecond,
+		Sleep: func(_ context.Context, d time.Duration) error {
+			sleeps = append(sleeps, d)
+			return nil
+		},
+	}
+	c, err := New(Config{APIKey: testAPIKey, Model: "jev-latest", BaseURL: "http://a b", Retry: policy})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, askErr := c.Ask(context.Background(), "s", Questions{"q": Noul{Instructions: "i"}})
+	if askErr == nil {
+		t.Fatal("expected an error")
+	}
+	if !errors.Is(askErr, llmkit.ErrInvalidRequest) {
+		t.Errorf("err = %v, want ErrInvalidRequest", askErr)
+	}
+	var apiErr *llmkit.APIError
+	if !errors.As(askErr, &apiErr) {
+		t.Fatalf("err = %T, want *llmkit.APIError", askErr)
+	}
+	if apiErr.StatusCode != 0 {
+		t.Errorf("StatusCode = %d, want 0", apiErr.StatusCode)
+	}
+	if len(sleeps) != 0 {
+		t.Errorf("sleeps = %v, want none: a malformed BaseURL must not retry", sleeps)
 	}
 }

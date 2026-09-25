@@ -1,6 +1,7 @@
 package anthropic
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	llmkit "github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/retry"
 )
 
 // SSE event shapes mirror the vendor SDK's streaming fixtures
@@ -432,47 +434,6 @@ func TestAnthropicStreamFnErrorCancels(t *testing.T) {
 	}
 }
 
-// TestAnthropicStreamErrorEvent: a mid-stream error event goes through the
-// same normalizeErr path as Complete. The event rides an already-committed
-// HTTP 200 response, so ClassifyStatus's default branch classifies it
-// ErrInvalidRequest — the same outcome a 200-carrying body produces on
-// the non-streaming path.
-func TestAnthropicStreamErrorEvent(t *testing.T) {
-	events := []sseEvent{
-		{"message_start", `{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-test","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}`},
-		{"content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`},
-		{"content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}`},
-		{"error", `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`},
-	}
-	base := newServer(t, sseHandler(events))
-	ad := newStreamAdapter(t, base)
-
-	var got []llmkit.Delta
-	resp, err := ad.Stream(t.Context(), simpleRequest(), func(d llmkit.Delta) error {
-		got = append(got, d)
-		return nil
-	})
-	if err == nil {
-		t.Fatal("Stream: want error, got nil")
-	}
-	var apiErr *llmkit.APIError
-	if !errors.As(err, &apiErr) {
-		t.Fatalf("err = %T (%v), want *llmkit.APIError", err, err)
-	}
-	if apiErr.Kind != llmkit.ErrInvalidRequest {
-		t.Errorf("Kind = %v, want ErrInvalidRequest (200-carrying error event)", apiErr.Kind)
-	}
-	if apiErr.Provider != "anthropic" {
-		t.Errorf("Provider = %q", apiErr.Provider)
-	}
-	if !reflect.DeepEqual(resp, llmkit.Response{}) {
-		t.Errorf("resp = %#v, want zero Response", resp)
-	}
-	if len(got) != 1 || got[0].Text != "partial" {
-		t.Errorf("deltas = %#v, want the single pre-error fragment", got)
-	}
-}
-
 // TestAnthropicStreamTruncated: a connection that closes cleanly before
 // message_stop is an error, never a partial success — Complete fails on
 // the equivalent truncated body.
@@ -707,6 +668,142 @@ func TestAnthropicThinkingRawPadding(t *testing.T) {
 			}
 			if hits != 0 {
 				t.Errorf("wire hits = %d, want 0 — the guard must fire before any wire call", hits)
+			}
+		})
+	}
+}
+
+// TestAnthropicStreamErrorEvent (rewritten for in-band SSE error
+// classification, S3): a mid-stream error event goes through the same
+// normalizeErr path as Complete, and the vendor type in the event body
+// classifies in band — an already-committed HTTP 200 no longer dumps every
+// such event into ErrInvalidRequest. The overloaded error arrives AFTER a
+// delivered delta, so WithRetry must NOT retry it: one wire hit (the
+// delivered guard holds).
+func TestAnthropicStreamErrorEvent(t *testing.T) {
+	events := []sseEvent{
+		{"message_start", `{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-test","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}`},
+		{"content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`},
+		{"content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}`},
+		{"error", `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`},
+	}
+	base := newServer(t, sseHandler(events))
+	ad := newStreamAdapter(t, base)
+
+	var got []llmkit.Delta
+	resp, err := ad.Stream(t.Context(), simpleRequest(), func(d llmkit.Delta) error {
+		got = append(got, d)
+		return nil
+	})
+	if err == nil {
+		t.Fatal("Stream: want error, got nil")
+	}
+	var apiErr *llmkit.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %T (%v), want *llmkit.APIError", err, err)
+	}
+	if !errors.Is(err, llmkit.ErrOverloaded) {
+		t.Errorf("Kind = %v, want ErrOverloaded (in-band overloaded_error on a 200 stream)", apiErr.Kind)
+	}
+	if apiErr.StatusCode != http.StatusOK {
+		t.Errorf("StatusCode = %d, want 200 (the committed stream's status)", apiErr.StatusCode)
+	}
+	if apiErr.Provider != "anthropic" {
+		t.Errorf("Provider = %q", apiErr.Provider)
+	}
+	if !reflect.DeepEqual(resp, llmkit.Response{}) {
+		t.Errorf("resp = %#v, want zero Response", resp)
+	}
+	if len(got) != 1 || got[0].Text != "partial" {
+		t.Errorf("deltas = %#v, want the single pre-error fragment", got)
+	}
+
+	// One wire hit under WithRetry: the delivered delta forbids a retry.
+	hits := 0
+	sseBase := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		sseHandler(events)(w, r)
+	})
+	retrying := llmkit.WithRetry(newStreamAdapter(t, sseBase), retry.Config{
+		MaxAttempts: 2,
+		BaseDelay:   time.Millisecond,
+		Sleep:       func(context.Context, time.Duration) error { return nil },
+	})
+	_, err = llmkit.Stream(t.Context(), retrying, simpleRequest(), func(llmkit.Delta) error { return nil })
+	if !errors.Is(err, llmkit.ErrOverloaded) {
+		t.Errorf("WithRetry err = %v, want ErrOverloaded", err)
+	}
+	if hits != 1 {
+		t.Errorf("wire hits = %d, want 1 (a delivered delta forbids retry)", hits)
+	}
+}
+
+// TestAnthropicStreamErrorFirstEventClassifiedByType pins a 200 stream whose FIRST event is the error event classifies in band by vendor type: overloaded_error is retryable (two hits); invalid_request_error is terminal (one hit). Both keep StatusCode 200 with no delivered delta.
+func TestAnthropicStreamErrorFirstEventClassifiedByType(t *testing.T) {
+	start := `{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-test","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}`
+	tests := []struct {
+		name     string
+		events   []sseEvent
+		wantKind error
+		wantHits int
+	}{
+		{
+			name: "overloaded_error",
+			events: []sseEvent{
+				{"message_start", start},
+				{"error", `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`},
+			},
+			wantKind: llmkit.ErrOverloaded,
+			wantHits: 2,
+		},
+		{
+			name: "invalid_request_error",
+			events: []sseEvent{
+				{"message_start", start},
+				{"error", `{"type":"error","error":{"type":"invalid_request_error","message":"bad"}}`},
+			},
+			wantKind: llmkit.ErrInvalidRequest,
+			wantHits: 1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			hits := 0
+			base := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+				hits++
+				sseHandler(tc.events)(w, r)
+			})
+			client := llmkit.WithRetry(newStreamAdapter(t, base), retry.Config{
+				MaxAttempts: 2,
+				BaseDelay:   time.Millisecond,
+				Sleep:       func(context.Context, time.Duration) error { return nil },
+			})
+			var got []llmkit.Delta
+			resp, err := llmkit.Stream(context.Background(), client, simpleRequest(), func(d llmkit.Delta) error {
+				got = append(got, d)
+				return nil
+			})
+			if err == nil {
+				t.Fatal("Stream: want error, got nil")
+			}
+			if !errors.Is(err, tc.wantKind) {
+				t.Errorf("err = %v, want %v (in-band type classification)", err, tc.wantKind)
+			}
+			var apiErr *llmkit.APIError
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("err = %T (%v), want *llmkit.APIError", err, err)
+			}
+			if apiErr.StatusCode != http.StatusOK {
+				t.Errorf("StatusCode = %d, want 200 (the committed stream's status)", apiErr.StatusCode)
+			}
+			if !reflect.DeepEqual(resp, llmkit.Response{}) {
+				t.Errorf("resp = %#v, want zero Response", resp)
+			}
+			if len(got) != 0 {
+				t.Errorf("deltas = %#v, want none (the error event came first)", got)
+			}
+			if hits != tc.wantHits {
+				t.Errorf("wire hits = %d, want %d", hits, tc.wantHits)
 			}
 		})
 	}

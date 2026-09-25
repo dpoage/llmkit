@@ -124,6 +124,28 @@ entry below is marked.
   exported and called by `New` itself, so `llmkit.Observe` callers pass
   the same value instead of restating the rule.
 
+- `llmkit`: `llmkit.Classify`, the kit's one retryability rule, in
+  `retry.Do`'s classify shape: cancellation (anything chaining
+  `context.Canceled`, including an `*APIError` wrapping it) is terminal,
+  `*APIError` with kind `ErrRateLimited`/`ErrServer`/`ErrOverloaded` is
+  retryable honouring the carried `Retry-After`, and everything else is
+  terminal. `APIError` gains `HasRetryAfter` — a presence bit;
+  `RetryAfter` is meaningful only when it is true, and a present zero
+  means retry immediately. **Breaking:** literal constructors that relied
+  on `RetryAfter > 0` to mark a carried delay must set `HasRetryAfter`.
+- `llmkit/retry`: `retry.Config.Or(base)` completes a partial config
+  field-wise — each unset schedule field (`MaxAttempts <= 0`,
+  `BaseDelay <= 0`, `MaxDelay <= 0`, `Jitter == 0`, `RequestTimeout <= 0`)
+  is taken from `base`; the `Sleep`/`Rand` test hooks pass through
+  untouched. `provider.New`, `decide.New`, and `embed.NewEmbedder` each
+  run their `Config.Retry.Or(<their defaults>)`, so a partial
+  `Config.Retry` keeps its fields instead of being discarded wholesale
+  (`provider.New` with `Retry{MaxAttempts: -1}` now resolves to four
+  attempts). **Breaking:** under every constructor that calls `Or`,
+  `Jitter` 0 counts as unset — the explicit value "no jitter" no longer
+  pins; the deterministic escape is the `Config.Rand` hook (a function
+  that returns 0.5 produces exactly 1.0 jitter factors).
+
 ### Changed
 
 - **Breaking:** `FinalizeEvent` loses `Iterations` — `Event.Step` on the
@@ -174,6 +196,120 @@ entry below is marked.
   behavior is unchanged except that every in-tree loop now applies
   `internal/retry`'s stricter negative-`Retry-After` and overflow clamps,
   which no in-tree config could reach.
+
+- **Breaking:** unknown non-APIError errors and cancellation are terminal
+  under `WithRetry` — the hand-rolled root classifier used to retry any
+  error it did not recognize. Third-party `Clients` whose `Complete` or
+  `Stream` returns plain errors, bare `context.Canceled`, or an
+  `*APIError` wrapping `Canceled` go from retried to terminal; wrap
+  transport-shaped failures in an `*APIError{Kind: ErrServer}` (as the
+  in-tree adapters do) to keep them retryable.
+- **Breaking:** the kit's adapters no longer surface a caller's cancelled
+  context as an `*APIError`: they return a plain error chaining
+  `context.Canceled`. Consumers (such as bugbot's `isTransportError`) that
+  treated `StatusCode == 0` as "transport failure" must check
+  `StatusCode == 0 && errors.Is(err, llmkit.ErrServer)` instead — a
+  pre-wire refusal is also `{Kind: ErrInvalidRequest, StatusCode: 0}`,
+  and the `*APIError` with `{ErrServer, 0}` also covers a response the
+  adapter could not decode, not only a transport failure; `Kind` is the
+  discriminator.
+- `Retry-After` is parsed and honoured on every status, not only 429/529:
+  a 503 carrying the header is now waited out (worst case
+  `(MaxAttempts − 1) × MaxDelay` — the cap applies to each of the waits
+  between the `MaxAttempts` attempts).
+- In-band SSE errors are classified by the vendor type at `StatusCode`
+  200 (the stream was opened on a 2xx response): an Anthropic 200 stream
+  whose `error` event carries `overloaded_error` returns `ErrOverloaded`,
+  and an OpenAI stream whose data line carries an `error.type` of
+  `invalid_request_error`/`server_error` classifies accordingly. Before,
+  the two vendors collapsed differently: an Anthropic in-band error
+  returned `ErrInvalidRequest` (terminal, one wire hit), while OpenAI and
+  openai-compatible reported `APIError{Kind: ErrServer, StatusCode: 0}`
+  and retried — so an OpenAI in-band `invalid_request_error` (and any
+  auth-class type) goes from retried to terminal, and a `server_error`
+  keeps retrying but now with its real status.
+- A Google status below 400 (302 included) classifies `ErrServer`
+  (retryable) instead of `ErrInvalidRequest`: genai exposes no vendor
+  type, and an untyped sub-400 failure is a server-class failure. Real 4xx
+  statuses still classify `ErrInvalidRequest`.
+- `retry.Do`: when the caller's context is done at the point `Do` returns,
+  it never returns a last error the classifier marks retryable: that error
+  is replaced by a plain error chaining `ctx.Err()` that carries its text
+  (`%v`, never `%w`) — including a parent deadline that expires
+  mid-attempt, whose adapter `ErrServer` transport error used to surface as
+  a retryable `*APIError`. The replacement is terminal under a classifier
+  that treats context errors as terminal, as `llmkit.Classify` does, so
+  `WithRetry` never returns a retryable error once the caller's context is
+  done — a stream error after a delivered delta included. A last error the
+  classifier marks terminal is returned as-is, identity kept (an auth
+  `*APIError`, a stream callback's sentinel, an adapter's own cancellation
+  error). Before, `Do` returned fn's last error.
+- `retry.ParseRetryAfter`: a negative integer clamps to 0, and an integer
+  too large for `time.Duration` — including one `strconv` cannot parse —
+  saturates to the maximum, so `MaxDelay` caps it. Before, an integer
+  outside the int64 range read as absent (the backoff schedule applied),
+  and any other integer beyond ±9223372036 wrapped — to 0 (an immediate
+  retry) or to an arbitrary delay.
+- `retry`: the exponential backoff is capped at `MaxDelay` after jitter is
+  applied — jitter never pushes a sleep past the cap (BaseDelay 20s,
+  MaxDelay 30s, Jitter 0.2 slept 36s before).
+- **Breaking:** `decide.Ask`'s caller cancellation and a deadline it set
+  are no longer an `*llmkit.APIError`: they now surface as an error
+  chaining the context error (`errors.Is(err, ctx.Err())`), never
+  retryable — the same shape `retry.Do` gives every other kit caller once
+  the caller's context is done. Every other error from `Ask` stays an
+  `*llmkit.APIError` with `Provider "typesafe"`.
+- `decide`: `Ask` retries a 200 response that violates the answer
+  contract like any other `ErrServer` (each retry re-sends the same
+  request) instead of returning after one attempt; `Ask` now carries
+  `APIError.HasRetryAfter`; a non-200 status below 400 (a redirect
+  without a client-visible resolution, an unexpected 2xx) now
+  classifies `ErrServer` (retryable) instead of `ErrInvalidRequest`,
+  since the vendor exposes no `Type` to classify a sub-400 failure
+  from; a `BaseURL` that `net/url` cannot parse now fails immediately
+  as `ErrInvalidRequest` instead of being retried to `MaxAttempts`;
+  `decide.Config.Retry` completes via `retry.Config.Or` — see the
+  `retry.Config.Or` bullet above for the partial-config rules.
+- **Breaking:** `embed`'s errors join the kit vocabulary through the same
+  normalization the chat adapters use, and `llmkit.Classify` alone
+  decides retryability. A non-200 response is a `*llmkit.APIError`: 429 →
+  `ErrRateLimited`, 401/403 → `ErrAuth`, 529 → `ErrOverloaded`, any other
+  status 500 or above → `ErrServer`, a 400 whose body reports a
+  context-length overflow → `ErrContextTooLong`, and any non-200 status
+  below 400 (a 204, a 302 without `Location`) → `ErrServer`, retried.
+  The status is classified against the full response body; `Message`
+  keeps the first 200 bytes. A transport failure (dial, TLS, EOF while
+  reading the body, a stalled attempt reaped by the per-attempt
+  timeout) is `{ErrServer, 0}` and retried — a dial failure to a closed
+  server used to give up after one hit. An openai-compatible 200 whose
+  body carries an error object is a `*APIError` with `StatusCode` 200
+  and the `Kind` its type field maps to; a missing or unknown type is
+  `ErrServer`, and the route honors `Retry-After`. Before, that
+  response was a plain error, terminal after one hit; now it is
+  retried unless its type maps to a terminal `Kind`. The caller's
+  cancellation is never an `*APIError`: it is the plain context error,
+  as it already was. `embed.Config.Validate`, `NewEmbedder`,
+  `NewOllamaEmbedder`, and `NewOpenAICompatibleEmbedder` wrap
+  construction and validation refusals in `llmkit.ErrInvalidRequest`. A
+  decode failure, a wrong embedding count, an index error, and a
+  dimension mismatch stay plain terminal errors: `Classify` never
+  retries an error outside the kit vocabulary. Error text changes with
+  the type: `ollama: HTTP 429: slow down` is now
+  `llmkit: ollama error (status 429): slow down`, a transport failure
+  reads `llmkit: ollama error: ...` instead of
+  `ollama: request failed: ...`, and a cancel mid body read reads
+  `llmkit: ollama: context canceled` instead of
+  `ollama: read response: context canceled` (the `openai-compatible`
+  prefix changes the same way). `embed`'s private `statusError` type
+  and classifier are deleted; `embed/retry.go` is gone.
+- **Breaking:** `embed.Config.Retry` is completed by `retry.Config.Or`
+  against the embed defaults (3 attempts, 60s per-attempt timeout, the
+  kit's `BaseDelay`/`MaxDelay`/`Jitter`) instead of embed's own
+  Jitter-literal resolver — see the `retry.Config.Or` bullet above for
+  the partial-config rules. `LoadConfig` now returns
+  `Retry.BaseDelay`, `MaxDelay`, and `Jitter` at zero (before: 500ms,
+  30s, 0.2) and sets only `RequestTimeout`, from `<PREFIX>_EMBED_TIMEOUT`;
+  the policy an embedder resolves from a loaded `Config` is unchanged.
 
 ## [0.5.0] - 2026-09-20
 

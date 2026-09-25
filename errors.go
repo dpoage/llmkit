@@ -1,6 +1,7 @@
 package llmkit
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -39,13 +40,31 @@ var (
 type APIError struct {
 	// Kind is the sentinel error this maps to (ErrRateLimited, ErrAuth, ...).
 	Kind error
-	// StatusCode is the HTTP status, or 0 if not an HTTP error (e.g. a timeout
-	// or transport error).
+	// StatusCode is the HTTP status of the response. A 0 means no usable
+	// HTTP status: a transport failure (dial, reset, per-attempt timeout)
+	// carries Kind ErrServer; a response the adapter could not decode also
+	// carries Kind ErrServer; a pre-wire refusal carries Kind
+	// ErrInvalidRequest. Kind is the discriminator — a 0 status with
+	// ErrServer is retryable, a 0 status with ErrInvalidRequest is not.
+	// The kit's adapters report a caller's cancelled context as a plain
+	// error chaining context.Canceled, never an *APIError. When the
+	// caller's context is done as the retry stage returns ([retry.Do]),
+	// a retryable *APIError never comes back: it is replaced by a plain
+	// error chaining ctx.Err() that carries its text — an ErrServer
+	// transport failure cut short by the caller's deadline included. A
+	// terminal *APIError (a 401, say) is returned as-is.
 	StatusCode int
-	// RetryAfter is the server-suggested wait before retrying, or 0 if none was
-	// provided. Only populated for ErrRateLimited / ErrOverloaded responses that
-	// carried a Retry-After header.
+	// RetryAfter is the server-suggested wait before retrying. The header
+	// is parsed on every status, not only 429/529, but honoured only when
+	// Kind is retryable ([Classify]). It is meaningful only when
+	// HasRetryAfter is true; a present zero means retry immediately. The
+	// Google SDK hides response headers, so a Google error never carries
+	// one.
 	RetryAfter time.Duration
+	// HasRetryAfter reports that the response carried a Retry-After header;
+	// RetryAfter is meaningful only when it is true, and a present zero
+	// means retry immediately.
+	HasRetryAfter bool
 	// Provider names the backend that produced the error (e.g. "anthropic").
 	Provider string
 	// Message is a short description: either fixed llmkit text or text
@@ -74,33 +93,37 @@ func (e *APIError) Unwrap() []error {
 	return []error{e.Kind}
 }
 
-// retryable reports whether this error class is worth retrying.
-func (e *APIError) retryable() bool {
-	switch e.Kind {
-	case ErrRateLimited, ErrServer, ErrOverloaded:
-		return true
-	default:
-		return false
+// Classify is the kit's retryability rule, in retry.Do's classify shape:
+// one classifier for every error Complete, Stream, and the retry stage
+// return. Row order is precedence — cancellation is decided before Kind.
+//
+//   - nil, or an error chaining context.Canceled (the caller's context, at
+//     any depth): not retryable. A retry would run against a dead context,
+//     and this holds even when the error is an *APIError wrapping
+//     Canceled.
+//   - *APIError with Kind ErrRateLimited, ErrServer, or ErrOverloaded:
+//     retryable, honouring the server's Retry-After when HasRetryAfter is
+//     true (a present zero delay retries immediately).
+//   - every other *APIError Kind, and every non-APIError error (including
+//     a bare context.DeadlineExceeded): not retryable.
+//
+// When [retry.Do] runs with Classify and the caller's context is done as
+// it returns, the error is never retryable here: Do replaces a retryable
+// last error with a plain error chaining ctx.Err() — terminal by the
+// Canceled row for a cancelled context, by the last row for a deadline —
+// and returns a terminal one as-is.
+func Classify(err error) (retryAfter time.Duration, hasRetryAfter, retryable bool) {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return 0, false, false
 	}
-}
-
-// isRetryable reports whether err is a retryable APIError or a bare transport
-// error (timeout / connection reset) that the adapters could not classify.
-func isRetryable(err error) bool {
 	var apiErr *APIError
 	if errors.As(err, &apiErr) {
-		return apiErr.retryable()
+		switch apiErr.Kind {
+		case ErrRateLimited, ErrServer, ErrOverloaded:
+			return apiErr.RetryAfter, apiErr.HasRetryAfter, true
+		default:
+			return 0, false, false
+		}
 	}
-	// Unclassified non-API errors (transport timeouts, connection resets) are
-	// transient by nature; retrying is the safer default.
-	return err != nil
-}
-
-// retryAfter extracts a server-suggested delay from err, if any.
-func retryAfter(err error) (time.Duration, bool) {
-	var apiErr *APIError
-	if errors.As(err, &apiErr) && apiErr.RetryAfter > 0 {
-		return apiErr.RetryAfter, true
-	}
-	return 0, false
+	return 0, false, false
 }

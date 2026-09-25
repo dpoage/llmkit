@@ -18,7 +18,8 @@ func simpleRequest() Request {
 }
 
 // blockingClient blocks each Complete call until its context is done, then
-// returns ctx.Err().
+// fails the attempt the way an adapter's transport normalization does: an
+// *APIError{Kind: ErrServer} with the context error chained.
 type blockingClient struct {
 	// blockAttempts is the number of leading attempts to block.
 	blockAttempts int
@@ -32,15 +33,24 @@ func (b *blockingClient) Complete(ctx context.Context, req Request) (Response, e
 	b.calls++
 	if i < b.blockAttempts {
 		<-ctx.Done()
-		// Mimic an adapter that received a transport/timeout error it could not
-		// classify: it returns the raw context error (bare context.DeadlineExceeded).
-		return Response{}, ctx.Err()
+		// A stalled attempt is what every real adapter sees; the adapter's
+		// normalization wraps it as *APIError{Kind: ErrServer} with the
+		// context error chained (a bare context error is terminal under
+		// llmkit.Classify and would never be retried).
+		return Response{}, &APIError{
+			Kind:     ErrServer,
+			Provider: "fake",
+			Message:  ctx.Err().Error(),
+			Err:      ctx.Err(),
+		}
 	}
 	return Response{Text: "ok", StopReason: StopEndTurn}, nil
 }
 
 // probingClient records each attempt's context deadline, fails transiently
-// for the first probeAttempts attempts, then succeeds.
+// for the first probeAttempts attempts with the shape a retried adapter
+// failure carries (*APIError{Kind: ErrServer} — a plain error is terminal
+// under Classify), then succeeds.
 type probingClient struct {
 	probeAttempts int
 	calls         int
@@ -55,7 +65,7 @@ func (p *probingClient) Complete(ctx context.Context, req Request) (Response, er
 	p.calls++
 	p.deadline, p.hasDeadline = ctx.Deadline()
 	if i < p.probeAttempts {
-		return Response{}, errors.New("transient")
+		return Response{}, &APIError{Kind: ErrServer, Provider: "fake", Message: "transient"}
 	}
 	return Response{Text: "ok", StopReason: StopEndTurn}, nil
 }

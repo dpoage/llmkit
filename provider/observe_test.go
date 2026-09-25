@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"reflect"
 	"strings"
@@ -363,4 +364,50 @@ func TestNew_AttemptTagMatchesTag(t *testing.T) {
 			t.Errorf("New attempt tag = %q, want the override branch %q", got, "compat-lane")
 		}
 	})
+}
+
+// TestNew_CompletesPartialRetryConfigFieldWise pins S1 at the construction
+// boundary: a caller-supplied Options.Retry that sets only MaxAttempts and
+// the Sleep hook keeps both and takes retry.Default's BaseDelay/Jitter
+// field-wise — the hook observes the ~500ms jittered backoff, never a
+// zero-delay hot loop (the discarded whole-swap behavior).
+func TestNew_CompletesPartialRetryConfigFieldWise(t *testing.T) {
+	hits := 0
+	base := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(errorBody("anthropic", http.StatusServiceUnavailable, "overloaded")))
+	})
+
+	var sleeps []time.Duration
+	hook := func(_ context.Context, d time.Duration) error {
+		sleeps = append(sleeps, d)
+		return nil
+	}
+	client, err := New(t.Context(), Spec{
+		Type:    TypeAnthropic,
+		Model:   "claude-test",
+		BaseURL: base,
+		Secret:  "test-key",
+	}, Options{Retry: retry.Config{MaxAttempts: 2, Sleep: hook}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = client.Complete(context.Background(), simpleRequest())
+	var apiErr *llmkit.APIError
+	if !errors.As(err, &apiErr) || !errors.Is(err, llmkit.ErrServer) {
+		t.Fatalf("err = %v, want *llmkit.APIError ErrServer from the final 503", err)
+	}
+	if hits != 2 {
+		t.Errorf("wire hits = %d, want 2 (MaxAttempts kept from the partial config)", hits)
+	}
+	if len(sleeps) != 1 {
+		t.Fatalf("sleeps = %v, want exactly one backoff sleep", sleeps)
+	}
+	// Default BaseDelay 500ms with Default Jitter 0.2: [400ms, 600ms]. A
+	// whole-config swap (or no fill at all) sleeps 0.
+	if sleeps[0] < 400*time.Millisecond || sleeps[0] > 600*time.Millisecond {
+		t.Errorf("slept %v, want the completed 500ms±20%% jittered default — not 0", sleeps[0])
+	}
 }

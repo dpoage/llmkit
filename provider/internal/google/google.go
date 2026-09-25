@@ -626,10 +626,9 @@ func mapGoogleStop(reason genai.FinishReason, hasToolCalls bool) llmkit.StopReas
 }
 
 func (g *googleAdapter) normalizeErr(ctx context.Context, err error) error {
-	// genai returns APIError by value (not a pointer). It carries no
-	// *http.Response, so Retry-After is unavailable; the retry wrapper
-	// falls back to exponential backoff. We pass nil for resp, which the
-	// shared helper recognizes and skips Retry-After parsing for.
+	// genai returns APIError by value (not a pointer) and exposes neither
+	// response headers nor a vendor type: no Retry-After is parsed, and a
+	// sub-400 status without a vendor type falls back to ErrServer.
 	var apiErr genai.APIError
 	if errors.As(err, &apiErr) {
 		status := apiErr.Code
@@ -642,14 +641,14 @@ func (g *googleAdapter) normalizeErr(ctx context.Context, err error) error {
 				status = s.code
 			}
 		}
-		return adapter.NormalizeSDKError("google", status, apiErr.Message, nil, err)
+		return adapter.NormalizeSDKError("google", adapter.VendorError{
+			Status:  status,
+			Message: apiErr.Message,
+			Err:     err,
+		})
 	}
-	return &llmkit.APIError{
-		Kind:     llmkit.ErrServer,
-		Provider: "google",
-		Message:  err.Error(),
-		Err:      err,
-	}
+	// No HTTP response: transport failure or caller's context ending mid-call.
+	return adapter.TransportError("google", ctx, err)
 }
 
 // Sources (vendor docs consulted for this table; every number comes from

@@ -69,13 +69,13 @@ func (o *openaiAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(
 		}
 	}
 	if err := stream.Err(); err != nil {
-		return llmkit.Response{}, o.normalizeErr(err)
+		return llmkit.Response{}, o.normalizeErr(ctx, err)
 	}
 	// A clean stream end without a finish_reason is a truncated generation:
 	// Complete over the same wire would fail, and returning the partial
 	// text or tool arguments would mask that as success.
 	if len(acc.Choices) == 0 || acc.Choices[0].FinishReason == "" {
-		return llmkit.Response{}, o.normalizeErr(errors.New("stream ended before finish_reason"))
+		return llmkit.Response{}, o.normalizeErr(ctx, errors.New("stream ended before finish_reason"))
 	}
 	compactGhostToolCalls(&acc.ChatCompletion)
 	return o.toResponse(&acc.ChatCompletion), nil

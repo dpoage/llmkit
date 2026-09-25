@@ -2,6 +2,7 @@ package embed
 
 import (
 	"fmt"
+	"github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/retry"
 	"net/http"
 	"os"
@@ -68,29 +69,26 @@ type Config struct {
 	// bound.
 	CacheSize int
 
-	// Retry tunes transient-failure retries via the shared
-	// retry.Config. Unset knobs (<= 0) resolve at backend
-	// construction: MaxAttempts to 3 and RequestTimeout to 60s, the embed
-	// bounds, because embeddings are lighter and retried less than LLM
-	// completions. BaseDelay and MaxDelay fall back to
-	// retry.Default. Jitter is taken literally: 0 means no
-	// jitter, and values outside [0, 1] are rejected by Validate.
-	// LoadConfig seeds the kit default 20% jitter so env-driven configs
-	// jitter unless overridden.
+	// Retry tunes transient-failure retries via [retry.Config]. Unset
+	// fields are completed at backend construction by [retry.Config.Or]
+	// against the embed defaults (MaxAttempts 3, RequestTimeout 60s,
+	// BaseDelay/MaxDelay/Jitter from [retry.Default]). MaxAttempts,
+	// BaseDelay, MaxDelay, and RequestTimeout resolve when <= 0; Jitter
+	// resolves when == 0 (an explicit 0 is unset, like every other zero
+	// field — to run the resolved defaults with no jitter, set
+	// Retry.Rand to a function returning 0.5). Validate rejects a
+	// Jitter outside [0, 1].
 	Retry retry.Config
 }
 
-// defaults returns a Config with sensible local-first defaults.
+// defaults returns a Config with sensible local-first defaults. Retry is
+// left zero: retryPolicy resolves it via [retry.Config.Or] against
+// defaultRetry at construction.
 func defaults() Config {
 	return Config{
 		Embedder:     "ollama",
 		Model:        "nomic-embed-text",
 		CacheEnabled: false,
-		Retry: retry.Config{
-			BaseDelay: retry.Default().BaseDelay,
-			MaxDelay:  retry.Default().MaxDelay,
-			Jitter:    retry.Default().Jitter,
-		},
 	}
 }
 
@@ -163,30 +161,31 @@ func LoadConfig(prefix string) (Config, error) {
 
 // Validate reports whether c is internally consistent: Embedder names a
 // known backend, Model and URL are non-empty, Dimensions, MaxBatch, and
-// CacheSize are non-negative, and Retry.Jitter is in [0, 1].
+// CacheSize are non-negative, and Retry.Jitter is in [0, 1]. Every
+// rejection wraps [llmkit.ErrInvalidRequest].
 func (c Config) Validate() error {
 	switch c.Embedder {
 	case "ollama", "openai-compatible":
 	default:
-		return fmt.Errorf("unknown embedder type %q", c.Embedder)
+		return fmt.Errorf("unknown embedder type %q: %w", c.Embedder, llmkit.ErrInvalidRequest)
 	}
 	if c.Model == "" {
-		return fmt.Errorf("embedding model name is required")
+		return fmt.Errorf("embedding model name is required: %w", llmkit.ErrInvalidRequest)
 	}
 	if c.URL == "" {
-		return fmt.Errorf("embedding service URL is required")
+		return fmt.Errorf("embedding service URL is required: %w", llmkit.ErrInvalidRequest)
 	}
 	if c.Dimensions < 0 {
-		return fmt.Errorf("dimensions must be non-negative, got %d", c.Dimensions)
+		return fmt.Errorf("dimensions must be non-negative, got %d: %w", c.Dimensions, llmkit.ErrInvalidRequest)
 	}
 	if c.MaxBatch < 0 {
-		return fmt.Errorf("max batch must be non-negative, got %d", c.MaxBatch)
+		return fmt.Errorf("max batch must be non-negative, got %d: %w", c.MaxBatch, llmkit.ErrInvalidRequest)
 	}
 	if c.CacheSize < 0 {
-		return fmt.Errorf("cache size must be non-negative, got %d", c.CacheSize)
+		return fmt.Errorf("cache size must be non-negative, got %d: %w", c.CacheSize, llmkit.ErrInvalidRequest)
 	}
 	if c.Retry.Jitter < 0 || c.Retry.Jitter > 1 {
-		return fmt.Errorf("retry jitter must be in [0, 1], got %v", c.Retry.Jitter)
+		return fmt.Errorf("retry jitter must be in [0, 1], got %v: %w", c.Retry.Jitter, llmkit.ErrInvalidRequest)
 	}
 	return nil
 }
@@ -203,27 +202,22 @@ func (c Config) httpClient() *http.Client {
 	return &http.Client{}
 }
 
-// retryPolicy returns the effective retry policy: c.Retry with unset knobs
-// (<= 0) resolved to the embed bounds — MaxAttempts 3 and a 60s per-attempt
-// RequestTimeout (embeddings retry less often and each attempt is far lighter
-// than an LLM completion, so the kit's 4 / 5m defaults are tightened; worst
-// case before giving up is roughly 3 * (60s + backoff)). BaseDelay and
-// MaxDelay fall back to retry.Default. Jitter is left literal so
-// explicit 0 means no jitter; LoadConfig seeds the kit default 20% jitter.
+// defaultRetry is [retry.Default] narrowed to the embed bounds:
+// MaxAttempts 3 and a 60s per-attempt RequestTimeout (embeddings retry
+// less than LLM completions, and each attempt is far lighter — worst
+// case before giving up is roughly 3 * (60s + backoff)). BaseDelay,
+// MaxDelay, and Jitter keep the kit defaults.
+func defaultRetry() retry.Config {
+	d := retry.Default()
+	d.MaxAttempts = defaultEmbedMaxAttempts
+	d.RequestTimeout = defaultEmbedRequestTimeout
+	return d
+}
+
+// retryPolicy returns the effective retry policy: c.Retry completed by
+// [retry.Config.Or] against defaultRetry. MaxAttempts, BaseDelay,
+// MaxDelay, and RequestTimeout resolve when <= 0; Jitter resolves when
+// == 0; Sleep and Rand pass through from c.Retry unchanged.
 func (c Config) retryPolicy() retry.Config {
-	p := c.Retry
-	def := retry.Default()
-	if p.MaxAttempts <= 0 {
-		p.MaxAttempts = defaultEmbedMaxAttempts
-	}
-	if p.BaseDelay <= 0 {
-		p.BaseDelay = def.BaseDelay
-	}
-	if p.MaxDelay <= 0 {
-		p.MaxDelay = def.MaxDelay
-	}
-	if p.RequestTimeout <= 0 {
-		p.RequestTimeout = defaultEmbedRequestTimeout
-	}
-	return p
+	return c.Retry.Or(defaultRetry())
 }

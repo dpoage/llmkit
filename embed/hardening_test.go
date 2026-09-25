@@ -894,6 +894,11 @@ func TestRetry_MaxAttemptsOnlyPolicy_Bounded(t *testing.T) {
 	}
 }
 
+// TestRetry_PolicyNormalization pins retryPolicy's Or-based resolution:
+// an explicit field is kept, an unset one (<= 0, and Jitter == 0) takes
+// the embed/kit default. Jitter 0 counts as unset like every other
+// schedule field under Or, so both an explicit zero and a fully zero
+// Config resolve to the kit's default jitter.
 func TestRetry_PolicyNormalization(t *testing.T) {
 	p := Config{Retry: retry.Config{MaxAttempts: 5}}.retryPolicy()
 	def := retry.Default()
@@ -906,17 +911,16 @@ func TestRetry_PolicyNormalization(t *testing.T) {
 	if p.RequestTimeout != 60*time.Second {
 		t.Errorf("RequestTimeout = %v, want 60s (embed default)", p.RequestTimeout)
 	}
-	if p.Jitter != 0 {
-		t.Errorf("Jitter = %v, want 0 (explicit zero means no jitter)", p.Jitter)
+	if p.Jitter != def.Jitter {
+		t.Errorf("Jitter = %v, want %v (explicit 0 counts as unset under Or)", p.Jitter, def.Jitter)
 	}
 	got := (Config{}).retryPolicy()
 	if got.MaxAttempts != 3 || got.RequestTimeout != 60*time.Second {
 		t.Errorf("zero policy attempts/timeout = %d/%v, want 3/60s (embed bounds)", got.MaxAttempts, got.RequestTimeout)
 	}
-	if got.BaseDelay != def.BaseDelay || got.MaxDelay != def.MaxDelay || got.Jitter != 0 {
-		t.Errorf("Config{}.retryPolicy() = %+v, want kit-default delays with Jitter left at 0", got)
+	if got.BaseDelay != def.BaseDelay || got.MaxDelay != def.MaxDelay || got.Jitter != def.Jitter {
+		t.Errorf("Config{}.retryPolicy() = %+v, want kit-default delays including Jitter", got)
 	}
-
 }
 
 func TestHTTPClientConstruction(t *testing.T) {
@@ -1051,10 +1055,12 @@ func TestCheckDimensions_EmptyVectorConfigured(t *testing.T) {
 	}
 }
 
-// TestConfig_JitterTriState pins the three representable states: explicit 0
-// is valid and means no jitter, negative and >1 are Validate errors, and the
-// unset state on the env path resolves to the kit default via LoadConfig.
-func TestConfig_JitterTriState(t *testing.T) {
+// TestConfig_JitterRangeAndDefault pins Jitter under Validate and Or:
+// negative and above 1 are Validate errors; 0 (explicit or left unset) is
+// valid and resolves to the kit default via retryPolicy's Or, because Or
+// treats Jitter 0 as unset like every other schedule field — the
+// deterministic escape is Retry.Rand, not a literal zero Jitter.
+func TestConfig_JitterRangeAndDefault(t *testing.T) {
 	base := Config{Embedder: "ollama", Model: "m", URL: "http://localhost"}
 
 	zero := base
@@ -1062,9 +1068,10 @@ func TestConfig_JitterTriState(t *testing.T) {
 	if err := zero.Validate(); err != nil {
 		t.Fatalf("Validate with Jitter 0: %v", err)
 	}
-	if got := zero.retryPolicy().Jitter; got != 0 {
-		t.Errorf("retryPolicy Jitter = %v, want 0 (explicit zero = no jitter)", got)
+	if got := zero.retryPolicy().Jitter; got != retry.Default().Jitter {
+		t.Errorf("retryPolicy Jitter = %v, want kit default %v (0 is unset under Or)", got, retry.Default().Jitter)
 	}
+
 	neg := base
 	neg.Retry = retry.Config{Jitter: -0.5}
 	if err := neg.Validate(); err == nil {
@@ -1081,14 +1088,11 @@ func TestConfig_JitterTriState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if cfg.Retry.Jitter != retry.Default().Jitter {
-		t.Errorf("LoadConfig Jitter = %v, want kit default %v", cfg.Retry.Jitter, retry.Default().Jitter)
-	}
 	p := cfg.retryPolicy()
 	if p.MaxAttempts != 3 || p.RequestTimeout != 60*time.Second {
 		t.Errorf("LoadConfig resolved attempts/timeout = %d/%v, want 3/60s (embed bounds)", p.MaxAttempts, p.RequestTimeout)
 	}
-	if p.BaseDelay != retry.Default().BaseDelay || p.MaxDelay != retry.Default().MaxDelay {
-		t.Errorf("LoadConfig resolved delays = %v/%v, want kit defaults", p.BaseDelay, p.MaxDelay)
+	if p.BaseDelay != retry.Default().BaseDelay || p.MaxDelay != retry.Default().MaxDelay || p.Jitter != retry.Default().Jitter {
+		t.Errorf("LoadConfig resolved delays = %v/%v/%v, want kit defaults", p.BaseDelay, p.MaxDelay, p.Jitter)
 	}
 }

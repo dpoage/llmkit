@@ -86,7 +86,7 @@ func (a *anthropicAdapter) Stream(ctx context.Context, req llmkit.Request, fn fu
 		if err := acc.Accumulate(ev); err != nil {
 			// Out-of-order indices or undecodable blocks are the same
 			// server-class failure as a transport error.
-			return llmkit.Response{}, a.normalizeErr(err)
+			return llmkit.Response{}, a.normalizeErr(ctx, err)
 		}
 
 		switch v := ev.AsAny().(type) {
@@ -120,7 +120,7 @@ func (a *anthropicAdapter) Stream(ctx context.Context, req llmkit.Request, fn fu
 		case anthropic.ContentBlockDeltaEvent:
 			fnErr, protoErr := a.forwardBlockDelta(v, started, forward)
 			if protoErr != nil {
-				return llmkit.Response{}, a.normalizeErr(protoErr)
+				return llmkit.Response{}, a.normalizeErr(ctx, protoErr)
 			}
 			if fnErr != nil {
 				return llmkit.Response{}, fnErr
@@ -128,14 +128,14 @@ func (a *anthropicAdapter) Stream(ctx context.Context, req llmkit.Request, fn fu
 		}
 	}
 	if err := stream.Err(); err != nil {
-		return llmkit.Response{}, a.normalizeErr(err)
+		return llmkit.Response{}, a.normalizeErr(ctx, err)
 	}
 	if !sawStop {
 		// Clean EOF before message_stop: a partial message would hand the
 		// caller half-finished tool arguments as a success. Complete errors
 		// on the equivalent truncated body; this is the same server-class
 		// failure.
-		return llmkit.Response{}, a.normalizeErr(errEarlyStreamEnd)
+		return llmkit.Response{}, a.normalizeErr(ctx, errEarlyStreamEnd)
 	}
 	return a.finalize(req, a.toResponse(&acc)), nil
 }

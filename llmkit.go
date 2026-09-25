@@ -65,12 +65,23 @@
 // Complete and Stream return [*APIError] for provider-side failures. Each
 // APIError wraps exactly one sentinel ([ErrRateLimited], [ErrAuth],
 // [ErrContextTooLong], [ErrInvalidRequest], [ErrServer], [ErrOverloaded]);
-// match it with errors.Is. Rate-limit and overload errors carry the server's
-// Retry-After when the adapter can read the response header (Anthropic and
-// OpenAI; the Google SDK hides response headers, so Google reports none), and
-// Retry-After above [retry.Config.MaxDelay] truncates to MaxDelay.
-// Unclassifiable transport failures (timeouts, connection resets) surface as
-// [ErrServer]. See docs/providers.md for the HTTP-status-to-sentinel table.
+// match it with errors.Is. A response's Retry-After rides any status that
+// carried it — not only rate limits and overloads — and is reported on
+// [APIError.HasRetryAfter] (a present zero delay means retry immediately);
+// the Google SDK hides response headers, so Google reports none.
+// Retry-After above [retry.Config.MaxDelay] truncates to MaxDelay. A
+// [APIError.StatusCode] of 0 means no usable HTTP status: a transport
+// failure (dial, connection reset, per-attempt timeout) or a response the
+// adapter could not decode — both carry Kind ErrServer; a pre-wire refusal
+// is also StatusCode 0 with Kind ErrInvalidRequest, and Kind is the
+// discriminator. The adapters report a caller's cancelled context as a
+// plain error chaining context.Canceled, never an [*APIError]. When the
+// caller's context is done as the retry stage returns, the error is never
+// retryable: a retryable last error (a transport failure cut short by the
+// caller's deadline included) is replaced by a plain error chaining
+// ctx.Err() that carries its text, and a terminal one (a 401, say) is
+// returned as-is. [Classify] is the one retryability rule over all of
+// this. See docs/providers.md for the HTTP-status-to-sentinel table.
 //
 // # Capabilities
 //
@@ -93,10 +104,10 @@
 //
 // Three wrappers compose around any [Client]:
 //
-//   - [WithRetry] retries transient failures (429, 5xx, transport timeouts)
-//     with exponential backoff and honors Retry-After. Non-Client callers
-//     run the same loop with [retry.Do]; [retry.ParseRetryAfter] decodes
-//     the header.
+//   - [WithRetry] classifies failures with [Classify] and retries the
+//     retryable ones with exponential backoff, honouring a carried
+//     Retry-After. Non-Client callers run the same loop with [retry.Do]
+//     and [Classify]; [retry.ParseRetryAfter] decodes the header.
 //   - [WithRecorder] reports each successful completion's usage to a
 //     [Recorder].
 //   - [WithSerializedToolCalls] truncates multi-tool-call responses to the

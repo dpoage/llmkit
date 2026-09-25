@@ -3,6 +3,10 @@ package retry
 import (
 	"context"
 	"errors"
+	"fmt"
+	"math"
+	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -127,23 +131,148 @@ func TestDo_RetryAfterReplacesBackoff(t *testing.T) {
 	}
 }
 
-// TestDo_ParentCancelTerminal pins that cancellation of the parent context
-// ends the loop immediately with the last error — cancellation is never
-// retried and never swallowed.
+// attemptErr is a retryable attempt failure that chains its cause, so a test
+// can tell whether Do returned it (errors.As) or replaced it.
+type attemptErr struct{ cause error }
+
+func (e *attemptErr) Error() string { return "attempt failed: " + e.cause.Error() }
+func (e *attemptErr) Unwrap() error { return e.cause }
+
+// errTerminal is the one failure retryUnlessTerminal marks terminal.
+var errTerminal = errors.New("terminal failure")
+
+// retryUnlessTerminal marks anything chaining errTerminal terminal and every
+// other error retryable.
+func retryUnlessTerminal(err error) (time.Duration, bool, bool) {
+	if err == nil || errors.Is(err, errTerminal) {
+		return 0, false, false
+	}
+	return 0, false, true
+}
+
+// TestDo_ParentCancelTerminal pins a parent cancelled during an attempt ends the loop after that attempt: the retryable last error is replaced by a plain error chaining ctx.Err() whose text carries it; a terminal last error is returned as-is, identity kept.
 func TestDo_ParentCancelTerminal(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	t.Run("retryable last error is replaced", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var calls atomic.Int32
+		err := Do(ctx, Config{MaxAttempts: 5, BaseDelay: time.Hour, Jitter: 0}, retryUnlessTerminal, func(context.Context) error {
+			calls.Add(1)
+			cancel() // cancel the parent mid-attempt
+			return &attemptErr{errors.New("boom")}
+		})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context.Canceled in the chain", err)
+		}
+		if ae := new(*attemptErr); errors.As(err, ae) {
+			t.Errorf("err = %v, want the retryable attempt error NOT chained (text only)", err)
+		}
+		if !strings.Contains(err.Error(), "attempt failed: boom") {
+			t.Errorf("err = %v, want the last attempt's error in the text", err)
+		}
+		if got := calls.Load(); got != 1 {
+			t.Errorf("calls = %d, want 1 (cancelled parents never retry)", got)
+		}
+	})
+
+	t.Run("terminal last error returned as-is", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var calls atomic.Int32
+		want := fmt.Errorf("callback: %w", errTerminal)
+		err := Do(ctx, Config{MaxAttempts: 5, BaseDelay: time.Hour, Jitter: 0}, retryUnlessTerminal, func(context.Context) error {
+			calls.Add(1)
+			cancel() // cancel the parent mid-attempt
+			return want
+		})
+		if err != want {
+			t.Fatalf("err = %v, want the terminal last error returned as-is (%v)", err, want)
+		}
+		if got := calls.Load(); got != 1 {
+			t.Errorf("calls = %d, want 1 (cancelled parents never retry)", got)
+		}
+	})
+}
+
+// TestDo_ParentDeadlineMidAttempt pins a parent deadline that expires during an attempt makes the attempt fail with a retryable error that itself chains context.DeadlineExceeded; Do replaces it with a plain error chaining the deadline and carrying the attempt's text.
+func TestDo_ParentDeadlineMidAttempt(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	var calls atomic.Int32
+	err := Do(ctx, Config{MaxAttempts: 5, BaseDelay: time.Hour, Jitter: 0}, retryUnlessTerminal, func(actx context.Context) error {
+		calls.Add(1)
+		<-actx.Done() // stall until the parent deadline ends the attempt
+		return &attemptErr{actx.Err()}
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want context.DeadlineExceeded in the chain", err)
+	}
+	if ae := new(*attemptErr); errors.As(err, ae) {
+		t.Errorf("err = %v, want the retryable attempt error replaced, not returned", err)
+	}
+	if !strings.Contains(err.Error(), "attempt failed: context deadline exceeded") {
+		t.Errorf("err = %v, want the last attempt's error in the text", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("calls = %d, want 1 (an expired parent never retries)", got)
+	}
+}
+
+// TestDo_CtxEndsDuringSleep pins a parent that ends while the loop sleeps after a retryable failure replaces that failure with a plain error chaining ctx.Err() carrying its text — cancellation and expired deadline alike.
+func TestDo_CtxEndsDuringSleep(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ctx  func() (context.Context, context.CancelFunc)
+		want error
+	}{
+		{"cancelled", func() (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(context.Background())
+			time.AfterFunc(50*time.Millisecond, cancel)
+			return ctx, cancel
+		}, context.Canceled},
+		{"deadline", func() (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), 50*time.Millisecond)
+		}, context.DeadlineExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := tc.ctx()
+			defer cancel()
+			var calls atomic.Int32
+			err := Do(ctx, Config{MaxAttempts: 5, BaseDelay: time.Hour, Jitter: 0}, retryUnlessTerminal, func(context.Context) error {
+				calls.Add(1)
+				return &attemptErr{errors.New("boom")}
+			})
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v in the chain", err, tc.want)
+			}
+			if ae := new(*attemptErr); errors.As(err, ae) {
+				t.Errorf("err = %v, want the retryable attempt error NOT chained (text only)", err)
+			}
+			if !strings.Contains(err.Error(), "attempt failed: boom") {
+				t.Errorf("err = %v, want the last attempt's error in the text", err)
+			}
+			if got := calls.Load(); got != 1 {
+				t.Errorf("calls = %d, want 1 (an ended parent stops the loop)", got)
+			}
+		})
+	}
+}
+
+// TestDo_SleepHookErrorWithLiveParent pins a Sleep hook that fails while the parent is still live is not a cancellation — Do returns fn's last error, unchanged.
+func TestDo_SleepHookErrorWithLiveParent(t *testing.T) {
 	var calls atomic.Int32
 	want := errors.New("boom")
-	err := Do(ctx, Config{MaxAttempts: 5, BaseDelay: time.Hour, Jitter: 0}, retryAny, func(ctx context.Context) error {
+	cfg := Config{MaxAttempts: 5, BaseDelay: time.Hour, Jitter: 0}
+	cfg.Sleep = func(context.Context, time.Duration) error { return errors.New("hook broke") }
+	err := Do(context.Background(), cfg, retryAny, func(context.Context) error {
 		calls.Add(1)
-		cancel() // cancel the parent mid-attempt
 		return want
 	})
 	if !errors.Is(err, want) {
-		t.Fatalf("err = %v, want the in-flight attempt's error", err)
+		t.Fatalf("err = %v, want fn's last error (a broken hook is not cancellation)", err)
 	}
 	if got := calls.Load(); got != 1 {
-		t.Errorf("calls = %d, want 1 (cancelled parents never retry)", got)
+		t.Errorf("calls = %d, want 1", got)
 	}
 }
 
@@ -290,6 +419,34 @@ func TestParseRetryAfter(t *testing.T) {
 	}
 }
 
+// TestParseRetryAfter_SaturatesBySign pins the integer rule at and beyond the
+// time.Duration range: a negative integer clamps to 0; an integer too large
+// for time.Duration — including one strconv cannot parse (≥ 2^63) — saturates
+// to the maximum, so MaxDelay caps it. ok is true on every row: the header
+// supplied a delay.
+func TestParseRetryAfter_SaturatesBySign(t *testing.T) {
+	now := time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
+	maxD := time.Duration(math.MaxInt64)
+	for _, tc := range []struct {
+		v    string
+		want time.Duration
+	}{
+		{"-9223372037", 0},
+		{"-99999999999999999999", 0},
+		{"9223372036", 9223372036 * time.Second},
+		{"9223372037", maxD},
+		{"18446744074", maxD},
+		{"9223372036854775807", maxD},
+		{"9223372036854775808", maxD},
+		{"99999999999999999999", maxD},
+	} {
+		d, ok := ParseRetryAfter(tc.v, now)
+		if !ok || d != tc.want {
+			t.Errorf("ParseRetryAfter(%q) = %v, %v; want %v, true", tc.v, d, ok, tc.want)
+		}
+	}
+}
+
 // TestRetryLoop_DelayAgreement pins the one delay schedule every retry entry
 // point now shares: a table of (cfg, attempt, after, hasAfter) cases run
 // through Do's own sleep hook with a deterministic Rand, asserting exact
@@ -395,10 +552,7 @@ func TestDo_PanicReleasesAttemptContext(t *testing.T) {
 	}
 }
 
-// TestDo_CancelsEachAttemptBeforeTheNext pins that the loop holds no
-// accumulated defers: by the time attempt N runs, attempt N-1's context
-// already reads context.Canceled — cancel runs at the end of each attempt,
-// not when Do returns.
+// TestDo_CancelsEachAttemptBeforeTheNext pins the loop holds no accumulated defers: by the time attempt N runs, attempt N-1's context already reads context.Canceled.
 func TestDo_CancelsEachAttemptBeforeTheNext(t *testing.T) {
 	var ctxs []context.Context
 	var prevErrs []error
@@ -426,5 +580,102 @@ func TestDo_CancelsEachAttemptBeforeTheNext(t *testing.T) {
 		if e != context.Canceled {
 			t.Errorf("attempt %d's ctx while attempt %d ran: err = %v, want context.Canceled (cancel must not accumulate until Do returns)", i+1, i+2, e)
 		}
+	}
+}
+
+// TestConfigOr_FieldWiseCompletion pins Or fills exactly the unset schedule fields from base, keeps the caller's set fields, and passes the Sleep/Rand hooks through from c untouched. Jitter 0 counts as unset; the no-jitter escape is the Rand hook.
+func TestConfigOr_FieldWiseCompletion(t *testing.T) {
+	t.Run("empty config takes all five schedule fields", func(t *testing.T) {
+		got := Config{}.Or(Default())
+		want := Default()
+		if got.MaxAttempts != want.MaxAttempts {
+			t.Errorf("MaxAttempts = %d, want %d", got.MaxAttempts, want.MaxAttempts)
+		}
+		if got.BaseDelay != want.BaseDelay {
+			t.Errorf("BaseDelay = %v, want %v", got.BaseDelay, want.BaseDelay)
+		}
+		if got.MaxDelay != want.MaxDelay {
+			t.Errorf("MaxDelay = %v, want %v", got.MaxDelay, want.MaxDelay)
+		}
+		if got.Jitter != want.Jitter {
+			t.Errorf("Jitter = %v, want %v", got.Jitter, want.Jitter)
+		}
+		if got.RequestTimeout != want.RequestTimeout {
+			t.Errorf("RequestTimeout = %v, want %v", got.RequestTimeout, want.RequestTimeout)
+		}
+		if got.Sleep != nil || got.Rand != nil {
+			t.Error("Sleep/Rand set, want nil (base hooks are never taken)")
+		}
+	})
+
+	t.Run("set fields and hooks survive", func(t *testing.T) {
+		sleep := func(context.Context, time.Duration) error { return nil }
+		rand := func() float64 { return 0.5 }
+		c := Config{MaxAttempts: 2, Sleep: sleep, Rand: rand}
+		got := c.Or(Default())
+		if got.MaxAttempts != 2 {
+			t.Errorf("MaxAttempts = %d, want 2 (caller's value kept)", got.MaxAttempts)
+		}
+		if got.BaseDelay != Default().BaseDelay {
+			t.Errorf("BaseDelay = %v, want the default (unset field filled)", got.BaseDelay)
+		}
+		if got.MaxDelay != Default().MaxDelay {
+			t.Errorf("MaxDelay = %v, want the default (unset field filled)", got.MaxDelay)
+		}
+		if got.Jitter != Default().Jitter {
+			t.Errorf("Jitter = %v, want the default (0 counts as unset)", got.Jitter)
+		}
+		if got.RequestTimeout != Default().RequestTimeout {
+			t.Errorf("RequestTimeout = %v, want the default (unset field filled)", got.RequestTimeout)
+		}
+		if got.Sleep == nil || got.Rand == nil {
+			t.Fatal("Sleep/Rand nil, want the caller's hooks passed through")
+		}
+	})
+
+	t.Run("every field overridden", func(t *testing.T) {
+		sleep := func(context.Context, time.Duration) error { return nil }
+		c := Config{
+			MaxAttempts:    7,
+			BaseDelay:      time.Second,
+			MaxDelay:       time.Minute,
+			Jitter:         0.3,
+			RequestTimeout: 3 * time.Second,
+			Sleep:          sleep,
+		}
+		got := c.Or(Default())
+		if got.MaxAttempts != 7 || got.BaseDelay != time.Second || got.MaxDelay != time.Minute || got.Jitter != 0.3 || got.RequestTimeout != 3*time.Second || got.Sleep == nil {
+			t.Errorf("Or = %+v, want c unchanged (nothing unset to fill)", got)
+		}
+	})
+}
+
+// TestBackoffDelay_JitterCappedAtMaxDelay pins S1b: the jitter factor is
+// applied and THEN the result is capped at MaxDelay, so jitter never pushes
+// a sleep past MaxDelay (base slept [24s, 36s, 36s]; the cap gives [24s,
+// 30s, 30s]). Rand pinned to 1.0 → factor 1.2; attempt 1 grows 20s→24s (no
+// clamp), attempts 2-3 sit at MaxDelay and would grow 30s→36s without the
+// post-jitter cap.
+func TestBackoffDelay_JitterCappedAtMaxDelay(t *testing.T) {
+	cfg := Config{
+		MaxAttempts: 4,
+		BaseDelay:   20 * time.Second,
+		MaxDelay:    30 * time.Second,
+		Jitter:      0.2,
+		Rand:        func() float64 { return 1.0 },
+	}
+	var got []time.Duration
+	for attempt := 1; attempt <= 3; attempt++ {
+		got = append(got, backoffDelay(cfg, attempt, 0, false))
+	}
+	want := []time.Duration{24 * time.Second, 30 * time.Second, 30 * time.Second}
+	if !slices.Equal(got, want) {
+		t.Errorf("delays = %v, want %v (whole sequence)", got, want)
+	}
+
+	// MaxDelay <= 0 stays uncapped even after jitter.
+	uncapped := Config{MaxAttempts: 4, BaseDelay: 20 * time.Second, Jitter: 0.2, Rand: func() float64 { return 1.0 }}
+	if d := backoffDelay(uncapped, 2, 0, false); d != 48*time.Second {
+		t.Errorf("uncapped delay = %v, want 48s (no MaxDelay, jitter applied)", d)
 	}
 }

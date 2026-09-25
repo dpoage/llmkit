@@ -180,8 +180,13 @@ type Spec struct {
 // default retry policy, no recorder, no observer, and the default HTTP
 // transport.
 type Options struct {
-	// Retry configures the shared retry wrapper. If MaxAttempts is 0,
-	// retry.Default is used.
+	// Retry configures the shared retry wrapper. Unset schedule fields
+	// (<= 0; == 0 for Jitter) are completed field-wise from retry.Default
+	// ([retry.Config.Or]); the fields the caller sets are preserved.
+	// MaxAttempts, BaseDelay, MaxDelay, and RequestTimeout resolve when
+	// <= 0; Jitter resolves when == 0 (an explicit 0 is unset, like
+	// every other zero field — to run the resolved defaults with no
+	// jitter, set Retry.Rand to a function returning 0.5).
 	Retry retry.Config
 	// Recorder, if non-nil, receives a UsageEvent after each successful
 	// completion.
@@ -316,10 +321,11 @@ func New(ctx context.Context, spec Spec, opts Options) (llmkit.Client, error) {
 			spec.Type, validTypes, llmkit.ErrInvalidRequest)
 	}
 
-	retryCfg := opts.Retry
-	if retryCfg.MaxAttempts == 0 {
-		retryCfg = retry.Default()
-	}
+	// Field-wise completion: the caller's partial Retry config keeps its
+	// fields and takes retry.Default's schedule for everything it leaves
+	// unset ([retry.Config.Or]). MaxAttempts-only is the documented case
+	// — BaseDelay stays at 0, so retries hot-loop with no backoff.
+	retryCfg := opts.Retry.Or(retry.Default())
 	providerTag := Tag(spec, opts)
 	// The attempt observer lives in the retry stage: it is the only layer
 	// that sees attempt boundaries. A nil observer makes this exactly

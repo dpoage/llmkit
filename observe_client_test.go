@@ -12,9 +12,7 @@ import (
 	"github.com/dpoage/llmkit/retry"
 )
 
-// captureObserver collects every event it receives — with the context it
-// was delivered on — for asserting emission counts, ordering, payloads, and
-// which context emitters hand their sinks.
+// captureObserver collects every event it receives — with the delivery context — for asserting counts, ordering, payloads, and which context emitters hand sinks.
 type captureObserver struct {
 	mu     sync.Mutex
 	events []Event
@@ -34,8 +32,7 @@ func (c *captureObserver) snapshot() []Event {
 	return append([]Event(nil), c.events...)
 }
 
-// ctxByKind returns the delivery contexts of one kind's events, in
-// emission order — index-aligned with byKind.
+// ctxByKind returns the delivery contexts of one kind's events, in emission order, index-aligned with byKind.
 func (c *captureObserver) ctxByKind(k EventKind) []context.Context {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -59,17 +56,13 @@ func (c *captureObserver) byKind(k EventKind) []Event {
 	return out
 }
 
-// retrySleeps is a retry.Config whose backoff sleeps are recorded, so tests
-// can pin that the Completion Duration covers the attempts plus the backoff.
+// retrySleeps is a retry.Config whose backoff sleeps are recorded so tests can pin that Completion Duration covers attempts plus backoff.
 type retrySleeps struct {
 	cfg   retry.Config
 	slept []time.Duration
 }
 
-// newRetrySleeps builds a retry.Config whose backoff sleeps are recorded
-// AND actually taken (microsecond-scale, capped at MaxDelay), so tests can
-// pin that the Completion Duration covers the attempts plus real backoff
-// wall time.
+// newRetrySleeps builds a retry.Config whose backoff sleeps are recorded AND taken (microsecond-scale, capped at MaxDelay).
 func newRetrySleeps(maxAttempts int) *retrySleeps {
 	r := &retrySleeps{cfg: retry.Config{
 		MaxAttempts:    maxAttempts,
@@ -94,8 +87,7 @@ func okResponse() Response {
 	}
 }
 
-// TestObserve_NilObserverPassthrough: a nil observer returns the client
-// unchanged, mirroring WithRecorder.
+// TestObserve_NilObserverPassthrough pins a nil observer returns the client unchanged.
 func TestObserve_NilObserverPassthrough(t *testing.T) {
 	fc := &fakeClient{}
 	if got := Observe(fc, nil, "p", "m"); got != Client(fc) {
@@ -103,8 +95,7 @@ func TestObserve_NilObserverPassthrough(t *testing.T) {
 	}
 }
 
-// TestObserve_CompleteEmitsExactlyOneEvent pins the full shape of the
-// Completion event on the success path.
+// TestObserve_CompleteEmitsExactlyOneEvent pins the full shape of the Completion event on the success path.
 func TestObserve_CompleteEmitsExactlyOneEvent(t *testing.T) {
 	fc := &fakeClient{responses: []Response{okResponse()}}
 	obs := &captureObserver{}
@@ -158,10 +149,7 @@ func TestObserve_CompleteEmitsExactlyOneEvent(t *testing.T) {
 	}
 }
 
-// TestObserve_CompleteError: a failed completion's event carries the error
-// text and the zero Response — even when the inner client returned a partial
-// response alongside the error — while the caller still receives that
-// partial response unchanged.
+// TestObserve_CompleteError pins a failed completion carries the error text and zero Response while the caller still receives the inner partial unchanged.
 func TestObserve_CompleteError(t *testing.T) {
 	fc := &fakeClient{
 		errs:      []error{&APIError{Kind: ErrAuth, StatusCode: 401, Provider: "fake", Message: "bad key"}},
@@ -190,8 +178,7 @@ func TestObserve_CompleteError(t *testing.T) {
 	}
 }
 
-// TestObserve_StreamEmitsExactlyOneEvent: the native streaming path delivers
-// deltas and closes with one Completion whose Response is the final one.
+// TestObserve_StreamEmitsExactlyOneEvent pins the native streaming path delivers deltas and closes with one Completion whose Response is the final one.
 func TestObserve_StreamEmitsExactlyOneEvent(t *testing.T) {
 	inner := &scriptedStreamClient{
 		deltas: []Delta{{Kind: DeltaText, Text: "he"}, {Kind: DeltaText, Text: "llo"}},
@@ -227,8 +214,7 @@ func TestObserve_StreamEmitsExactlyOneEvent(t *testing.T) {
 	}
 }
 
-// TestObserve_StreamError: a failed stream still closes with exactly one
-// Completion carrying the error text and the zero Response.
+// TestObserve_StreamError pins a failed stream still closes with exactly one Completion carrying the error text and zero Response.
 func TestObserve_StreamError(t *testing.T) {
 	inner := &scriptedStreamClient{err: &APIError{Kind: ErrServer, StatusCode: 500, Provider: "openai", Message: "boom"}}
 	obs := &captureObserver{}
@@ -251,9 +237,7 @@ func TestObserve_StreamError(t *testing.T) {
 	}
 }
 
-// TestObserve_StreamAndCompleteDeepEqual: the stream path and the complete
-// path observe the same event modulo the per-call facts (Time, Duration, and
-// the freshly minted SpanID).
+// TestObserve_StreamAndCompleteDeepEqual pins the stream and complete paths observe the same event modulo per-call facts (Time, Duration, SpanID).
 func TestObserve_StreamAndCompleteDeepEqual(t *testing.T) {
 	resp := okResponse()
 	runID := NewRunID()
@@ -286,16 +270,10 @@ func TestObserve_StreamAndCompleteDeepEqual(t *testing.T) {
 	}
 }
 
-// TestObserve_AttemptsJoinCompletionSpan: N retried attempts produce Attempt
-// events numbered 1..N with the completion's SpanID. Failed ones carry the
-// error, the zero Response (even when the inner client returned a partial
-// one), and the APIError's status and Retry-After; the completion's Duration
-// covers every attempt plus the backoff between them.
+// TestObserve_AttemptsJoinCompletionSpan pins N retried attempts produce Attempt events numbered 1..N joined to the completion's SpanID, and Duration covers attempts plus backoff.
 func TestObserve_AttemptsJoinCompletionSpan(t *testing.T) {
 	fc := &fakeClient{
-		// The inner client returns a partial Response alongside each
-		// failure, so the zero-Response assertion below discriminates:
-		// the event is zeroed by the emitter, not by the fixture.
+		// Inner client returns a partial Response with each failure, so the zero-Response assertion proves the event zeroing is the emitter's, not the fixture's.
 		errs:      []error{rateLimitErr(2 * time.Second), rateLimitErr(2 * time.Second)},
 		responses: []Response{{Text: "partial"}, {Text: "partial"}, okResponse()},
 	}
@@ -377,11 +355,7 @@ func TestObserve_AttemptsJoinCompletionSpan(t *testing.T) {
 	}
 }
 
-// TestObserve_AttemptEventsUseRetryCallerContext: attempt events are
-// delivered on the retry caller's context. With a non-zero RequestTimeout
-// the per-attempt context is done by emission time — a ctx-honouring sink
-// must still see ok == false from Deadline and a nil Err, or it would drop
-// exactly the timed-out attempts.
+// TestObserve_AttemptEventsUseRetryCallerContext pins attempt events are delivered on the retry caller's context, never the per-attempt timeout context.
 func TestObserve_AttemptEventsUseRetryCallerContext(t *testing.T) {
 	stalls := &stallClient{}
 	obs := &captureObserver{}
@@ -394,8 +368,7 @@ func TestObserve_AttemptEventsUseRetryCallerContext(t *testing.T) {
 	}
 	client := WithRetryObserver(stalls, cfg, obs, "p", "m")
 
-	// Plain Background: any deadline the observer sees would have to come
-	// from the retry stage's per-attempt context, which must not leak.
+	// Plain Background: any deadline seen would have to come from the retry stage's per-attempt context, which must not leak.
 	_, err := client.Complete(context.Background(), simpleRequest())
 	if err == nil {
 		t.Fatal("Complete: want the final timeout error")
@@ -423,8 +396,7 @@ func TestObserve_AttemptEventsUseRetryCallerContext(t *testing.T) {
 	}
 }
 
-// stallClient blocks every Complete until its context is done, simulating a
-// wire call the per-attempt RequestTimeout has to abort.
+// stallClient blocks every Complete until its context is done, simulating a wire call the per-attempt RequestTimeout must abort.
 type stallClient struct {
 	calls int
 }
@@ -434,11 +406,16 @@ func (s *stallClient) Capabilities() Capabilities { return Capabilities{} }
 func (s *stallClient) Complete(ctx context.Context, req Request) (Response, error) {
 	s.calls++
 	<-ctx.Done()
-	return Response{}, ctx.Err()
+	// Adapter shape for a stalled attempt: *APIError{ErrServer} with the context error chained (a bare context error is terminal under Classify).
+	return Response{}, &APIError{
+		Kind:     ErrServer,
+		Provider: "fake",
+		Message:  ctx.Err().Error(),
+		Err:      ctx.Err(),
+	}
 }
 
-// TestObserve_FailedFinalAttempt: a terminal failure still emits its Attempt
-// and its Completion — both with the error text and zero responses.
+// TestObserve_FailedFinalAttempt pins a terminal failure still emits its Attempt and its Completion, both with the error text and zero responses.
 func TestObserve_FailedFinalAttempt(t *testing.T) {
 	fc := &fakeClient{errs: []error{&APIError{Kind: ErrAuth, StatusCode: 401, Provider: "fake", Message: "denied"}}}
 	obs := &captureObserver{}
@@ -467,16 +444,13 @@ func TestObserve_FailedFinalAttempt(t *testing.T) {
 	}
 }
 
-// TestObserve_MintsFreshSpanPerCompletion: the span is minted
-// unconditionally — an inherited span is never reused, and two completions
-// never share one (the nested-completion rule).
+// TestObserve_MintsFreshSpanPerCompletion pins an inherited span is never reused and two completions never share one.
 func TestObserve_MintsFreshSpanPerCompletion(t *testing.T) {
 	fc := &fakeClient{responses: []Response{okResponse(), okResponse(), okResponse()}}
 	obs := &captureObserver{}
 	client := Observe(fc, obs, "p", "m")
 
-	// A context that already carries a span, as a harness would hand one to
-	// a nested caller: the emitter must mint its own anyway.
+	// A context that already carries a span (a harness handing one to a nested caller): the emitter must mint its own anyway.
 	inherited := NewSpanID()
 	ctx := WithSpan(WithRun(context.Background(), NewRunID()), inherited)
 	if _, err := client.Complete(ctx, simpleRequest()); err != nil {
@@ -498,8 +472,7 @@ func TestObserve_MintsFreshSpanPerCompletion(t *testing.T) {
 	}
 }
 
-// TestObserve_ObserverPanicPropagates: a panicking observer is a harness bug
-// and surfaces to the caller, never swallowed.
+// TestObserve_ObserverPanicPropagates pins a panicking observer surfaces to the caller, never swallowed.
 func TestObserve_ObserverPanicPropagates(t *testing.T) {
 	panicking := ObserverFunc(func(context.Context, Event) { panic("sink bug") })
 	client := Observe(&fakeClient{responses: []Response{okResponse()}}, panicking, "p", "m")
@@ -512,9 +485,7 @@ func TestObserve_ObserverPanicPropagates(t *testing.T) {
 	}
 }
 
-// TestObserve_SynthesizedStreamFromPlainClient: wrapping a Complete-only
-// client still observes one Completion per Stream call — synthesis happens
-// on the same response Complete returned.
+// TestObserve_SynthesizedStreamFromPlainClient pins wrapping a Complete-only client still observes one Completion per Stream call.
 func TestObserve_SynthesizedStreamFromPlainClient(t *testing.T) {
 	resp := okResponse()
 	inner := &fakeClient{responses: []Response{resp}}
@@ -545,21 +516,14 @@ func TestObserve_SynthesizedStreamFromPlainClient(t *testing.T) {
 	}
 }
 
-// TestObserve_StreamAttemptsExhausted: retrying a native stream emits one
-// Attempt event per wire stream call — numbered 1..N, each joined to the
-// (failed) completion's SpanID, each carrying its failure and the request
-// as received. The events ride the retry caller's context (never the
-// per-attempt timeout context), the span is minted fresh even over an
-// inherited one, and the completion's Duration covers the attempts plus the
-// real backoff between them.
+// TestObserve_StreamAttemptsExhausted pins retrying a native stream emits Attempt events numbered 1..N joined to the completion's SpanID, with Duration covering attempts plus backoff.
 func TestObserve_StreamAttemptsExhausted(t *testing.T) {
 	inner := &scriptedStreamClient{err: rateLimitErr(0)}
 	obs := &captureObserver{}
 	rc := newRetrySleeps(3)
 	client := Observe(WithRetryObserver(inner, rc.cfg, obs, "openai", "gpt-test"), obs, "openai", "gpt-test")
 
-	// A context that already carries a span: the stream emitter must mint
-	// its own anyway.
+	// A context that already carries a span: the stream emitter must mint its own anyway.
 	inherited := NewSpanID()
 	runID := NewRunID()
 	ctx := WithSpan(WithRun(context.Background(), runID), inherited)
@@ -600,8 +564,7 @@ func TestObserve_StreamAttemptsExhausted(t *testing.T) {
 		if !reflect.DeepEqual(ae.Request, simpleRequest()) {
 			t.Errorf("attempt %d Request = %+v, want the request as received", i, ae.Request)
 		}
-		// Delivered on the retry caller's context: no per-attempt deadline
-		// may leak, or a ctx-honouring sink would drop timed-out streams.
+		// Delivered on the retry caller's context: no per-attempt deadline may leak.
 		if _, ok := attemptCtxs[i].Deadline(); ok {
 			t.Errorf("attempt %d delivered on a context with a deadline", i)
 		}
@@ -625,10 +588,7 @@ func TestObserve_StreamAttemptsExhausted(t *testing.T) {
 	}
 }
 
-// TestObserve_StreamAttemptSucceedsAfterRetry: a stream that succeeds on a
-// later attempt numbers its attempts across the wire calls, joins them to
-// the successful completion's span, and the successful attempt's Response
-// matches the completion's.
+// TestObserve_StreamAttemptSucceedsAfterRetry pins a stream succeeding on a later attempt numbers attempts across wire calls and joins them to the completion's span.
 func TestObserve_StreamAttemptSucceedsAfterRetry(t *testing.T) {
 	inner := &scriptedAttempts{
 		errs:  []error{rateLimitErr(0)},
@@ -666,10 +626,7 @@ func TestObserve_StreamAttemptSucceedsAfterRetry(t *testing.T) {
 	}
 }
 
-// TestObserve_StreamPartialResponseDiscriminated: an inner stream that
-// returns a partial Response alongside a terminal error yields that partial
-// to the CALLER unchanged, while the Completion event carries the zero
-// Response — the event zeroing must not depend on the fixture returning zero.
+// TestObserve_StreamPartialResponseDiscriminated pins the caller gets the partial Response unchanged while the Completion event carries the zero Response.
 func TestObserve_StreamPartialResponseDiscriminated(t *testing.T) {
 	inner := &scriptedAttempts{
 		errs:  []error{&APIError{Kind: ErrServer, StatusCode: 500, Provider: "openai", Message: "boom"}},
@@ -698,8 +655,7 @@ func TestObserve_StreamPartialResponseDiscriminated(t *testing.T) {
 	}
 }
 
-// TestWithRetry_NilObserverEmitsNothing: WithRetry keeps its exact old
-// behavior — no events — when a stack is wrapped only by an outer Observe.
+// TestWithRetry_NilObserverEmitsNothing pins WithRetry stays silent when a stack is wrapped only by an outer Observe.
 func TestWithRetry_NilObserverEmitsNothing(t *testing.T) {
 	fc := &fakeClient{responses: []Response{okResponse()}}
 	obs := &captureObserver{}
@@ -717,9 +673,7 @@ func TestWithRetry_NilObserverEmitsNothing(t *testing.T) {
 	}
 }
 
-// scriptedAttempts is a StreamingClient with per-call error and response
-// scripts, so retry tests can script fail-then-succeed sequences and
-// partial-response failures the shared scriptedStreamClient cannot express.
+// scriptedAttempts is a StreamingClient with per-call error and response scripts for fail-then-succeed and partial-response failures the shared scriptedStreamClient cannot express.
 type scriptedAttempts struct {
 	caps  Capabilities
 	errs  []error // per Stream call; nil means success with the scripted resp
@@ -752,9 +706,7 @@ func (s *scriptedAttempts) Stream(ctx context.Context, req Request, fn func(Delt
 	return resp, nil
 }
 
-// TestObserve_AttemptCounterIsPerCall: the 1..N numbering restarts with
-// every logical completion on the same client — no counter state leaks
-// between completions.
+// TestObserve_AttemptCounterIsPerCall pins the 1..N numbering restarts with every logical completion on the same client.
 func TestObserve_AttemptCounterIsPerCall(t *testing.T) {
 	fc := &fakeClient{errs: []error{
 		rateLimitErr(0), rateLimitErr(0), rateLimitErr(0), rateLimitErr(0),
@@ -775,10 +727,7 @@ func TestObserve_AttemptCounterIsPerCall(t *testing.T) {
 	}
 }
 
-// TestObserve_ConcurrentSpanJoin: one Observe+WithRetryObserver stack shared
-// by 64 concurrent completions keeps the span join exact — every Attempt
-// joins exactly one Completion, every Completion owns exactly one Attempt,
-// and no span is ever shared. Runs under -race.
+// TestObserve_ConcurrentSpanJoin pins every Attempt joins exactly one Completion and no span is shared under 64 concurrent completions (runs under -race).
 func TestObserve_ConcurrentSpanJoin(t *testing.T) {
 	obs := &captureObserver{}
 	inner := &safeClient{resp: okResponse()}
@@ -824,9 +773,7 @@ func TestObserve_ConcurrentSpanJoin(t *testing.T) {
 	}
 }
 
-// safeClient is a concurrency-safe scripted Client: the shared fakeClient is
-// not (its calls counter races), and the concurrency test shares one client
-// across goroutines. The mutex guards the calls counter it exposes.
+// safeClient is a concurrency-safe scripted Client: the shared fakeClient races on its calls counter, and the concurrency test shares one client across goroutines.
 type safeClient struct {
 	mu    sync.Mutex
 	calls int

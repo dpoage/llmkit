@@ -10,14 +10,9 @@ import (
 )
 
 // TestNormalizeErr_ClassifiesFromTransportStatus pins 5xx classification
-// when the transport status is not available inside the SDK error. genai
-// returns genai.APIError (Code/Message/Status only — no *http.Response, no
-// Unwrap); when the error body parses as a Google error object WITHOUT a
-// "code" field, the SDK reports Code=0 and drops the transport response
-// entirely. The status the wrapping transport recorded must take over.
-// The HTML-body case is the other half of the same contract: a body
-// that is not Google error JSON at all makes the SDK fill Code from the
-// transport status itself.
+// when the SDK error does not carry the transport response: the recorded
+// transport status takes over, whether the body was Google JSON without a
+// "code" field or a non-JSON body the SDK stamps Code from the transport.
 func TestNormalizeErr_ClassifiesFromTransportStatus(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -67,5 +62,37 @@ func TestNormalizeErr_ClassifiesFromTransportStatus(t *testing.T) {
 				t.Errorf("StatusCode = %d, want 503", apiErr.StatusCode)
 			}
 		})
+	}
+}
+
+// TestNormalizeErr_Sub400ClassifiesErrServer pins a sub-400 status that
+// genai reports as its APIError: with no vendor type, the in-band lookup
+// falls back to ErrServer with the status preserved.
+func TestNormalizeErr_Sub400ClassifiesErrServer(t *testing.T) {
+	base := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusFound) // 302, no Location: not followed
+		_, _ = w.Write([]byte(`{"error":{"message":"moved"}}`))
+	})
+	client, err := New(context.Background(), "gemini-test", Options{
+		APIKey:  "test-key",
+		BaseURL: base,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = client.Complete(context.Background(), simpleRequest())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, llmkit.ErrServer) {
+		t.Fatalf("error = %v, want ErrServer for a sub-400 status without a vendor type", err)
+	}
+	var apiErr *llmkit.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error is not *llmkit.APIError: %T", err)
+	}
+	if apiErr.StatusCode != http.StatusFound {
+		t.Errorf("StatusCode = %d, want 302", apiErr.StatusCode)
 	}
 }

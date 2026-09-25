@@ -48,7 +48,16 @@ func (s *scriptedStreamClient) Stream(ctx context.Context, req Request, fn func(
 	}
 	if s.calls <= s.blockAttempts {
 		<-ctx.Done()
-		return Response{}, ctx.Err()
+		// A stalled attempt is what every real adapter sees; the adapter's
+		// normalization wraps it as *APIError{Kind: ErrServer} with the
+		// context error chained (a bare context error is terminal under
+		// llmkit.Classify and would never be retried).
+		return Response{}, &APIError{
+			Kind:     ErrServer,
+			Provider: "fake",
+			Message:  ctx.Err().Error(),
+			Err:      ctx.Err(),
+		}
 	}
 	if s.err != nil {
 		return Response{}, s.err

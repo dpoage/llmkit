@@ -127,7 +127,7 @@ All three decorators compose over streaming. Retry stops once a delta reaches th
 
 | Field | Effect | Default |
 |---|---|---|
-| `Retry` | Retry policy for the retry wrapper. A zero `MaxAttempts` selects the default policy. | 4 attempts, 500 ms base delay, 30 s cap, 20% jitter, 5 m per-attempt timeout (`retry.Default`) |
+| `Retry` | Retry policy for the retry wrapper. Unset fields (≤ 0; `Jitter` == 0) are completed field-wise from `retry.Default` via `retry.Config.Or`; every field you set is kept — `Retry{BaseDelay: 2s}` sleeps a 2 s-based schedule, `Retry{MaxAttempts: 2}` keeps the 500 ms base. | `retry.Default` fills every unset field: 4 attempts, 500 ms base delay, 30 s cap, 20% jitter, 5 m per-attempt timeout |
 | `Recorder` | Receives a `llmkit.UsageEvent` after each successful completion. | nil (no recording) |
 | `Observer` | Receives one `llmkit.AttemptEvent` per provider attempt (failures included) from the retry stage, tagged with the resolved provider name and model. `New` emits no `Completion` events — see the next section. | nil (no attempt events) |
 | `Provider` | Overrides the provider tag on usage and attempt events; set it when your ledger keys on a config name. | `string(spec.Type)` |
@@ -172,30 +172,36 @@ If the same client runs inside an `agent.Runner`, do not wrap it with `llmkit.Ob
 
 Adapters map vendor failures onto the sentinel errors in `llmkit`; match them with `errors.Is` on the returned error. The `Kind` is derived from the HTTP status, with the response body disambiguating 400s:
 
-| HTTP status | `llmkit` kind | Retried by `WithRetry` |
+| HTTP status / failure | `llmkit` kind | Retried by `WithRetry` |
 |---|---|---|
-| 429 | `ErrRateLimited` | Yes; Anthropic and OpenAI errors carry the `Retry-After` header value, and `WithRetry` honors it |
+| 429 | `ErrRateLimited` | Yes; carries `Retry-After` when the response supplies one |
 | 401, 403 | `ErrAuth` | No |
 | 413 | `ErrContextTooLong` | No |
 | 400 with a context-length message ("prompt is too long", "context length", ...) | `ErrContextTooLong` | No |
 | 400, other | `ErrInvalidRequest` | No |
-| 529 | `ErrOverloaded` | Yes (same `Retry-After` rules as 429) |
-| Other 5xx | `ErrServer` | Yes |
+| 529 | `ErrOverloaded` | Yes |
+| Other 5xx (503 included) | `ErrServer` | Yes |
 | Any other 4xx (404, 409, 422, ...) | `ErrInvalidRequest` | No |
-| Transport failure (timeout, connection reset) | `ErrServer` | Yes |
+| Google status below 400 (302 included) | `ErrServer` (genai exposes no vendor type) | Yes |
+| In-band SSE error event on a committed 200 stream (Anthropic `error.type` / OpenAI body `error.type`) | classified by the vendor type, `StatusCode` 200 | `overloaded_error`/`server_error` → yes; `invalid_request_error` → no; unknown type → `ErrServer` (yes) |
+| Transport failure (dial, reset, per-attempt timeout) | `ErrServer` with `StatusCode` 0, SDK error chained | Yes |
+| Caller's context done (cancelled mid-call or during the retry backoff, or its deadline expired mid-attempt) | Adapters report a cancellation as a plain error chaining `context.Canceled`, never an `*llmkit.APIError`. When the caller's context is done as the retry stage returns, a retryable last error (a 503, or the `ErrServer` transport failure a caller deadline cuts short) is replaced by a plain error chaining `ctx.Err()` that carries its text; a terminal one (a 401, a stream callback's sentinel) is returned as-is | No — the result is never retryable under `llmkit.Classify` |
+
+`Retry-After` is parsed on every status, not only 429/529: whenever a response carries the header and it parses, the error reports `HasRetryAfter` with `RetryAfter` set (a present zero means retry immediately). `llmkit.Classify` is the one retryability rule the table summarizes: cancellation first, then the retryable kinds `ErrRateLimited`/`ErrServer`/`ErrOverloaded`, everything else terminal.
 
 Outcomes below 400 are body-parse-driven, not status-driven:
 
 - Anthropic, OpenAI, and openai-compatible: a body that decodes as the vendor's completion object returns no error. A JSON error body decodes the same way; its error field is ignored. A body that fails to parse — empty, or an HTML page — returns an `ErrServer`-class error with status code 0, at any status including 200.
-- Google: any non-2xx status returns `ErrInvalidRequest` carrying that status (302 included). A 200 with an unparseable body (HTML) returns an `ErrServer`-class error with status code 0; an empty 200 body returns no error.
-- Anthropic SSE: a 200 stream that carries an error event returns `ErrInvalidRequest`.
+- Google: a non-2xx status at or above 400 returns the status-classified sentinel carrying that status; a status below 400 (302 included) returns `ErrServer` — retryable — because genai exposes no vendor type to classify by. A 200 with an unparseable body (HTML) returns an `ErrServer`-class error with status code 0; an empty 200 body returns no error.
+- Anthropic SSE: a 200 stream that carries an `error` event classifies it in band by the event body's `error.type` (`overloaded_error` → `ErrOverloaded`, `invalid_request_error` → `ErrInvalidRequest`, unknown type → `ErrServer`), carrying the committed stream's `StatusCode` 200.
+- OpenAI SSE: a `data:` line whose body carries an `error` object classifies the same way by `error.type`, also at `StatusCode` 200.
 
 A refused pre-wire request (a `Capabilities` violation, a malformed block, an unknown role) also returns `ErrInvalidRequest` before any network call. See [capabilities](capabilities.md) for which profile fields refuse rather than drop. The `llmkit` package documentation lists the `APIError` fields.
 
 Two `Retry-After` rules apply across the table.
 
-First, only Anthropic and OpenAI surface the header: the Google SDK hides response headers, so Google errors carry `RetryAfter` 0. The retry wrapper falls back to exponential backoff.
+First, the header is honored on every status that carries it, but only Anthropic and OpenAI can surface it: the Google SDK hides response headers, so Google errors report `HasRetryAfter` false and the retry wrapper falls back to exponential backoff. An OpenAI in-band error on a 200 stream is the same gap from the other side: the SDK's `StreamError` carries no headers, so no `Retry-After` surfaces there either.
 
-Second, a `Retry-After` above `retry.Config.MaxDelay` is truncated to `MaxDelay` (30 s by default).
+Second, a `Retry-After` above `retry.Config.MaxDelay` is truncated to `MaxDelay` (30 s by default) — and jitter never pushes a backoff sleep past `MaxDelay` either.
 
-The `decide` package parses `Retry-After` on every status and honors it on 429 and every 5xx. Its exact semantics are in [decide](decide.md).
+The `decide` package parses `Retry-After` on every non-200 status and honors it on 429, any status 500 or above, and any non-200 status below 400. Its exact semantics are in [decide](decide.md).

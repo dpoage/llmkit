@@ -54,10 +54,13 @@ type Config struct {
 	// per-attempt bound. An injected client keeps its own Timeout.
 	HTTPClient *http.Client
 
-	// Retry tunes the shared retry policy. Unset knobs (<= 0) resolve at
-	// construction to the decide defaults: 3 attempts and a 30s per-attempt
-	// RequestTimeout, with BaseDelay and MaxDelay from retry.Default.
-	// Jitter is taken literally: explicit 0 means no jitter.
+	// Retry tunes the shared retry policy. New completes it field-wise
+	// from decide's defaults (3 attempts, 30s per-attempt RequestTimeout;
+	// BaseDelay, MaxDelay, Jitter from [retry.Default]). MaxAttempts,
+	// BaseDelay, MaxDelay, and RequestTimeout resolve when <= 0; Jitter
+	// resolves when == 0 (an explicit 0 is unset, like every other zero
+	// field — to run the resolved defaults with no jitter, set
+	// Retry.Rand to a function returning 0.5).
 	Retry retry.Config
 
 	// Recorder is optional. A non-nil Recorder receives exactly one
@@ -125,22 +128,21 @@ func (c Config) httpClient() *http.Client {
 	return &http.Client{}
 }
 
-// retryPolicy resolves the decide defaults for unset knobs. Jitter is left
-// literal so an explicit 0 means no jitter.
+// defaultRetry is decide's retry policy baseline: [retry.Default] with
+// MaxAttempts set to 3 and RequestTimeout to 30s (Jev answers in under
+// a second, so a shorter budget keeps the worst case tight);
+// BaseDelay, MaxDelay, and Jitter come from retry.Default as-is.
+func defaultRetry() retry.Config {
+	d := retry.Default()
+	d.MaxAttempts = defaultMaxAttempts
+	d.RequestTimeout = defaultRequestTimeout
+	return d
+}
+
+// retryPolicy completes cfg.Retry with decide's defaults via
+// [retry.Config.Or]: MaxAttempts, BaseDelay, MaxDelay, and RequestTimeout
+// resolve when <= 0; Jitter resolves when == 0 (an explicit 0 is
+// unset, like every other zero field).
 func (c Config) retryPolicy() retry.Config {
-	p := c.Retry
-	def := retry.Default()
-	if p.MaxAttempts <= 0 {
-		p.MaxAttempts = defaultMaxAttempts
-	}
-	if p.BaseDelay <= 0 {
-		p.BaseDelay = def.BaseDelay
-	}
-	if p.MaxDelay <= 0 {
-		p.MaxDelay = def.MaxDelay
-	}
-	if p.RequestTimeout <= 0 {
-		p.RequestTimeout = defaultRequestTimeout
-	}
-	return p
+	return c.Retry.Or(defaultRetry())
 }
