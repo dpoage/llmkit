@@ -131,13 +131,13 @@ entry below is marked.
   behind the always-present in-memory `Transcript`, which now stores
   `llmkit.Event` values in `Transcript.Record` and carries
   `RunID`/`ParentRunID`. `JSONL(dir, onErr)` streams one JSON line per
-  event to one `<RunID>.jsonl` file per run — created exclusively at the
-  run's start, closed at its finalize, refusals reported through `onErr`
+  event to a `<RunID>.jsonl` file — created exclusively when the run's
+  start event reaches the sink, refusals reported through `onErr`
   and never failing the run — and reads them back through the same
   `llmkit.Source` interface replay builds on. The Runner emits `start`,
   `completion` (one per logical completion, span-minted per turn), `tool_run`
   (with `Denied`/`DenyReason` for policy denials), `compaction`, `steer`, and
-  `finalize` (on every run end including error returns). `WithRunID(id)`
+  `finalize`. `WithRunID(id)`
   pins a run's identity; `Outcome.RunID` is exported; `Continue` chains
   carry `ParentRunID`.
 - `llmkit/agent`: the read side of recording. `llmkit.Source` is a
@@ -154,11 +154,10 @@ entry below is marked.
   is absent). `NewEvent` stamps `Event.Step` from it, so decorator-emitted
   events inside a Runner turn — the retry stage's Attempt events, a decision
   observed inside a ToolPolicy, the sandbox Exec and embed events a tool's
-  decorators emit — carry the enclosing turn; Runner-emitted events keep
-  setting Step explicitly. The agent Runner places the turn in the contexts
-  it passes to the client, policies, hooks, and tools.
+  decorators emit — carry the enclosing turn. The agent Runner places the
+  turn in the contexts it passes to the client, policies, hooks, and tools.
 - `llmkit`: `FinalizeEvent.FinalText` (`final_text`, omitted when empty) —
-  the run's answer as the Runner stitched it across a max-tokens
+  the run's text as the Runner stitched it across a max-tokens
   continuation, so a store persists it without re-deriving the stitch.
   Additive; no schema version bump.
 - `llmkit`: `Event.Validate()` — a shape check for sinks, stores, and
@@ -199,7 +198,7 @@ entry below is marked.
   field-wise — each unset schedule field (`MaxAttempts <= 0`,
   `BaseDelay <= 0`, `MaxDelay <= 0`, `Jitter == 0`, `RequestTimeout <= 0`)
   is taken from `base`; the `Sleep`/`Rand` test hooks pass through
-  untouched. `provider.New`, `decide.New`, and `embed.NewEmbedder` each
+  untouched. `provider.New`, `decide.New`, and `embed.New` each
   run their `Config.Retry.Or(<their defaults>)`, so a partial
   `Config.Retry` keeps its fields instead of being discarded wholesale
   (`provider.New` with `Retry{MaxAttempts: -1}` now resolves to four
@@ -285,14 +284,77 @@ entry below is marked.
   overridden.
 - `agent`: `TruncOutputCap` and `TruncNoAnswer` truncation reasons; `FinalizeEvent.Status` and `Err` are now set by the Runner (llmkit-bk8.6.1, llmkit-bk8.6.2, llmkit-4qh.16).
 - `agent`: after a hook panic, the run's `Finalize` event reports status
-  `panicked` with zero counters (llmkit-4qh.16).
+  `panicked` with zero usage (llmkit-4qh.16).
+- `examples/replay`: a new program that replays a run recorded by
+  `examples/agent --record <dir>` offline. It takes a record directory and
+  a run id, replays through `agent.NewReplayClient`, and prints the replayed
+  final text. It exits 1 when Run returns an error (an `*agent.IncompleteError`
+  included) or `ReplayClient.Err` is non-nil, and with the wrong number of
+  arguments. It reads no `LLMKIT_*` variables (llmkit-bk8.9.4).
+- `examples/agent`: `--record <dir>` persists the run as `<dir>/<run id>.jsonl`
+  through `agent.JSONL`, registered with `agent.WithObserver`, and prints the
+  run id; the provider client now sets `Options.Retry` and an
+  `Options.Observer` that logs each attempt. With `--image`, `examples/basic`
+  builds its user turn with `llmkit.UserMessage(llmkit.Text(…), llmkit.Image(…))`
+  (llmkit-bk8.9.4).
+- `examples`: `TestExamplesRecordReplay` records a run through the built
+  `examples/agent` against a scripted local openai-compatible server, replays
+  it through the built `examples/replay` with no server, and checks that
+  replay exits non-zero on a record with its last completion removed, on a
+  step-capped record, and on a step-capped record with its last tool run's
+  arguments altered. `TestExamplesUsageExitWithoutEnv`
+  gains a `replay` row, and its `LLMKIT_PROVIDER` assertion now covers only
+  the four provider-driven examples (llmkit-bk8.9.4).
 
 ### Changed
 
+- **Breaking:** `llmkit.Delta` gains `Thinking string`, and a `DeltaThinking`
+  fragment now carries its text in `Thinking` with `Text` empty. `Text` still
+  carries `DeltaText` fragments, and `Thinking` is empty on `DeltaText` and
+  `DeltaToolCall`. The Anthropic, OpenAI-compatible, and Google stream
+  decoders and the deltas `llmkit.Stream` synthesizes from `Complete` all
+  follow this split; only the thinking text moved, and a thinking block with
+  no visible text still yields one synthesized delta, now with both fields
+  empty. Migration: read `d.Thinking` when `d.Kind == llmkit.DeltaThinking`.
+  The v0.5.0 `ExampleStream` pattern, which printed `d.Text` for both
+  `DeltaText` and `DeltaThinking`, now goes silently quiet on thinking
+  fragments: it compiles and runs, and `d.Text` is empty on each thinking
+  fragment. `agent` `Hooks.Delta` passes each `Delta` to the hook unchanged.
+  The README Stream section and `ExampleStream` show a callback that prints
+  `d.Text`, which leaves out `DeltaThinking` fragments and still prints a
+  `<think>` span a model inlines in its answer (llmkit-bk8.9.3).
+- **Breaking:** the credential and endpoint fields are named alike in
+  `provider.Spec`, `decide.Config`, and `embed.Config`: the credential is
+  `Secret` and the endpoint is `BaseURL`. `decide.Config.APIKey` is now
+  `Secret`; `embed.Config.APIKey` is now `Secret` and `embed.Config.URL`
+  is now `BaseURL`. `provider.Spec` is unchanged, and the env variable
+  names (`LLMKIT_*_API_KEY`) are unchanged. The Validate and New error
+  texts name `Secret` and `BaseURL` and still never echo the credential.
+  An OpenAI-compatible `BaseURL` includes the version segment, the form
+  `provider.Spec.BaseURL` already takes: the OpenAI-compatible embed
+  backend now posts to `<BaseURL>/embeddings` (it posted to
+  `<URL>/v1/embeddings`), so an embed URL `http://host:11434` becomes
+  `http://host:11434/v1`. The Ollama backend is unchanged: `BaseURL` is
+  the server root and the request path is `/api/embed`. `decide`'s
+  `BaseURL` stays a root, with `/v1/systemone` appended. A renamed field
+  fails to compile, but an OpenAI-compatible embed URL that comes from
+  configuration or an environment string gives no compile error: the old
+  value keeps building, and each request goes to `<host>/embeddings`,
+  which a server that serves embeddings only under `/v1` answers with a
+  404. Migration: rename `APIKey` to `Secret` and `URL` to `BaseURL`, and
+  append `/v1` to the `BaseURL` of each OpenAI-compatible embedder
+  (llmkit-bk8.9.5).
+- CI lint (llmkit-bk8.9.7, llmkit-bk8.9.2): the `golangci-lint` job runs a
+  second time with `--build-tags integration,live`, so findings in the
+  integration- and live-tagged files are reported; the plain run stays. `ST1020` and
+  `ST1021` (doc comments begin with the name of the func or type they
+  document) are enabled. The three findings the tagged run surfaced are
+  fixed: two unchecked `Body.Close` errors in tagged tests and the unused
+  `cosineSimF32` in `embed/integration_test.go`, which is deleted.
 - **Breaking:** `agent.Runner.Run` returns a new `*agent.IncompleteError`
-  (`Reason`, `Outcome`) whenever a limit stopped the run — iteration cap,
-  token budget, or budget pool — instead of a nil error next to a truncated
-  `Outcome`. `ie.Outcome` is the same pointer `Run` returns and
+  (`Reason`, `Outcome`) whenever the run was truncated (an iteration-cap,
+  token-budget, or budget-pool stop, say) instead of a nil error next to a
+  truncated `Outcome`. `ie.Outcome` is the same pointer `Run` returns and
   `ie.Reason == Outcome.TruncationReason`; `Continue(ie.Outcome)` still
   works. A caller that printed `Outcome.FinalText` as the answer whenever
   `err == nil` now sees the limit stop first. `RunJSON`/`RunJSONAs` keep
@@ -303,15 +365,13 @@ entry below is marked.
   except when the repair completion itself fails (transport error,
   cancelled context): that failure is returned as is and matches neither.
   `examples/chat` and `examples/agent` branch on it before printing text.
-- **Breaking:** `agent`: `Runner.Run` returns a `*IncompleteError` when a
-  run ends with `TruncNoAnswer` or `TruncOutputCap`.
 - **Breaking:** `agent.Source` and `agent.ErrUnknownRun` moved to
   `llmkit.Source` / `llmkit.ErrUnknownRun` (no alias). `Transcript` and the
   JSONL sink satisfy `llmkit.Source`, and `NewReplayClient` takes one. The
   sentinel's text is now `llmkit: unknown run`; match it with `errors.Is`.
-- **Breaking:** `FinalizeEvent` loses `Iterations` — `Event.Step` on the
-  finalize event already carries the completed-turn count (the Runner set
-  both from the same value on every exit path). Old recordings still
+- **Breaking:** `FinalizeEvent` loses `Iterations` — `Event.Step` on a
+  finalize event whose status is not `panicked` already carries the
+  completed-turn count. Old recordings still
   decode: the `iterations` key is ignored. No compatibility aliases.
   This is a removal at the same schema version (still 1), not a bump —
   safe only because no store exists yet to branch on the field, which is
@@ -707,8 +767,8 @@ entry below is marked.
   `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_PROFILE` (and its
   `ANTHROPIC_CONFIG_DIR` profile file), `ANTHROPIC_CUSTOM_HEADERS`, and the
   `$HOME/.config/anthropic/configs/default.json` fallback profile
-  (anthropic) — `Spec.Secret`/`Spec.Auth` are now the only credential
-  source, and a profile's `workspace_id` no longer contributes the
+  (anthropic) — `Spec.Secret`/`Spec.Auth` are now the only source of the
+  vendor credential, and a profile's `workspace_id` no longer contributes the
   `Anthropic-Workspace-Id` header. `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`,
   and `GOOGLE_GEMINI_BASE_URL` no longer set the host for an empty
   `Spec.BaseURL`, and neither does the `base_url` of an Anthropic profile
@@ -753,6 +813,15 @@ entry below is marked.
 
 ### Fixed
 
+- `llmkit`: `Usage.ChargeableTokens` shows its full doc comment in `go doc`;
+  a blank line had detached the first paragraph from the func.
+- `agent` (llmkit-bk8.9.11, llmkit-bk8.9.2): the run-end docs state the
+  `TruncOutputCap` and `TruncNoAnswer` stops, the `Finalize` a hook panic
+  produces, and what `ReplayClient.Err` reports, and say that a limit stop
+  comes from a failed limit check. They delete the closed
+  stop-reason lists, the unconditional `Finalize` claim, the hook-panic
+  propagation claims, and the stale transcript-filename, persistence, and
+  streaming sentences.
 - `agent` (llmkit-bk8.1.5): replaying a run that recorded a `ToolPolicy`
   denial no longer diverges under the same policy when that policy only
   denies, and no longer rewrites the denial into an ordinary tool error when
@@ -761,12 +830,14 @@ entry below is marked.
   policy that only denies (argument-rewriting policies are not replayable
   yet, llmkit-60a), and the replayed `ToolRun` events keep
   `Denied`/`DenyReason`. Replaying a record with a denial and no policy now
-  fails with `ErrReplayDiverged` instead; pass `rc.ToolPolicy()`. The denial
+  records a divergence, which `ReplayClient.Err` reports, instead; `Run`
+  returns the error of the run's own end (an `*IncompleteError` for a
+  step-capped record). Pass `rc.ToolPolicy()`. The denial
   text is rendered only by the Runner.
 - `agent` (llmkit-4qh.10, llmkit-bk8.6.8): the `ReplayClient`, `Tools`, and
   `Err` docs state that tools other than `rc.Tools()` execute live and their
-  results are never compared with the record, that `Err` is the only
-  report of a divergence in the run's final tool turn, and that `Err` does
+  results are never compared with the record, that `Err` reports a
+  divergence in the run's final tool turn, and that `Err` does
   not report a recorded call left unserved in that turn (llmkit-lew).
   `NewReplayClientFromResponses` is documented as the scripted test double.
 - `llmkit/sandbox` (llmkit-bk8.1.8): a command that cannot be launched now
@@ -903,8 +974,7 @@ entry below is marked.
   response was a plain error, terminal after one hit; now it is
   retried unless its type maps to a terminal `Kind`. The caller's
   cancellation is never an `*APIError`: it is the plain context error,
-  as it already was. `embed.Config.Validate`, `NewEmbedder`,
-  `NewOllamaEmbedder`, and `NewOpenAICompatibleEmbedder` wrap
+  as it already was. `embed.Config.Validate` and `embed.New` wrap
   construction and validation refusals in `llmkit.ErrInvalidRequest`. A
   decode failure, a wrong embedding count, an index error, and a
   dimension mismatch stay plain terminal errors: `Classify` never
@@ -921,10 +991,7 @@ entry below is marked.
   against the embed defaults (3 attempts, 60s per-attempt timeout, the
   kit's `BaseDelay`/`MaxDelay`/`Jitter`) instead of embed's own
   Jitter-literal resolver — see the `retry.Config.Or` bullet above for
-  the partial-config rules. `LoadConfig` now returns
-  `Retry.BaseDelay`, `MaxDelay`, and `Jitter` at zero (before: 500ms,
-  30s, 0.2) and sets only `RequestTimeout`, from `<PREFIX>_EMBED_TIMEOUT`;
-  the policy an embedder resolves from a loaded `Config` is unchanged.
+  the partial-config rules.
 - `embed.CachedEmbedder` no longer aliases the inner embedder's vectors
   (llmkit-bk8.8.1): `insert` now stores a private copy, so an inner
   `Embedder` that keeps and later mutates a slice it returned can no
@@ -948,6 +1015,17 @@ entry below is marked.
   `$defs`, `additionalProperties`, and `description` at the schema root,
   producing a dangling `$ref` for any caller schema that used `$defs`;
   every non-typed root key now carries through to the wire verbatim.
+- Docs truth (llmkit-bk8.9.6, llmkit-bk8.9.8, llmkit-bk8.9.10):
+  `embed.Embedder.Dimensions` no longer says the first successful call
+  records the length: `EmbedBatch` with no texts sends no request and
+  leaves `Dimensions()` at 0 on an embedder with `Config.Dimensions` 0.
+  The `embed` and `provider` package docs now say that a nil `HTTPClient`
+  sends through `http.DefaultTransport`, which reads `HTTP_PROXY`,
+  `HTTPS_PROXY`, and `NO_PROXY`. `docs/design.md` no longer says that
+  `internal/adapter.Prepare` applies every request-side rule of
+  `Capabilities`. `AGENTS.md` and `CLAUDE.md` no longer say that
+  `provider/live_registry_test.go` enforces the acceptance rule for
+  adapter and agent-loop changes.
 
 ## [0.5.0] - 2026-09-20
 

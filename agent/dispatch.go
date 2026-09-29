@@ -131,9 +131,9 @@ func (r *Runner) authorizeCalls(ctx context.Context, calls []llmkit.ToolCall, re
 // (isErr=true) rather than aborting the loop — in BOTH dispatch modes, so
 // toggling WithParallelTools never changes failure semantics. A panic is
 // the tool-boundary conversion of a bug into data for the model; a hook
-// panic (ToolStart/ToolEnd) is a harness bug and is NOT recovered here — it
-// propagates to the caller (see [Runner.executeTools] for the parallel-mode
-// path). Context cancellation surfaced by the tool is still rendered as a
+// panic (ToolStart/ToolEnd/ToolHealth) is a harness bug and is NOT recovered
+// here (see [Runner.executeTools] for the parallel-mode path). Context
+// cancellation surfaced by the tool is still rendered as a
 // tool error here; the loop's own ctx checks handle real cancellation.
 //
 // With WithToolTimeout set, the call runs under a derived deadline: on
@@ -254,14 +254,13 @@ func (res toolResult) message(callID string) llmkit.Message {
 // the transcript; the caller appends the results in call order after
 // executeTools returns.
 //
-// Hook panics are harness bugs and are never rendered to the model. In
-// sequential mode a panicking hook propagates to [Runner.Run]'s caller
-// unchanged. In parallel mode the per-call goroutine recovers it (the only
-// panic that can escape runTool — tool panics are fully contained there),
-// stashes the FIRST hook panic, and this function re-panics with the
-// original value AFTER all sibling goroutines have finished: no goroutine
-// leaks, no result is recorded for the interrupted turn, and the caller sees
-// the same panic value in both modes.
+// Hook panics are harness bugs and are never rendered to the model. When the
+// calls run one at a time, a panicking hook is not recovered here, so its
+// panic unwinds through this function. When they run in parallel, the
+// per-call goroutine recovers it, stashes the first hook panic to arrive, and
+// this function re-panics with the original value AFTER all sibling
+// goroutines have finished. Either way no result is recorded for the
+// interrupted turn.
 func (r *Runner) executeTools(ctx context.Context, outcome *Outcome, calls []llmkit.ToolCall) []toolResult {
 	results := make([]toolResult, len(calls))
 	// The turn's Step rides the whole tool phase's context — the ToolPolicy

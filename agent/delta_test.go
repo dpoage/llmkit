@@ -51,7 +51,7 @@ func (s *streamFakeClient) Stream(ctx context.Context, req llmkit.Request, fn fu
 		case llmkit.BlockText:
 			d = llmkit.Delta{Kind: llmkit.DeltaText, Text: b.Text}
 		case llmkit.BlockThinking:
-			d = llmkit.Delta{Kind: llmkit.DeltaThinking, Text: b.Text}
+			d = llmkit.Delta{Kind: llmkit.DeltaThinking, Thinking: b.Text}
 		default:
 			continue
 		}

@@ -54,19 +54,19 @@ func TestParseBackend_AcceptsBothConstants(t *testing.T) {
 func TestNewAndValidate_RejectBadConfig(t *testing.T) {
 	const u = "http://localhost:1"
 
-	if _, err := New(Config{Backend: "nope", Model: "m", URL: u}); !errors.Is(err, llmkit.ErrInvalidRequest) {
+	if _, err := New(Config{Backend: "nope", Model: "m", BaseURL: u}); !errors.Is(err, llmkit.ErrInvalidRequest) {
 		t.Errorf("New(bad backend) = %v, want errors.Is ErrInvalidRequest", err)
 	}
-	if _, err := New(Config{Model: "m", URL: u}); !errors.Is(err, llmkit.ErrInvalidRequest) {
+	if _, err := New(Config{Model: "m", BaseURL: u}); !errors.Is(err, llmkit.ErrInvalidRequest) {
 		t.Errorf("New(zero backend) = %v, want errors.Is ErrInvalidRequest", err)
 	}
 
 	rejected := []Config{
-		{Backend: "nope", Model: "m", URL: u},
-		{Backend: BackendOllama, Model: "", URL: u},
-		{Backend: BackendOllama, Model: "m", URL: ""},
-		{Backend: BackendOllama, Model: "m", URL: u, Dimensions: -1},
-		{Backend: BackendOllama, Model: "m", URL: u, MaxBatch: -1},
+		{Backend: "nope", Model: "m", BaseURL: u},
+		{Backend: BackendOllama, Model: "", BaseURL: u},
+		{Backend: BackendOllama, Model: "m", BaseURL: ""},
+		{Backend: BackendOllama, Model: "m", BaseURL: u, Dimensions: -1},
+		{Backend: BackendOllama, Model: "m", BaseURL: u, MaxBatch: -1},
 	}
 	for i, cfg := range rejected {
 		if err := cfg.Validate(); !errors.Is(err, llmkit.ErrInvalidRequest) {

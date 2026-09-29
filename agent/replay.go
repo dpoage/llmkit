@@ -13,9 +13,9 @@ import (
 )
 
 // ErrReplayDiverged reports that a replayed run's tool calls or wire
-// requests no longer match the recorded sequence. A diverged replay FAILS
-// [Runner.Run] with an error wrapping this sentinel instead of finishing
-// with a wrong answer. Match it with errors.Is.
+// requests no longer match the recorded sequence. The [ReplayClient] records
+// the first divergence and [ReplayClient.Err] returns it. Match it with
+// errors.Is.
 var ErrReplayDiverged = errors.New("agent: replay diverged")
 
 // ReplayClient is an [llmkit.Client] that serves a fixed sequence of recorded
@@ -57,10 +57,9 @@ var ErrReplayDiverged = errors.New("agent: replay diverged")
 //
 // A divergence in the run's FINAL tool turn can end the run before another
 // Complete happens: a recording that stopped at its step cap replays to the
-// same limit and Run returns an [*IncompleteError]. [ReplayClient.Err] is
-// the ONLY report of it: callers MUST assert it returns nil after a
-// replayed run — a diverged replay is a failed evaluation whatever Run
-// returned.
+// same limit and Run returns an [*IncompleteError]. [ReplayClient.Err]
+// reports it: callers MUST assert it returns nil after a replayed run — a
+// diverged replay is a failed evaluation whatever Run returned.
 //
 // ReplayClient is safe for concurrent use, though a single Runner calls it
 // sequentially.
@@ -144,10 +143,11 @@ func NewReplayClientFromResponses(resps []llmkit.Response, caps llmkit.Capabilit
 func (rc *ReplayClient) Capabilities() llmkit.Capabilities { return rc.caps }
 
 // Complete serves the next recorded response, validating tool-call
-// structure; if the request's trailing tool results carry a replay
-// divergence, it returns an error wrapping [ErrReplayDiverged] instead of
-// serving the next response — a diverged replay fails Run, it does not
-// finish with a wrong answer.
+// structure. It returns ctx.Err() when ctx is already done. Otherwise it
+// returns an error wrapping [ErrReplayDiverged] instead of serving the next
+// response when a divergence is already recorded, when the request's
+// tool-call structure does not match the record, and when the record is
+// exhausted.
 func (rc *ReplayClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	if err := ctx.Err(); err != nil {
 		return llmkit.Response{}, err
@@ -358,7 +358,7 @@ func (rc *ReplayClient) recordDiverged(err error) {
 
 // Err returns the replay's first recorded divergence, or nil when none was
 // recorded. A divergence in the run's final tool turn can end the run
-// before another Complete happens; Err is the only report of it, so callers
+// before another Complete happens; Err reports it, so callers
 // MUST assert Err() == nil after a replayed run. A recorded call the replay
 // never serves in its final tool turn — for example one a policy stricter than
 // the recorded one denies — records no divergence, so Err does not report

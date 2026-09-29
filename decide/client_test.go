@@ -20,8 +20,8 @@ import (
 	"github.com/dpoage/llmkit/retry"
 )
 
-// testAPIKey is a distinctive fake credential used to prove keys never leak into error strings.
-const testAPIKey = "sk-super-secret-do-not-echo"
+// testSecret is a distinctive fake credential used to prove keys never leak into error strings.
+const testSecret = "sk-super-secret-do-not-echo"
 
 var fastRetry = retry.Config{
 	MaxAttempts: 3,
@@ -36,7 +36,7 @@ func newTestClient(t *testing.T, srvURL string, policy retry.Config) *Client {
 	if policy.Rand == nil {
 		policy.Rand = func() float64 { return 0.5 }
 	}
-	c, err := New(Config{APIKey: testAPIKey, Model: "jev-latest", BaseURL: srvURL, Retry: policy})
+	c, err := New(Config{Secret: testSecret, Model: "jev-latest", BaseURL: srvURL, Retry: policy})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestAsk_GoldenRequestEnvelope(t *testing.T) {
 	if string(body) != want {
 		t.Errorf("body =\n%s\nwant\n%s", body, want)
 	}
-	if auth != "Bearer "+testAPIKey {
+	if auth != "Bearer "+testSecret {
 		t.Errorf("Authorization = %q, want bearer credential", auth)
 	}
 	if ctype != "application/json" {
@@ -582,7 +582,7 @@ func TestAsk_ObserverEmitsOneDecisionEventOnSuccess(t *testing.T) {
 	defer srv.Close()
 
 	obs := &decisionCapture{}
-	c, err := New(Config{APIKey: testAPIKey, Model: "jev-latest", BaseURL: srv.URL, Retry: fastRetry, Observer: obs})
+	c, err := New(Config{Secret: testSecret, Model: "jev-latest", BaseURL: srv.URL, Retry: fastRetry, Observer: obs})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -642,7 +642,7 @@ func TestAsk_ObserverEmitsOnFailure(t *testing.T) {
 	defer srv.Close()
 
 	obs := &decisionCapture{}
-	c, err := New(Config{APIKey: testAPIKey, Model: "jev-latest", BaseURL: srv.URL, Retry: retry.Config{MaxAttempts: 2, BaseDelay: time.Millisecond}, Observer: obs})
+	c, err := New(Config{Secret: testSecret, Model: "jev-latest", BaseURL: srv.URL, Retry: retry.Config{MaxAttempts: 2, BaseDelay: time.Millisecond}, Observer: obs})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -680,7 +680,7 @@ func TestAsk_NoObserverEmitsNothing(t *testing.T) {
 	srv := httptest.NewServer(okHandler(mixedAnswers("jev-1.13.0")))
 	defer srv.Close()
 
-	c, err := New(Config{APIKey: testAPIKey, Model: "jev-latest", BaseURL: srv.URL, Retry: fastRetry})
+	c, err := New(Config{Secret: testSecret, Model: "jev-latest", BaseURL: srv.URL, Retry: fastRetry})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -764,7 +764,7 @@ func TestAsk_DecisionEventRoundTrip(t *testing.T) {
 	}
 
 	obs := &decisionCapture{}
-	c, err := New(Config{APIKey: testAPIKey, Model: "jev-latest", BaseURL: srv.URL, Retry: fastRetry, Observer: obs})
+	c, err := New(Config{Secret: testSecret, Model: "jev-latest", BaseURL: srv.URL, Retry: fastRetry, Observer: obs})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -801,22 +801,22 @@ func TestAsk_DecisionEventRoundTrip(t *testing.T) {
 	}
 }
 
-// TestAsk_APIKeyNeverInErrorStrings pins the credential never appears in Error() nor %+v dumps across every error path.
-func TestAsk_APIKeyNeverInErrorStrings(t *testing.T) {
+// TestAsk_SecretNeverInErrorStrings pins the credential never appears in Error() nor %+v dumps across every error path.
+func TestAsk_SecretNeverInErrorStrings(t *testing.T) {
 	run := func(t *testing.T, err error) {
 		t.Helper()
 		if err == nil {
 			t.Fatal("expected an error")
 		}
 		for _, s := range []string{err.Error(), fmt.Sprintf("%+v", err)} {
-			if strings.Contains(s, testAPIKey) {
+			if strings.Contains(s, testSecret) {
 				t.Errorf("error string leaks the API key: %s", s)
 			}
 		}
 	}
 
 	// Pre-wire validation (no network).
-	c, err := New(Config{APIKey: testAPIKey, Model: "m"})
+	c, err := New(Config{Secret: testSecret, Model: "m"})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -1064,7 +1064,7 @@ func TestAsk_MalformedBaseURLIsErrInvalidRequest(t *testing.T) {
 			return nil
 		},
 	}
-	c, err := New(Config{APIKey: testAPIKey, Model: "jev-latest", BaseURL: "http://a b", Retry: policy})
+	c, err := New(Config{Secret: testSecret, Model: "jev-latest", BaseURL: "http://a b", Retry: policy})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

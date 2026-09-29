@@ -17,12 +17,12 @@ func TestNew_ConfigValidation(t *testing.T) {
 		name string
 		cfg  Config
 	}{
-		{"empty APIKey", Config{Model: "jev-latest"}},
-		{"whitespace-only APIKey", Config{APIKey: "   ", Model: "jev-latest"}},
-		{"padded APIKey", Config{APIKey: " key ", Model: "jev-latest"}},
-		{"empty Model", Config{APIKey: "key"}},
-		{"negative jitter", Config{APIKey: "key", Model: "jev-latest", Retry: retry.Config{Jitter: -0.1}}},
-		{"jitter above 1", Config{APIKey: "key", Model: "jev-latest", Retry: retry.Config{Jitter: 1.5}}},
+		{"empty Secret", Config{Model: "jev-latest"}},
+		{"whitespace-only Secret", Config{Secret: "   ", Model: "jev-latest"}},
+		{"padded Secret", Config{Secret: " key ", Model: "jev-latest"}},
+		{"empty Model", Config{Secret: "key"}},
+		{"negative jitter", Config{Secret: "key", Model: "jev-latest", Retry: retry.Config{Jitter: -0.1}}},
+		{"jitter above 1", Config{Secret: "key", Model: "jev-latest", Retry: retry.Config{Jitter: 1.5}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -37,7 +37,7 @@ func TestNew_ConfigValidation(t *testing.T) {
 	}
 
 	// Padded key must be refused without its value reaching the error text.
-	_, err := New(Config{APIKey: " sk-super-secret-do-not-echo ", Model: "jev-latest"})
+	_, err := New(Config{Secret: " sk-super-secret-do-not-echo ", Model: "jev-latest"})
 	if err == nil {
 		t.Fatal("expected an error for a padded API key")
 	}
@@ -50,7 +50,7 @@ func TestNew_ConfigValidation(t *testing.T) {
 }
 
 func TestNew_Defaults(t *testing.T) {
-	c, err := New(Config{APIKey: "key", Model: "jev-latest"})
+	c, err := New(Config{Secret: "key", Model: "jev-latest"})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestNew_Defaults(t *testing.T) {
 	}
 
 	// A partial Retry keeps its set fields and takes every other field from decide's defaults.
-	p, err := New(Config{APIKey: "key", Model: "jev-latest", Retry: retry.Config{MaxAttempts: 5}})
+	p, err := New(Config{Secret: "key", Model: "jev-latest", Retry: retry.Config{MaxAttempts: 5}})
 	if err != nil {
 		t.Fatalf("New(partial Retry): %v", err)
 	}
@@ -94,7 +94,7 @@ func TestNew_Defaults(t *testing.T) {
 
 func TestNew_ExplicitRetryAndBaseURLKept(t *testing.T) {
 	policy := retry.Config{MaxAttempts: 5, RequestTimeout: 10 * time.Second, BaseDelay: time.Second, MaxDelay: time.Minute, Jitter: 0.2}
-	c, err := New(Config{APIKey: "key", Model: "jev-1.13.0", BaseURL: "http://localhost:9000/", Retry: policy})
+	c, err := New(Config{Secret: "key", Model: "jev-1.13.0", BaseURL: "http://localhost:9000/", Retry: policy})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

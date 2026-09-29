@@ -21,11 +21,11 @@ var errStreamNoFinishReason = errors.New("google: stream ended before finishReas
 // same normalizeErr, and the reassembled response through the same
 // toResponse — the returned Response is what Complete would have returned
 // for the same wire exchange. fn (when non-nil) runs in wire order: one
-// DeltaText per text part, one DeltaThinking per thought part, one
-// DeltaToolCall per functionCall part with the full arguments (function
-// calls arrive whole; Index is the call's arrival position among the
-// response's calls). A fn error cancels the stream and is returned wrapped,
-// with no Response.
+// DeltaText per non-empty text part, one DeltaThinking (Thinking) per thought
+// part, one DeltaToolCall per functionCall part with the full arguments
+// (function calls arrive whole; Index is the call's arrival position among
+// the response's calls). A fn error cancels the stream and is returned
+// wrapped, with no Response.
 func (g *googleAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(llmkit.Delta) error) (llmkit.Response, error) {
 	// Per-request transport-status recorder for normalizeErr's fallback,
 	// mirroring Complete.
@@ -122,7 +122,7 @@ func absorbChunk(agg *genai.GenerateContentResponse, chunk *genai.GenerateConten
 				case p.Thought:
 					cand.Content.Parts = append(cand.Content.Parts, p)
 					if fn != nil {
-						if err := fn(llmkit.Delta{Kind: llmkit.DeltaThinking, Text: p.Text}); err != nil {
+						if err := fn(llmkit.Delta{Kind: llmkit.DeltaThinking, Thinking: p.Text}); err != nil {
 							return err
 						}
 					}

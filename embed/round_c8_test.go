@@ -97,7 +97,7 @@ func TestResponseBody_Bound(t *testing.T) {
 			defer srv.Close()
 
 			client := &http.Client{Transport: &countingBodyTransport{rt: http.DefaultTransport, n: &bytesRead}}
-			emb, err := New(Config{Backend: backend, Model: "m", URL: srv.URL, HTTPClient: client, Retry: retry.Config{MaxAttempts: 3}})
+			emb, err := New(Config{Backend: backend, Model: "m", BaseURL: srv.URL, HTTPClient: client, Retry: retry.Config{MaxAttempts: 3}})
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
@@ -131,7 +131,7 @@ func TestResponseBody_Bound(t *testing.T) {
 			defer srv.Close()
 
 			client := &http.Client{Transport: &countingBodyTransport{rt: http.DefaultTransport, n: &bytesRead}}
-			emb, err := New(Config{Backend: backend, Model: "m", URL: srv.URL, HTTPClient: client, Retry: retry.Config{MaxAttempts: 1}})
+			emb, err := New(Config{Backend: backend, Model: "m", BaseURL: srv.URL, HTTPClient: client, Retry: retry.Config{MaxAttempts: 1}})
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
@@ -163,7 +163,7 @@ func TestResponseBody_Bound(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			emb, err := New(Config{Backend: backend, Model: "m", URL: srv.URL, Retry: retry.Config{MaxAttempts: 1}})
+			emb, err := New(Config{Backend: backend, Model: "m", BaseURL: srv.URL, Retry: retry.Config{MaxAttempts: 1}})
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}

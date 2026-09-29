@@ -301,7 +301,7 @@ func caseStructuredState(t *testing.T, sess *livetest.Session) {
 
 func caseErrorBadKey(t *testing.T, sess *livetest.Session) {
 	base := newDecideCase(t, sess, "error_bad_key")
-	bad := base.variant(func(c *decide.Config) { c.APIKey = badKey })
+	bad := base.variant(func(c *decide.Config) { c.Secret = badKey })
 	_, err := bad.ask(ticketState, ticketQuestions())
 	if !errors.Is(err, llmkit.ErrAuth) {
 		t.Fatalf("error = %v, want ErrAuth", err)

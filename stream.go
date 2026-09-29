@@ -9,9 +9,11 @@ import (
 type DeltaKind string
 
 const (
-	// DeltaText is a text fragment of the assistant reply.
+	// DeltaText is a text fragment of the assistant reply; the fragment is
+	// in [Delta.Text].
 	DeltaText DeltaKind = "text"
-	// DeltaThinking is a thinking fragment.
+	// DeltaThinking is a thinking fragment; the fragment is in
+	// [Delta.Thinking] and [Delta.Text] is empty.
 	DeltaThinking DeltaKind = "thinking"
 	// DeltaToolCall is one tool call's fragment. Index is the 0-based position
 	// of the call in [Response.ToolCalls] — adapters renumber vendor wire
@@ -25,8 +27,12 @@ const (
 type Delta struct {
 	// Kind selects which fields carry the payload.
 	Kind DeltaKind
-	// Text holds the fragment for DeltaText and DeltaThinking.
+	// Text holds the fragment for DeltaText. It is empty for DeltaThinking
+	// and DeltaToolCall.
 	Text string
+	// Thinking holds the fragment for DeltaThinking. It is empty for
+	// DeltaText and DeltaToolCall.
+	Thinking string
 	// Index is the 0-based position of the call in Response.ToolCalls
 	// (DeltaToolCall); adapters renumber vendor wire indices to this.
 	Index int
@@ -60,12 +66,12 @@ type StreamingClient interface {
 
 // Stream uses c's Stream when c implements StreamingClient; otherwise it
 // calls c.Complete and synthesizes deltas from the Response in block order
-// (text blocks → DeltaText, thinking blocks → DeltaThinking, each ToolCall →
-// one DeltaToolCall with ID/Name/Index and the full Arguments) before
-// returning it. When Blocks carries no text block but Text is set, one
-// DeltaText from Text is emitted after the blocks and before the tool-call
-// deltas. fn runs on the calling goroutine, and its execution time
-// counts toward the per-attempt RequestTimeout when Stream is wrapped by
+// (text blocks → DeltaText in Text, thinking blocks → DeltaThinking in
+// Thinking, each ToolCall → one DeltaToolCall with ID/Name/Index and the
+// full Arguments) before returning it. When Blocks carries no text block but
+// Text is set, one DeltaText from Text is emitted after the blocks and before
+// the tool-call deltas. fn runs on the calling goroutine, and its execution
+// time counts toward the per-attempt RequestTimeout when Stream is wrapped by
 // the provider retry stage.
 func Stream(ctx context.Context, c Client, req Request, fn func(Delta) error) (Response, error) {
 	if sc, ok := c.(StreamingClient); ok {
@@ -80,19 +86,17 @@ func Stream(ctx context.Context, c Client, req Request, fn func(Delta) error) (R
 	}
 	sawText := false
 	for _, b := range resp.Blocks {
-		var kind DeltaKind
+		var d Delta
 		switch b.Kind {
 		case BlockText:
-			kind = DeltaText
+			d = Delta{Kind: DeltaText, Text: b.Text}
+			sawText = true
 		case BlockThinking:
-			kind = DeltaThinking
+			d = Delta{Kind: DeltaThinking, Thinking: b.Text}
 		default:
 			continue
 		}
-		if kind == DeltaText {
-			sawText = true
-		}
-		if err := fn(Delta{Kind: kind, Text: b.Text}); err != nil {
+		if err := fn(d); err != nil {
 			return Response{}, fmt.Errorf("llmkit: stream fn: %w", err)
 		}
 	}

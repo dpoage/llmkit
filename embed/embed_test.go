@@ -47,7 +47,7 @@ func TestOllamaBackend_Embed(t *testing.T) {
 	emb, err := New(Config{
 		Backend: BackendOllama,
 		Model:   "nomic-embed-text",
-		URL:     srv.URL,
+		BaseURL: srv.URL,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -97,7 +97,7 @@ func TestOllamaBackend_EmbedBatch(t *testing.T) {
 	emb, err := New(Config{
 		Backend: BackendOllama,
 		Model:   "nomic-embed-text",
-		URL:     srv.URL,
+		BaseURL: srv.URL,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -122,7 +122,7 @@ func TestOllamaBackend_EmbedBatch_Empty(t *testing.T) {
 	emb, err := New(Config{
 		Backend: BackendOllama,
 		Model:   "nomic-embed-text",
-		URL:     "http://localhost:99999",
+		BaseURL: "http://localhost:99999",
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -147,7 +147,7 @@ func TestOllamaBackend_HTTPError(t *testing.T) {
 	emb, err := New(Config{
 		Backend: BackendOllama,
 		Model:   "nonexistent-model",
-		URL:     srv.URL,
+		BaseURL: srv.URL,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -163,7 +163,7 @@ func TestOllamaBackend_ConnectionRefused(t *testing.T) {
 	emb, err := New(Config{
 		Backend: BackendOllama,
 		Model:   "nomic-embed-text",
-		URL:     "http://127.0.0.1:1",
+		BaseURL: "http://127.0.0.1:1",
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -179,7 +179,7 @@ func TestNew_InvalidConfig(t *testing.T) {
 	_, err := New(Config{
 		Backend: BackendOllama,
 		Model:   "",
-		URL:     "http://localhost:11434",
+		BaseURL: "http://localhost:11434",
 	})
 	if err == nil {
 		t.Fatal("expected validation error for empty model")
@@ -195,7 +195,7 @@ func TestOllamaBackend_ContextCancellation(t *testing.T) {
 	emb, err := New(Config{
 		Backend: BackendOllama,
 		Model:   "nomic-embed-text",
-		URL:     srv.URL,
+		BaseURL: srv.URL,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -214,7 +214,7 @@ func TestOllamaBackend_ConfiguredDimensions(t *testing.T) {
 	emb, err := New(Config{
 		Backend:    BackendOllama,
 		Model:      "nomic-embed-text",
-		URL:        "http://localhost:11434",
+		BaseURL:    "http://localhost:11434",
 		Dimensions: 768,
 	})
 	if err != nil {
@@ -262,8 +262,8 @@ func TestOpenAIBackend_Embed(t *testing.T) {
 	emb, err := New(Config{
 		Backend: BackendOpenAICompatible,
 		Model:   "text-embedding-3-small",
-		URL:     srv.URL,
-		APIKey:  "test-key",
+		BaseURL: srv.URL + "/v1",
+		Secret:  "test-key",
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -315,7 +315,7 @@ func TestOpenAIBackend_EmbedBatch(t *testing.T) {
 	emb, err := New(Config{
 		Backend: BackendOpenAICompatible,
 		Model:   "text-embedding-3-small",
-		URL:     srv.URL,
+		BaseURL: srv.URL,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -349,7 +349,7 @@ func TestOpenAIBackend_EmbedBatch_UnorderedResponse(t *testing.T) {
 	emb, err := New(Config{
 		Backend: BackendOpenAICompatible,
 		Model:   "model",
-		URL:     srv.URL,
+		BaseURL: srv.URL,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -375,7 +375,7 @@ func TestOpenAIBackend_EmbedBatch_Empty(t *testing.T) {
 	emb, err := New(Config{
 		Backend: BackendOpenAICompatible,
 		Model:   "model",
-		URL:     "http://localhost:99999",
+		BaseURL: "http://localhost:99999",
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -405,7 +405,7 @@ func TestOpenAIBackend_APIError(t *testing.T) {
 	emb, err := New(Config{
 		Backend: BackendOpenAICompatible,
 		Model:   "bad-model",
-		URL:     srv.URL,
+		BaseURL: srv.URL,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -427,8 +427,8 @@ func TestOpenAIBackend_HTTPError(t *testing.T) {
 	emb, err := New(Config{
 		Backend: BackendOpenAICompatible,
 		Model:   "model",
-		URL:     srv.URL,
-		APIKey:  "bad-key",
+		BaseURL: srv.URL,
+		Secret:  "bad-key",
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -440,7 +440,7 @@ func TestOpenAIBackend_HTTPError(t *testing.T) {
 	}
 }
 
-func TestOpenAIBackend_NoAuthHeader_WithoutAPIKey(t *testing.T) {
+func TestOpenAIBackend_NoAuthHeader_WithoutSecret(t *testing.T) {
 	var gotAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
@@ -457,7 +457,7 @@ func TestOpenAIBackend_NoAuthHeader_WithoutAPIKey(t *testing.T) {
 	emb, err := New(Config{
 		Backend: BackendOpenAICompatible,
 		Model:   "model",
-		URL:     srv.URL,
+		BaseURL: srv.URL,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -620,7 +620,7 @@ func TestNew_Ollama(t *testing.T) {
 	emb, err := New(Config{
 		Backend: BackendOllama,
 		Model:   "nomic-embed-text",
-		URL:     "http://localhost:11434",
+		BaseURL: "http://localhost:11434",
 	})
 	if err != nil {
 		t.Fatalf("New(ollama): %v", err)
@@ -634,8 +634,8 @@ func TestNew_OpenAICompatible(t *testing.T) {
 	emb, err := New(Config{
 		Backend: BackendOpenAICompatible,
 		Model:   "text-embedding-3-small",
-		URL:     "https://api.openai.com",
-		APIKey:  "sk-test",
+		BaseURL: "https://api.openai.com",
+		Secret:  "sk-test",
 	})
 	if err != nil {
 		t.Fatalf("New(openai-compatible): %v", err)
@@ -649,7 +649,7 @@ func TestNew_UnknownBackend(t *testing.T) {
 	_, err := New(Config{
 		Backend: Backend("unknown"),
 		Model:   "model",
-		URL:     "http://localhost",
+		BaseURL: "http://localhost",
 	})
 	if err == nil {
 		t.Fatal("expected error for unknown backend")
@@ -664,42 +664,42 @@ func TestConfig_Validate(t *testing.T) {
 	}{
 		{
 			name:    "valid ollama",
-			cfg:     Config{Backend: BackendOllama, Model: "nomic-embed-text", URL: "http://localhost:11434"},
+			cfg:     Config{Backend: BackendOllama, Model: "nomic-embed-text", BaseURL: "http://localhost:11434"},
 			wantErr: false,
 		},
 		{
 			name:    "valid openai-compatible",
-			cfg:     Config{Backend: BackendOpenAICompatible, Model: "text-embedding-3-small", URL: "https://api.openai.com"},
+			cfg:     Config{Backend: BackendOpenAICompatible, Model: "text-embedding-3-small", BaseURL: "https://api.openai.com"},
 			wantErr: false,
 		},
 		{
 			name:    "unknown backend",
-			cfg:     Config{Backend: "foo", Model: "m", URL: "http://localhost"},
+			cfg:     Config{Backend: "foo", Model: "m", BaseURL: "http://localhost"},
 			wantErr: true,
 		},
 		{
 			name:    "zero backend",
-			cfg:     Config{Model: "m", URL: "http://localhost"},
+			cfg:     Config{Model: "m", BaseURL: "http://localhost"},
 			wantErr: true,
 		},
 		{
 			name:    "empty model",
-			cfg:     Config{Backend: BackendOllama, Model: "", URL: "http://localhost"},
+			cfg:     Config{Backend: BackendOllama, Model: "", BaseURL: "http://localhost"},
 			wantErr: true,
 		},
 		{
-			name:    "empty URL for HTTP backend",
-			cfg:     Config{Backend: BackendOllama, Model: "m", URL: ""},
+			name:    "empty BaseURL for HTTP backend",
+			cfg:     Config{Backend: BackendOllama, Model: "m", BaseURL: ""},
 			wantErr: true,
 		},
 		{
 			name:    "negative dimensions",
-			cfg:     Config{Backend: BackendOllama, Model: "m", URL: "http://localhost", Dimensions: -1},
+			cfg:     Config{Backend: BackendOllama, Model: "m", BaseURL: "http://localhost", Dimensions: -1},
 			wantErr: true,
 		},
 		{
 			name:    "explicit zero dimensions OK",
-			cfg:     Config{Backend: BackendOllama, Model: "m", URL: "http://localhost", Dimensions: 0},
+			cfg:     Config{Backend: BackendOllama, Model: "m", BaseURL: "http://localhost", Dimensions: 0},
 			wantErr: false,
 		},
 	}

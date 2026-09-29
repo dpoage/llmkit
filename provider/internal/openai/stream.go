@@ -16,12 +16,12 @@ var _ llmkit.StreamingClient = (*openaiAdapter)(nil)
 // streaming: the same params builder Complete uses, plus
 // stream_options.include_usage so the final usage-only chunk arrives (a
 // stream carries usage nowhere else). Fragments map onto llmkit deltas in
-// wire order: delta.content → DeltaText; the delta's reasoning_content
-// extra field (MiniMax/DeepSeek-style compatible endpoints) → DeltaThinking;
-// each delta.tool_calls entry → DeltaToolCall with the vendor's wire index
-// renumbered to the call's position in Response.ToolCalls. Refusal deltas
-// emit nothing — the final response normalizes them exactly as Complete
-// does. The accumulated completion goes through the same toResponse
+// wire order: delta.content → DeltaText (Text); the delta's reasoning_content
+// extra field (MiniMax/DeepSeek-style compatible endpoints) → DeltaThinking
+// (Thinking); each delta.tool_calls entry → DeltaToolCall with the vendor's
+// wire index renumbered to the call's position in Response.ToolCalls. Refusal
+// deltas emit nothing — the final response normalizes them exactly as
+// Complete does. The accumulated completion goes through the same toResponse
 // normalizer Complete uses, so the returned Response is what Complete
 // would have returned for the same wire exchange.
 //
@@ -115,7 +115,7 @@ func deltas(d openai.ChatCompletionChunkChoiceDelta, calls *toolCallTracker) []l
 		if raw != "" && raw != "null" {
 			var text string
 			if json.Unmarshal([]byte(raw), &text) == nil && text != "" {
-				out = append(out, llmkit.Delta{Kind: llmkit.DeltaThinking, Text: text})
+				out = append(out, llmkit.Delta{Kind: llmkit.DeltaThinking, Thinking: text})
 			}
 		}
 	}

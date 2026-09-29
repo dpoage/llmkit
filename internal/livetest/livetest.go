@@ -295,7 +295,7 @@ func (s *Session) Client(ctx context.Context, t testing.TB, tr *Transport, mutat
 // adjusts the Config last.
 func (s *Session) DecideClient(ctx context.Context, t testing.TB, tr *Transport, mutate func(*decide.Config)) *decide.Client {
 	cfg := decide.Config{
-		APIKey:     s.Key,
+		Secret:     s.Key,
 		Model:      s.Model,
 		BaseURL:    s.BaseURL,
 		HTTPClient: &http.Client{Transport: tr},

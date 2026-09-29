@@ -61,10 +61,12 @@ func (r *Runner) begin(ctx context.Context, cfg runConfig, task string) (context
 	return ctx, em
 }
 
-// emitFinalize closes the run with the Finalize event on EVERY run end,
-// including error returns. Step carries the number of completed turns
-// (Outcome.Iterations); a failed completion does not advance it, so a run
-// whose only completion failed reports Step 0.
+// emitFinalize emits the run's Finalize event. On a return it reports the
+// outcome's status, usage, and truncation reason, with Step the number of
+// completed turns (Outcome.Iterations); a failed completion does not advance
+// it, so a run whose only completion failed reports Step 0. With panicked set
+// it reports Status RunPanicked with every other payload field zero, and
+// leaves Step as NewEvent stamped it from ctx.
 func (r *Runner) emitFinalize(ctx context.Context, em runEmitter, o *Outcome, err error, panicked bool) {
 	ev := llmkit.NewEvent(ctx, llmkit.KindFinalize)
 	if panicked {

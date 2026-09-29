@@ -26,8 +26,8 @@ import (
 // continues. A panic raised by adversarial model-supplied arguments is data
 // for the model, not an abort — the harness never lets a tool panic kill the
 // process or its caller. (A panicking HOOK is a harness bug with the
-// opposite contract: it propagates out of [Runner.Run] and is never rendered
-// to the model — see [Hooks].)
+// opposite contract: it aborts the run and is never rendered to the model —
+// see [Hooks].)
 //
 // Run must honor ctx cancellation. The harness may invoke Run concurrently:
 // within a single run when the Runner was constructed with

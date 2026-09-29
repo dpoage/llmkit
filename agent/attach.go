@@ -15,8 +15,6 @@ import (
 // exception: its text block always exists because it carries the JSON
 // instruction. With no blocks the turn keeps the plain
 // [llmkit.TextMessage] shape, so runs without attachments are unchanged.
-// A run with an empty task and attachments has no text to derive the
-// transcript filename from; the autosave uses the name "run".
 //
 // Attachments appear on the task turn only. The empty-turn nudge, the
 // max-tokens continuation, the forced finalization turn, and the repair

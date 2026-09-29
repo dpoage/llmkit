@@ -25,10 +25,11 @@ const (
 type Backend string
 
 const (
-	// BackendOllama posts to <URL>/api/embed on an Ollama server.
+	// BackendOllama posts to <BaseURL>/api/embed on an Ollama server.
 	BackendOllama Backend = "ollama"
-	// BackendOpenAICompatible posts to <URL>/v1/embeddings on any
-	// OpenAI-compatible API (OpenAI, Azure OpenAI, vLLM, LiteLLM).
+	// BackendOpenAICompatible posts to <BaseURL>/embeddings on any
+	// OpenAI-compatible API (OpenAI, Azure OpenAI, vLLM, LiteLLM);
+	// [Config.BaseURL] states the BaseURL form each backend takes.
 	BackendOpenAICompatible Backend = "openai-compatible"
 )
 
@@ -59,17 +60,26 @@ type Config struct {
 	// Validate requires a non-empty Model.
 	Model string
 
-	// URL is the base URL of the embedding service. Validate requires a
-	// non-empty URL; there is no default.
-	URL string
+	// BaseURL is the base URL of the embedding service. Validate requires
+	// a non-empty BaseURL; there is no default. A trailing slash is
+	// dropped, and the backend appends its request path to the rest:
+	//
+	//   - [BackendOllama]: BaseURL is the server root
+	//     ("http://localhost:11434"); the request path is "/api/embed".
+	//   - [BackendOpenAICompatible]: BaseURL includes the version segment
+	//     ("https://api.openai.com/v1", "http://localhost:11434/v1"), the
+	//     same form as provider.Spec.BaseURL; the request path is
+	//     "/embeddings". A root URL without "/v1" is sent to
+	//     "<BaseURL>/embeddings" as given and is not corrected.
+	BaseURL string
 
-	// APIKey, when non-empty, is sent as "Authorization: Bearer <APIKey>"
+	// Secret, when non-empty, is sent as "Authorization: Bearer <Secret>"
 	// on every request to BOTH backends; when empty, neither backend
 	// sends an Authorization header. Validate refuses leading/trailing
 	// whitespace and any byte net/http refuses in a header value (bytes
-	// 0x00-0x1F except tab, and 0x7F). The error never echoes APIKey,
-	// raw or trimmed. An empty APIKey is always allowed.
-	APIKey string
+	// 0x00-0x1F except tab, and 0x7F). The error never echoes Secret,
+	// raw or trimmed. An empty Secret is always allowed.
+	Secret string
 
 	// Dimensions overrides the expected vector dimensionality. When
 	// zero, the embedder detects the dimensionality from the first
@@ -103,11 +113,11 @@ type Config struct {
 }
 
 // Validate reports whether c is internally consistent: Backend is
-// [BackendOllama] or [BackendOpenAICompatible], Model and URL are
-// non-empty, Dimensions and MaxBatch are non-negative, APIKey carries no
+// [BackendOllama] or [BackendOpenAICompatible], Model and BaseURL
+// are non-empty, Dimensions and MaxBatch are non-negative, Secret carries no
 // leading/trailing whitespace and no byte net/http cannot send in a
 // header value, and Retry.Jitter is in [0, 1]. Every rejection wraps
-// [llmkit.ErrInvalidRequest] and never echoes APIKey.
+// [llmkit.ErrInvalidRequest] and never echoes Secret.
 func (c Config) Validate() error {
 	if _, err := ParseBackend(string(c.Backend)); err != nil {
 		return fmt.Errorf("%w: %w", err, llmkit.ErrInvalidRequest)
@@ -115,8 +125,8 @@ func (c Config) Validate() error {
 	if c.Model == "" {
 		return fmt.Errorf("embedding model name is required: %w", llmkit.ErrInvalidRequest)
 	}
-	if c.URL == "" {
-		return fmt.Errorf("embedding service URL is required: %w", llmkit.ErrInvalidRequest)
+	if c.BaseURL == "" {
+		return fmt.Errorf("embed: BaseURL is required: %w", llmkit.ErrInvalidRequest)
 	}
 	if c.Dimensions < 0 {
 		return fmt.Errorf("dimensions must be non-negative, got %d: %w", c.Dimensions, llmkit.ErrInvalidRequest)
@@ -124,11 +134,11 @@ func (c Config) Validate() error {
 	if c.MaxBatch < 0 {
 		return fmt.Errorf("max batch must be non-negative, got %d: %w", c.MaxBatch, llmkit.ErrInvalidRequest)
 	}
-	if strings.TrimSpace(c.APIKey) != c.APIKey {
-		return fmt.Errorf("embed: API key must not have leading or trailing whitespace: %w", llmkit.ErrInvalidRequest)
+	if strings.TrimSpace(c.Secret) != c.Secret {
+		return fmt.Errorf("embed: Secret must not have leading or trailing whitespace: %w", llmkit.ErrInvalidRequest)
 	}
-	if !validHeaderValue(c.APIKey) {
-		return fmt.Errorf("embed: API key must not contain control characters: %w", llmkit.ErrInvalidRequest)
+	if !validHeaderValue(c.Secret) {
+		return fmt.Errorf("embed: Secret must not contain control characters: %w", llmkit.ErrInvalidRequest)
 	}
 	if c.Retry.Jitter < 0 || c.Retry.Jitter > 1 {
 		return fmt.Errorf("retry jitter must be in [0, 1], got %v: %w", c.Retry.Jitter, llmkit.ErrInvalidRequest)

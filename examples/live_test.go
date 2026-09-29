@@ -36,8 +36,8 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// liveEnv maps the compat lane onto the LLMKIT_* variables every example
-// reads.
+// liveEnv maps the compat lane onto the LLMKIT_* variables that
+// examples/internal/envcfg reads.
 func liveEnv(t *testing.T) map[string]string {
 	t.Helper()
 	sess := livetest.Resolve(t, "compat")

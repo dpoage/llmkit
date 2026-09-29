@@ -72,16 +72,18 @@ go vet -tags live ./provider/ ./agent/ ./examples/... ./decide/
 go vet -tags integration ./embed/ ./sandbox/
 go test -race -count=1 ./...
 golangci-lint run ./...    # v2.13.2; config in .golangci.yml
+golangci-lint run --build-tags integration,live ./...  # same config; compiles the integration- and live-tagged files
 gofmt -l .                 # must print nothing
 ```
 
 [docs/testing.md](docs/testing.md) describes the three suites, how each one
 skips, and how to run the live suite against real vendors.
 
-One rule has teeth beyond the linters. Any change to an adapter, the agent
+One rule goes beyond the linters. Any change to an adapter, the agent
 loop, or an `llmkit.Capabilities` field must name its hermetic test and its
-live case in `provider/live_registry_test.go`. The plain `go test ./...` suite
-fails when a capability has no registered live case.
+live case. The plain `go test ./...` suite fails when an
+`llmkit.Capabilities` field has no registered live case in
+`provider/live_registry_test.go`.
 
 ## What CI runs on your pull request
 

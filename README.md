@@ -100,6 +100,12 @@ resp, err = llmkit.Stream(context.Background(), client, req,
 	func(d llmkit.Delta) error { fmt.Print(d.Text); return nil })
 ```
 
+Each `Delta` carries its fragment in the field its `Kind` names: `Text` for
+`DeltaText`, and `Thinking` for `DeltaThinking`. The callback above leaves out
+`DeltaThinking` fragments; to print them as well, read `d.Thinking` when
+`d.Kind == llmkit.DeltaThinking`. A `<think>` span a model inlines in its
+answer arrives in `DeltaText` fragments, so the callback prints it.
+
 ## Packages
 
 | Package | Provides | Reference |
@@ -115,23 +121,28 @@ resp, err = llmkit.Stream(context.Background(), client, req,
 
 ## Examples
 
-Five runnable programs live under `examples/`:
+Six runnable programs live under `examples/`:
 
-- `examples/basic` — one completion with content blocks and capability gating.
-- `examples/agent` — the agent loop with hooks, a tool policy, and optional parallel dispatch.
+- `examples/basic` — one completion, with capability gating; with `--image`, its user turn is built with `llmkit.UserMessage(llmkit.Text(…), llmkit.Image(…))`.
+- `examples/agent` — the agent loop with hooks, a tool policy, and optional parallel dispatch. Its provider client sets `Options.Retry` and an `Options.Observer` that logs each attempt. With `--record <dir>`, it persists the run as `<dir>/<run id>.jsonl` through `agent.JSONL` and prints the run id.
+- `examples/replay` — replays such a record offline through `agent.NewReplayClient` and prints the replayed final text. It exits 1 when the replayed run returns an error or the replay client reports a divergence.
 - `examples/structured` — schema-constrained output with `RunJSONAs`.
 - `examples/chat` — a multi-turn read–eval–print loop (REPL) with mid-run steering.
 - `examples/decide` — one mixed `Ask` (noul, choice, score) against TypeSafe Jev.
 
-The first four read `LLMKIT_PROVIDER`, `LLMKIT_MODEL`, and `LLMKIT_API_KEY`.
-`LLMKIT_BASE_URL` is required for `openai-compatible` and optional otherwise.
-`examples/decide` reads `LLMKIT_TYPESAFE_API_KEY` and `LLMKIT_TYPESAFE_MODEL`.
-`LLMKIT_TYPESAFE_BASE_URL` is optional. If a required variable is unset, an
-example prints its usage and exits 1 without touching the network.
+`basic`, `agent`, `structured`, and `chat` read `LLMKIT_PROVIDER`, `LLMKIT_MODEL`,
+and `LLMKIT_API_KEY`. `LLMKIT_BASE_URL` is required for `openai-compatible` and
+optional otherwise. `examples/decide` reads `LLMKIT_TYPESAFE_API_KEY` and
+`LLMKIT_TYPESAFE_MODEL`. `LLMKIT_TYPESAFE_BASE_URL` is optional. If a required
+variable is unset, these five print their usage and exit 1 without touching the
+network. `examples/replay` reads no environment variables and needs no network:
+it takes a record directory and a run id, and with any other argument count it
+prints its usage and exits 1.
 
 ```bash
 go run ./examples/basic --image path/to/photo.jpg
-go run ./examples/agent --parallel
+go run ./examples/agent --parallel --record ./records   # prints "run id:     <id>"
+go run ./examples/replay ./records <id>
 go run ./examples/structured
 go run ./examples/chat
 go run ./examples/decide

@@ -66,7 +66,7 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 
 The suites, commands, and skip rules live in [docs/testing.md](docs/testing.md); run the scoped checks your task names, not the whole gate.
 
-Acceptance rule: any change to an adapter, the agent loop, or a `llmkit.Capabilities` field must name its hermetic test and its live case; `provider/live_registry_test.go` enforces this in the plain `go test ./...` suite.
+Acceptance rule: any change to an adapter, the agent loop, or a `llmkit.Capabilities` field must name its hermetic test and its live case. `provider/live_registry_test.go` fails the plain `go test ./...` suite when a `llmkit.Capabilities` field has no registered live case.
 
 Exact local live run (compat lane; costs real money). The operator env file path lives here, never in docs/:
 

@@ -14,10 +14,11 @@ go vet -tags integration ./embed/  # the `integration` Ollama test must keep com
 go vet -tags integration ./sandbox/ # the sandbox integration test must keep compiling
 go test -race -count=1 ./...
 golangci-lint run ./...            # config: .golangci.yml (v2 schema, conservative set)
+golangci-lint run --build-tags integration,live ./... # the same config, with the integration- and live-tagged files compiled in
 gofmt -l .                         # must print nothing
 ```
 
-The tag-gated `go vet` steps compile the gated suites without running them. CI pins golangci-lint to v2.13.2.
+The tag-gated `go vet` steps compile the gated suites without running them. CI pins golangci-lint to v2.13.2. It runs golangci-lint twice, in the same job: the plain run does not compile the `integration`- and `live`-tagged files, and the tagged run does.
 
 ## The three suites
 
@@ -127,9 +128,9 @@ The fixture writer is secret-free by construction: it refuses to write any fixtu
 
 ## The live registry rule
 
-Contributor rule: any change to an adapter, the agent loop, or an `llmkit.Capabilities` field must name two things. They are its hermetic test and its live case in the registry in `provider/live_registry_test.go`.
+Contributor rule: any change to an adapter, the agent loop, or an `llmkit.Capabilities` field must name two things. They are its hermetic test and its live case. The registry in `provider/live_registry_test.go` describes a capability's live case; the case body is in the `live`-tagged `provider/live_test.go`.
 
-`provider/live_registry_test.go` has no build tag. It reflects over `llmkit.Capabilities` and fails the plain `go test ./...` suite when a field has no registered live case. The same happens when a case gates on a nonexistent field, or when a case has no doc. A capability cannot ship without its acceptance test.
+`provider/live_registry_test.go` has no build tag. It reflects over `llmkit.Capabilities` and fails the plain `go test ./...` suite when a field has no registered live case. The same happens when a case gates on a nonexistent field, when a case has no doc, or when two cases share a name. The test runs no live case.
 
 [CONTRIBUTING](../CONTRIBUTING.md) states the rest of the rules for a pull request: the sign-off, the local gate, and what does not get merged.
 
@@ -140,13 +141,18 @@ The programs under `examples/` are runnable contract checks, compiled by `go bui
 ```bash
 go run ./examples/basic
 go run ./examples/agent
+go run ./examples/replay <record-dir> <run-id>
 go run ./examples/structured
 go run ./examples/chat
 go run ./examples/decide
 ```
 
-The first four examples no-op with a usage message and exit code 1 unless `LLMKIT_PROVIDER`, `LLMKIT_MODEL`, and `LLMKIT_API_KEY` are set. `LLMKIT_BASE_URL` is required for `openai-compatible` and optional otherwise.
+`basic`, `agent`, `structured`, and `chat` no-op with a usage message and exit code 1 unless `LLMKIT_PROVIDER`, `LLMKIT_MODEL`, and `LLMKIT_API_KEY` are set. `LLMKIT_BASE_URL` is required for `openai-compatible` and optional otherwise.
 
 `examples/decide` no-ops with a usage message and exit code 1 unless `LLMKIT_TYPESAFE_API_KEY` and `LLMKIT_TYPESAFE_MODEL` are set. `LLMKIT_TYPESAFE_BASE_URL` is optional.
 
+`examples/replay` reads no environment variables. It prints a usage message and exits 1 unless it is given a record directory and a run id.
+
 Without credentials, the examples never touch the network.
+
+Two hermetic tests in `examples/` run in plain `go test ./...`, and both skip under `-short` because they build the examples. `TestExamplesUsageExitWithoutEnv` runs `basic`, `agent`, `structured`, `chat`, and `replay` with only `PATH` in the environment and no arguments and checks the exit code and the usage text. `TestExamplesRecordReplay` runs the built `examples/agent --record` against a scripted local openai-compatible server, then runs the built `examples/replay` on the written record with no server and no `LLMKIT_*` variables. It asserts that replay exits 0 and prints a `final:` line equal to the scripted answer, and that replay exits non-zero on three records: a tampered one with its last completion removed, a plain one whose run stopped at the iteration cap, and one that stopped at the iteration cap with the arguments of its last tool run altered, for which replay's output must name the divergence.

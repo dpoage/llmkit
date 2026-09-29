@@ -38,7 +38,7 @@ func TestStream_SynthesizesFromCompleteOnlyClient(t *testing.T) {
 	// tool calls in order with their full arguments.
 	want := []Delta{
 		{Kind: DeltaText, Text: "hello "},
-		{Kind: DeltaThinking, Text: "pondering"},
+		{Kind: DeltaThinking, Thinking: "pondering"},
 		{Kind: DeltaText, Text: "world"},
 		{Kind: DeltaToolCall, Index: 0, ID: "call_1", Name: "lookup", Arguments: `{"q":"a"}`},
 		{Kind: DeltaToolCall, Index: 1, ID: "call_2", Name: "lookup", Arguments: `{"q":"b"}`},
@@ -105,7 +105,7 @@ func TestStream_TextFallbackNotFiredWhenBlocksCarryText(t *testing.T) {
 	want := []Delta{
 		{Kind: DeltaText, Text: "hello "},
 		{Kind: DeltaText, Text: "world"},
-		{Kind: DeltaThinking, Text: "hmm"},
+		{Kind: DeltaThinking, Thinking: "hmm"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("deltas = %+v, want %+v", got, want)
@@ -133,8 +133,8 @@ func TestStream_TextFallbackOrderingAndEmpty(t *testing.T) {
 				},
 			},
 			want: []Delta{
-				{Kind: DeltaThinking, Text: "hmm"},
-				{Kind: DeltaThinking, Text: "hah"},
+				{Kind: DeltaThinking, Thinking: "hmm"},
+				{Kind: DeltaThinking, Thinking: "hah"},
 				{Kind: DeltaText, Text: "afterthought"},
 			},
 		},
@@ -309,4 +309,66 @@ func TestStream_FnErrorCancelsAndWraps(t *testing.T) {
 			t.Fatalf("delivered %d deltas, want 2", len(got))
 		}
 	})
+}
+
+// TestStream_SynthesisSplitsThinkingFromText pins the payload split on the
+// synthesized path: across every delta, the Thinking fragments join to the
+// thinking text and the Text fragments join to the answer, each exactly, so
+// no thinking byte lands in Text.
+func TestStream_SynthesisSplitsThinkingFromText(t *testing.T) {
+	inner := &fakeClient{responses: []Response{{
+		Blocks: []Block{
+			{Kind: BlockThinking, Text: "step one. "},
+			{Kind: BlockThinking, Text: "step two."},
+			Text("The "),
+			Text("answer."),
+		},
+	}}}
+	var thinking, text []string
+	if _, err := Stream(t.Context(), inner, simpleRequest(), func(d Delta) error {
+		thinking = append(thinking, d.Thinking)
+		text = append(text, d.Text)
+		return nil
+	}); err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if got := strings.Join(thinking, ""); got != "step one. step two." {
+		t.Errorf("joined Thinking = %q, want %q", got, "step one. step two.")
+	}
+	if got := strings.Join(text, ""); got != "The answer." {
+		t.Errorf("joined Text = %q, want %q", got, "The answer.")
+	}
+}
+
+// TestStream_EmptyThinkingBlockKeepsItsDelta pins that a thinking block with
+// no visible text (a redacted block, or a signature-only block) still yields
+// exactly one DeltaThinking on the synthesized path, with Text and Thinking
+// both empty: no fragment is skipped.
+func TestStream_EmptyThinkingBlockKeepsItsDelta(t *testing.T) {
+	tests := []struct {
+		name  string
+		block Block
+	}{
+		{"redacted", Block{Kind: BlockThinking, Provider: "anthropic", Raw: json.RawMessage(`{"type":"redacted_thinking","data":"cGF5bG9hZA=="}`)}},
+		{"signature only", Block{Kind: BlockThinking, Provider: "anthropic", Raw: json.RawMessage(`{"type":"thinking","thinking":"","signature":"sig-1"}`)}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inner := &fakeClient{responses: []Response{{Blocks: []Block{tt.block, Text("answer")}}}}
+			var got []Delta
+			if _, err := Stream(t.Context(), inner, simpleRequest(), func(d Delta) error {
+				got = append(got, d)
+				return nil
+			}); err != nil {
+				t.Fatalf("Stream: %v", err)
+			}
+			want := []Delta{
+				{Kind: DeltaThinking},
+				{Kind: DeltaText, Text: "answer"},
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("deltas = %+v, want %+v", got, want)
+			}
+		})
+	}
 }

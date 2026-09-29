@@ -34,7 +34,7 @@ func TestOllamaBackend_RequestTimeoutEnforced(t *testing.T) {
 	emb, err := New(Config{
 		Backend: BackendOllama,
 		Model:   "m",
-		URL:     srv.URL,
+		BaseURL: srv.URL,
 		Retry:   retry.Config{MaxAttempts: 1, RequestTimeout: 50 * time.Millisecond},
 	})
 	if err != nil {
@@ -71,7 +71,7 @@ func TestOpenAIBackend_RequestTimeoutEnforced(t *testing.T) {
 	emb, err := New(Config{
 		Backend: BackendOpenAICompatible,
 		Model:   "m",
-		URL:     srv.URL,
+		BaseURL: srv.URL,
 		Retry:   retry.Config{MaxAttempts: 1, RequestTimeout: 50 * time.Millisecond},
 	})
 	if err != nil {
@@ -108,7 +108,7 @@ func TestOllamaBackend_RetryOn5xx_ThenSuccess(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	emb, err := New(Config{Backend: BackendOllama, Model: "m", URL: srv.URL, Retry: fastRetry})
+	emb, err := New(Config{Backend: BackendOllama, Model: "m", BaseURL: srv.URL, Retry: fastRetry})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestOllamaBackend_RetryGivesUpAfterMaxAttempts(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	emb, err := New(Config{Backend: BackendOllama, Model: "m", URL: srv.URL, Retry: fastRetry})
+	emb, err := New(Config{Backend: BackendOllama, Model: "m", BaseURL: srv.URL, Retry: fastRetry})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestOllamaBackend_NoRetryOn400(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	emb, err := New(Config{Backend: BackendOllama, Model: "m", URL: srv.URL, Retry: fastRetry})
+	emb, err := New(Config{Backend: BackendOllama, Model: "m", BaseURL: srv.URL, Retry: fastRetry})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestOllamaBackend_RetryAfterSeconds_Honored(t *testing.T) {
 	emb, err := New(Config{
 		Backend: BackendOllama,
 		Model:   "m",
-		URL:     srv.URL,
+		BaseURL: srv.URL,
 		Retry:   retry.Config{MaxAttempts: 3, BaseDelay: 30 * time.Second, MaxDelay: 30 * time.Second},
 	})
 	if err != nil {
@@ -219,7 +219,7 @@ func TestOpenAIBackend_RetryAfterHTTPDate_Honored(t *testing.T) {
 	emb, err := New(Config{
 		Backend: BackendOpenAICompatible,
 		Model:   "m",
-		URL:     srv.URL,
+		BaseURL: srv.URL,
 		Retry:   retry.Config{MaxAttempts: 3, BaseDelay: 30 * time.Second, MaxDelay: 30 * time.Second},
 	})
 	if err != nil {
@@ -246,7 +246,7 @@ func TestOpenAIBackend_NoRetryWhenContextCancelled(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	emb, err := New(Config{Backend: BackendOpenAICompatible, Model: "m", URL: srv.URL, Retry: fastRetry})
+	emb, err := New(Config{Backend: BackendOpenAICompatible, Model: "m", BaseURL: srv.URL, Retry: fastRetry})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -291,7 +291,7 @@ func TestOllamaBackend_EmbedBatch_Chunking(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	emb, err := New(Config{Backend: BackendOllama, Model: "m", URL: srv.URL, MaxBatch: 2, Retry: retry.Config{MaxAttempts: 1}})
+	emb, err := New(Config{Backend: BackendOllama, Model: "m", BaseURL: srv.URL, MaxBatch: 2, Retry: retry.Config{MaxAttempts: 1}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -346,7 +346,7 @@ func TestOpenAIBackend_EmbedBatch_Chunking(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	emb, err := New(Config{Backend: BackendOpenAICompatible, Model: "m", URL: srv.URL, MaxBatch: 2, Retry: retry.Config{MaxAttempts: 1}})
+	emb, err := New(Config{Backend: BackendOpenAICompatible, Model: "m", BaseURL: srv.URL, MaxBatch: 2, Retry: retry.Config{MaxAttempts: 1}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -391,7 +391,7 @@ func TestOllamaBackend_EmbedBatch_ChunkFailureFailsWholeCall(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	emb, err := New(Config{Backend: BackendOllama, Model: "m", URL: srv.URL, MaxBatch: 2, Retry: retry.Config{MaxAttempts: 1}})
+	emb, err := New(Config{Backend: BackendOllama, Model: "m", BaseURL: srv.URL, MaxBatch: 2, Retry: retry.Config{MaxAttempts: 1}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -524,7 +524,7 @@ func TestOllamaBackend_DimensionMismatch_Configured(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	emb, err := New(Config{Backend: BackendOllama, Model: "m", URL: srv.URL, Dimensions: 3, Retry: retry.Config{MaxAttempts: 1}})
+	emb, err := New(Config{Backend: BackendOllama, Model: "m", BaseURL: srv.URL, Dimensions: 3, Retry: retry.Config{MaxAttempts: 1}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -555,7 +555,7 @@ func TestOpenAIBackend_DimensionMismatch_AutoDetect(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	emb, err := New(Config{Backend: BackendOpenAICompatible, Model: "m", URL: srv.URL, Retry: retry.Config{MaxAttempts: 1}})
+	emb, err := New(Config{Backend: BackendOpenAICompatible, Model: "m", BaseURL: srv.URL, Retry: retry.Config{MaxAttempts: 1}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -622,7 +622,7 @@ func TestOpenAIBackend_EmbedBatch_CountMismatch(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			emb, err := New(Config{Backend: BackendOpenAICompatible, Model: "m", URL: srv.URL, Retry: retry.Config{MaxAttempts: 1}})
+			emb, err := New(Config{Backend: BackendOpenAICompatible, Model: "m", BaseURL: srv.URL, Retry: retry.Config{MaxAttempts: 1}})
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
@@ -648,7 +648,7 @@ func TestOpenAIBackend_HTTPClientInjection(t *testing.T) {
 	srv1 := httptest.NewServer(respond)
 	defer srv1.Close()
 	emb1, err := New(Config{
-		Backend: BackendOpenAICompatible, Model: "m", URL: srv1.URL,
+		Backend: BackendOpenAICompatible, Model: "m", BaseURL: srv1.URL,
 		HTTPClient: timedClient, Retry: retry.Config{MaxAttempts: 1, RequestTimeout: 5 * time.Second},
 	})
 	if err != nil {
@@ -665,7 +665,7 @@ func TestOpenAIBackend_HTTPClientInjection(t *testing.T) {
 	srv2 := httptest.NewServer(respond)
 	defer srv2.Close()
 	emb2, err := New(Config{
-		Backend: BackendOpenAICompatible, Model: "m", URL: srv2.URL,
+		Backend: BackendOpenAICompatible, Model: "m", BaseURL: srv2.URL,
 		HTTPClient: untimedClient, Retry: retry.Config{MaxAttempts: 1, RequestTimeout: 50 * time.Millisecond},
 	})
 	if err != nil {
@@ -680,7 +680,7 @@ func TestOpenAIBackend_HTTPClientInjection(t *testing.T) {
 }
 
 func TestConfig_Validate_Negatives(t *testing.T) {
-	base := Config{Backend: BackendOllama, Model: "m", URL: "http://localhost"}
+	base := Config{Backend: BackendOllama, Model: "m", BaseURL: "http://localhost"}
 
 	if err := base.Validate(); err != nil {
 		t.Fatalf("base config invalid: %v", err)
@@ -736,7 +736,7 @@ func TestOllamaBackend_EmbedBatch_CountMismatch(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			emb, err := New(Config{Backend: BackendOllama, Model: "m", URL: srv.URL, Retry: retry.Config{MaxAttempts: 1}})
+			emb, err := New(Config{Backend: BackendOllama, Model: "m", BaseURL: srv.URL, Retry: retry.Config{MaxAttempts: 1}})
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
@@ -757,7 +757,7 @@ func TestOllamaBackend_EmbedBatch_CountMismatch(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	emb, err := New(Config{Backend: BackendOllama, Model: "m", URL: srv.URL, Retry: retry.Config{MaxAttempts: 1}})
+	emb, err := New(Config{Backend: BackendOllama, Model: "m", BaseURL: srv.URL, Retry: retry.Config{MaxAttempts: 1}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -802,7 +802,7 @@ func TestRetry_MaxAttemptsOnlyPolicy_Bounded(t *testing.T) {
 	emb, err := New(Config{
 		Backend: BackendOllama,
 		Model:   "m",
-		URL:     srv.URL,
+		BaseURL: srv.URL,
 		Retry:   retry.Config{MaxAttempts: 4},
 	})
 	if err != nil {
@@ -871,7 +871,7 @@ func TestOllamaBackend_TimeoutRetriedAsTransient(t *testing.T) {
 	emb, err := New(Config{
 		Backend: BackendOllama,
 		Model:   "m",
-		URL:     srv.URL,
+		BaseURL: srv.URL,
 		Retry:   retry.Config{MaxAttempts: 2, BaseDelay: time.Millisecond, RequestTimeout: 30 * time.Millisecond},
 	})
 	if err != nil {
@@ -951,7 +951,7 @@ func TestOllamaBackend_EmptyVector_AutoDetectRejected(t *testing.T) {
 	emb, err := New(Config{
 		Backend: BackendOllama,
 		Model:   "m",
-		URL:     srv.URL,
+		BaseURL: srv.URL,
 		Retry:   retry.Config{MaxAttempts: 1},
 	})
 	if err != nil {
@@ -988,7 +988,7 @@ func TestCheckDimensions_EmptyVectorConfigured(t *testing.T) {
 // treats Jitter 0 as unset like every other schedule field — the
 // deterministic escape is Retry.Rand, not a literal zero Jitter.
 func TestConfig_JitterRangeAndDefault(t *testing.T) {
-	base := Config{Backend: BackendOllama, Model: "m", URL: "http://localhost"}
+	base := Config{Backend: BackendOllama, Model: "m", BaseURL: "http://localhost"}
 
 	zero := base
 	zero.Retry = retry.Config{MaxAttempts: 2}

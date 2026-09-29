@@ -27,7 +27,7 @@ func TestDimensions_ZeroUntilFirstCall_ThenDetected(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			emb, err := New(Config{Backend: backend, Model: "m", URL: srv.URL, Retry: retry.Config{MaxAttempts: 1}})
+			emb, err := New(Config{Backend: backend, Model: "m", BaseURL: srv.URL, Retry: retry.Config{MaxAttempts: 1}})
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
@@ -44,7 +44,7 @@ func TestDimensions_ZeroUntilFirstCall_ThenDetected(t *testing.T) {
 		})
 
 		t.Run(string(backend)+"/configured", func(t *testing.T) {
-			emb, err := New(Config{Backend: backend, Model: "m", URL: "http://localhost:1", Dimensions: 7})
+			emb, err := New(Config{Backend: backend, Model: "m", BaseURL: "http://localhost:1", Dimensions: 7})
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}

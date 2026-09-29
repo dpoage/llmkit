@@ -786,7 +786,11 @@ func TestLiveTableTruth(t *testing.T) {
 			if err != nil {
 				redFatal(t, sess, "models list GET: %v", err)
 			}
-			defer resp.Body.Close()
+			defer func() {
+				if err := resp.Body.Close(); err != nil {
+					t.Logf("close models list body: %v", err)
+				}
+			}()
 			body, err := io.ReadAll(resp.Body)
 			if err != nil {
 				redFatal(t, sess, "models list body: %v", err)
@@ -935,7 +939,9 @@ func tinyPDF() []byte {
 // llmkit.Stream must deliver more than one DeltaText (true incremental
 // delivery, not one synthesized fragment), and the final Response must
 // have the Complete shape — fragments concatenate to response text,
-// usage is accounted, and the turn ends with StopEndTurn.
+// usage is accounted, and the turn ends with StopEndTurn. Every delta
+// must keep its payload in the field its Kind names: a DeltaThinking has
+// an empty Text, and any other kind has an empty Thinking.
 func streamTextCase(t *testing.T, lane string) {
 	sess := livetest.Resolve(t, lane)
 	lc := newLiveClient(t, sess)
@@ -944,7 +950,16 @@ func streamTextCase(t *testing.T, lane string) {
 		MaxTokens: defaultLiveMaxTokens,
 	}
 	var texts []string
+	thinkings := 0
 	resp, err := llmkit.Stream(lc.ctx, lc.cl, req, func(d llmkit.Delta) error {
+		if d.Kind == llmkit.DeltaThinking {
+			thinkings++
+			if d.Text != "" {
+				t.Errorf("DeltaThinking carries Text %q, want it empty", d.Text)
+			}
+		} else if d.Thinking != "" {
+			t.Errorf("%s delta carries Thinking %q, want it empty", d.Kind, d.Thinking)
+		}
 		if d.Kind == llmkit.DeltaText {
 			texts = append(texts, d.Text)
 		}
@@ -966,13 +981,13 @@ func streamTextCase(t *testing.T, lane string) {
 	if resp.StopReason != llmkit.StopEndTurn {
 		t.Fatalf("stop reason = %q, want %q", resp.StopReason, llmkit.StopEndTurn)
 	}
-	t.Logf("lane %s: %d text deltas, %q, usage %+v", lane, len(texts), streamed, resp.Usage)
+	t.Logf("lane %s: %d text deltas, %d thinking deltas, %q, usage %+v", lane, len(texts), thinkings, streamed, resp.Usage)
 }
 
 // TestLiveCompatStreamText runs the streaming acceptance case on the
 // openai-compatible lane (MiniMax-M3 in CI). The case counts DeltaText
-// fragments only and requires more than one; reasoning_content deltas
-// are not asserted here.
+// fragments and requires more than one; on every delta it asserts that the
+// payload sits in the field its Kind names.
 func TestLiveCompatStreamText(t *testing.T) {
 	streamTextCase(t, "compat")
 }

@@ -33,7 +33,7 @@ type wireCodec interface {
 	// decodeResponse parses a 200 response body for want texts. A
 	// non-nil vendorErr means the body carries an in-band error object;
 	// the shared loop classifies it through the same trim-and-cap helper
-	// as a non-200 response ([classifyVendorError]). vectors and
+	// as a non-200 response ([adapter.NormalizeCapped]). vectors and
 	// vendorErr are never both set.
 	decodeResponse(body []byte, want int) (vectors [][]float32, vendorErr *adapter.VendorError, err error)
 }
@@ -59,9 +59,9 @@ var _ Embedder = (*backendEmbedder)(nil)
 func newBackendEmbedder(cfg Config, codec wireCodec) *backendEmbedder {
 	return &backendEmbedder{
 		name:     string(cfg.Backend),
-		baseURL:  strings.TrimRight(cfg.URL, "/"),
+		baseURL:  strings.TrimRight(cfg.BaseURL, "/"),
 		model:    cfg.Model,
-		apiKey:   cfg.APIKey,
+		apiKey:   cfg.Secret,
 		client:   cfg.httpClient(),
 		retry:    cfg.retryPolicy(),
 		maxBatch: cfg.MaxBatch,
@@ -158,7 +158,7 @@ func (b *backendEmbedder) doEmbed(ctx context.Context, texts []string) ([][]floa
 			return nil, fmt.Errorf("%s: response body exceeds the %d-byte limit", b.name, maxResponseBytes)
 		}
 		// Non-200: classify by status from the truncated body; the
-		// 200-byte Message cap in classifyVendorError still applies on top.
+		// 200-byte Message cap in [adapter.NormalizeCapped] still applies on top.
 		respBody = respBody[:maxResponseBytes]
 	}
 
@@ -172,7 +172,7 @@ func (b *backendEmbedder) doEmbed(ctx context.Context, texts []string) ([][]floa
 	}
 	if vendorErr != nil {
 		vendorErr.Header = resp.Header
-		return nil, classifyVendorError(b.name, *vendorErr)
+		return nil, adapter.NormalizeCapped(b.name, *vendorErr)
 	}
 
 	if err := checkDimensions(b.name, vectors, &b.dims, &b.mu); err != nil {
@@ -181,37 +181,17 @@ func (b *backendEmbedder) doEmbed(ctx context.Context, texts []string) ([][]floa
 	return vectors, nil
 }
 
-// classifyVendorError normalizes v into the kit's error vocabulary and
-// caps the resulting APIError's Message at 200 bytes plus "..." after
-// trimming surrounding whitespace. Both APIError routes built from
-// server-supplied text — a non-200 response ([responseError]) and the
-// openai-compatible 200 error-object route — call this one helper, so
-// the trim-and-cap rule cannot drift between them.
-// [adapter.NormalizeSDKError] classifies against the whole trimmed
-// v.Message, which doEmbed has already cut to maxResponseBytes — only
-// the returned Message is capped.
-func classifyVendorError(backend string, v adapter.VendorError) error {
-	v.Message = strings.TrimSpace(v.Message)
-	err := adapter.NormalizeSDKError(backend, v)
-	if apiErr, ok := err.(*llmkit.APIError); ok {
-		apiErr.Message = truncate(apiErr.Message, 200)
-	}
-	return err
-}
-
-// responseError normalizes a non-200 response into the kit's vocabulary
-// through classifyVendorError.
+// responseError normalizes a non-200 response into the kit's vocabulary.
+// Both APIError routes built from server-supplied text — this one and the
+// openai-compatible 200 error-object route — call
+// [adapter.NormalizeCapped], so the trim-and-cap rule cannot drift
+// between them. It classifies against the whole trimmed body, which
+// doEmbed has already cut to maxResponseBytes; only the returned Message
+// is capped.
 func responseError(backend string, resp *http.Response, body []byte) error {
-	return classifyVendorError(backend, adapter.VendorError{
+	return adapter.NormalizeCapped(backend, adapter.VendorError{
 		Status:  resp.StatusCode,
 		Message: string(body),
 		Header:  resp.Header,
 	})
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
 }

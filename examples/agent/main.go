@@ -3,12 +3,17 @@
 // logging ToolStart/ToolEnd/AfterCompletion, a per-tool timeout, a
 // ToolPolicy denying any tool named in --deny (decisions logged alongside
 // the hooks), and — behind --parallel — concurrent dispatch of the tool
-// calls a single completion requests.
+// calls that a single completion requests. The provider client is built with a
+// retry schedule (provider.Options.Retry) and an Observer that logs each
+// provider attempt, so a retried completion is visible on stderr. Behind
+// --record <dir>, the run is persisted as "<dir>/<run id>.jsonl" through
+// agent.JSONL, registered with agent.WithObserver, and the run id is
+// printed; examples/replay replays that record offline.
 //
 // Usage:
 //
 //	# export the shared LLMKIT_* variables (examples/internal/envcfg), then:
-//	go run ./examples/agent [--parallel] [--task "..."] [--deny now,add]
+//	go run ./examples/agent [--parallel] [--task "..."] [--deny now,add] [--record dir]
 //
 // Without the environment variables set, the program prints usage and exits
 // non-zero without touching the network.
@@ -28,6 +33,7 @@ import (
 	"github.com/dpoage/llmkit/agent"
 	"github.com/dpoage/llmkit/examples/internal/envcfg"
 	"github.com/dpoage/llmkit/provider"
+	"github.com/dpoage/llmkit/retry"
 )
 
 func main() {
@@ -40,17 +46,27 @@ func main() {
 func run() error {
 	parallel := flag.Bool("parallel", false, "dispatch the tool calls of one turn concurrently (WithParallelTools)")
 	deny := flag.String("deny", "", "comma-separated tool names the ToolPolicy refuses to run (WithToolPolicy demo)")
+	record := flag.String("record", "", "directory to persist the run in as <run id>.jsonl (agent.JSONL); examples/replay replays it")
 	task := flag.String("task", "What time is it right now, and what is 41 plus 58? Use the tools to answer both parts.",
 		"the task to give the agent")
 	flag.Parse()
 
 	spec, err := envcfg.Load(envcfg.Usage("go run ./examples/agent",
-		`[--parallel] [--task "..."]`))
+		`[--parallel] [--task "..."] [--deny now,add] [--record dir]`))
 	if err != nil {
 		return err
 	}
 
-	client, err := provider.New(context.Background(), spec, provider.Options{})
+	// Retry and Observer configure the provider stack: a failed attempt
+	// that is retryable is retried up to MaxAttempts with backoff (unset
+	// schedule fields take retry.Default's values), and the Observer sees
+	// one Attempt event per try, failures included. Under the agent Runner
+	// the Observer reports Attempts only; the Runner reports the logical
+	// completion itself (the JSONL record below).
+	client, err := provider.New(context.Background(), spec, provider.Options{
+		Retry:    retry.Config{MaxAttempts: 3},
+		Observer: llmkit.ObserverFunc(logAttempt),
+	})
 	if err != nil {
 		return fmt.Errorf("build client: %w", err)
 	}
@@ -106,6 +122,19 @@ func run() error {
 	if *parallel {
 		opts = append(opts, agent.WithParallelTools())
 	}
+	// The durable record: one "<run id>.jsonl" line per event. The sink
+	// never fails the run; its refusals and write failures arrive on onErr.
+	// The run id is pinned up front and printed before the run starts, so a
+	// run that fails still names its record.
+	var runOpts []agent.RunOption
+	if *record != "" {
+		opts = append(opts, agent.WithObserver(agent.JSONL(*record, func(err error) {
+			log.Printf("record: %v", err)
+		})))
+		id := llmkit.NewRunID()
+		runOpts = append(runOpts, agent.WithRunID(id))
+		fmt.Println("run id:    ", id)
+	}
 
 	now := agent.Func[struct{}]("now", "returns the current local date and time",
 		func(_ context.Context, _ struct{}) (string, error) {
@@ -120,7 +149,7 @@ func run() error {
 		opts...)
 
 	log.Printf("task: %s (parallel=%t)", *task, *parallel)
-	outcome, err := runner.Run(context.Background(), *task)
+	outcome, err := runner.Run(context.Background(), *task, runOpts...)
 	var incomplete *agent.IncompleteError
 	switch {
 	case errors.As(err, &incomplete):
@@ -152,4 +181,18 @@ func run() error {
 type addArgs struct {
 	A float64 `json:"a"`
 	B float64 `json:"b"`
+}
+
+// logAttempt is the provider Observer: it logs each provider attempt the
+// retry stage makes, so a retried completion shows as several lines.
+func logAttempt(_ context.Context, ev llmkit.Event) {
+	if ev.Kind != llmkit.KindAttempt || ev.Attempt == nil {
+		return
+	}
+	a := ev.Attempt
+	if a.Err != "" {
+		log.Printf("attempt %d failed (status %d): %s", a.Attempt, a.StatusCode, a.Err)
+		return
+	}
+	log.Printf("attempt %d ok", a.Attempt)
 }

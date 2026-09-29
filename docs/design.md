@@ -117,15 +117,17 @@ provider-plus-model pair. Every field belongs to one of four enforcement
 classes: dropped silently, refused pre-wire, decorator, or advisory. No
 adapter fabricates a context window; an unknown model reports `0`.
 
-`internal/adapter.Prepare` applies every request-side rule of
-`Capabilities` exactly once, shared by all three vendor adapters: message
-validation, defaulting, the sampler gates, and the `ToolChoice` refusal. An
-adapter maps a `Prepared` value onto its SDK types without re-checking any
-of it. Each adapter's `New` pins a ceiling naming the wire-gated fields
-(`StructuredOutput`, `Thinking`, `ToolChoice`, `StopSequences`, `TopP`,
-`TopK`, `Seed`) it can put on the wire; `internal/adapter.ApplyOverride`
-refuses a `Spec.Capabilities` override that reports a field above the
-ceiling, so the profile can never claim a feature the adapter cannot send.
+`internal/adapter.Prepare` is shared by all three vendor adapters. It
+validates the messages, defaults `MaxTokens`, decodes tool and response
+schemas, and applies the gate of each wire-gated `Capabilities` field: a
+silent drop, or the `ToolChoice` refusal. An adapter maps a `Prepared`
+value onto its SDK types without re-applying those rules. Each adapter's
+`New` pins a ceiling naming the
+wire-gated fields (`StructuredOutput`, `Thinking`, `ToolChoice`,
+`StopSequences`, `TopP`, `TopK`, `Seed`) it can put on the wire;
+`internal/adapter.ApplyOverride` refuses a `Spec.Capabilities` override
+that reports a field above the ceiling, so the profile can never claim a
+wire-gated feature the adapter cannot send.
 
 - **What it buys:** one profile answers "what happens if I send this". A
   refusal is an error before the wire call; a drop is visible in the profile
@@ -306,8 +308,7 @@ no cache itself: to cache a backend, a caller passes the `Embedder` that
   either one is always visible in the caller's own code, never hidden
   inside a config flag.
 - **What it costs:** a caller who wants environment-driven configuration
-  writes that mapping itself; embed does not read the environment on its
-  behalf.
+  writes that mapping itself.
 
 ## Decision models are not Clients
 

@@ -321,8 +321,8 @@ func TestOpenAIStream_ReasoningContent(t *testing.T) {
 	}
 
 	want := []llmkit.Delta{
-		{Kind: llmkit.DeltaThinking, Text: "I should greet the user."},
-		{Kind: llmkit.DeltaThinking, Text: "Then I answer."},
+		{Kind: llmkit.DeltaThinking, Thinking: "I should greet the user."},
+		{Kind: llmkit.DeltaThinking, Thinking: "Then I answer."},
 		{Kind: llmkit.DeltaText, Text: "Hi!"},
 	}
 	if !reflect.DeepEqual(want, deltas) {
@@ -531,3 +531,32 @@ func TestOpenAIStream_TruncatedMidToolArgs(t *testing.T) {
 
 // TestStream_InBandSSEErrorClassifiedByType's retry behaviour lives at
 // provider.TestConformance_OpenAIStream_InBandSSEErrorClassifiedByType.
+
+// TestOpenAIStream_ReasoningJoin: across every delta, the Thinking fragments
+// join to the thinking text and the Text fragments join to the answer, each
+// exactly, so no thinking byte lands in Text.
+func TestOpenAIStream_ReasoningJoin(t *testing.T) {
+	chunks := []string{
+		chunkJSON(`{"role":"assistant","content":null,"reasoning_content":"step one. "}`, "", ""),
+		chunkJSON(`{"content":null,"reasoning_content":"step two."}`, "", ""),
+		chunkJSON(`{"content":"The ","reasoning_content":null}`, "", ""),
+		chunkJSON(`{"content":"answer."}`, "", ""),
+		chunkJSON(`{}`, "stop", ""),
+		usageChunkJSON(streamUsage),
+	}
+	_, deltas, err := stream(t, newServer(t, sseHandler(nil, chunks...)), simpleRequest(), func(llmkit.Delta) error { return nil })
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	var thinking, text []string
+	for _, d := range deltas {
+		thinking = append(thinking, d.Thinking)
+		text = append(text, d.Text)
+	}
+	if got := strings.Join(thinking, ""); got != "step one. step two." {
+		t.Errorf("joined Thinking = %q, want %q", got, "step one. step two.")
+	}
+	if got := strings.Join(text, ""); got != "The answer." {
+		t.Errorf("joined Text = %q, want %q", got, "The answer.")
+	}
+}

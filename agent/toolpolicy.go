@@ -40,8 +40,7 @@ import (
 // A Runner is safe for concurrent Run calls, so a policy shared across
 // runs is called concurrently and must synchronize its own state. The
 // model-order serialization holds within one run. A panic inside Authorize
-// propagates out of [Runner.Run] with its original value in both dispatch
-// modes; the model never sees it.
+// aborts the run and is never rendered to the model.
 //
 // ToolPolicy does not rewrite tool results. Wrap the [Tool] to do that.
 type ToolPolicy interface {

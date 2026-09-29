@@ -10,7 +10,7 @@ Every construction follows the same shape:
 2. Call `provider.New(ctx, spec, opts)`.
 3. New validates the spec and returns a fully wrapped `llmkit.Client`.
 
-New performs no network I/O. New reads three vendor-SDK base-URL environment variables (`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, `GOOGLE_GEMINI_BASE_URL`) and the Anthropic SDK profile files only to decide whether to refuse an empty `BaseURL`. The vendor SDKs still read their own environment variables at construction (the Google SDK logs a warning when both `GOOGLE_API_KEY` and `GEMINI_API_KEY` are non-empty), but no value from a vendor-SDK environment variable or profile file sets a request's host or a header, so construction is testable with placeholder credentials. An invalid spec returns an error wrapping `llmkit.ErrInvalidRequest`; the error never echoes the secret.
+New performs no network I/O. New reads three vendor-SDK base-URL environment variables (`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, `GOOGLE_GEMINI_BASE_URL`) and the Anthropic SDK profile files only to decide whether to refuse an empty `BaseURL`. The vendor SDKs still read their own environment variables at construction (the Google SDK logs a warning when both `GOOGLE_API_KEY` and `GEMINI_API_KEY` are non-empty), but no value from a vendor-SDK environment variable or profile file sets a request's host or a header, so construction is testable with placeholder credentials. A request still depends on the environment: a nil `Options.HTTPClient` sends through `http.DefaultTransport`, which reads `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` once per process and can route the request through a proxy. An invalid spec returns an error wrapping `llmkit.ErrInvalidRequest`; the error never echoes the secret.
 
 ### Anthropic
 
@@ -80,6 +80,8 @@ No `BaseURL` targets the vendor default, `generativelanguage.googleapis.com`.
 
 `Spec.BaseURL` overrides the endpoint for tests, proxies, and self-hosted gateways. Empty means the vendor default host. No SDK base-URL environment variable or profile file changes the host. `TypeOpenAICompatible` requires the field unconditionally — it has no vendor default.
 
+An OpenAI-compatible `BaseURL` includes the version segment (`http://localhost:11434/v1`): the adapter appends `/chat/completions`. `embed.Config.BaseURL` follows the same form for the OpenAI-compatible embedding backend, which appends `/embeddings`. The Ollama embedding backend takes the server root (`http://localhost:11434`) and appends `/api/embed`.
+
 For `TypeOpenAI`, `TypeAnthropic`, and `TypeGoogle`, `New` refuses an empty `Spec.BaseURL` when the vendor SDK would have taken the host from one of these sources:
 
 - The Type's base-URL variable (`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, or `GOOGLE_GEMINI_BASE_URL`) is present in the process environment. An empty value counts as present.
@@ -102,7 +104,7 @@ New refuses `AuthOAuthToken` on any other type with an error wrapping `ErrInvali
 
 ## Environment conventions in examples/
 
-The example programs under `examples/` read four variables through `examples/internal/envcfg`:
+The `basic`, `agent`, `structured`, and `chat` examples under `examples/` read four variables through `examples/internal/envcfg`:
 
 | Variable | Meaning |
 |---|---|

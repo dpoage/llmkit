@@ -145,6 +145,10 @@
 // in block order, then one DeltaToolCall per tool call). Callers never
 // special-case a non-streaming backend.
 //
+// A [Delta] carries its fragment in the field its Kind names: Text for
+// DeltaText, Thinking for DeltaThinking, and Index, ID, Name, and Arguments
+// for DeltaToolCall.
+//
 // # Reasoning text
 //
 // Reasoning models served through plain-text channels inline
@@ -570,7 +574,7 @@ type Usage struct {
 // Anthropic, 0.25–0.5x OpenAI), so a cache-heavy run exhausts a raw-token
 // budget far faster than its real cost warrants. cacheReadWeight = 1.0
 // reproduces the uncached-discount-free count.
-
+//
 // Cache CREATION tokens are left at full weight (Anthropic bills them at
 // 1.25x; treating them as cheap would understate cost).
 func (u Usage) ChargeableTokens(cacheReadWeight float64) int64 {

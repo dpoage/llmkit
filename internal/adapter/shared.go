@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/dpoage/llmkit"
@@ -34,7 +35,8 @@ type VendorError struct {
 	Type string
 	// Message is the full response body. Classification reads it (a 400's
 	// context-length phrase can sit past any cap), so callers pass the
-	// full body here and cap the returned APIError.Message themselves.
+	// full body here; [NormalizeCapped] caps the returned APIError.Message
+	// and [NormalizeSDKError] leaves it uncapped.
 	Message string
 	// Header carries the response headers (Retry-After); nil when the SDK
 	// hides them.
@@ -97,6 +99,25 @@ func NormalizeSDKError(provider string, v VendorError) error {
 		Message:       v.Message,
 		Err:           v.Err,
 	}
+}
+
+// maxMessageBytes is the byte length at which [NormalizeCapped] cuts an
+// APIError Message.
+const maxMessageBytes = 200
+
+// NormalizeCapped is [NormalizeSDKError] for a message taken from a
+// server response body: it trims surrounding whitespace from v.Message,
+// classifies against the whole trimmed text (a context-length phrase can
+// sit past any cap), then cuts the returned APIError's Message to 200
+// bytes plus "..." when it is longer. The cut is by byte, so it can split
+// a multibyte rune.
+func NormalizeCapped(provider string, v VendorError) error {
+	v.Message = strings.TrimSpace(v.Message)
+	err := NormalizeSDKError(provider, v)
+	if apiErr, ok := err.(*llmkit.APIError); ok && len(apiErr.Message) > maxMessageBytes {
+		apiErr.Message = apiErr.Message[:maxMessageBytes] + "..."
+	}
+	return err
 }
 
 // ResponseHeader returns the headers of an SDK error's HTTP response, or nil

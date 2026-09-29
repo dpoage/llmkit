@@ -27,8 +27,8 @@ func ExampleNew() {
 	emb, err := embed.New(embed.Config{
 		Backend: embed.BackendOpenAICompatible,
 		Model:   "text-embedding-fake",
-		URL:     srv.URL,
-		APIKey:  "test-key",
+		BaseURL: srv.URL + "/v1", // includes the version segment
+		Secret:  "test-key",
 	})
 	if err != nil {
 		fmt.Println("error:", err)
@@ -63,7 +63,7 @@ func ExampleNew_ollama() {
 	emb, err := embed.New(embed.Config{
 		Backend: embed.BackendOllama,
 		Model:   "nomic-embed-text",
-		URL:     srv.URL,
+		BaseURL: srv.URL,
 	})
 	if err != nil {
 		fmt.Println("error:", err)

@@ -126,7 +126,8 @@ func LoadJSONL(r io.Reader) (*Transcript, error) {
 //
 // Identity is the RunID alone: the file is "<dir>/<RunID>.jsonl", opened
 // exclusively (O_EXCL) by the run's Start event and closed when its
-// Finalize arrives — one RunID is one file, created exactly once. The
+// Finalize arrives — one RunID names one file, which is never created
+// twice. The
 // admission state machine, per RunID:
 //
 //	Start, no entry:    create the directory, open O_EXCL and write the

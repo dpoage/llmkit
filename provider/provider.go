@@ -30,8 +30,8 @@
 // sends Secret as the provider's standard API-key credential;
 // [AuthOAuthToken] sends it as an OAuth bearer token and is Anthropic-only.
 // [Spec.Secret] must be a non-empty value without surrounding whitespace.
-// Secret is the only credential New sends: no vendor-SDK environment
-// variable or profile file supplies one. New never logs the Secret.
+// No vendor-SDK environment variable or profile file supplies a
+// credential. New never logs the Secret.
 // A credential-less endpoint (a local Ollama or vLLM server) takes any
 // non-empty placeholder.
 //
@@ -54,9 +54,14 @@
 // OpenAI's `OPENAI_BASE_URL`, Anthropic's `ANTHROPIC_BASE_URL` and its
 // profile files, Google's `GOOGLE_GEMINI_BASE_URL`. No value read from
 // those sources — or from any other vendor-SDK environment variable or
-// profile file — sets a request's host or any of its headers: every request
-// goes to Spec.BaseURL when set, else to the vendor default host, and its
-// credential header carries Spec.Secret. New performs no network I/O.
+// profile file — sets a request's host or any of its headers: a request's
+// URL names the Spec.BaseURL host when set, else the vendor default host,
+// and its credential header carries Spec.Secret. Other environment
+// variables still reach the transport: a nil [Options.HTTPClient] sends
+// through http.DefaultTransport, which reads HTTP_PROXY, HTTPS_PROXY, and
+// NO_PROXY once per process, so a request can travel through a proxy, and
+// the userinfo of a proxy URL goes to that proxy in a Proxy-Authorization
+// header. New performs no network I/O.
 //
 // # The stack
 //
@@ -198,12 +203,11 @@ type Spec struct {
 	// Secret is the resolved credential: an API key in AuthAPIKey mode, an
 	// OAuth bearer token in AuthOAuthToken mode. New refuses a Secret that
 	// is empty or whitespace-padded, with an error wrapping
-	// ErrInvalidRequest; the value is never echoed. Secret is the only
-	// credential New sends: no vendor-SDK environment variable or profile
-	// file supplies one. New never logs the Secret. For a
-	// credential-less endpoint — a local Ollama or vLLM server — pass any
-	// non-empty placeholder; New only checks that Secret is present, never
-	// that the backend accepts it.
+	// ErrInvalidRequest; the value is never echoed. No vendor-SDK
+	// environment variable or profile file supplies a credential. New
+	// never logs the Secret. For a credential-less endpoint — a local
+	// Ollama or vLLM server — pass any non-empty placeholder; New only
+	// checks that Secret is present, never that the backend accepts it.
 	Secret string
 
 	// Capabilities tunes the adapter's model-table profile; nil keeps the

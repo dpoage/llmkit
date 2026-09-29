@@ -115,7 +115,7 @@ func replayDecideFixture(t *testing.T, f *livetest.DecideFixture) {
 	defer srv.Close()
 
 	cl, err := decide.New(decide.Config{
-		APIKey:     "llmkit-replay-placeholder",
+		Secret:     "llmkit-replay-placeholder",
 		Model:      f.Model,
 		BaseURL:    srv.URL,
 		HTTPClient: srv.Client(),

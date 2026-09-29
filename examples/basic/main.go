@@ -7,12 +7,12 @@
 //	# export the shared LLMKIT_* variables (examples/internal/envcfg), then:
 //	go run ./examples/basic [--image path/to/photo.jpg]
 //
-// With --image, the user message carries a second content block
-// (llmkit.BlockImage with the file's bytes inline), guarded by the model's
-// Capabilities.Images — an advisory flag: adapters do not read it, but this
-// example refuses to send an image the model does not advertise. Without
-// the environment variables set, the program prints usage and exits
-// non-zero without touching the network.
+// With --image, the user message is llmkit.UserMessage(llmkit.Text(...),
+// llmkit.Image(mediaType, data)): a second content block carrying the file's
+// bytes inline, guarded by the model's Capabilities.Images — an advisory
+// flag: adapters do not read it, but this example refuses to send an image
+// the model does not advertise. Without the environment variables set, the
+// program prints usage and exits non-zero without touching the network.
 package main
 
 import (
@@ -50,9 +50,12 @@ func run() error {
 		return fmt.Errorf("build client: %w", err)
 	}
 
-	msg := llmkit.TextMessage(llmkit.RoleUser, "Say hello in one short sentence.")
-	if *imagePath != "" {
-		block, err := imageBlock(*imagePath)
+	const prompt = "Say hello in one short sentence."
+	var msg llmkit.Message
+	if *imagePath == "" {
+		msg = llmkit.TextMessage(llmkit.RoleUser, prompt)
+	} else {
+		mediaType, data, err := readImage(*imagePath)
 		if err != nil {
 			return err
 		}
@@ -60,7 +63,7 @@ func run() error {
 		if !caps.Images {
 			return fmt.Errorf("model %s reports Capabilities.Images=false — the flag is advisory (llmkit sends the block anyway and the provider may reject the request), so this example refuses to send it; re-run without --image or pick another model", spec.Model)
 		}
-		msg.Content = append(msg.Content, block)
+		msg = llmkit.UserMessage(llmkit.Text(prompt), llmkit.Image(mediaType, data))
 	}
 
 	resp, err := client.Complete(context.Background(), llmkit.Request{
@@ -78,21 +81,21 @@ func run() error {
 	return nil
 }
 
-// imageBlock reads an image file into an inline BlockImage content block.
-// Block.Data carries the raw bytes (never pre-encoded); adapters base64 them
-// per provider wire format.
-func imageBlock(path string) (llmkit.Block, error) {
-	data, err := os.ReadFile(path)
+// readImage reads an image file and returns its MIME type (by extension)
+// and raw bytes, ready for llmkit.Image. The bytes are never pre-encoded;
+// adapters base64 them per provider wire format. It rejects an empty file
+// itself, because llmkit.Image panics on empty data.
+func readImage(path string) (mediaType string, data []byte, err error) {
+	data, err = os.ReadFile(path)
 	if err != nil {
-		return llmkit.Block{}, fmt.Errorf("read image: %w", err)
+		return "", nil, fmt.Errorf("read image: %w", err)
 	}
-	mediaType := mime.TypeByExtension(filepath.Ext(path))
+	if len(data) == 0 {
+		return "", nil, fmt.Errorf("read image: %s is empty", path)
+	}
+	mediaType = mime.TypeByExtension(filepath.Ext(path))
 	if mediaType == "" {
 		mediaType = "application/octet-stream"
 	}
-	return llmkit.Block{
-		Kind:      llmkit.BlockImage,
-		MediaType: mediaType,
-		Data:      data,
-	}, nil
+	return mediaType, data, nil
 }

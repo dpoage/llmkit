@@ -62,11 +62,12 @@ type Schema struct {
 	Value map[string]any
 }
 
-// Prepare applies every request-side rule of llmkit.Capabilities once:
-// message validation, MaxTokens defaulting, the sampler gates
-// (TopP/TopK/Seed/StopSequences/Thinking dropped silently when the
-// effective profile reports false), the ToolChoice gate (refused pre-wire),
-// and tool/response-schema decoding. Every refusal is an error wrapping
+// Prepare validates req.Messages, defaults MaxTokens, decodes tool and
+// response schemas, and gates req on caps: it drops TopP, TopK, Seed,
+// StopSequences, and Thinking silently when caps reports that field false,
+// drops ResponseSchema when caps.StructuredOutput is false, and refuses an
+// explicit ToolChoice mode other than auto pre-wire when caps.ToolChoice
+// is false. Every refusal is an error wrapping
 // llmkit.ErrInvalidRequest with Provider = provider and StatusCode 0,
 // returned before any wire call. A tool Parameters or ResponseSchema that
 // is zero-length or the JSON literal null counts as "not supplied" (Schema

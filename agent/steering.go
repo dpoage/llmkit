@@ -53,16 +53,16 @@ type queuedTurn struct {
 //
 // Queued turns are ordinary user messages: the transcript records them as
 // request messages and [Outcome.Messages] includes them. Limits apply
-// unchanged, so a run stopped by [Limits.MaxIterations],
-// [Limits.TokenBudget], or a [BudgetPool] leaves undelivered turns queued
+// unchanged, so a run stopped by a limit leaves undelivered turns queued
 // — [Steering.Pending] reports them, and [Continue] with the SAME Steering
 // delivers pending steers before the continued run's first completion and
 // pending follow-ups at its first would-be finish. A refusal stop
 // ([StopReasonError]) returns before the would-be-finish drain: queued
 // turns stay pending and the refusal is never papered over. A steer already
 // queued delivers at the pre-completion boundary, before the refusing
-// completion. At an empty turn the queued content replaces the synthetic
-// nudge and does not consume a nudge attempt (see [maxEmptyTurnNudges]).
+// completion. When the loop would nudge an empty turn, the queued content
+// is delivered in place of the nudge and does not consume a nudge attempt
+// (see [maxEmptyTurnNudges]).
 //
 // A Steering serves one run at a time. Passing it to a second concurrent
 // run fails that run with [ErrSteeringInUse]; sequential runs —

@@ -26,7 +26,7 @@ func newTestEmbedder(t *testing.T, backend, url string, retryCfg retry.Config) E
 // HTTP client (e.g. to count dial attempts a server-side handler never sees).
 func newTestEmbedderWithClient(t *testing.T, backend, url string, retryCfg retry.Config, client *http.Client) Embedder {
 	t.Helper()
-	emb, err := New(Config{Backend: Backend(backend), Model: "m", URL: url, Retry: retryCfg, HTTPClient: client})
+	emb, err := New(Config{Backend: Backend(backend), Model: "m", BaseURL: url, Retry: retryCfg, HTTPClient: client})
 	if err != nil {
 		t.Fatalf("New(%s): %v", backend, err)
 	}
@@ -321,39 +321,39 @@ func TestE3_ConfigRefusalsWrapErrInvalidRequest(t *testing.T) {
 		fn   func() error
 	}{
 		{"Validate/unknown backend", func() error {
-			return Config{Backend: "nope", Model: "m", URL: "http://x"}.Validate()
+			return Config{Backend: "nope", Model: "m", BaseURL: "http://x"}.Validate()
 		}},
 		{"Validate/zero backend", func() error {
-			return Config{Model: "m", URL: "http://x"}.Validate()
+			return Config{Model: "m", BaseURL: "http://x"}.Validate()
 		}},
 		{"Validate/empty model", func() error {
-			return Config{Backend: BackendOllama, Model: "", URL: "http://x"}.Validate()
+			return Config{Backend: BackendOllama, Model: "", BaseURL: "http://x"}.Validate()
 		}},
-		{"Validate/empty URL", func() error {
-			return Config{Backend: BackendOllama, Model: "m", URL: ""}.Validate()
+		{"Validate/empty BaseURL", func() error {
+			return Config{Backend: BackendOllama, Model: "m", BaseURL: ""}.Validate()
 		}},
 		{"Validate/negative dimensions", func() error {
-			return Config{Backend: BackendOllama, Model: "m", URL: "http://x", Dimensions: -1}.Validate()
+			return Config{Backend: BackendOllama, Model: "m", BaseURL: "http://x", Dimensions: -1}.Validate()
 		}},
 		{"Validate/negative max batch", func() error {
-			return Config{Backend: BackendOllama, Model: "m", URL: "http://x", MaxBatch: -1}.Validate()
+			return Config{Backend: BackendOllama, Model: "m", BaseURL: "http://x", MaxBatch: -1}.Validate()
 		}},
 		{"Validate/whitespace-padded API key", func() error {
-			return Config{Backend: BackendOllama, Model: "m", URL: "http://x", APIKey: "  sk-test  "}.Validate()
+			return Config{Backend: BackendOllama, Model: "m", BaseURL: "http://x", Secret: "  sk-test  "}.Validate()
 		}},
 		{"Validate/jitter out of range", func() error {
-			return Config{Backend: BackendOllama, Model: "m", URL: "http://x", Retry: retry.Config{Jitter: 2}}.Validate()
+			return Config{Backend: BackendOllama, Model: "m", BaseURL: "http://x", Retry: retry.Config{Jitter: 2}}.Validate()
 		}},
 		{"New/ollama bad config", func() error {
-			_, err := New(Config{Backend: BackendOllama, Model: "", URL: ""})
+			_, err := New(Config{Backend: BackendOllama, Model: "", BaseURL: ""})
 			return err
 		}},
 		{"New/openai-compatible bad config", func() error {
-			_, err := New(Config{Backend: BackendOpenAICompatible, Model: "", URL: ""})
+			_, err := New(Config{Backend: BackendOpenAICompatible, Model: "", BaseURL: ""})
 			return err
 		}},
 		{"New/unknown backend", func() error {
-			_, err := New(Config{Backend: "nope", Model: "m", URL: "http://x"})
+			_, err := New(Config{Backend: "nope", Model: "m", BaseURL: "http://x"})
 			return err
 		}},
 	}

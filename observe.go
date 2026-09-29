@@ -14,8 +14,7 @@ import (
 // executions. One method, one event, no return value: an Observer is a data
 // sink. It MUST NOT affect the caller's result — never mutate the event or
 // its payload, never block for long, never write back into harness state. A
-// panicking Observer is a harness bug and propagates to the caller; it is
-// never recovered by llmkit.
+// panicking Observer is a harness bug.
 //
 // # Emission rule
 //
@@ -58,8 +57,8 @@ func (f ObserverFunc) Observe(ctx context.Context, ev Event) { f(ctx, ev) }
 // pointer or ObserverFunc(nil) is NOT skipped — it is called and will
 // panic. An empty (or all-nil-interface) chain is a valid no-op observer,
 // defined so callers never branch on nil. Observers are invoked
-// synchronously on the emitting goroutine and a panic in one propagates
-// immediately — later observers are not run and nothing is recovered.
+// synchronously on the emitting goroutine; a panic in one leaves the later
+// observers uncalled for that event, and Observers does not recover it.
 func Observers(observers ...Observer) Observer {
 	live := make([]Observer, 0, len(observers))
 	for _, o := range observers {
@@ -131,10 +130,10 @@ const (
 	// agent turn, and whether the runner queued a follow-up turn for it.
 	// Payload: [SteerEvent]. Step is set on Runner-emitted events.
 	KindSteer EventKind = "steer"
-	// KindFinalize closes a run: how it ended (status and error), why it
-	// stopped short (truncation reason, if a limit or a non-answer ended
-	// it), the run's total usage, and whether a forced-finalization turn
-	// fired. Payload: [FinalizeEvent]. Step is the completed-turn count.
+	// KindFinalize closes a run: how it ended (status and error). Unless the
+	// status is [RunPanicked], it also carries the run's truncation reason
+	// when it has one, its usage, and whether a forced-finalization turn
+	// fired, and Step is the completed-turn count. Payload: [FinalizeEvent].
 	KindFinalize EventKind = "finalize"
 	// KindDecision records one decision-model call: the judged state, the
 	// questions asked and the answers returned (or the error). The payload
@@ -160,9 +159,7 @@ const (
 //
 // Header fields every event carries: Kind, RunID (empty outside a run),
 // SpanID (the logical completion a Completion or Attempt belongs to), Step
-// (the enclosing Runner turn: the Runner sets it on its own events, and
-// decorator-emitted events inside a Runner turn inherit it from the context
-// via [WithStep]; 0 elsewhere), Time (stamped by the emitter when the
+// (see Event.Step), Time (stamped by the emitter when the
 // observed operation ended), Duration, and SchemaVersion
 // ([EventSchemaVersion]). ParentRunID is a run-level fact only the Runner
 // stamps, on continued runs.
@@ -185,14 +182,14 @@ type Event struct {
 	// joins its Completion on SpanID. Which call gets a new span follows
 	// the emission rule on [Observer].
 	SpanID SpanID `json:"span_id,omitempty"`
-	// Step is the 1-based model turn within an agent run. The Runner sets it
-	// explicitly on every event it emits; decorator-emitted events inside a
+	// Step is the 1-based model turn within an agent run. [NewEvent] stamps
+	// it from the context ([WithStep]), so decorator-emitted events inside a
 	// Runner turn — the retry stage's Attempt, a decision, a sandbox Exec or
-	// embedding from a tool — inherit it from the context ([WithStep]) via
-	// [NewEvent]. 0 outside a Runner turn. On [KindFinalize] Step is the
-	// count of COMPLETED turns, not a turn number: it is 0 when no turn
-	// completed, so a finalize can carry Step 0 inside a run whose first
-	// completion failed (beside that completion's own Step 1).
+	// embedding from a tool — carry that turn. On a [KindFinalize] event whose
+	// status is not [RunPanicked], Step is the count of COMPLETED turns, not
+	// a turn number: it is 0 when no turn completed, so a finalize can carry
+	// Step 0 inside a run whose first completion failed (beside that
+	// completion's own Step 1).
 	Step int `json:"step,omitempty"`
 	// Time is when the observed operation ended, set by the emitter. Sinks
 	// never re-stamp it.
@@ -356,24 +353,31 @@ const (
 	RunPanicked RunStatus = "panicked"
 )
 
-// FinalizeEvent closes a run ([KindFinalize]). TruncationReason is set when
-// the run ended by hitting a limit rather than finishing its task; Usage
-// totals the run's completions; Finalized marks that a forced-finalization
-// turn fired (a fact about the run's shape that is not derivable from the
-// event stream). The completed-turn count is Event.Step, not a payload
-// field.
+// FinalizeEvent closes a run ([KindFinalize]). Unless Status is
+// [RunPanicked], TruncationReason is set when the Runner truncated the run,
+// Usage is the run's cumulative token usage, Finalized marks that a
+// forced-finalization turn fired (a fact about the run's shape that is not
+// derivable from the event stream), and the completed-turn count is
+// Event.Step, not a payload field.
+//
+// When a panic in an agent hook, request policy, tool policy, or RunJSON
+// out-value unmarshal unwinds a run after its Start event, the Runner emits
+// a Finalize with Status [RunPanicked], an empty TruncationReason,
+// FinalText, and Err, and zero Usage.
 type FinalizeEvent struct {
 	TruncationReason string `json:"truncation_reason,omitempty"`
 	Finalized        bool   `json:"finalized,omitempty"`
 	Usage            Usage  `json:"usage"`
-	// FinalText is the run's final answer text as the Runner stitched it
-	// across a max-tokens continuation, so a store can persist it without
-	// re-deriving the stitch. Empty when the run produced none: a
-	// first-completion failure, or the hook-panic path that closes the
-	// record with zero counters. A refusal/safety stop (the Runner's
-	// StopReasonError) leaves the model's refusal prose here with no error
-	// marker on the event — cross-read the last Completion's stop_reason to
-	// detect it.
+	// FinalText is the run's text as the Runner stitched it across a
+	// max-tokens continuation, so a store can persist it without re-deriving
+	// the stitch. For Runner.Run it is the text of the last completion that
+	// succeeded: after a failed later completion it is still the earlier
+	// completion's text, so it is not necessarily an answer. For
+	// Runner.RunJSON, when a repair completion succeeded, it holds text from
+	// the repair turn. It is empty when no completion succeeded, and
+	// when the run panicked. A refusal or safety stop (the Runner's
+	// StopReasonError) records the model's refusal prose here, with Status
+	// [RunRefused] and Err set.
 	FinalText string `json:"final_text,omitempty"`
 	// Status is how the run ended, in the [RunStatus] vocabulary. Empty marks
 	// a record written before this field existed; a reader must not read

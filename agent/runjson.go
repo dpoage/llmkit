@@ -67,9 +67,8 @@ var ErrUnparseableOutput = errors.New("agent: model output did not parse as JSON
 // completion that itself fails (a transport error, a cancelled context): err
 // is that completion failure, which matches neither, even on a truncated run,
 // and the Outcome still keeps its TruncationReason. The Outcome is returned for
-// inspection either way. When a repair ran, the returned Outcome's
-// [Outcome.FinalText] is the REPAIR completion's text — the last completion
-// of the run — not the unparseable pre-repair answer.
+// inspection either way. When a repair completion succeeded, the returned
+// Outcome's [Outcome.FinalText] holds text from the repair turn.
 //
 // Pass [WithSteering] to inject queued user turns mid-run ([Steering]):
 // both drain points apply; the JSON parse applies to the last completion.
@@ -124,9 +123,8 @@ func (r *Runner) runJSON(ctx context.Context, cfg runConfig, task string, schema
 	prompt := task + "\n\n" + jsonInstruction(schema)
 
 	ctx, em := r.begin(ctx, cfg, task)
-	// Finalize closes the run on every return path — including after the
-	// repair completion below, so the run's last recorded turn is the repair
-	// and Finalize.Step names it (see [emitFinalize]).
+	// The deferred emitFinalize runs after the repair completion below (see
+	// [emitFinalize]).
 	returned := false
 	defer func() { r.emitFinalize(ctx, em, outcome, err, !returned) }()
 	outcome, err = r.runJSONBody(ctx, em, prompt, task, cfg, schema, out)
@@ -238,8 +236,8 @@ func (r *Runner) runJSONBody(ctx context.Context, em runEmitter, prompt, task st
 	return outcome, nil
 }
 
-// truncatedUnparseable is the error of a RunJSON run that both hit a limit
-// and produced no parseable answer. It reports the parse error's message
+// truncatedUnparseable is the error of a RunJSON run that was truncated and
+// produced no parseable answer. It reports the parse error's message
 // unchanged and unwraps to that error and to the [*IncompleteError], so
 // errors.Is(err, ErrUnparseableOutput) and errors.As(err, **IncompleteError)
 // both match. It does not print the IncompleteError, whose message carries its

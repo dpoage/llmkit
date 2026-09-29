@@ -2,7 +2,6 @@ package llmkit_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -57,40 +56,31 @@ func ExampleUserMessage() {
 
 func ExampleStream() {
 	// echoClient has no Stream method, so llmkit.Stream calls Complete and
-	// synthesizes deltas: text blocks in order, then one tool-call delta.
+	// synthesizes deltas in block order: the thinking block arrives as a
+	// DeltaThinking fragment in Delta.Thinking, each text block as a
+	// DeltaText fragment in Delta.Text.
 	c := &echoClient{responses: []llmkit.Response{{
 		Blocks: []llmkit.Block{
+			{Kind: llmkit.BlockThinking, Text: "The user greets me; I greet back."},
 			llmkit.Text("Hello"),
 			llmkit.Text(" world"),
 		},
-		Text: "Hello world",
-		ToolCalls: []llmkit.ToolCall{
-			{ID: "call_1", Name: "get_time", Arguments: json.RawMessage(`{"tz":"utc"}`)},
-		},
+		Text:       "Hello world",
 		Usage:      llmkit.Usage{InputTokens: 5, OutputTokens: 3},
 		StopReason: llmkit.StopEndTurn,
 	}}}
 
-	resp, err := llmkit.Stream(context.Background(), c, llmkit.Request{
-		Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "What time is it?")},
-	}, func(d llmkit.Delta) error {
-		switch d.Kind {
-		case llmkit.DeltaText, llmkit.DeltaThinking:
-			fmt.Printf("%s: %q\n", d.Kind, d.Text)
-		case llmkit.DeltaToolCall:
-			fmt.Printf("%s: %s %s args=%s\n", d.Kind, d.ID, d.Name, d.Arguments)
-		}
-		return nil
-	})
+	// Printing Delta.Text leaves out this response's thinking block: its
+	// DeltaThinking fragment carries the text in Delta.Thinking.
+	_, err := llmkit.Stream(context.Background(), c, llmkit.Request{
+		Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "Say hello.")},
+	}, func(d llmkit.Delta) error { fmt.Print(d.Text); return nil })
 	if err != nil {
 		fmt.Println("error:", err)
 		return
 	}
-	fmt.Println(resp.Text)
+	fmt.Println()
 	// Output:
-	// text: "Hello"
-	// text: " world"
-	// tool_call: call_1 get_time args={"tz":"utc"}
 	// Hello world
 }
 

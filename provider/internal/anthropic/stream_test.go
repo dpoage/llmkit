@@ -164,8 +164,8 @@ func TestAnthropicStreamTextThinking(t *testing.T) {
 	}
 
 	want := []llmkit.Delta{
-		{Kind: llmkit.DeltaThinking, Text: "Adding 2+2"},
-		{Kind: llmkit.DeltaThinking, Text: ", so 4."},
+		{Kind: llmkit.DeltaThinking, Thinking: "Adding 2+2"},
+		{Kind: llmkit.DeltaThinking, Thinking: ", so 4."},
 		{Kind: llmkit.DeltaText, Text: "The answer is 4."},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -723,4 +723,25 @@ func TestAnthropicStreamErrorEvent(t *testing.T) {
 	// (delivered-delta guard; vendor-type classification) is covered by
 	// provider.TestConformance_AnthropicStream_DeliveredDeltaForbidsRetry
 	// and provider.TestConformance_AnthropicStream_FirstEventClassifiedByType.
+}
+
+// TestAnthropicStreamThinkingJoin: across every delta, the Thinking fragments
+// join to the thinking text and the Text fragments join to the answer, each
+// exactly, so no thinking byte lands in Text.
+func TestAnthropicStreamThinkingJoin(t *testing.T) {
+	ad := newStreamAdapter(t, newServer(t, sseHandler(streamReasoningEvents())))
+	var thinking, text []string
+	if _, err := ad.Stream(t.Context(), simpleRequest(), func(d llmkit.Delta) error {
+		thinking = append(thinking, d.Thinking)
+		text = append(text, d.Text)
+		return nil
+	}); err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if got := strings.Join(thinking, ""); got != "Adding 2+2, so 4." {
+		t.Errorf("joined Thinking = %q, want %q", got, "Adding 2+2, so 4.")
+	}
+	if got := strings.Join(text, ""); got != "The answer is 4." {
+		t.Errorf("joined Text = %q, want %q", got, "The answer is 4.")
+	}
 }

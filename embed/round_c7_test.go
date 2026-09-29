@@ -31,7 +31,7 @@ func TestAPIError_MessageTrimAndCap(t *testing.T) {
 				}))
 				defer srv.Close()
 
-				emb, err := New(Config{Backend: backend, Model: "m", URL: srv.URL, Retry: retry.Config{MaxAttempts: 1}})
+				emb, err := New(Config{Backend: backend, Model: "m", BaseURL: srv.URL, Retry: retry.Config{MaxAttempts: 1}})
 				if err != nil {
 					t.Fatalf("New: %v", err)
 				}
@@ -63,7 +63,7 @@ func TestAPIError_MessageTrimAndCap(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		emb, err := New(Config{Backend: BackendOpenAICompatible, Model: "m", URL: srv.URL, Retry: retry.Config{MaxAttempts: 1}})
+		emb, err := New(Config{Backend: BackendOpenAICompatible, Model: "m", BaseURL: srv.URL, Retry: retry.Config{MaxAttempts: 1}})
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
@@ -97,7 +97,7 @@ func TestAPIError_MessageTrimAndCap(t *testing.T) {
 				}))
 				defer srv.Close()
 
-				emb, err := New(Config{Backend: backend, Model: "m", URL: srv.URL, Retry: retry.Config{MaxAttempts: 1}})
+				emb, err := New(Config{Backend: backend, Model: "m", BaseURL: srv.URL, Retry: retry.Config{MaxAttempts: 1}})
 				if err != nil {
 					t.Fatalf("New: %v", err)
 				}

@@ -94,8 +94,9 @@ func WithMaxTokens(n int) Option {
 }
 
 // WithBudgetPool makes the Runner share pool across its runs: the Runner
-// checks the pool once per main-loop turn (ErrBudgetExhausted stops the run
-// with TruncBudgetPool, which Run reports as an [*IncompleteError]) and
+// checks the pool once per main-loop turn (when the check returns
+// ErrBudgetExhausted, Run stops the run with TruncBudgetPool and reports it
+// as an [*IncompleteError]) and
 // charges it after every successful completion with that completion's
 // llmkit.Usage.ChargeableTokens
 // (CacheReadWeight-discounted). Continuation, finalization, and repair
@@ -108,7 +109,8 @@ func WithBudgetPool(pool *BudgetPool) Option {
 }
 
 // NewRunner builds a Runner bound to client, the given tools, and a system
-// prompt. Options tune limits, transcript persistence, and output token caps.
+// prompt. Options such as [WithLimits], [WithMaxTokens], [WithHooks], and
+// [WithObserver] tune limits, output token caps, callbacks, and event sinks.
 //
 // NewRunner panics if tools contains a nil entry or two tools whose
 // Def().Name is the same: the model addresses a tool by name alone, so a
@@ -130,8 +132,7 @@ func NewRunner(client llmkit.Client, tools []Tool, systemPrompt string, opts ...
 
 // Run executes the tool loop for a single task: it seeds the conversation
 // with the task as a user message, then repeatedly calls the model and
-// executes any requested tools until the model finishes its turn, a limit
-// is hit, or an infrastructure error occurs.
+// executes any requested tools until the run ends.
 //
 // Pass [Continue] to run the task inside a prior conversation instead of a
 // fresh one.
@@ -141,14 +142,13 @@ func NewRunner(client llmkit.Client, tools []Tool, systemPrompt string, opts ...
 // Pass [WithSteering] to inject queued user turns while the run is in
 // flight ([Steering]).
 //
-// A limit stop returns an [*IncompleteError] next to the Outcome, whose
-// [Outcome.TruncationReason] is non-empty and whose [Outcome.FinalText] is the
-// last completion's text, not necessarily an answer; the error's Outcome is
-// that same pointer, and [Continue] accepts it. Every other failure returns
-// its own non-nil error next to the Outcome: a failed completion, a
-// [RequestPolicy] error, [ErrSteeringInUse], context cancellation, or
-// [StopReasonError]. The returned Outcome's Transcript is always non-nil,
-// even on error, capturing whatever happened before the failure.
+// A truncated run returns an [*IncompleteError] next to the Outcome, whose
+// [Outcome.TruncationReason] is non-empty; the error's Outcome is that same
+// pointer, and [Continue] accepts it. A failure returns its own non-nil
+// error next to the Outcome, such as a failed completion, a [RequestPolicy]
+// error, [ErrSteeringInUse], context cancellation, or [StopReasonError]. The
+// returned Outcome's Transcript is always non-nil, even on error, capturing
+// whatever happened before the failure.
 //
 // Max-tokens continuation: when a turn stops at the output token cap
 // (StopMaxTokens) with no tool calls, Run makes ONE extra continuation
@@ -157,18 +157,22 @@ func NewRunner(client llmkit.Client, tools []Tool, systemPrompt string, opts ...
 // its own assistant turn. The stitched text reaches the caller in
 // [Outcome.FinalText] and the returned response; the conversation history
 // keeps both assistant turns, separated by that continuation nudge. This
-// applies to plain Run, not only RunJSON: a truncated final answer is
-// completed rather than returned half-written. It costs at most one
+// applies to plain Run, not only RunJSON. It costs at most one
 // additional completion per truncated turn and is reflected in the
 // Outcome's Iterations and Usage.
+//
+// When the continuation also stops at the cap without a tool call and the
+// loop has no queued [Steering] turn to deliver after it, the run ends with
+// [TruncOutputCap].
 func (r *Runner) Run(ctx context.Context, task string, opts ...RunOption) (outcome *Outcome, err error) {
 	var cfg runConfig
 	for _, opt := range opts {
 		opt(&cfg)
 	}
 	ctx, em := r.begin(ctx, cfg, task)
-	// Finalize closes every run, on every return path — clean finish,
-	// truncation stop, or error (see [emitFinalize]).
+	// The deferred emitFinalize emits the run's Finalize event when Run
+	// returns, and with panicked set when a panic unwinds it (see
+	// [emitFinalize]).
 	returned := false
 	defer func() { r.emitFinalize(ctx, em, outcome, err, !returned) }()
 	outcome, err = r.run(ctx, em, cfg.seed, task, cfg.attach, "", nil, cfg.steering)
@@ -245,8 +249,7 @@ func WithRunID(id llmkit.RunID) RunOption {
 //
 // Like Run, there is no context-window management: a caller driving a long
 // conversation must bound the history itself, using the client's
-// [llmkit.Capabilities].ContextWindow and [EstimateHistoryTokens]. There is
-// likewise no streaming and no persistence across processes.
+// [llmkit.Capabilities].ContextWindow and [EstimateHistoryTokens].
 //
 // When an earlier call returned [StopReasonError] (model refusal/safety
 // stop), the attached err.Outcome may be threaded back in here: the refusal
@@ -270,9 +273,9 @@ func Continue(prev *Outcome) RunOption {
 // a seed whose trailing assistant turn carries unanswered tool calls is
 // trimmed — see [trimDanglingToolTurn].
 //
-// finalizePrompt, when non-empty, enables forced finalization: when a stop
-// condition fires (iteration cap, per-run token budget, or shared budget
-// pool) the loop injects this user-role message and takes a single final
+// finalizePrompt, when non-empty, enables forced finalization: when the
+// iteration cap, the per-run token budget, or the shared budget pool stops
+// the run, the loop injects this user-role message and takes a single final
 // tool-less completion so the model can emit its answer instead of dangling
 // exploration prose or a silently empty output. RunJSON passes a
 // JSON-demanding prompt; the public Run passes "" and therefore never pays
@@ -296,13 +299,13 @@ func Continue(prev *Outcome) RunOption {
 // emit an assistant turn that is ONLY an inline think block — stop=end_turn,
 // zero tool calls — which would otherwise hand RunJSON unparseable empty text
 // and burn its single repair. The cap stops a persistently silent model from
-// looping forever; after maxEmptyTurnNudges nudges go unanswered, run()
-// falls through to break.
+// looping forever. The count is per run and is never reset; see
+// [TruncNoAnswer].
 const maxEmptyTurnNudges = 2
 
-// emptyTurnNudge is appended as a user turn when a completion produced no
-// tool call and no visible text, to give the model another chance to either
-// call a tool or emit its final answer. See [maxEmptyTurnNudges].
+// emptyTurnNudge is the text of the user turn run() appends as an empty-turn
+// nudge: another chance for the model to call a tool or emit its final
+// answer. See [maxEmptyTurnNudges].
 const emptyTurnNudge = "You made no tool call and produced no final answer. Continue: call a tool or emit your final answer now."
 
 func (r *Runner) run(ctx context.Context, em runEmitter, seed []llmkit.Message, task string, attach []llmkit.Block, finalizePrompt string, responseSchema json.RawMessage, steering *Steering) (*Outcome, error) {
@@ -576,9 +579,9 @@ func trimDanglingToolTurn(seed []llmkit.Message) []llmkit.Message {
 	return seed
 }
 
-// finalizeAndTruncate is the single reserved finalization turn used by EVERY
-// stop condition the loop can hit (iteration cap, per-run token budget, shared
-// budget pool). It is a no-op unless finalizePrompt is non-empty AND the run
+// finalizeAndTruncate is the single reserved finalization turn taken at the
+// iteration-cap, per-run token budget, and shared budget pool stops. It is a
+// no-op unless finalizePrompt is non-empty AND the run
 // has not already taken a finalization turn this run, so the public Run path
 // (finalizePrompt == "") never pays an extra model call. When it does fire it:
 //
@@ -878,10 +881,10 @@ func (r *Runner) complete(ctx context.Context, em runEmitter, messages []llmkit.
 	outcome.Iterations++
 	outcome.Usage = outcome.Usage.Add(resp.Usage)
 	outcome.LastStopReason = resp.StopReason
-	// FinalText is always the LAST completion's text: assigned
-	// unconditionally, so an empty completion empties it (no stale earlier
-	// turn ever leaks through). completeOnce overwrites it with the stitched
-	// text after a max-tokens continuation.
+	// FinalText is assigned after each successful completion, so an empty
+	// completion empties it; a failed completion returned above and leaves it
+	// unchanged. completeOnce overwrites it with the stitched text after a
+	// max-tokens continuation.
 	outcome.FinalText = resp.Text
 	// Charge the shared budget pool (WithBudgetPool) for this completion:
 	// every successful completion of the run — main turn, continuation,

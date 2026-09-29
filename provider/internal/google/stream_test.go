@@ -161,7 +161,7 @@ func TestStream_ThoughtThenText(t *testing.T) {
 		t.Fatalf("Stream: %v", err)
 	}
 	want := []llmkit.Delta{
-		{Kind: llmkit.DeltaThinking, Text: " pondering"},
+		{Kind: llmkit.DeltaThinking, Thinking: " pondering"},
 		{Kind: llmkit.DeltaText, Text: "Answer"},
 	}
 	if !reflect.DeepEqual(deltas, want) {
@@ -304,7 +304,7 @@ func TestStream_IdentityWithComplete(t *testing.T) {
 	wantDeltas := []llmkit.Delta{
 		{Kind: llmkit.DeltaText, Text: "Hello"},
 		{Kind: llmkit.DeltaText, Text: " world"},
-		{Kind: llmkit.DeltaThinking, Text: " pondering"},
+		{Kind: llmkit.DeltaThinking, Thinking: " pondering"},
 		{Kind: llmkit.DeltaToolCall, Index: 0, ID: "call-9", Name: "get_weather", Arguments: `{"city":"Paris"}`},
 	}
 	if !reflect.DeepEqual(deltas, wantDeltas) {
@@ -629,5 +629,39 @@ func TestStream_EmptyTextPartsSuppressed(t *testing.T) {
 	}
 	if len(resp.Blocks) != 1 || resp.Blocks[0].Text != "AB" || resp.Text != "AB" {
 		t.Fatalf("resp = %+v, want one merged AB block", resp)
+	}
+}
+
+// TestStream_ThoughtJoin: across every delta, the Thinking fragments join to
+// the thinking text and the Text fragments join to the answer, each exactly,
+// so no thinking byte lands in Text.
+func TestStream_ThoughtJoin(t *testing.T) {
+	thought := func(s string) map[string]any {
+		return map[string]any{"candidates": []any{map[string]any{
+			"content": map[string]any{"role": "model", "parts": []any{map[string]any{
+				"text": s, "thought": true, "thoughtSignature": testSig,
+			}}},
+		}}}
+	}
+	base := streamServer(t,
+		thought("step one. "),
+		thought("step two."),
+		textChunk("The "),
+		textChunk("answer."),
+		finalChunk("STOP", map[string]any{"promptTokenCount": 5, "candidatesTokenCount": 4, "totalTokenCount": 9}),
+	)
+	var thinking, text []string
+	if _, err := newStreamClient(t, base).Stream(context.Background(), simpleRequest(), func(d llmkit.Delta) error {
+		thinking = append(thinking, d.Thinking)
+		text = append(text, d.Text)
+		return nil
+	}); err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if got := strings.Join(thinking, ""); got != "step one. step two." {
+		t.Errorf("joined Thinking = %q, want %q", got, "step one. step two.")
+	}
+	if got := strings.Join(text, ""); got != "The answer." {
+		t.Errorf("joined Text = %q, want %q", got, "The answer.")
 	}
 }

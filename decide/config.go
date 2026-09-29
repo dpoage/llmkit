@@ -34,11 +34,11 @@ const (
 
 // Config configures a TypeSafe System One client. New validates it.
 type Config struct {
-	// APIKey is the TypeSafe credential, sent as "Authorization: Bearer".
+	// Secret is the TypeSafe credential, sent as "Authorization: Bearer".
 	// Required: a non-empty value without surrounding whitespace (the same
 	// rule as provider.Spec.Secret). New never echoes it, logs it, or reads
 	// it from the environment.
-	APIKey string
+	Secret string
 
 	// Model is the Jev model id or alias to ask ("jev-1.13.0",
 	// "jev-latest", ...). Required; there is no default alias. The response
@@ -46,7 +46,9 @@ type Config struct {
 	Model string
 
 	// BaseURL overrides the vendor endpoint root. Empty selects
-	// "https://api.typesafe.ai"; the "/v1/systemone" path is appended.
+	// "https://api.typesafe.ai". The request URL is BaseURL plus
+	// "/v1/systemone" (a trailing slash on BaseURL is dropped), so do not
+	// include "/v1".
 	BaseURL string
 
 	// HTTPClient is optional. nil selects a plain client with no
@@ -72,19 +74,16 @@ type Config struct {
 }
 
 // New validates cfg and returns a Client. It returns an error wrapping
-// llmkit.ErrInvalidRequest for an APIKey that is empty, whitespace-only, or
+// llmkit.ErrInvalidRequest for a Secret that is empty, whitespace-only, or
 // whitespace-padded, an empty Model, and a Retry.Jitter outside [0, 1].
 // Construction is hermetic: no network I/O, no environment lookups, and
-// the error never echoes the API key.
+// the error never echoes Secret.
 func New(cfg Config) (*Client, error) {
-	// Refuse an APIKey that is empty or differs from strings.TrimSpace —
-	// the same refusal provider.New applies to Spec.Secret. No vendor
-	// issues a credential with surrounding whitespace, and such a value
-	// is almost always a copy/paste or `cat`/`pass` artifact; refusing it
-	// here turns a confusing 401 into an immediate, actionable one. The
-	// error never echoes the key.
-	if trimmed := strings.TrimSpace(cfg.APIKey); trimmed == "" || trimmed != cfg.APIKey {
-		return nil, fmt.Errorf("decide: API key must be a non-empty value with no leading or trailing whitespace: %w", llmkit.ErrInvalidRequest)
+	// Refuse a Secret that is empty or differs from strings.TrimSpace —
+	// the same refusal provider.New applies to Spec.Secret. The error
+	// never echoes Secret.
+	if trimmed := strings.TrimSpace(cfg.Secret); trimmed == "" || trimmed != cfg.Secret {
+		return nil, fmt.Errorf("decide: Secret must be a non-empty value with no leading or trailing whitespace: %w", llmkit.ErrInvalidRequest)
 	}
 	if cfg.Model == "" {
 		return nil, fmt.Errorf("decide: model is required: %w", llmkit.ErrInvalidRequest)
@@ -97,7 +96,7 @@ func New(cfg Config) (*Client, error) {
 		base = defaultBaseURL
 	}
 	return &Client{
-		apiKey:   cfg.APIKey,
+		apiKey:   cfg.Secret,
 		model:    cfg.Model,
 		endpoint: strings.TrimRight(base, "/") + systemOnePath,
 		client:   cfg.httpClient(),

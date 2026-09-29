@@ -15,9 +15,9 @@ var ErrBudgetExhausted = errors.New("agent: shared budget pool exhausted")
 // BudgetPool is a concurrency-safe token budget shared across many
 // concurrent [Runner] runs. A Runner installed with [WithBudgetPool] checks
 // the pool once per main-loop turn and charges it after every successful
-// completion with that completion's chargeable tokens. A run already in
-// flight stops at the next turn boundary once the pool is exhausted,
-// rather than running to completion under its own per-run allowance. This
+// completion with that completion's chargeable tokens. Once a check finds
+// the pool exhausted, a run already in flight starts no further main-loop
+// turn, even with its own per-run allowance left. This
 // bounds total charged overshoot to at most one in-flight model call per
 // concurrent runner.
 // Note a RunJSON repair pass and a run

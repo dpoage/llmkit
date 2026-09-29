@@ -9,10 +9,10 @@ import (
 )
 
 // openaiCodec is the [wireCodec] for [BackendOpenAICompatible]: any
-// OpenAI-compatible /v1/embeddings endpoint (OpenAI, Azure OpenAI, vLLM,
-// LiteLLM).
+// OpenAI-compatible embeddings endpoint (OpenAI, Azure OpenAI, vLLM,
+// LiteLLM); [Config.BaseURL] states the BaseURL form it takes.
 //
-// POST <baseURL>/v1/embeddings
+// POST <baseURL>/embeddings
 //
 //	Request:  {"model": "...", "input": ["...", ...]}
 //	Response: {"data": [{"embedding": [...], "index": 0}], "model": "..."}
@@ -23,7 +23,7 @@ type openaiCodec struct{}
 
 var _ wireCodec = openaiCodec{}
 
-func (openaiCodec) path() string { return "/v1/embeddings" }
+func (openaiCodec) path() string { return "/embeddings" }
 
 func (openaiCodec) encodeRequest(model string, texts []string) any {
 	return openaiRequest{Model: model, Input: texts}

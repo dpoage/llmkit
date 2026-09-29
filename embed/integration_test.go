@@ -4,7 +4,6 @@ package embed
 
 import (
 	"context"
-	"math"
 	"net/http"
 	"testing"
 	"time"
@@ -24,12 +23,14 @@ func TestOllamaIntegration_Embed(t *testing.T) {
 	if err != nil {
 		t.Skipf("Ollama not available at %s: %v", ollamaURL, err)
 	}
-	resp.Body.Close()
+	if err := resp.Body.Close(); err != nil {
+		t.Logf("close probe response body: %v", err)
+	}
 
 	emb, err := New(Config{
 		Backend: BackendOllama,
 		Model:   "nomic-embed-text",
-		URL:     ollamaURL,
+		BaseURL: ollamaURL,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -70,17 +71,4 @@ func TestOllamaIntegration_Embed(t *testing.T) {
 			t.Errorf("batch[%d] has %d dims, want %d", i, len(vec), emb.Dimensions())
 		}
 	}
-}
-
-func cosineSimF32(a, b []float32) float64 {
-	var dot, normA, normB float64
-	for i := range a {
-		dot += float64(a[i]) * float64(b[i])
-		normA += float64(a[i]) * float64(a[i])
-		normB += float64(b[i]) * float64(b[i])
-	}
-	if normA == 0 || normB == 0 {
-		return 0
-	}
-	return dot / (math.Sqrt(normA) * math.Sqrt(normB))
 }

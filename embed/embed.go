@@ -19,15 +19,16 @@
 // # Backends
 //
 // [New] builds the backend named by [Config.Backend]: [BackendOllama]
-// posts to <URL>/api/embed on an Ollama server, and
-// [BackendOpenAICompatible] posts to <URL>/v1/embeddings on any
-// OpenAI-compatible API. There is no default backend and no default URL:
-// [Config.Validate] requires a known Backend and a non-empty
-// [Config.URL]. A local Ollama server typically listens on
-// http://localhost:11434. New is the only way to build a backend
-// embedder in this package: both backend types and their constructors
-// are unexported, so a caller always goes through New and the returned
-// [Embedder] interface.
+// posts to <BaseURL>/api/embed on an Ollama server, and
+// [BackendOpenAICompatible] posts to <BaseURL>/embeddings on any
+// OpenAI-compatible API. The two backends take different BaseURL forms;
+// [Config.BaseURL] states them. There is no default backend and no
+// default BaseURL: [Config.Validate] requires a
+// known Backend and a non-empty [Config.BaseURL]. A local Ollama server
+// typically listens on http://localhost:11434. New is the only way to
+// build a backend embedder in this package: both backend types and
+// their constructors are unexported, so a caller always goes through New
+// and the returned [Embedder] interface.
 //
 // The Ollama wire request always sends "input" as a JSON array, even for
 // a single text ([Embedder.Embed] calls EmbedBatch with a one-element
@@ -44,17 +45,23 @@
 //
 // # Configuration
 //
-// [Config] holds every setting a backend honors: New reads no
-// environment variables and no file — a caller fills Config from its own
-// configuration source. [Config.Backend] selects the wire protocol
+// [Config] holds the caller's settings for a backend. New reads no
+// environment variable and no file — a caller fills Config from its own
+// configuration source. A request still depends on the process
+// environment: with a nil [Config.HTTPClient], requests go through
+// http.DefaultTransport, which reads HTTP_PROXY, HTTPS_PROXY, and
+// NO_PROXY once per process and sends matching requests through the
+// proxy. Requests to localhost and loopback addresses bypass it. An
+// injected HTTPClient whose Transport sets its own Proxy function
+// replaces that behavior. [Config.Backend] selects the wire protocol
 // ([ParseBackend] parses a string into it); [Config.Validate] rejects the
 // zero Backend and any value other than [BackendOllama] or
-// [BackendOpenAICompatible]. [Config.APIKey], when non-empty, is sent as
-// an "Authorization: Bearer <APIKey>" header on every request to BOTH
+// [BackendOpenAICompatible]. [Config.Secret], when non-empty, is sent as
+// an "Authorization: Bearer <Secret>" header on every request to BOTH
 // backends; when empty, neither backend sends an Authorization header.
-// Validate also refuses an APIKey with leading or trailing whitespace,
-// and an APIKey that holds a byte net/http cannot send in a header value
-// (bytes 0x00-0x1F except tab, and 0x7F); the error never echoes the key,
+// Validate also refuses a Secret with leading or trailing whitespace,
+// and a Secret that holds a byte net/http cannot send in a header value
+// (bytes 0x00-0x1F except tab, and 0x7F); the error never echoes Secret,
 // raw or trimmed. Validate rejects negative Dimensions and MaxBatch, and
 // rejects Retry.Jitter outside [0, 1].
 //
@@ -134,8 +141,8 @@
 // A cancelled or expired caller context surfaces as the context error
 // (errors.Is(err, context.Canceled) or context.DeadlineExceeded), never
 // an APIError. [Config.Validate] and [New] reject a bad Config — an
-// unknown or zero Backend, an empty Model or URL, a negative Dimensions
-// or MaxBatch, an APIKey with leading or trailing whitespace or a byte
+// unknown or zero Backend, an empty Model or BaseURL, a negative Dimensions
+// or MaxBatch, a Secret with leading or trailing whitespace or a byte
 // net/http cannot send in a header value, or an out-of-range Retry.Jitter — with an error
 // wrapping [llmkit.ErrInvalidRequest].
 // [ErrEmptyVector] and a decode/count/dimension mismatch are plain
@@ -192,11 +199,13 @@ type Embedder interface {
 	// Dimensions returns the dimensionality of the vectors produced by the
 	// underlying model. For an Embedder built by [New] with
 	// Config.Dimensions set, it returns that value from construction. With
-	// Config.Dimensions 0, it returns 0 before the first call and the
-	// served vector length after the first successful call. A call that
-	// fails may or may not have recorded a value: the embedder records
-	// the length of the first vector it accepts, even when a later vector
-	// or a later batch chunk of the same call is rejected.
+	// Config.Dimensions 0, it returns 0 until the embedder accepts its
+	// first vector, then that vector's length. A call that sends no
+	// request, such as EmbedBatch with no texts, accepts no vector and
+	// leaves it 0. A call that fails may or may not have recorded a
+	// value: the embedder records the length of the first vector it
+	// accepts, even when a later vector or a later batch chunk of the
+	// same call is rejected.
 	Dimensions() int
 
 	// ModelName returns the identifier of the model used for embedding.
@@ -206,7 +215,7 @@ type Embedder interface {
 // New validates cfg and builds the Embedder for cfg.Backend. New applies
 // no cache: a caller who wants one wraps the result with
 // [NewCachedEmbedder]. Every refusal (a bad Config or an unknown
-// Backend) wraps [llmkit.ErrInvalidRequest] and never echoes cfg.APIKey.
+// Backend) wraps [llmkit.ErrInvalidRequest] and never echoes cfg.Secret.
 func New(cfg Config) (Embedder, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err

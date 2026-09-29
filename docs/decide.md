@@ -26,7 +26,7 @@ import (
 
 func main() {
 	client, err := decide.New(decide.Config{
-		APIKey: os.Getenv("LLMKIT_TYPESAFE_API_KEY"),
+		Secret: os.Getenv("LLMKIT_TYPESAFE_API_KEY"),
 		Model:  "jev-latest",
 	})
 	if err != nil {
@@ -44,9 +44,9 @@ placeholder key. An invalid field returns an error wrapping
 
 | Field | Required | Effect and default |
 |---|---|---|
-| `APIKey` | Yes | Non-empty, no surrounding whitespace (the same rule as `provider.Spec.Secret`). |
+| `Secret` | Yes | Non-empty, no surrounding whitespace (the same rule as `provider.Spec.Secret`). |
 | `Model` | Yes | A versioned id (`jev-1.13.0`) or alias (`jev-latest`, `jev-preview`). There is no default alias. |
-| `BaseURL` | No | Endpoint root for tests and gateways. Default: `https://api.typesafe.ai`; the path `/v1/systemone` is appended. |
+| `BaseURL` | No | Endpoint root for tests and gateways, without `/v1`. Default: `https://api.typesafe.ai`; the path `/v1/systemone` is appended. |
 | `HTTPClient` | No | Used as-is, including its `Timeout`. Default: a plain client with no `http.Client.Timeout`, so the per-attempt `RequestTimeout` is the only bound. |
 | `Retry` | No | Resolved at construction via `retry.Config.Or`: 3 attempts, 30 s per-attempt timeout, `BaseDelay` (500 ms), `MaxDelay` (30 s), and `Jitter` (20%) from `retry.Default`. An explicit `Jitter` of 0 resolves like every other unset field; pin `Retry.Rand` for the resolved defaults with no jitter. |
 | `Observer` | No | Receives one [`llmkit.DecisionEvent`](https://pkg.go.dev/github.com/dpoage/llmkit#DecisionEvent) per `Ask` that passes pre-wire validation (success or failure; a caller's already-cancelled ctx emits one with `Err` set and zero wire hits; a `buildRequest` refusal emits nothing), via its `Observe(ctx, llmkit.Event)` method. Default: nil (no events). |
@@ -79,7 +79,7 @@ import (
 
 func main() {
 	client, err := decide.New(decide.Config{
-		APIKey: os.Getenv("LLMKIT_TYPESAFE_API_KEY"),
+		Secret: os.Getenv("LLMKIT_TYPESAFE_API_KEY"),
 		Model:  "jev-latest",
 	})
 	if err != nil {
@@ -122,7 +122,7 @@ import (
 
 func main() {
 	client, err := decide.New(decide.Config{
-		APIKey: os.Getenv("LLMKIT_TYPESAFE_API_KEY"),
+		Secret: os.Getenv("LLMKIT_TYPESAFE_API_KEY"),
 		Model:  "jev-latest",
 	})
 	if err != nil {
@@ -172,7 +172,7 @@ import (
 
 func main() {
 	client, err := decide.New(decide.Config{
-		APIKey: os.Getenv("LLMKIT_TYPESAFE_API_KEY"),
+		Secret: os.Getenv("LLMKIT_TYPESAFE_API_KEY"),
 		Model:  "jev-latest",
 	})
 	if err != nil {
@@ -224,7 +224,7 @@ import (
 
 func main() {
 	client, err := decide.New(decide.Config{
-		APIKey: os.Getenv("LLMKIT_TYPESAFE_API_KEY"),
+		Secret: os.Getenv("LLMKIT_TYPESAFE_API_KEY"),
 		Model:  "jev-latest",
 	})
 	if err != nil {

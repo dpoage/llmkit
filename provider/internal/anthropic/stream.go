@@ -32,8 +32,8 @@ func (e streamProtocolError) Error() string { return e.msg }
 //
 // Fragment mapping:
 //
-//	text_delta       → DeltaText
-//	thinking_delta   → DeltaThinking
+//	text_delta       → DeltaText (Text)
+//	thinking_delta   → DeltaThinking (Thinking)
 //	signature_delta  → nothing (the signature rides the final thinking block)
 //	input_json_delta → DeltaToolCall; for the synthetic structured-output
 //	                   tool, DeltaText — finalize presents that call as
@@ -159,7 +159,7 @@ func (a *anthropicAdapter) forwardBlockDelta(ev anthropic.ContentBlockDeltaEvent
 	case anthropic.TextDelta:
 		return forward(llmkit.Delta{Kind: llmkit.DeltaText, Text: d.Text}), nil
 	case anthropic.ThinkingDelta:
-		return forward(llmkit.Delta{Kind: llmkit.DeltaThinking, Text: d.Thinking}), nil
+		return forward(llmkit.Delta{Kind: llmkit.DeltaThinking, Thinking: d.Thinking}), nil
 	case anthropic.InputJSONDelta:
 		if d.PartialJSON == "" {
 			return nil, nil

@@ -60,20 +60,22 @@ import (
 //
 // Invocation is synchronous: each hook runs inline on the goroutine that
 // reaches the fire point (the loop goroutine, or the per-call goroutine for
-// ToolStart/ToolEnd under WithParallelTools). A slow hook stalls the run —
-// and, under WithParallelTools, the tool call it wraps.
+// ToolStart, ToolEnd, and ToolHealth in a turn of two or more calls under
+// WithParallelTools). A slow hook stalls the run — and, under
+// WithParallelTools, the tool call it wraps.
 //
 // Hook panics are harness bugs, never tool data: a panic inside any callback
 // is never rendered as a tool result. The remaining callbacks registered for
-// that event do not fire. Under WithParallelTools the per-call goroutine
-// recovers the panic and the loop re-panics with the original value after all
-// sibling calls finish.
+// that event do not fire. In a turn of two or more calls under
+// WithParallelTools, a panic in ToolStart, ToolEnd, or ToolHealth is
+// recovered in the per-call goroutine, and the loop re-panics with the
+// original value after all sibling calls finish.
 //
-// Concurrency: with WithParallelTools set, ToolStart/ToolEnd fire
-// concurrently from the per-call goroutines; with concurrent Run calls on one
-// Runner (which is safe), every hook can fire concurrently across runs. Hook
-// functions must therefore be safe for concurrent use — synchronize their own
-// state.
+// Concurrency: in a turn of two or more calls under WithParallelTools,
+// ToolStart, ToolEnd, and ToolHealth fire concurrently from the per-call
+// goroutines; with concurrent Run calls on one Runner (which is safe), every
+// hook can fire concurrently across runs. Hook functions must therefore be
+// safe for concurrent use — synchronize their own state.
 //
 // Every hook receives a context without the turn's completion span
 // (Step set): the Runner claims the span only on the context it hands
@@ -158,10 +160,11 @@ func WithToolTimeout(d time.Duration) Option {
 // in the call's goroutine and rendered as that call's error result
 // ("ERROR: tool <name> panicked: …"), so siblings complete normally and the
 // run continues — the same rendering the sequential path produces. A
-// panicking [Hooks] callback is a harness bug, not tool data: it is
-// recovered in the per-call goroutine and re-panicked with the original
-// value after all sibling calls finish, aborting the run exactly as a hook
-// panic does sequentially — no goroutine leaks, no tool_result recorded for
+// panicking [Hooks] callback is a harness bug, not tool data: a panic in
+// [Hooks.ToolStart], [Hooks.ToolEnd], or [Hooks.ToolHealth] during a turn of
+// two or more calls is recovered in the per-call goroutine and re-panicked
+// with the original value after all sibling calls finish, aborting the run as
+// a panic in the same hook does sequentially. No tool_result is recorded for
 // the interrupted turn. See [Tool.Run] and [Hooks].
 //
 // Tools that run under this option must be safe for concurrent calls (see

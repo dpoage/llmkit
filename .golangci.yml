@@ -14,11 +14,11 @@ linters:
     staticcheck:
       checks:
         # staticcheck v2's default style exclusions stay off (package
-        # comments, naming, receiver consistency, doc-comment placement).
+        # comments, naming, receiver consistency, var/const doc form).
+        # ST1020 (exported func doc begins with its name) and ST1021 (the
+        # same for exported types) are on.
         - all
         - -ST1000
         - -ST1003
         - -ST1016
-        - -ST1020
-        - -ST1021
         - -ST1022

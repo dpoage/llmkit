@@ -59,12 +59,26 @@ jobs:
         # installs golangci-lint v1 (built with go1.24), which cannot load our
         # v2-schema .golangci.yml or target go 1.25. v9 of the action runs on
         # node24; v8 ran node20, which GitHub removes on 2026-09-23. The
-        # linter binary is PINNED (not latest) so the lint verdict —
-        # including the path-scoped SA1019 exclusion below in .golangci.yml —
-        # is reproducible across point releases.
+        # linter binary is PINNED (not latest) so the lint verdict is
+        # reproducible across point releases.
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.13.2
+
+      - name: golangci-lint (integration and live build tags)
+        # The plain run above does not compile files behind the `integration`
+        # and `live` build tags, so it cannot see findings in them. This run
+        # adds the tags; it does not replace the plain run, which still
+        # reports a non-test func whose only caller is a tagged test. Both
+        # read the repo's .golangci.yml. `!cancelled()` makes this step run
+        # when the plain step failed, so one pull request reports findings
+        # from both runs. A second `uses:` (the action passes `args` through
+        # to `golangci-lint run`) needs nothing from the failed step's PATH.
+        if: ${{ !cancelled() }}
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2
+          args: --build-tags integration,live ./...
 
   sandbox-integration:
     name: sandbox integration (bwrap + container CLI)

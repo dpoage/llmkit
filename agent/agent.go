@@ -1,6 +1,6 @@
 // Package agent is a tool-call execution harness: a reusable loop that drives
 // an [llmkit.Client] through a bounded set of tools until the model produces
-// a final answer, runs out of iterations, or exhausts a token budget.
+// a final answer or the run stops short of one.
 //
 // Callers with different roles (a coder, a reviewer, a researcher) construct
 // the same [Runner] with different system prompts and tool sets. The harness
@@ -22,9 +22,10 @@
 // also reaches [Hooks.ToolHealth]; a *StopReasonError ends the run, because
 // the model itself stopped for a provider error reason.
 //
-// Six errors end a run: a failed [llmkit.Client.Complete], a cancelled
-// context, a [RequestPolicy] error, [StopReasonError], [ErrSteeringInUse],
-// and [IncompleteError]. [Runner.RunJSON] adds [ErrUnparseableOutput].
+// A run can end with an error such as a failed [llmkit.Client.Complete], a
+// cancelled context, a [RequestPolicy] error, [StopReasonError],
+// [ErrSteeringInUse], or [IncompleteError]. [Runner.RunJSON] can also return
+// [ErrUnparseableOutput].
 //
 // Tools run one call at a time by default. [WithParallelTools] runs a turn's
 // calls concurrently, and concurrent [Runner.Run] calls on one Runner are
@@ -32,14 +33,16 @@
 //
 // # Limits and outcomes
 //
-// The loop enforces two limits: [Limits.MaxIterations] (model turns) and
-// [Limits.TokenBudget] (cumulative input+output tokens from [llmkit.Usage]).
-// Zero selects the package default; [Unlimited] removes the cap;
-// [Limits.CacheReadWeight] discounts cache-read tokens in the check.
-// Exceeding a limit stops the run: [Runner.Run] returns the [Outcome] with a
-// non-empty [Outcome.TruncationReason] next to an [*IncompleteError] that
-// carries the same Outcome, and [Outcome.FinalText] holds the text of the
-// last completion, which is not necessarily an answer.
+// The loop checks two limits before each main-loop turn:
+// [Limits.MaxIterations] (model turns) and [Limits.TokenBudget] (cumulative
+// input+output tokens from [llmkit.Usage]). Zero selects the package
+// default; [Unlimited] removes the cap; [Limits.CacheReadWeight] discounts
+// cache-read tokens in the check. When a check fails, [Runner.Run] returns
+// the [Outcome] with a non-empty [Outcome.TruncationReason] next to an
+// [*IncompleteError] that carries the same Outcome. [Outcome.FinalText] is
+// not necessarily an answer.
+// [TruncOutputCap] and [TruncNoAnswer] are truncation reasons too, and Run
+// reports a run that ends with one the same way.
 // [Limits.HistoryTokenBudget] enables threshold-triggered history
 // compaction, which replaces old tool results with short stubs and re-arms
 // its threshold so the cache cost stays bounded.
@@ -121,9 +124,9 @@
 // [BudgetPool] ([WithBudgetPool]) shares one token budget across concurrent
 // Runner runs. The Runner checks the pool once per loop turn and charges it
 // after every successful completion; continuation, finalization, and repair
-// completions are charged without a fresh check. An exhausted pool stops a
-// run with [TruncBudgetPool], which [Runner.Run] reports as an
-// [*IncompleteError]; [ErrBudgetExhausted] is the check failure. A nil pool
+// completions are charged without a fresh check. [ErrBudgetExhausted] is
+// the check failure: when the check fails, [Runner.Run] stops the run with
+// [TruncBudgetPool] and reports it as an [*IncompleteError]. A nil pool
 // is the default and means unlimited.
 //
 // # Transcripts, observers, and replay
@@ -131,11 +134,12 @@
 // Every run emits [llmkit.Event] values through one observer chain: the
 // in-memory [Transcript] first (it backs [Outcome.Transcript] and always
 // exists), then every sink registered with [WithObserver], in registration
-// order — [JSONL] streams one JSON line per event to a file per run. The
+// order — [JSONL] streams events as JSON lines into a file named after the
+// run's RunID. The
 // Runner does not enforce a single sink; register at most one that records
 // the run's history, and compose the rest (a spend ledger, metrics) beside
 // it. Events carry the run's identity ([WithRunID], [llmkit.RunID];
-// [Continue] chains record ParentRunID) and the 1-based turn as Step.
+// [Continue] chains record ParentRunID) and a Step (see [llmkit.Event]).
 // Transcripts serialize to JSONL
 // with [Transcript.SaveJSONL], load back with [LoadJSONL], and replay
 // offline through [NewReplayClient] — the read-side [llmkit.Source] interface, so
@@ -216,9 +220,8 @@ func (l Limits) resolve() Limits {
 	return out
 }
 
-// TruncationReason explains why a run stopped before the model finished its
-// turn. The zero value ("") means the run was not truncated; see
-// [Outcome.Truncated].
+// TruncationReason names the reason the loop truncated a run. The zero value
+// ("") means the run was not truncated; see [Outcome.Truncated].
 type TruncationReason string
 
 // Truncation reasons recorded in [Outcome.TruncationReason].
@@ -235,30 +238,40 @@ const (
 	// ("budget-stopped") from one that merely exhausted its own allowance.
 	TruncBudgetPool TruncationReason = "budget_pool"
 	// TruncOutputCap means the model's answer was cut off at the output token
-	// cap and stayed cut off.
+	// cap and stayed cut off: a completion with no tool call stopped at the
+	// cap, and its one continuation completion also stopped at the cap
+	// without a tool call.
 	TruncOutputCap TruncationReason = "output_cap"
 	// TruncNoAnswer means the run ended after exhausting the empty-turn
-	// nudge limit without an answer.
+	// nudge limit without an answer. The loop nudges at most twice per run.
+	// The nudge count is not reset, so a nudge the model answered with a
+	// tool call still counts. When the loop would nudge an empty turn, a
+	// turn queued on a [Steering] handle is delivered in place of the
+	// nudge and does not use one.
 	TruncNoAnswer TruncationReason = "no_answer"
 )
 
 // Outcome is the result of a [Runner.Run]. A truncated run still yields a
-// valid outcome: FinalText holds the last completion's text, and the
-// Transcript captures the full interaction. Run returns it together with an
-// [*IncompleteError] that carries this same pointer.
+// valid outcome, and the Transcript captures the full interaction. Run
+// returns it together with an [*IncompleteError] that carries this same
+// pointer.
 //
-// A truncated outcome is exactly one whose TruncationReason is non-empty;
-// see [Outcome.Truncated].
+// A truncated outcome is one whose TruncationReason is non-empty; see
+// [Outcome.Truncated].
 type Outcome struct {
-	// FinalText is the text of the last completion of the run. That completion
-	// is the main-loop turn, a stitched max-tokens continuation, the forced
-	// finalization turn, or the RunJSON repair completion, whichever ran last.
-	// It is empty when that completion produced no text.
+	// In a [Runner.Run], FinalText is the text of the last completion that
+	// succeeded: a main-loop turn, or a main-loop turn stitched with its
+	// max-tokens continuation. There, a failed later completion leaves the
+	// earlier completion's text in place, and FinalText is empty when no
+	// completion succeeded. It is not necessarily an answer.
+	//
+	// When a [Runner.RunJSON] repair completion succeeded, FinalText holds
+	// text from the repair turn.
 	FinalText string
-	// TruncationReason is set when the run stopped because it hit a limit
-	// rather than the model finishing its turn: one of the Trunc* constants.
-	// Empty means the model finished cleanly. [Runner.Run] reports a
-	// non-empty reason as an [*IncompleteError] carrying this Outcome.
+	// TruncationReason is set when the loop truncated the run; it is one of
+	// the Trunc* constants, which say why. Empty means the run was not
+	// truncated. [Runner.Run] reports a non-empty reason as an
+	// [*IncompleteError] carrying this Outcome.
 	TruncationReason TruncationReason
 	// Iterations is the number of completed model turns.
 	Iterations int
@@ -291,9 +304,7 @@ type Outcome struct {
 	Messages []llmkit.Message
 }
 
-// Truncated reports whether the run stopped because it hit a limit rather
-// than the model finishing its turn. It reports whether TruncationReason
-// is set.
+// Truncated reports whether TruncationReason is set.
 func (o *Outcome) Truncated() bool { return o.TruncationReason != "" }
 
 // StopReasonError is returned by [Runner.Run] when the model's final turn
@@ -316,12 +327,11 @@ func (e *StopReasonError) Error() string {
 	return fmt.Sprintf("agent: model stopped without tool calls: stop reason %q", e.StopReason)
 }
 
-// IncompleteError is returned by [Runner.Run] exactly when the run stopped at
-// a limit before the model finished its turn: Outcome.TruncationReason is
-// non-empty, and Reason repeats it. Outcome is the same pointer Run returns
-// next to the error, so a caller that only holds the error still reaches the
-// transcript, the usage, and [Outcome.Messages] for [Continue]. Its FinalText
-// is the last completion's text, which is not necessarily an answer.
+// IncompleteError is returned by [Runner.Run] when the run was truncated:
+// Outcome.TruncationReason is non-empty, and Reason repeats it. Outcome is
+// the same pointer Run returns next to the error, so a caller that only holds
+// the error still reaches the transcript, the usage, and [Outcome.Messages]
+// for [Continue]. Its FinalText is not necessarily an answer.
 //
 // [Runner.RunJSON] and [RunJSONAs] return no IncompleteError when the last
 // completion parsed. A truncated RunJSON whose answer does not parse returns
@@ -330,8 +340,8 @@ func (e *StopReasonError) Error() string {
 // transport error, a cancelled context): that completion failure is returned
 // as is and matches neither.
 type IncompleteError struct {
-	// Reason is the limit that stopped the run; always non-empty, and equal
-	// to Outcome.TruncationReason.
+	// Reason is the truncation reason that stopped the run, equal to
+	// Outcome.TruncationReason.
 	Reason TruncationReason
 	// Outcome is the outcome at the point the run stopped. Never nil.
 	Outcome *Outcome

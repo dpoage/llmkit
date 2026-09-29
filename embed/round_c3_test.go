@@ -13,10 +13,10 @@ import (
 	"github.com/dpoage/llmkit/retry"
 )
 
-// TestAPIKey_BearerHeaderBothBackends pins: a non-empty Config.APIKey
+// TestSecret_BearerHeaderBothBackends pins: a non-empty Config.Secret
 // sends "Authorization: Bearer <key>" on every request on both backends;
-// an empty APIKey sends no Authorization header on either.
-func TestAPIKey_BearerHeaderBothBackends(t *testing.T) {
+// an empty Secret sends no Authorization header on either.
+func TestSecret_BearerHeaderBothBackends(t *testing.T) {
 	for _, backend := range []Backend{BackendOllama, BackendOpenAICompatible} {
 		t.Run(string(backend)+"/with_key", func(t *testing.T) {
 			var gotAuth []string
@@ -26,7 +26,7 @@ func TestAPIKey_BearerHeaderBothBackends(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			emb, err := New(Config{Backend: backend, Model: "m", URL: srv.URL, APIKey: "k"})
+			emb, err := New(Config{Backend: backend, Model: "m", BaseURL: srv.URL, Secret: "k"})
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
@@ -54,7 +54,7 @@ func TestAPIKey_BearerHeaderBothBackends(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			emb, err := New(Config{Backend: backend, Model: "m", URL: srv.URL})
+			emb, err := New(Config{Backend: backend, Model: "m", BaseURL: srv.URL})
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
@@ -68,14 +68,14 @@ func TestAPIKey_BearerHeaderBothBackends(t *testing.T) {
 	}
 }
 
-// TestAPIKey_WhitespaceRefused pins: New and Validate refuse an APIKey
+// TestSecret_WhitespaceRefused pins: New and Validate refuse a Secret
 // with leading or trailing whitespace, and the error never echoes the
 // key, raw or trimmed.
-func TestAPIKey_WhitespaceRefused(t *testing.T) {
+func TestSecret_WhitespaceRefused(t *testing.T) {
 	const padded = "  sk-r6-padded-7f3a  "
 	const trimmed = "sk-r6-padded-7f3a"
 
-	cfg := Config{Backend: BackendOllama, Model: "m", URL: "http://localhost:1", APIKey: padded}
+	cfg := Config{Backend: BackendOllama, Model: "m", BaseURL: "http://localhost:1", Secret: padded}
 
 	err := cfg.Validate()
 	if err == nil || !errors.Is(err, llmkit.ErrInvalidRequest) {
@@ -94,20 +94,20 @@ func TestAPIKey_WhitespaceRefused(t *testing.T) {
 	}
 }
 
-// TestAPIKey_ControlCharacterRefused pins: New and Validate refuse an
-// APIKey that net/http cannot send in the Authorization header value, on
+// TestSecret_ControlCharacterRefused pins: New and Validate refuse an
+// Secret that net/http cannot send in the Authorization header value, on
 // both backends, without echoing the key. Without the check such a key
 // passes Validate and every attempt fails client-side as a retryable
 // transport error. The sweep holds Validate to net/http's own rule: for
 // every byte b, the key "sk"+b+"z" is accepted exactly when net/http
 // sends it, and an accepted key embeds.
-func TestAPIKey_ControlCharacterRefused(t *testing.T) {
+func TestSecret_ControlCharacterRefused(t *testing.T) {
 	const head, tail = "sk-r6", "ctl-9c1e"
 	rows := map[string]string{"LF": "\n", "CR": "\r", "NUL": "\x00"}
 	for _, backend := range []Backend{BackendOllama, BackendOpenAICompatible} {
 		for name, ctl := range rows {
 			t.Run(string(backend)+"/"+name, func(t *testing.T) {
-				cfg := Config{Backend: backend, Model: "m", URL: "http://localhost:1", APIKey: head + ctl + tail}
+				cfg := Config{Backend: backend, Model: "m", BaseURL: "http://localhost:1", Secret: head + ctl + tail}
 				_, newErr := New(cfg)
 				for call, err := range map[string]error{"Validate": cfg.Validate(), "New": newErr} {
 					if !errors.Is(err, llmkit.ErrInvalidRequest) {
@@ -131,7 +131,7 @@ func TestAPIKey_ControlCharacterRefused(t *testing.T) {
 
 			for b := range 256 {
 				key := "sk" + string([]byte{byte(b)}) + "z"
-				emb, err := New(Config{Backend: backend, Model: "m", URL: srv.URL, APIKey: key, Retry: retry.Config{MaxAttempts: 1}})
+				emb, err := New(Config{Backend: backend, Model: "m", BaseURL: srv.URL, Secret: key, Retry: retry.Config{MaxAttempts: 1}})
 				if err == nil {
 					if _, err := emb.Embed(context.Background(), "x"); err != nil {
 						t.Errorf("byte %#02x: New accepted the key but Embed failed: %v", b, err)
@@ -153,7 +153,7 @@ func TestAPIKey_ControlCharacterRefused(t *testing.T) {
 		})
 
 		t.Run(string(backend)+"/normal_key_accepted", func(t *testing.T) {
-			cfg := Config{Backend: backend, Model: "m", URL: "http://localhost:1", APIKey: "sk-r6-normal-key"}
+			cfg := Config{Backend: backend, Model: "m", BaseURL: "http://localhost:1", Secret: "sk-r6-normal-key"}
 			if err := cfg.Validate(); err != nil {
 				t.Errorf("Validate() = %v, want nil", err)
 			}

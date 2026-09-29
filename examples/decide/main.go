@@ -46,7 +46,7 @@ func run() error {
 	}
 
 	client, err := decide.New(decide.Config{
-		APIKey:  key,
+		Secret:  key,
 		Model:   model,
 		BaseURL: os.Getenv("LLMKIT_TYPESAFE_BASE_URL"),
 	})

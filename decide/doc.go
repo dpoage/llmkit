@@ -151,7 +151,7 @@
 // [New] validates the config and returns an error wrapping
 // llmkit.ErrInvalidRequest for any of:
 //
-//   - an APIKey that is empty, whitespace-only, or whitespace-padded (the
+//   - a Secret that is empty, whitespace-only, or whitespace-padded (the
 //     same rule as provider.Spec.Secret);
 //   - an empty Model;
 //   - a Retry.Jitter outside [0, 1].

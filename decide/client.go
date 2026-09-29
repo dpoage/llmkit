@@ -175,21 +175,17 @@ func (c *Client) attempt(ctx context.Context, body []byte, questions Questions) 
 	}
 
 	if httpResp.StatusCode != http.StatusOK {
-		msg := strings.TrimSpace(string(respBody))
-		if msg == "" {
+		msg := string(respBody)
+		if strings.TrimSpace(msg) == "" {
 			msg = fmt.Sprintf("HTTP %d", httpResp.StatusCode)
 		}
 		// Classify on the full body: a context-length phrase can sit past
 		// byte 200. Only the Message the caller sees is truncated.
-		err := adapter.NormalizeSDKError(providerName, adapter.VendorError{
+		return Response{}, adapter.NormalizeCapped(providerName, adapter.VendorError{
 			Status:  httpResp.StatusCode,
 			Message: msg,
 			Header:  httpResp.Header,
 		})
-		if apiErr, ok := err.(*llmkit.APIError); ok {
-			apiErr.Message = truncate(apiErr.Message, 200)
-		}
-		return Response{}, err
 	}
 	return parseResponse(httpResp.StatusCode, respBody, questions)
 }
@@ -305,13 +301,6 @@ func serverError(status int, message string) error {
 		Provider:   providerName,
 		Message:    message,
 	}
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
 }
 
 // nonEmptyOrNil returns nil for an empty map, so absence reads as absence.
