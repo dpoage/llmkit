@@ -297,7 +297,7 @@ func caseToolRoundTrip(t *testing.T, lc *liveClient) {
 	}
 
 	req.Messages = append(req.Messages,
-		llmkit.Message{Role: llmkit.RoleAssistant, ToolCalls: resp.ToolCalls},
+		resp.Message(),
 		llmkit.Message{
 			Role:       llmkit.RoleToolResult,
 			ToolCallID: call.ID,
@@ -589,7 +589,7 @@ func caseThinking(t *testing.T, lc *liveClient) {
 	}
 	// The thinking turn must re-send cleanly on the next request.
 	req.Messages = append(req.Messages,
-		llmkit.Message{Role: llmkit.RoleAssistant, Content: resp.Blocks},
+		resp.Message(),
 		llmkit.TextMessage(llmkit.RoleUser, "Now add ten."),
 	)
 	second, err := lc.complete(req)

@@ -66,7 +66,6 @@ type stepRecorder struct {
 	mu          sync.Mutex
 	completions []int
 	tools       []int
-	compactions []int
 }
 
 func (s *stepRecorder) hooks() Hooks {
@@ -80,11 +79,6 @@ func (s *stepRecorder) hooks() Hooks {
 			s.mu.Lock()
 			defer s.mu.Unlock()
 			s.tools = append(s.tools, ev.Step)
-		},
-		Compaction: func(_ context.Context, ev CompactionEvent) {
-			s.mu.Lock()
-			defer s.mu.Unlock()
-			s.compactions = append(s.compactions, ev.Step)
 		},
 	}
 }
@@ -131,8 +125,8 @@ func TestObserver_OneEventOfEachKindAtHookSteps(t *testing.T) {
 	)
 
 	out, err := r.Run(context.Background(), "exercise every kind", WithSteering(steering))
-	if err != nil {
-		t.Fatalf("Run: %v", err)
+	if ierr := incompleteErr(out, err, TruncMaxIterations); ierr != nil {
+		t.Fatalf("Run: %v", ierr)
 	}
 	if !out.Truncated() || out.TruncationReason != TruncMaxIterations {
 		t.Fatalf("TruncationReason = %q, want %q", out.TruncationReason, TruncMaxIterations)
@@ -200,7 +194,6 @@ func TestObserver_OneEventOfEachKindAtHookSteps(t *testing.T) {
 	rec.mu.Lock()
 	wantSteps := slices.Clone(rec.completions)
 	toolSteps := slices.Clone(rec.tools)
-	compactSteps := slices.Clone(rec.compactions)
 	rec.mu.Unlock()
 	if !reflect.DeepEqual(completionSteps, wantSteps) {
 		t.Errorf("completion steps %v != hook steps %v", completionSteps, wantSteps)
@@ -248,14 +241,14 @@ func TestObserver_OneEventOfEachKindAtHookSteps(t *testing.T) {
 		t.Errorf("denials = %d errors = %d, want 1 and 1", denials, errs)
 	}
 
-	// Compaction: the Step of the completion that consumed the compacted
-	// history, exactly what Hooks.Compaction reported.
-	for _, ev := range evs {
+	// Compaction: emitted immediately before the completion that consumed
+	// the compacted history, at that completion's Step.
+	for i, ev := range evs {
 		if ev.Kind != llmkit.KindCompaction {
 			continue
 		}
-		if !slices.Contains(compactSteps, ev.Step) {
-			t.Errorf("compaction step %d not reported by hooks %v", ev.Step, compactSteps)
+		if next := evs[i+1]; next.Kind != llmkit.KindCompletion || next.Step != ev.Step {
+			t.Errorf("compaction at step %d followed by %s at step %d, want the completion at the same step", ev.Step, next.Kind, next.Step)
 		}
 		if ev.Compaction.Pruned == 0 {
 			t.Errorf("compaction pruned 0 messages; the event must fire only on a real prune")
@@ -319,34 +312,28 @@ func TestObserver_RunIDVisibleFromContext(t *testing.T) {
 	}
 }
 
-// TestObserver_WithObserverLastWins pins the single-durable-sink ruling: a
-// second WithObserver REPLACES the first (last-wins), never stacks a second
-// history.
-func TestObserver_WithObserverLastWins(t *testing.T) {
+// TestObserver_WithObserverComposes pins the composing rule: a second
+// WithObserver APPENDS, so two durable sinks each record the run's complete
+// event sequence — the transcript's exact events, in order — instead of the
+// later one silently replacing the earlier.
+func TestObserver_WithObserverComposes(t *testing.T) {
 	dir1, dir2 := t.TempDir(), t.TempDir()
+	sink1, sink2 := JSONL(dir1, nil), JSONL(dir2, nil)
 	r := NewRunner(newFakeClient(textResp("done", 1, 1)), nil, "sys",
-		WithObserver(JSONL(dir1, nil)),
-		WithObserver(JSONL(dir2, nil)))
+		WithObserver(sink1),
+		WithObserver(sink2))
 
-	if _, err := r.Run(context.Background(), "task"); err != nil {
+	out, err := r.Run(context.Background(), "task")
+	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	for _, tc := range []struct {
-		dir      string
-		wantFile bool
-	}{
-		{dir1, false},
-		{dir2, true},
-	} {
-		entries, err := os.ReadDir(tc.dir)
+	for i, sink := range []*JSONLSink{sink1, sink2} {
+		got, err := sink.Events(context.Background(), out.RunID)
 		if err != nil {
-			t.Fatalf("ReadDir %s: %v", tc.dir, err)
+			t.Fatalf("sink %d Events: %v", i+1, err)
 		}
-		if tc.wantFile && len(entries) != 1 {
-			t.Errorf("winning sink dir %s has %d entries, want 1", tc.dir, len(entries))
-		}
-		if !tc.wantFile && len(entries) != 0 {
-			t.Errorf("replaced sink dir %s has %d entries, want 0 (no second history)", tc.dir, len(entries))
+		if seq, want := eventSequence(t, got), eventSequence(t, out.Transcript.Record); !slices.Equal(seq, want) {
+			t.Errorf("sink %d recorded\n  %v\nwant the transcript's\n  %v", i+1, seq, want)
 		}
 	}
 }
@@ -455,9 +442,10 @@ func TestObserver_ReplayDivergenceNamesStep(t *testing.T) {
 
 // TestObserver_ReplayDivergenceMaskingShapes pins the two shapes where a
 // divergence in the run's FINAL tool turn ends the run before another
-// Complete: a clean finish and a cap-truncated recording both return Run
-// nil, so the caller's rc.Err() assertion is the only thing that catches
-// them. The mid-run shape (divergence with completions still to serve)
+// Complete: a clean finish returns Run nil and a cap-truncated recording
+// returns its *IncompleteError, neither matching ErrReplayDiverged, so the
+// caller's rc.Err() assertion is the only thing that catches them. The
+// mid-run shape (divergence with completions still to serve)
 // fails Run with ErrReplayDiverged. The rewriter policy forces the tool
 // mismatch deterministically.
 func TestObserver_ReplayDivergenceMaskingShapes(t *testing.T) {
@@ -487,8 +475,11 @@ func TestObserver_ReplayDivergenceMaskingShapes(t *testing.T) {
 		)
 		replayed, err := NewRunner(rc, rc.Tools(), "sys",
 			WithToolPolicy(rewrite), WithLimits(Limits{MaxIterations: 1})).Run(context.Background(), "task")
-		if err != nil {
-			t.Fatalf("Run = %v, want the truncation nil", err)
+		if ierr := incompleteErr(replayed, err, TruncMaxIterations); ierr != nil {
+			t.Fatalf("Run: %v", ierr)
+		}
+		if errors.Is(err, ErrReplayDiverged) {
+			t.Fatalf("Run = %v, want the plain limit stop, not the divergence", err)
 		}
 		if !replayed.Truncated() {
 			t.Error("expected the truncated recording shape")
@@ -617,8 +608,8 @@ func TestObserver_ConcurrentRunsDistinctRunIDs(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			out, err := r.Run(context.Background(), "concurrent task")
-			if err != nil {
-				t.Errorf("Run %d: %v", i, err)
+			if ierr := incompleteErr(out, err, TruncMaxIterations); ierr != nil {
+				t.Errorf("Run %d: %v", i, ierr)
 				return
 			}
 			ids[i] = out.RunID
@@ -908,8 +899,8 @@ func TestReplay_ParallelToolsDeterministic(t *testing.T) {
 	live := 0
 	rec := NewRunner(newFakeClient(steps...), []Tool{&countingTool{name: "echo", count: &live}}, "sys")
 	out, err := rec.Run(context.Background(), "task")
-	if err != nil {
-		t.Fatalf("record run: %v", err)
+	if ierr := incompleteErr(out, err, TruncMaxIterations); ierr != nil {
+		t.Fatalf("record run: %v", ierr)
 	}
 	if live == 0 {
 		t.Fatal("record run executed no tools")
@@ -922,8 +913,10 @@ func TestReplay_ParallelToolsDeterministic(t *testing.T) {
 	tools := rp.Tools()
 	live = 0
 	replayed, err := NewRunner(rp, tools, "sys", WithParallelTools()).Run(context.Background(), "task")
-	if err != nil {
-		t.Fatalf("parallel replay diverged: %v", err)
+	// The default iteration cap ends the 40-turn script; the replay must end
+	// the same way, as a plain limit stop rather than a divergence.
+	if ierr := incompleteErr(replayed, err, TruncMaxIterations); ierr != nil || errors.Is(err, ErrReplayDiverged) {
+		t.Fatalf("parallel replay: %v (err = %v)", ierr, err)
 	}
 	if live != 0 {
 		t.Errorf("replay executed %d live tools, want 0", live)
@@ -1003,16 +996,17 @@ func TestObserver_SinkRefusesDuplicateAndUnsafeRunIDs(t *testing.T) {
 	})
 }
 
-// TestObserver_UnknownRunSentinels pins the read-side contract: both Source
-// implementations fail with ErrUnknownRun for runs they have no record of.
+// TestObserver_UnknownRunSentinels pins the read-side contract: both
+// llmkit.Source implementations fail with llmkit.ErrUnknownRun for runs they
+// have no record of.
 func TestObserver_UnknownRunSentinels(t *testing.T) {
 	tr := NewTranscript()
 	tr.RunID = "known"
-	if _, err := tr.Events(context.Background(), "other"); !errors.Is(err, ErrUnknownRun) {
+	if _, err := tr.Events(context.Background(), "other"); !errors.Is(err, llmkit.ErrUnknownRun) {
 		t.Errorf("Transcript.Events mismatch err = %v, want ErrUnknownRun", err)
 	}
 	dir := t.TempDir()
-	if _, err := JSONL(dir, nil).Events(context.Background(), "missing"); !errors.Is(err, ErrUnknownRun) {
+	if _, err := JSONL(dir, nil).Events(context.Background(), "missing"); !errors.Is(err, llmkit.ErrUnknownRun) {
 		t.Errorf("JSONLSink.Events missing err = %v, want ErrUnknownRun", err)
 	}
 }
@@ -1356,7 +1350,7 @@ func TestObserver_EventsRejectsDegenerateRecords(t *testing.T) {
 	t.Run("zero-byte record", func(t *testing.T) {
 		dir := write(t, "r-3.jsonl", "")
 		_, err := JSONL(dir, nil).Events(ctx, "r-3")
-		if !errors.Is(err, ErrUnknownRun) {
+		if !errors.Is(err, llmkit.ErrUnknownRun) {
 			t.Errorf("err = %v, want ErrUnknownRun", err)
 		}
 	})
@@ -1521,7 +1515,9 @@ func TestObserver_StructureAndExhaustionWrapSentinel(t *testing.T) {
 }
 
 // TestObserver_ReplayedDenialReproducesText pins M36: a recorded policy
-// denial replays to the byte-identical model-visible denial text.
+// denial replays, under the record's own ReplayClient.ToolPolicy, to the
+// byte-identical model-visible denial text; without that policy the same
+// replay fails loudly instead of rewriting the denial into an error.
 func TestObserver_ReplayedDenialReproducesText(t *testing.T) {
 	policy := ToolPolicyFunc(func(_ context.Context, call *llmkit.ToolCall) error {
 		if call.Name == "denied_tool" {
@@ -1552,7 +1548,7 @@ func TestObserver_ReplayedDenialReproducesText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	replayed, err := NewRunner(rc, rc.Tools(), "sys").Run(context.Background(), "task")
+	replayed, err := NewRunner(rc, rc.Tools(), "sys", WithToolPolicy(rc.ToolPolicy())).Run(context.Background(), "task")
 	if err != nil {
 		t.Fatalf("replay run: %v", err)
 	}
@@ -1567,6 +1563,20 @@ func TestObserver_ReplayedDenialReproducesText(t *testing.T) {
 	}
 	if !sawReplayed {
 		t.Errorf("replayed denial text differs: %+v", replayed.Messages)
+	}
+
+	// No policy: the denied call reaches the recorded tool, which serves no
+	// denials — the replay diverges rather than rewriting Denied to IsError.
+	rc2, err := NewReplayClient(out.Transcript, out.RunID, llmkit.Capabilities{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, runErr := NewRunner(rc2, rc2.Tools(), "sys").Run(context.Background(), "task")
+	if !errors.Is(rc2.Err(), ErrReplayDiverged) {
+		t.Errorf("no-policy replay rc.Err() = %v, want ErrReplayDiverged", rc2.Err())
+	}
+	if !errors.Is(runErr, ErrReplayDiverged) {
+		t.Errorf("no-policy replay Run err = %v, want ErrReplayDiverged", runErr)
 	}
 }
 
@@ -1992,7 +2002,7 @@ func TestObserver_EventsRefusesUnsafeIDsBeforeOpen(t *testing.T) {
 	sink := JSONL(dir, nil)
 	for _, id := range []llmkit.RunID{"../leak", "sub/../../leak", "..", ".", "", "a\x00b"} {
 		got, err := sink.Events(ctx, id)
-		if !errors.Is(err, ErrUnknownRun) || !strings.Contains(err.Error(), "not a safe filename component") {
+		if !errors.Is(err, llmkit.ErrUnknownRun) || !strings.Contains(err.Error(), "not a safe filename component") {
 			t.Errorf("Events(%q) err = %v (%d events), want ErrUnknownRun naming the unsafe component", id, err, len(got))
 		}
 	}
@@ -2462,8 +2472,8 @@ func TestObserver_FinalizeCarriesFinalText_Truncated(t *testing.T) {
 	)
 	r := NewRunner(fc, []Tool{probe}, "sys", WithLimits(Limits{MaxIterations: 1}))
 	out, err := r.Run(context.Background(), "task")
-	if err != nil {
-		t.Fatalf("Run: %v", err)
+	if ierr := incompleteErr(out, err, TruncMaxIterations); ierr != nil {
+		t.Fatalf("Run: %v", ierr)
 	}
 	if !out.Truncated() || out.TruncationReason != TruncMaxIterations {
 		t.Fatalf("TruncationReason = %q, want %q", out.TruncationReason, TruncMaxIterations)
@@ -2503,98 +2513,5 @@ func TestObserver_FinalizeCarriesFinalText_TextThenError(t *testing.T) {
 	}
 	if final.Step != 1 {
 		t.Errorf("finalize step = %d, want 1 (the failed completion does not advance)", final.Step)
-	}
-}
-
-// TestHooks_CtxStep_Compaction pins the hook-ctx half of the WithStep
-// wiring: when Hooks.Compaction fires, its context carries the same step
-// the CompactionEvent reports.
-func TestHooks_CtxStep_Compaction(t *testing.T) {
-	big := &ctxTool{name: "big", payload: 2000}
-	var mu sync.Mutex
-	var pairs [][2]int
-	fc := newFakeClient(
-		toolResp("c1", "big", `{}`, 1, 1),
-		toolResp("c2", "big", `{}`, 1, 1),
-		toolResp("c3", "big", `{}`, 1, 1),
-		toolResp("c4", "big", `{}`, 1, 1),
-		toolResp("c5", "big", `{}`, 1, 1),
-		textResp("done", 1, 1),
-	)
-	r := NewRunner(fc, []Tool{big}, "sys",
-		WithHooks(Hooks{Compaction: func(ctx context.Context, ev CompactionEvent) {
-			mu.Lock()
-			pairs = append(pairs, [2]int{llmkit.StepFromContext(ctx), ev.Step})
-			mu.Unlock()
-		}}),
-		WithLimits(Limits{MaxIterations: 6, HistoryTokenBudget: 800}),
-	)
-	if _, err := r.Run(context.Background(), "task"); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	// The fifth 2000-byte result pushes the oldest outside the recent window
-	// (compactRecentToolResults = 4), so exactly one pass fires before turn 6.
-	if len(pairs) != 1 {
-		t.Fatalf("compaction hooks = %d, want exactly 1", len(pairs))
-	}
-	if pairs[0] != [2]int{6, 6} {
-		t.Errorf("compaction hook ctx step/event step = %v, want [6 6]", pairs[0])
-	}
-}
-
-// TestHooks_CtxStep_RepairAndFinalize pins the two RunJSON hook contexts:
-// Hooks.Finalize reads the reserved finalization turn's step, Hooks.Repair
-// reads the repair turn's step — in both cases the same number the turn's
-// completion event reports.
-func TestHooks_CtxStep_RepairAndFinalize(t *testing.T) {
-	var mu sync.Mutex
-	var finalizeCtx, repairCtx []int
-	probe := &ctxTool{name: "probe", payload: 2}
-	fc := newFakeClient(
-		toolResp("c1", "probe", `{}`, 1, 1),
-		toolResp("c2", "probe", `{}`, 1, 1),
-		textResp("garbage three", 5, 5),
-		textResp(`{"path":"r.go","note":"ok"}`, 5, 5),
-	)
-	r := NewRunner(fc, []Tool{probe}, "sys",
-		WithHooks(Hooks{
-			Finalize: func(ctx context.Context, _ TruncationReason) {
-				mu.Lock()
-				finalizeCtx = append(finalizeCtx, llmkit.StepFromContext(ctx))
-				mu.Unlock()
-			},
-			Repair: func(ctx context.Context) {
-				mu.Lock()
-				repairCtx = append(repairCtx, llmkit.StepFromContext(ctx))
-				mu.Unlock()
-			},
-		}),
-		WithLimits(Limits{MaxIterations: 2}),
-	)
-	var got item
-	out, err := r.RunJSON(context.Background(), "task", json.RawMessage(`{"type":"object"}`), &got)
-	if err != nil {
-		t.Fatalf("RunJSON: %v", err)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	// Cross-check the turn numbering the hooks must match: completions at
-	// steps 1, 2 (main run), 3 (forced finalization), 4 (repair).
-	var completionSteps []int
-	for _, ev := range out.Transcript.Record {
-		if ev.Kind == llmkit.KindCompletion {
-			completionSteps = append(completionSteps, ev.Step)
-		}
-	}
-	if !reflect.DeepEqual(completionSteps, []int{1, 2, 3, 4}) {
-		t.Fatalf("completion steps = %v, want [1 2 3 4]", completionSteps)
-	}
-	if !reflect.DeepEqual(finalizeCtx, []int{3}) {
-		t.Errorf("Finalize hook ctx steps = %v, want [3] (the finalization turn)", finalizeCtx)
-	}
-	if !reflect.DeepEqual(repairCtx, []int{4}) {
-		t.Errorf("Repair hook ctx steps = %v, want [4] (the repair turn)", repairCtx)
 	}
 }

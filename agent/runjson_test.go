@@ -448,8 +448,10 @@ func TestRunJSON_RepairInfraErrorPreservesTruncationAndUsage(t *testing.T) {
 // off at the max-tokens cap (LastStopReason StopMaxTokens after the
 // continuation stitch fails to form valid JSON) and the repair completes
 // cleanly, the returned Outcome's LastStopReason is the repair's StopEndTurn,
-// while Usage/Iterations still fold the whole round in. A max-tokens stop is
-// not a TruncationReason, so that field stays empty.
+// while Usage/Iterations still fold the whole round in. The main turn and its
+// continuation both stopped at the cap with nothing queued, so the Outcome
+// keeps TruncOutputCap even though the repaired answer parsed and RunJSON
+// returns nil.
 func TestRunJSON_RepairLastStopReasonReflectsRepair(t *testing.T) {
 	fc := newFakeClient(
 		maxTokensResp(`{"path":"a.go"`, 5, 5),            // cut off mid-object
@@ -466,8 +468,8 @@ func TestRunJSON_RepairLastStopReasonReflectsRepair(t *testing.T) {
 	if got.Path != "r.go" {
 		t.Errorf("parsed = %+v, want repaired JSON", got)
 	}
-	if out.TruncationReason != "" {
-		t.Errorf("TruncationReason = %q, want empty (a max-tokens stop is not a truncation)", out.TruncationReason)
+	if out.TruncationReason != TruncOutputCap {
+		t.Errorf("TruncationReason = %q, want %q (main turn and continuation both capped; the reason survives a parsed repair)", out.TruncationReason, TruncOutputCap)
 	}
 	if out.LastStopReason != llmkit.StopEndTurn {
 		t.Errorf("LastStopReason = %q, want %q (the repair completion's stop reason)", out.LastStopReason, llmkit.StopEndTurn)
@@ -865,8 +867,8 @@ func TestRunJSON_RunPathNoExtraCall(t *testing.T) {
 		}),
 		WithBudgetPool(pool))
 	out, err := r.Run(context.Background(), "task")
-	if err != nil {
-		t.Fatalf("Run: %v", err)
+	if ierr := incompleteErr(out, err, TruncBudgetPool); ierr != nil {
+		t.Fatalf("Run: %v", ierr)
 	}
 	if out.TruncationReason != TruncBudgetPool {
 		t.Errorf("TruncationReason = %q, want %q", out.TruncationReason, TruncBudgetPool)
@@ -1553,8 +1555,8 @@ func TestRunJSON_EmptyTurnNudgeCapExhausted(t *testing.T) {
 // continuity: the repair completion's transcript step continues the parent
 // run's iteration sequence instead of restarting at 1. A repaired run
 // records steps 1,2 then 3 (not 1,2 then 1) while Outcome.Iterations is 3,
-// so a consumer joining ToolEvent.Step / CompactionEvent.Step / Event.Step
-// on Step sees one monotonic sequence.
+// so a consumer joining ToolEvent.Step / Event.Step on Step sees one
+// monotonic sequence.
 func TestRunJSON_RepairStepContinuesParentSequence(t *testing.T) {
 	fc := newFakeClient(
 		toolResp("c1", "echo", `{"v":"hi"}`, 10, 4),

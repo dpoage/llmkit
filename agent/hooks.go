@@ -7,22 +7,25 @@ import (
 	"github.com/dpoage/llmkit"
 )
 
-// Hooks is the Runner's observer surface: a struct of optional callback funcs,
-// one per loop event. Every field is independent; a nil func is a no-op with
-// zero overhead, and a zero Hooks value is valid.
+// Hooks is the Runner's callback surface: a struct of optional callback funcs,
+// one per live loop event. Every field is independent; a nil func is a no-op
+// with zero overhead, and a zero Hooks value is valid. Hooks cover only what
+// the loop does around a completion or a tool call; facts about the run as a
+// whole — compaction, steering, finalization — are events on the run's
+// observer chain ([WithObserver]) and fields of [Outcome].
 //
 // Fire points, in the order a typical run hits them:
 //
 //   - BeforeCompletion / AfterCompletion around EVERY client.Complete — the
 //     main loop turn, a max-tokens continuation turn, a forced-finalization
 //     turn, and a RunJSON repair turn. step is the 1-based turn number and
-//     the SAME base every hook family uses: ToolEvent.Step,
-//     CompactionEvent.Step, and the step the Runner stamps on the run's
-//     llmkit.Event values all carry this number for the same turn, so
-//     consumers can join on Step. req is the FINAL wire request — the exact
-//     request client.Complete receives and the completion event's request
-//     records — already passed through [RequestPolicy.PrepareRequest] when
-//     one is registered. Observe it only: mutating req here is undefined,
+//     the SAME base every hook family uses: ToolEvent.Step and the step the
+//     Runner stamps on the run's llmkit.Event values all carry this number
+//     for the same turn, so consumers can join on Step. req is the FINAL
+//     wire request — the exact request client.Complete receives and the
+//     completion event's request records — already passed through
+//     [RequestPolicy.PrepareRequest] when one is registered. Observe it
+//     only: mutating req here is undefined,
 //     and request shaping (messages, sampling, tool choice) belongs to
 //     [RequestPolicy]. AfterCompletion receives resp == nil together with
 //     a non-nil err when the completion failed.
@@ -39,20 +42,21 @@ import (
 //   - ToolStart / ToolEnd around each Tool.Run. ToolEnd carries the final
 //     Result, IsError, and measured Duration; ToolStart leaves those zero.
 //     A model naming an unregistered tool never reaches Tool.Run, so neither
-//     hook fires for it. A panicking Tool.Run is recovered by the harness in
-//     BOTH dispatch modes and ToolEnd fires with the rendered panic result
-//     ("ERROR: tool <name> panicked: …", IsError=true). Step matches the
-//     tool_run event.
+//     hook fires for it; the same goes for a call a [ToolPolicy] denied. The
+//     run's ToolRun events also record unknown-tool calls and policy denials
+//     (a denial carries Denied and DenyReason, not a result). A run that
+//     ends mid-turn, for any reason including a cancelled context or a
+//     panic, can leave requested calls without a ToolRun event. A panicking
+//     Tool.Run is recovered by the harness in BOTH dispatch modes and
+//     ToolEnd fires with the rendered panic result ("ERROR: tool <name>
+//     panicked: …", IsError=true). Step matches the tool_run event.
 //   - ToolHealth when a tool returns a *ToolHealthError (a genuine
 //     harness/infra failure) — but not for ordinary model-recoverable tool
 //     errors, and never for a failure caused by an already-cancelled context.
-//   - Compaction when history compaction actually pruned (not on a
-//     threshold crossing with nothing to reclaim). Step is the transcript
-//     step of the completion that will consume the compacted history — the
-//     same number that completion's Before/AfterCompletion report.
-//   - Repair at the start of RunJSON's single repair pass.
-//   - Finalize when the reserved forced-finalization turn is taken; reason is
-//     the stop condition (a Trunc* constant) that triggered it.
+//
+// Composition: [WithHooks] appends. With several registrations, callbacks
+// fire in registration order; a nil field in one registration does not
+// suppress another registration's callback.
 //
 // Invocation is synchronous: each hook runs inline on the goroutine that
 // reaches the fire point (the loop goroutine, or the per-call goroutine for
@@ -60,10 +64,10 @@ import (
 // and, under WithParallelTools, the tool call it wraps.
 //
 // Hook panics are harness bugs, never tool data: a panic inside any callback
-// is never rendered as a tool result. Sequential dispatch propagates it
-// inline; under WithParallelTools the per-call goroutine recovers it and
-// the loop re-panics with the original value after all sibling calls
-// finish — the run aborts with that panic in both modes.
+// is never rendered as a tool result. The remaining callbacks registered for
+// that event do not fire. Under WithParallelTools the per-call goroutine
+// recovers the panic and the loop re-panics with the original value after all
+// sibling calls finish.
 //
 // Concurrency: with WithParallelTools set, ToolStart/ToolEnd fire
 // concurrently from the per-call goroutines; with concurrent Run calls on one
@@ -93,12 +97,6 @@ type Hooks struct {
 	ToolEnd func(ctx context.Context, ev ToolEvent)
 	// ToolHealth fires when a tool returns a *ToolHealthError.
 	ToolHealth func(ctx context.Context, tool string, he *ToolHealthError)
-	// Compaction fires when a compaction pass actually pruned history.
-	Compaction func(ctx context.Context, ev CompactionEvent)
-	// Repair fires at the start of a RunJSON repair pass.
-	Repair func(ctx context.Context)
-	// Finalize fires when the reserved forced-finalization turn is taken.
-	Finalize func(ctx context.Context, reason TruncationReason)
 }
 
 // ToolEvent is one tool call's lifecycle, as delivered to [Hooks.ToolStart]
@@ -123,28 +121,14 @@ type ToolEvent struct {
 	Duration time.Duration
 }
 
-// CompactionEvent describes one pruning compaction pass, as delivered to
-// [Hooks.Compaction]. BeforeTokens and AfterTokens come from the same
-// bytes/4 estimate the compaction trigger uses, so Before - After is the
-// reclaimed estimate; Pruned is the number of tool-result messages stubbed.
-type CompactionEvent struct {
-	// Step is the 1-based transcript step (Event.Step) of the completion that
-	// will consume the compacted history — the same number that completion's
-	// Before/AfterCompletion report.
-	Step int
-	// BeforeTokens is the estimated history size before pruning.
-	BeforeTokens int64
-	// AfterTokens is the estimated history size after pruning.
-	AfterTokens int64
-	// Pruned is the number of tool-result messages replaced with stubs.
-	Pruned int
-}
-
-// WithHooks registers the Runner's observer callbacks. A nil func field is a
-// no-op with zero overhead. See the [Hooks] documentation for fire points and
-// the concurrency contract.
+// WithHooks appends h to the Runner's callback registrations; it does not
+// replace an earlier WithHooks. Callbacks fire in registration order, so
+// independent concerns (a progress display, a health counter) each register
+// their own Hooks. A nil func field is a no-op with zero overhead. See the
+// [Hooks] documentation for fire points, the panic contract, and the
+// concurrency contract.
 func WithHooks(h Hooks) Option {
-	return func(r *Runner) { r.hooks = h }
+	return func(r *Runner) { r.hooks = append(r.hooks, h) }
 }
 
 // WithToolTimeout applies a per-call deadline to every Tool.Run. The deadline

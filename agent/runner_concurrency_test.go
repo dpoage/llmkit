@@ -446,8 +446,8 @@ func TestRunner_ConcurrentRunsDistinctTranscripts(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, err := r.Run(context.Background(), "task")
-			errs[i] = err
+			out, err := r.Run(context.Background(), "task")
+			errs[i] = incompleteErr(out, err, TruncMaxIterations)
 		}(i)
 	}
 	wg.Wait()

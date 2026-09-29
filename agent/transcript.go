@@ -23,7 +23,7 @@ import (
 // the same events any durable sink set with [WithObserver] receives.
 //
 // A Transcript is not safe for concurrent mutation; a single run appends
-// to it sequentially. It satisfies [llmkit.Observer] and [Source].
+// to it sequentially. It satisfies [llmkit.Observer] and [llmkit.Source].
 type Transcript struct {
 	// Record is the ordered event list.
 	Record []llmkit.Event
@@ -35,19 +35,25 @@ type Transcript struct {
 
 func NewTranscript() *Transcript { return &Transcript{} }
 
+var (
+	_ llmkit.Source = (*Transcript)(nil)
+	_ llmkit.Source = (*JSONLSink)(nil)
+)
+
 // Observe appends ev to the record.
 func (t *Transcript) Observe(_ context.Context, ev llmkit.Event) {
 	t.Record = append(t.Record, ev)
 }
 
 // Events returns a COPY of the recorded events of run, in emission order —
-// caller owns the slice. It satisfies [Source]; a transcript records exactly
-// one run, so any other id (including an empty one, unless the transcript
-// itself is unnamed) fails with an error wrapping [ErrUnknownRun].
+// caller owns the slice. It satisfies [llmkit.Source]; a transcript records
+// exactly one run, so any other id (including an empty one, unless the
+// transcript itself is unnamed) fails with an error wrapping
+// [llmkit.ErrUnknownRun].
 func (t *Transcript) Events(_ context.Context, run llmkit.RunID) ([]llmkit.Event, error) {
 	if t.RunID == "" || run != t.RunID {
 		// An unnamed (hand-built) transcript records no run at all.
-		return nil, fmt.Errorf("agent: transcript records run %q, not %q: %w", t.RunID, run, ErrUnknownRun)
+		return nil, fmt.Errorf("agent: transcript records run %q, not %q: %w", t.RunID, run, llmkit.ErrUnknownRun)
 	}
 	return slices.Clone(t.Record), nil
 }
@@ -156,7 +162,7 @@ func LoadJSONL(r io.Reader) (*Transcript, error) {
 // [Runner] multiplex by [llmkit.RunID], each writing under its own lock.
 // Start admission — create and first line included — is serialized on the
 // sink lock, so a duplicate RunID can never interleave into a half-open
-// entry. It satisfies [llmkit.Observer] and [Source].
+// entry. It satisfies [llmkit.Observer] and [llmkit.Source].
 type JSONLSink struct {
 	dir   string
 	onErr func(error)
@@ -218,8 +224,11 @@ func (r *jsonlRun) retireLocked() {
 
 // JSONL returns a durable event sink that appends one JSON line per event to
 // "<RunID>.jsonl" under dir, creating the directory when the run's Start
-// event opens its file. Pass it to [WithObserver]; a Runner accepts at most
-// one durable sink, and a later WithObserver wins (last-wins).
+// event opens its file. Pass it to [WithObserver]; the Runner does not
+// enforce a single durable history sink, so register at most one JSONL per
+// Runner. A second JSONL on a different directory writes a second copy of
+// every run; one on the same directory records nothing, because its exclusive
+// create of each run's file fails, and it reports that refusal through onErr.
 //
 // onErr, when non-nil, receives every refusal or write failure with the run
 // and path attached — the sink never fails the run.
@@ -338,26 +347,26 @@ func safeRunID(id llmkit.RunID) bool {
 }
 
 // Events returns the recorded events of run by reading the run's file back
-// — the read side of [JSONL]. It satisfies [Source], so [NewReplayClient]
+// — the read side of [JSONL]. It satisfies [llmkit.Source], so [NewReplayClient]
 // can replay from the sink exactly as from a [Transcript]; the caller owns
 // the returned slice.
 //
-// An unsafe filename id is refused with [ErrUnknownRun] before any open;
+// An unsafe filename id is refused with [llmkit.ErrUnknownRun] before any open;
 // a missing file, a mix of run ids, an empty record, or more than one Start
-// all surface as [ErrUnknownRun] with the offending file or line named.
+// all surface as [llmkit.ErrUnknownRun] with the offending file or line named.
 //
 // Read a run once it has finalized: the sink streams one line per event
 // with no read/write synchronization, so a read racing an append can decode
 // a torn last line and fail. A finalized run's file is complete and closed.
 func (s *JSONLSink) Events(_ context.Context, run llmkit.RunID) ([]llmkit.Event, error) {
 	if !safeRunID(run) {
-		return nil, fmt.Errorf("agent: run id %q is not a safe filename component: %w", run, ErrUnknownRun)
+		return nil, fmt.Errorf("agent: run id %q is not a safe filename component: %w", run, llmkit.ErrUnknownRun)
 	}
 	path := filepath.Join(s.dir, string(run)+".jsonl")
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("agent: no JSONL transcript for run %s at %s: %w", run, path, ErrUnknownRun)
+			return nil, fmt.Errorf("agent: no JSONL transcript for run %s at %s: %w", run, path, llmkit.ErrUnknownRun)
 		}
 		return nil, fmt.Errorf("agent: open %s: %w", path, err)
 	}
@@ -367,7 +376,7 @@ func (s *JSONLSink) Events(_ context.Context, run llmkit.RunID) ([]llmkit.Event,
 		return nil, fmt.Errorf("agent: %s: %w", path, err)
 	}
 	if len(t.Record) == 0 {
-		return nil, fmt.Errorf("agent: %s holds no events for run %s: %w", path, run, ErrUnknownRun)
+		return nil, fmt.Errorf("agent: %s holds no events for run %s: %w", path, run, llmkit.ErrUnknownRun)
 	}
 	for i, ev := range t.Record {
 		if ev.RunID != run {

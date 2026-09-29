@@ -189,12 +189,15 @@ Completion emitter mints a fresh `SpanID` per logical completion and puts
 it in the context it passes to the client, so concurrent or nested
 completions (a tool calling the model) stay separable in the record.
 
-A run has exactly ONE durable sink. JSONL transcripts and a SQLite store
-never coexist as a split history of the same run (user ruling, 2026-09-20):
-the transcript is a view of the event stream, not a second record, and the
+Usage rule: register at most one durable history sink; the Runner does not
+enforce it (user ruling, 2026-09-28, superseding the 2026-09-20 ruling that
+enforced one durable sink by last-wins `WithObserver`). JSONL transcripts and
+a SQLite store must never coexist as a split history of the same run: the
+transcript is a view of the event stream, not a second record, and the
 Runner's in-memory `Outcome.Transcript` stays that same view, not a store.
-Sinks that fan out compose through `llmkit.Observers`, but at most one of
-them is durable.
+`WithObserver` appends: the run's chain is the in-memory transcript first,
+then every sink in registration order, so a durable history sink and a side
+observer (a spend ledger, metrics) compose without `llmkit.Observers`.
 
 - **What it buys:** one correlation key and one wire shape across five
   components; offline replay and evaluation from any sink; a panicking

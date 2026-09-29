@@ -22,9 +22,9 @@
 // also reaches [Hooks.ToolHealth]; a *StopReasonError ends the run, because
 // the model itself stopped for a provider error reason.
 //
-// Four failures end a run with a non-nil error: a failed
-// [llmkit.Client.Complete], a cancelled context, a [RequestPolicy] error,
-// and [StopReasonError].
+// Six errors end a run: a failed [llmkit.Client.Complete], a cancelled
+// context, a [RequestPolicy] error, [StopReasonError], [ErrSteeringInUse],
+// and [IncompleteError]. [Runner.RunJSON] adds [ErrUnparseableOutput].
 //
 // Tools run one call at a time by default. [WithParallelTools] runs a turn's
 // calls concurrently, and concurrent [Runner.Run] calls on one Runner are
@@ -36,9 +36,10 @@
 // [Limits.TokenBudget] (cumulative input+output tokens from [llmkit.Usage]).
 // Zero selects the package default; [Unlimited] removes the cap;
 // [Limits.CacheReadWeight] discounts cache-read tokens in the check.
-// Exceeding a limit stops the run cleanly: [Runner.Run] returns an [Outcome]
-// with a non-empty [Outcome.TruncationReason], and [Outcome.FinalText] holds
-// the text of the last completion. Partial results are data, not errors.
+// Exceeding a limit stops the run: [Runner.Run] returns the [Outcome] with a
+// non-empty [Outcome.TruncationReason] next to an [*IncompleteError] that
+// carries the same Outcome, and [Outcome.FinalText] holds the text of the
+// last completion, which is not necessarily an answer.
 // [Limits.HistoryTokenBudget] enables threshold-triggered history
 // compaction, which replaces old tool results with short stubs and re-arms
 // its threshold so the cache cost stays bounded.
@@ -63,18 +64,26 @@
 //
 // # Hooks
 //
-// [WithHooks] registers the observer struct [Hooks]: one optional callback
-// per loop event, covering completions, deltas, tool calls, compaction,
-// repair, and finalization. Hooks run synchronously, inline on the goroutine
-// that reaches the fire point. Every hook family reports the same 1-based
-// step for a turn — [ToolEvent.Step], [CompactionEvent.Step], and the
-// Completion event's [llmkit.Event].Step — so consumers join on it, and a
-// RunJSON repair turn continues the numbering. When [Hooks.Delta] is set,
-// the Runner streams each completion through [llmkit.Stream]. Durable event
-// recording is a separate seam: [WithObserver] installs the single sink
-// ([JSONL]), whose failures surface through the callback it was constructed
-// with, never through Hooks or the run. A panicking hook is a harness bug:
-// it propagates out of [Runner.Run] and is never rendered to the model.
+// [WithHooks] registers the callback struct [Hooks]: one optional callback
+// per live loop event — before and after each completion, each streamed
+// delta, each executed tool call's start and end, and tool-health failures.
+// Each WithHooks call appends: callbacks fire in registration order. Hooks
+// run synchronously, inline on the goroutine that reaches the fire point.
+// [Hooks.ToolStart] and [Hooks.ToolEnd] fire only for executed calls; the
+// run's tool_run events also record unknown-tool calls and policy denials
+// (a denial carries Denied and DenyReason, not a result). A run that ends
+// mid-turn, for any reason including a cancelled context or a panic, can
+// leave requested calls without a tool_run event. Compaction, steering, and
+// finalization are recorded as events (and [Outcome.Finalized]), not as
+// hooks. Both hook families report the same 1-based step for a turn —
+// [ToolEvent.Step] and the Completion event's [llmkit.Event].Step — so
+// consumers join on it, and a RunJSON repair turn continues the numbering.
+// When [Hooks.Delta] is set, the Runner streams each completion through
+// [llmkit.Stream]. Durable event recording is a separate seam:
+// [WithObserver] appends a sink ([JSONL]), whose failures surface through
+// the callback it was constructed with, never through Hooks or the run. A
+// panicking hook is a harness bug: later callbacks for that event do not
+// fire, and the panic is never rendered to the model.
 //
 // # Steering
 //
@@ -96,8 +105,13 @@
 // parse or schema violation it makes one repair round-trip before failing
 // with [ErrUnparseableOutput]. A run already stopped by the token budget or
 // the budget pool skips the repair: it fails immediately, and the Outcome
-// keeps the budget TruncationReason. RunJSON reserves the last iteration
-// for a forced-finalization turn, so a capped run still emits its answer.
+// keeps the budget TruncationReason. A truncated run whose answer does not
+// parse fails with an error that matches both [ErrUnparseableOutput] and
+// [*IncompleteError]; one whose answer parses returns nil, and the Outcome
+// keeps the reason. A repair completion that itself fails (a transport error,
+// a cancelled context) is the exception: RunJSON returns that completion
+// failure, which matches neither. RunJSON reserves the last iteration for a
+// forced-finalization turn, so a capped run still emits its answer.
 // [RunJSONAs] derives the schema from a Go type with [SchemaOf] and returns
 // the decoded value, so the type the model must satisfy and the type that
 // decodes its answer cannot drift apart.
@@ -108,19 +122,23 @@
 // Runner runs. The Runner checks the pool once per loop turn and charges it
 // after every successful completion; continuation, finalization, and repair
 // completions are charged without a fresh check. An exhausted pool stops a
-// run cleanly with [TruncBudgetPool]; [ErrBudgetExhausted] is the check
-// failure. A nil pool is the default and means unlimited.
+// run with [TruncBudgetPool], which [Runner.Run] reports as an
+// [*IncompleteError]; [ErrBudgetExhausted] is the check failure. A nil pool
+// is the default and means unlimited.
 //
 // # Transcripts, observers, and replay
 //
 // Every run emits [llmkit.Event] values through one observer chain: the
 // in-memory [Transcript] first (it backs [Outcome.Transcript] and always
-// exists), then the single durable sink installed with [WithObserver] —
-// [JSONL] streams one JSON line per event to a file per run. Events carry
-// the run's identity ([WithRunID], [llmkit.RunID]; [Continue] chains record
-// ParentRunID) and the 1-based turn as Step. Transcripts serialize to JSONL
+// exists), then every sink registered with [WithObserver], in registration
+// order — [JSONL] streams one JSON line per event to a file per run. The
+// Runner does not enforce a single sink; register at most one that records
+// the run's history, and compose the rest (a spend ledger, metrics) beside
+// it. Events carry the run's identity ([WithRunID], [llmkit.RunID];
+// [Continue] chains record ParentRunID) and the 1-based turn as Step.
+// Transcripts serialize to JSONL
 // with [Transcript.SaveJSONL], load back with [LoadJSONL], and replay
-// offline through [NewReplayClient] — the read-side [Source] interface, so
+// offline through [NewReplayClient] — the read-side [llmkit.Source] interface, so
 // replay works from any sink; the client's [ReplayClient.Tools] serve the
 // recorded tool results and [ReplayClient.Err] reports a diverged replay
 // (assert it after every replayed run). Do not wrap a Runner's client with
@@ -216,11 +234,18 @@ const (
 	// the caller can tell a run that was stopped by the run-spanning ceiling
 	// ("budget-stopped") from one that merely exhausted its own allowance.
 	TruncBudgetPool TruncationReason = "budget_pool"
+	// TruncOutputCap means the model's answer was cut off at the output token
+	// cap and stayed cut off.
+	TruncOutputCap TruncationReason = "output_cap"
+	// TruncNoAnswer means the run ended after exhausting the empty-turn
+	// nudge limit without an answer.
+	TruncNoAnswer TruncationReason = "no_answer"
 )
 
-// Outcome is the result of a [Runner.Run]. A truncated run is still a valid
-// outcome: FinalText holds the last completion's text, and the Transcript
-// captures the full interaction.
+// Outcome is the result of a [Runner.Run]. A truncated run still yields a
+// valid outcome: FinalText holds the last completion's text, and the
+// Transcript captures the full interaction. Run returns it together with an
+// [*IncompleteError] that carries this same pointer.
 //
 // A truncated outcome is exactly one whose TruncationReason is non-empty;
 // see [Outcome.Truncated].
@@ -228,15 +253,12 @@ type Outcome struct {
 	// FinalText is the text of the last completion of the run. That completion
 	// is the main-loop turn, a stitched max-tokens continuation, the forced
 	// finalization turn, or the RunJSON repair completion, whichever ran last.
-	// It is empty when that completion produced no text, and it never holds
-	// text from an earlier turn. Present it as the run's answer verbatim, with
-	// two exceptions: after a [StopReasonError] it holds the refusing turn's
-	// text, not an answer; after a RunJSON repair it is the repair
-	// completion's text (see [Runner.RunJSON]).
+	// It is empty when that completion produced no text.
 	FinalText string
 	// TruncationReason is set when the run stopped because it hit a limit
 	// rather than the model finishing its turn: one of the Trunc* constants.
-	// Empty means the model finished cleanly.
+	// Empty means the model finished cleanly. [Runner.Run] reports a
+	// non-empty reason as an [*IncompleteError] carrying this Outcome.
 	TruncationReason TruncationReason
 	// Iterations is the number of completed model turns.
 	Iterations int
@@ -292,4 +314,29 @@ type StopReasonError struct {
 
 func (e *StopReasonError) Error() string {
 	return fmt.Sprintf("agent: model stopped without tool calls: stop reason %q", e.StopReason)
+}
+
+// IncompleteError is returned by [Runner.Run] exactly when the run stopped at
+// a limit before the model finished its turn: Outcome.TruncationReason is
+// non-empty, and Reason repeats it. Outcome is the same pointer Run returns
+// next to the error, so a caller that only holds the error still reaches the
+// transcript, the usage, and [Outcome.Messages] for [Continue]. Its FinalText
+// is the last completion's text, which is not necessarily an answer.
+//
+// [Runner.RunJSON] and [RunJSONAs] return no IncompleteError when the last
+// completion parsed. A truncated RunJSON whose answer does not parse returns
+// an error that matches both [ErrUnparseableOutput] and *IncompleteError under
+// [errors.Is] and [errors.As], unless the repair completion itself failed (a
+// transport error, a cancelled context): that completion failure is returned
+// as is and matches neither.
+type IncompleteError struct {
+	// Reason is the limit that stopped the run; always non-empty, and equal
+	// to Outcome.TruncationReason.
+	Reason TruncationReason
+	// Outcome is the outcome at the point the run stopped. Never nil.
+	Outcome *Outcome
+}
+
+func (e *IncompleteError) Error() string {
+	return fmt.Sprintf("agent: run incomplete: stopped at %s", e.Reason)
 }

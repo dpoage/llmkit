@@ -59,6 +59,16 @@ func newLiveAgentClient(t *testing.T) (context.Context, llmkit.Client, *livetest
 	return ctx, sess.Client(ctx, t, tr, nil), sess
 }
 
+// isModelFlake reports whether err is the *IncompleteError of a run the
+// model left without an answer: TruncNoAnswer (silent through every nudge) or
+// TruncOutputCap (cut off at the cap, continuation included). Both are the
+// known think-only / capped live-model flakes, so the retry loops treat them
+// like an empty visible answer; any other error still fails the test.
+func isModelFlake(err error) bool {
+	var ie *agent.IncompleteError
+	return errors.As(err, &ie) && (ie.Reason == agent.TruncNoAnswer || ie.Reason == agent.TruncOutputCap)
+}
+
 // addArgs is the argument schema for the live add tool.
 type addArgs struct {
 	A float64 `json:"a"`
@@ -113,20 +123,20 @@ func TestLiveAgentFuncToolLoop(t *testing.T) {
 		}
 		runner := agent.NewRunner(cl, tools, system, agent.WithHooks(hooks), agent.WithMaxTokens(2048), agent.WithObserver(livetest.DefaultTally()))
 		out, err = runner.Run(ctx, tasks[attempt-1])
-		if err != nil {
+		if err != nil && !isModelFlake(err) {
 			t.Fatalf("run (attempt %d): %v", attempt, err)
 		}
 		mu.Lock()
 		distinct := len(toolCalls)
 		called := slices.Sorted(maps.Keys(toolCalls))
 		mu.Unlock()
-		if distinct >= 2 {
+		if err == nil && distinct >= 2 {
 			break
 		}
 		if attempt == 3 {
-			t.Fatalf("after 3 differently-phrased attempts the model still did not call both tools (called %v)", called)
+			t.Fatalf("after 3 differently-phrased attempts no run completed calling both tools (called %v, err=%v)", called, err)
 		}
-		t.Logf("attempt %d: only %v called; retrying with different phrasing and tool order", attempt, called)
+		t.Logf("attempt %d: only %v called (err=%v); retrying with different phrasing and tool order", attempt, called, err)
 	}
 
 	// Both mandatory tools must appear in the transcript...
@@ -200,9 +210,28 @@ func TestLiveAgentContinueKeepsPriorTurns(t *testing.T) {
 	ctx, cl, _ := newLiveAgentClient(t)
 	runner := agent.NewRunner(cl, nil, "You are a terse assistant.", agent.WithMaxTokens(1024), agent.WithObserver(livetest.DefaultTally()))
 
-	first, err := runner.Run(ctx, "My favorite color is cerulean. Acknowledge in five words or fewer.")
-	if err != nil {
-		t.Fatalf("first run: %v", err)
+	// The first run can hit the same think-only / capped flake; it gets
+	// the bounded retry with varied phrasing, and any other error still
+	// fails.
+	firstTasks := []string{
+		"My favorite color is cerulean. Acknowledge in five words or fewer.",
+		"My favorite color is cerulean. Confirm it back in five words or fewer.",
+		"I am telling you my favorite color: cerulean. Acknowledge in five words or fewer.",
+	}
+	var first *agent.Outcome
+	for attempt := 1; attempt <= 3; attempt++ {
+		f, ferr := runner.Run(ctx, firstTasks[attempt-1])
+		if ferr != nil && !isModelFlake(ferr) {
+			t.Fatalf("first run (attempt %d): %v", attempt, ferr)
+		}
+		if ferr == nil && strings.TrimSpace(llmkit.StripThinkBlocks(f.FinalText)) != "" {
+			first = f
+			break
+		}
+		if attempt == 3 {
+			t.Fatalf("first run never completed with a visible answer in 3 attempts (final=%q, err=%v)", f.FinalText, ferr)
+		}
+		t.Logf("attempt %d: think-only or capped first run (%.60q, err=%v); retrying with different phrasing", attempt, f.FinalText, ferr)
 	}
 	// Continue threads first.Messages back in: the second question must be
 	// answered FROM the prior conversation, not from a fresh one. A
@@ -217,19 +246,19 @@ func TestLiveAgentContinueKeepsPriorTurns(t *testing.T) {
 	var second *agent.Outcome
 	for attempt := 1; attempt <= 3; attempt++ {
 		s, err := runner.Run(ctx, tasks[attempt-1], agent.Continue(first))
-		if err != nil {
+		if err != nil && !isModelFlake(err) {
 			t.Fatalf("continued run (attempt %d): %v", attempt, err)
 		}
-		if strings.TrimSpace(llmkit.StripThinkBlocks(s.FinalText)) != "" {
+		if err == nil && strings.TrimSpace(llmkit.StripThinkBlocks(s.FinalText)) != "" {
 			second = s
 			break
 		}
 		if attempt == 3 {
-			t.Fatalf("continued run produced no visible answer after 3 attempts (final=%q)", s.FinalText)
+			t.Fatalf("continued run produced no visible answer after 3 attempts (final=%q, err=%v)", s.FinalText, err)
 		}
 		second = s
-		t.Logf("attempt %d: think-only continued turn (%.60q); retrying with different phrasing",
-			attempt, llmkit.StripThinkBlocks(s.FinalText))
+		t.Logf("attempt %d: think-only or capped continued turn (%.60q, err=%v); retrying with different phrasing",
+			attempt, llmkit.StripThinkBlocks(s.FinalText), err)
 	}
 	if !strings.Contains(strings.ToLower(llmkit.StripThinkBlocks(second.FinalText)), "cerulean") {
 		t.Errorf("continued answer %q forgot the prior turn's fact", second.FinalText)
@@ -255,20 +284,26 @@ func TestLiveAgentMaxTokensContinuationParses(t *testing.T) {
 			"You are a terse assistant. Answer only with the requested JSON, nothing else.",
 			agent.WithMaxTokens(200), agent.WithObserver(livetest.DefaultTally()))
 		o, err := runner.Run(ctx, phrasings[attempt-1])
-		if err != nil {
+		if err != nil && !isModelFlake(err) {
 			t.Fatalf("run (attempt %d): %v", attempt, err)
 		}
 		var v map[string]any
-		uerr := json.Unmarshal([]byte(llmkit.StripThinkBlocks(o.FinalText)), &v)
+		// A flake run (still capped after the continuation, or silent) has
+		// no answer this loop accepts — cut text included: its error
+		// stands in for the parse error.
+		uerr := err
+		if err == nil {
+			uerr = json.Unmarshal([]byte(llmkit.StripThinkBlocks(o.FinalText)), &v)
+		}
 		if uerr == nil {
 			parsed = v
 			break
 		}
 		if attempt == 3 {
-			t.Fatalf("stitched FinalText does not parse as JSON after 3 attempts: %v\ntext: %q\n(stop=%s iterations=%d)",
+			t.Fatalf("no parseable answer after 3 attempts (capped or unparseable): %v\ntext: %q\n(stop=%s iterations=%d)",
 				uerr, o.FinalText, o.LastStopReason, o.Iterations)
 		}
-		t.Logf("attempt %d: stitched text unparseable (%.60q); retrying with different phrasing",
+		t.Logf("attempt %d: no parseable answer yet — capped run or unparseable text (%.60q); retrying with different phrasing",
 			attempt, llmkit.StripThinkBlocks(o.FinalText))
 	}
 	if _, ok := parsed["alpha"]; !ok {
@@ -298,21 +333,22 @@ func TestLiveAgentPreservesInlineThink(t *testing.T) {
 	for attempt := 1; attempt <= 3; attempt++ {
 		runner := agent.NewRunner(cl, nil, system, agent.WithMaxTokens(512), agent.WithObserver(livetest.DefaultTally()))
 		o, err := runner.Run(ctx, phrasings[attempt-1])
-		if err != nil {
+		if err != nil && !isModelFlake(err) {
 			t.Fatalf("run (attempt %d): %v", attempt, err)
 		}
 		visible := strings.TrimSpace(llmkit.StripThinkBlocks(o.FinalText))
-		if visible == "" {
-			// Known flake mode: CLOSED think span, no visible answer.
+		if err != nil || visible == "" {
+			// Known flake mode: CLOSED think span, no visible answer — or a
+			// turn the harness reports as incomplete (silent or capped).
 			if attempt == 3 {
 				if answerOnly == nil {
 					sess.Logf(t, "final text after 3 attempts: visible=%q raw=%.200q", visible, o.FinalText)
-					t.Fatal("no visible answer after 3 attempts (think-only turns throughout)")
+					t.Fatalf("no visible answer after 3 attempts (think-only turns throughout; last err=%v)", err)
 				}
 				break
 			}
-			t.Logf("attempt %d: think-only turn (%.60q); retrying with different phrasing",
-				attempt, o.FinalText)
+			t.Logf("attempt %d: think-only or capped turn (%.60q, err=%v); retrying with different phrasing",
+				attempt, o.FinalText, err)
 			continue
 		}
 		if !strings.Contains(o.FinalText, "<think>") {
@@ -389,9 +425,27 @@ func TestLiveAgentRequestPolicyShapesWire(t *testing.T) {
 			BeforeCompletion: func(context.Context, int, *llmkit.Request) { completions.Add(1) },
 		}),
 		agent.WithRequestPolicy(policy), agent.WithObserver(livetest.DefaultTally()))
-	out, err := runner.Run(ctx, "Reply with the single word: ready.")
-	if err != nil {
-		t.Fatalf("run: %v", err)
+	// The run can hit the think-only / capped flake; it gets the bounded
+	// retry with varied phrasing, and any other error still fails.
+	readyTasks := []string{
+		"Reply with the single word: ready.",
+		"Answer with exactly one word: ready.",
+		"Give the one-word reply: ready.",
+	}
+	var out *agent.Outcome
+	for attempt := 1; attempt <= 3; attempt++ {
+		o, rerr := runner.Run(ctx, readyTasks[attempt-1])
+		if rerr != nil && !isModelFlake(rerr) {
+			t.Fatalf("run (attempt %d): %v", attempt, rerr)
+		}
+		if rerr == nil {
+			out = o
+			break
+		}
+		if attempt == 3 {
+			t.Fatalf("run never completed in 3 attempts (last outcome: final=%q stop=%s err=%v)", o.FinalText, o.LastStopReason, rerr)
+		}
+		t.Logf("attempt %d: think-only or capped run (%.60q, err=%v); retrying with different phrasing", attempt, o.FinalText, rerr)
 	}
 	if out.TruncationReason != "" {
 		t.Fatalf("run truncated (%v): the policy case did not complete", out.TruncationReason)
@@ -420,10 +474,27 @@ func TestLiveAgentAttachImageOnTaskTurn(t *testing.T) {
 	}
 
 	runner := agent.NewRunner(cl, nil, "You are a terse assistant.", agent.WithMaxTokens(256), agent.WithObserver(livetest.DefaultTally()))
-	out, err := runner.Run(ctx, "What color is the attached square? Answer in three words or fewer.",
-		agent.Attach(llmkit.Image("image/png", pngBuf.Bytes())))
-	if err != nil {
-		t.Fatalf("run with attachment: %v", err)
+	// The run can hit the think-only / capped flake; it gets the bounded
+	// retry with varied phrasing, and any other error still fails.
+	attachTasks := []string{
+		"What color is the attached square? Answer in three words or fewer.",
+		"Look at the attached image: what color is the square? Three words max.",
+		"The attached picture shows a square; name its color in three words or fewer.",
+	}
+	var out *agent.Outcome
+	for attempt := 1; attempt <= 3; attempt++ {
+		o, aerr := runner.Run(ctx, attachTasks[attempt-1], agent.Attach(llmkit.Image("image/png", pngBuf.Bytes())))
+		if aerr != nil && !isModelFlake(aerr) {
+			t.Fatalf("run with attachment (attempt %d): %v", attempt, aerr)
+		}
+		if aerr == nil {
+			out = o
+			break
+		}
+		if attempt == 3 {
+			t.Fatalf("run with attachment never completed in 3 attempts (last outcome: final=%q stop=%s err=%v)", o.FinalText, o.LastStopReason, aerr)
+		}
+		t.Logf("attempt %d: think-only or capped run with attachment (%.60q, err=%v); retrying with different phrasing", attempt, o.FinalText, aerr)
 	}
 
 	var seed *llmkit.Message
@@ -500,7 +571,17 @@ func TestLiveAgentToolPolicyDeny(t *testing.T) {
 			agent.WithHooks(hooks), agent.WithToolPolicy(policy), agent.WithMaxTokens(2048), agent.WithObserver(livetest.DefaultTally()))
 		out, err = runner.Run(ctx, tasks[attempt-1])
 		if err != nil {
-			t.Fatalf("run (attempt %d): %v", attempt, err)
+			if !isModelFlake(err) {
+				t.Fatalf("run (attempt %d): %v", attempt, err)
+			}
+			// Known flake mode: the run ended unanswered (silent or capped);
+			// the tested premise did not run, so retry like a run that never
+			// requested the tool.
+			if attempt == 3 {
+				t.Fatalf("after 3 differently-phrased attempts the run still ended without an answer: %v", err)
+			}
+			t.Logf("attempt %d: run ended without an answer (%v); retrying with different phrasing", attempt, err)
+			continue
 		}
 		mu.Lock()
 		auths, executed := authorizations, runs
@@ -610,17 +691,17 @@ func TestLiveAgentDeltaHook(t *testing.T) {
 		runner := agent.NewRunner(cl, nil, "You are a helpful assistant.",
 			agent.WithHooks(hooks), agent.WithMaxTokens(2048), agent.WithObserver(livetest.DefaultTally()))
 		o, err := runner.Run(ctx, phrasings[attempt-1])
-		if err != nil {
+		if err != nil && !isModelFlake(err) {
 			t.Fatalf("run (attempt %d): %v", attempt, err)
 		}
 		out = o
-		if strings.TrimSpace(llmkit.StripThinkBlocks(out.FinalText)) != "" {
+		if err == nil && strings.TrimSpace(llmkit.StripThinkBlocks(out.FinalText)) != "" {
 			break
 		}
 		if attempt == 3 {
-			t.Fatalf("after 3 differently-phrased attempts the final turn still carried no visible text (raw %.200q)", out.FinalText)
+			t.Fatalf("after 3 differently-phrased attempts no run completed with a visible answer (raw %.200q, err=%v)", out.FinalText, err)
 		}
-		t.Logf("attempt %d: think-only final turn (%.60q); retrying with different phrasing", attempt, out.FinalText)
+		t.Logf("attempt %d: think-only or capped final turn (%.60q, err=%v); retrying with different phrasing", attempt, out.FinalText, err)
 	}
 
 	mu.Lock()

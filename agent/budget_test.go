@@ -75,8 +75,8 @@ func TestBudgetPool_OvershootBound(t *testing.T) {
 			client := &bigSpendClient{perCall: perCall}
 			r := NewRunner(client, []Tool{noopTool{}}, "sys", WithLimits(limits), WithBudgetPool(pool))
 			out, err := r.Run(context.Background(), "task")
-			if err != nil {
-				t.Errorf("Run: %v", err)
+			if ierr := incompleteErr(out, err, TruncBudgetPool); ierr != nil {
+				t.Errorf("Run: %v", ierr)
 				return
 			}
 			if !out.Truncated() || out.TruncationReason != TruncBudgetPool {
@@ -117,8 +117,8 @@ func TestBudgetPool_StopsInFlight(t *testing.T) {
 	r := NewRunner(client, []Tool{noopTool{}}, "sys",
 		WithLimits(Limits{MaxIterations: -1, TokenBudget: -1}), WithBudgetPool(pool))
 	out, err := r.Run(context.Background(), "task")
-	if err != nil {
-		t.Fatalf("Run: %v", err)
+	if ierr := incompleteErr(out, err, TruncBudgetPool); ierr != nil {
+		t.Fatalf("Run: %v", ierr)
 	}
 	if out.TruncationReason != TruncBudgetPool {
 		t.Fatalf("reason = %q, want %q", out.TruncationReason, TruncBudgetPool)
@@ -173,8 +173,8 @@ func TestBudgetPool_ExhaustedStopsWithoutRecorder(t *testing.T) {
 	r := NewRunner(client, []Tool{noopTool{}}, "sys",
 		WithLimits(Limits{MaxIterations: -1, TokenBudget: -1}), WithBudgetPool(pool))
 	out, err := r.Run(context.Background(), "task")
-	if err != nil {
-		t.Fatalf("Run: %v", err)
+	if ierr := incompleteErr(out, err, TruncBudgetPool); ierr != nil {
+		t.Fatalf("Run: %v", ierr)
 	}
 	if out.TruncationReason != TruncBudgetPool {
 		t.Fatalf("reason = %q, want %q", out.TruncationReason, TruncBudgetPool)

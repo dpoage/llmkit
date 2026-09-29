@@ -7,8 +7,9 @@ import (
 )
 
 // ErrBudgetExhausted is returned by BudgetPool.Check once the pool has no
-// headroom left for another model call. The [Runner] treats it as a clean
-// stop (TruncBudgetPool), not an infrastructure error.
+// headroom left for another model call. The [Runner] treats it as a limit
+// stop (TruncBudgetPool, reported by Run as an [IncompleteError]), not an
+// infrastructure error.
 var ErrBudgetExhausted = errors.New("agent: shared budget pool exhausted")
 
 // BudgetPool is a concurrency-safe token budget shared across many

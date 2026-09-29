@@ -3,6 +3,7 @@ package llmkit
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -73,6 +74,23 @@ func Observers(observers ...Observer) Observer {
 	})
 }
 
+// Source is the read side of recording: the ordered events of one run,
+// however and wherever they were recorded — an in-memory transcript, a JSONL
+// directory, a database. Callers do not know which sink holds a run, only
+// that its events come back in emission order or the run is unknown.
+//
+// Events returns the run's events in emission order; the caller owns the
+// returned slice. run is the id the events carry ([RunID]). A Source with no
+// record of run returns an error wrapping [ErrUnknownRun] — never an empty
+// success.
+type Source interface {
+	Events(ctx context.Context, run RunID) ([]Event, error)
+}
+
+// ErrUnknownRun is the error a [Source] wraps when it has no record of the
+// requested run. Match it with errors.Is.
+var ErrUnknownRun = errors.New("llmkit: unknown run")
+
 // EventKind discriminates [Event]. Each kind populates its own payload
 // pointer on Event; exactly one payload is set on an emitted event.
 type EventKind string
@@ -113,10 +131,10 @@ const (
 	// agent turn, and whether the runner queued a follow-up turn for it.
 	// Payload: [SteerEvent]. Step is set on Runner-emitted events.
 	KindSteer EventKind = "steer"
-	// KindFinalize closes a run: why it stopped (truncation reason, if the
-	// step budget or context limit ended it), the run's total usage, and
-	// whether a forced-finalization turn fired. Payload: [FinalizeEvent].
-	// Step is the completed-turn count.
+	// KindFinalize closes a run: how it ended (status and error), why it
+	// stopped short (truncation reason, if a limit or a non-answer ended
+	// it), the run's total usage, and whether a forced-finalization turn
+	// fired. Payload: [FinalizeEvent]. Step is the completed-turn count.
 	KindFinalize EventKind = "finalize"
 	// KindDecision records one decision-model call: the judged state, the
 	// questions asked and the answers returned (or the error). The payload
@@ -314,6 +332,30 @@ type SteerEvent struct {
 	FollowUp bool    `json:"follow_up,omitempty"`
 }
 
+// RunStatus is the vocabulary for what a run's end was, recorded on
+// [FinalizeEvent.Status]. It is an open string: a reader must tolerate a
+// value it does not know (a newer writer's), and the empty string marks a
+// record from before the field existed.
+type RunStatus string
+
+const (
+	// RunCompleted: the run finished with an answer.
+	RunCompleted RunStatus = "completed"
+	// RunIncomplete: the run stopped without an answer, on a limit or another
+	// non-answer end.
+	RunIncomplete RunStatus = "incomplete"
+	// RunRefused: the model stopped without an answer for a provider stop
+	// reason: a refusal, a safety or content filter, or another provider
+	// error stop.
+	RunRefused RunStatus = "refused"
+	// RunFailed: the run failed with an error.
+	RunFailed RunStatus = "failed"
+	// RunCanceled: the run's context ended (canceled or past its deadline).
+	RunCanceled RunStatus = "canceled"
+	// RunPanicked: the run panicked.
+	RunPanicked RunStatus = "panicked"
+)
+
 // FinalizeEvent closes a run ([KindFinalize]). TruncationReason is set when
 // the run ended by hitting a limit rather than finishing its task; Usage
 // totals the run's completions; Finalized marks that a forced-finalization
@@ -333,6 +375,13 @@ type FinalizeEvent struct {
 	// marker on the event — cross-read the last Completion's stop_reason to
 	// detect it.
 	FinalText string `json:"final_text,omitempty"`
+	// Status is how the run ended, in the [RunStatus] vocabulary. Empty marks
+	// a record written before this field existed; a reader must not read
+	// empty as [RunCompleted].
+	Status RunStatus `json:"status,omitempty"`
+	// Err is the text of the error the run returned; empty when the run
+	// completed, and on records from before this field existed.
+	Err string `json:"err,omitempty"`
 }
 
 // DecisionEvent records one decision-model call ([KindDecision]). The

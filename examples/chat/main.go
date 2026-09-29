@@ -8,7 +8,10 @@
 // becomes the next task; steers queued after the run's final drain are
 // replayed as the next task instead of being dropped. On
 // agent.StopReasonError a canned reply is printed and the refusal stays in
-// the history: err.Outcome feeds agent.Continue on the next run. /think
+// the history: err.Outcome feeds agent.Continue on the next run. On
+// agent.IncompleteError a stopped marker names the limit (and flags any reply
+// text printed above it as incomplete), and the REPL continues from
+// err.Outcome. /think
 // toggles extended thinking via an agent.RequestPolicy when the model
 // reports thinking support. Assistant text prints incrementally through
 // agent.Hooks.Delta.
@@ -223,13 +226,29 @@ func run() error {
 
 // reportRun prints one finished run and returns the conversation state to
 // continue from: the refusal outcome on a StopReasonError (the canned reply
-// keeps the refusal turn in the history), or the run's outcome on success.
-// streamed reports whether the Delta hook already printed the answer.
+// keeps the refusal turn in the history), the stopped run's outcome on an
+// IncompleteError (a limit ended it before the model finished, so its text
+// is not an answer), or the run's outcome on success. streamed reports
+// whether the Delta hook already printed the text.
 func reportRun(res runResult, streamed bool) (*agent.Outcome, error) {
 	var stopErr *agent.StopReasonError
 	if errors.As(res.err, &stopErr) {
 		fmt.Printf("assistant> (the model declined: %s)\n", stopErr.StopReason)
 		return stopErr.Outcome, nil
+	}
+	var incomplete *agent.IncompleteError
+	if errors.As(res.err, &incomplete) {
+		shown := streamed
+		if !streamed && incomplete.Outcome.FinalText != "" {
+			fmt.Println("partial>", incomplete.Outcome.FinalText)
+			shown = true
+		}
+		if shown {
+			fmt.Printf("(stopped: %s — the reply above is incomplete)\n", incomplete.Reason)
+		} else {
+			fmt.Printf("(stopped: %s — no reply text was produced)\n", incomplete.Reason)
+		}
+		return incomplete.Outcome, nil
 	}
 	if res.err != nil {
 		return nil, fmt.Errorf("run: %w", res.err)

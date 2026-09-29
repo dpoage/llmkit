@@ -48,13 +48,6 @@ type Tool interface {
 	Run(ctx context.Context, args json.RawMessage) (string, error)
 }
 
-// toolError prefixes a tool failure so the model recognizes it as a recoverable
-// error rather than a normal result. The harness uses this for every error a
-// Tool returns.
-func toolError(err error) string {
-	return "ERROR: " + err.Error()
-}
-
 // UnmarshalArgs decodes raw JSON tool arguments into dst. It returns a
 // well-formed error the runner will surface as "ERROR: invalid arguments: …"
 // when the model produced malformed JSON. Tool implementations call this to
@@ -64,36 +57,6 @@ func UnmarshalArgs(raw json.RawMessage, dst any) error {
 		return fmt.Errorf("invalid arguments: %w", err)
 	}
 	return nil
-}
-
-// toolSet indexes tools by name for dispatch and collects their defs for the
-// request.
-type toolSet struct {
-	byName map[string]Tool
-	defs   []llmkit.ToolDef
-}
-
-// newToolSet builds a dispatch table from tools. Later tools with a duplicate
-// name win, mirroring map-assignment semantics; the defs slice preserves the
-// first-seen order of the deduplicated set.
-func newToolSet(tools []Tool) toolSet {
-	ts := toolSet{byName: make(map[string]Tool, len(tools))}
-	seen := make(map[string]bool, len(tools))
-	for _, t := range tools {
-		def := t.Def()
-		ts.byName[def.Name] = t
-		if !seen[def.Name] {
-			ts.defs = append(ts.defs, def)
-			seen[def.Name] = true
-		}
-	}
-	return ts
-}
-
-// lookup returns the tool registered under name, if any.
-func (ts toolSet) lookup(name string) (Tool, bool) {
-	t, ok := ts.byName[name]
-	return t, ok
 }
 
 // ToolHealthError marks a tool failure as a GENUINE harness-tooling/infra

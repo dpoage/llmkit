@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -56,15 +57,29 @@ var ErrUnparseableOutput = errors.New("agent: model output did not parse as JSON
 //
 // The returned [Outcome] is the underlying loop outcome (including the full
 // transcript and any truncation). On a successful parse, out is populated
-// and err is nil. If the run truncates before producing parseable JSON, or
-// the repair round-trip still fails, err is non-nil but the Outcome is
-// still returned for inspection. When a repair ran, the returned Outcome's
+// and err is nil, even when the run was truncated (the forced-finalization
+// turn at the iteration cap, say): the Outcome keeps its TruncationReason.
+// If the run truncates and no answer parses (the budget-stopped answer that
+// skips the repair, or the repaired one), err matches both
+// [ErrUnparseableOutput] and [*IncompleteError] under [errors.Is] and
+// [errors.As]. If the repaired answer still does not parse on a run that did
+// not truncate, err wraps [ErrUnparseableOutput]. The exception is a repair
+// completion that itself fails (a transport error, a cancelled context): err
+// is that completion failure, which matches neither, even on a truncated run,
+// and the Outcome still keeps its TruncationReason. The Outcome is returned for
+// inspection either way. When a repair ran, the returned Outcome's
 // [Outcome.FinalText] is the REPAIR completion's text — the last completion
 // of the run — not the unparseable pre-repair answer.
-
+//
 // Pass [WithSteering] to inject queued user turns mid-run ([Steering]):
 // both drain points apply; the JSON parse applies to the last completion.
+//
+// RunJSON returns an error, without making any completion or emitting any
+// event, when out is nil, is not a pointer, or is a nil pointer.
 func (r *Runner) RunJSON(ctx context.Context, task string, schema json.RawMessage, out any, opts ...RunOption) (*Outcome, error) {
+	if err := checkJSONOut(out); err != nil {
+		return nil, err
+	}
 	var cfg runConfig
 	for _, opt := range opts {
 		opt(&cfg)
@@ -83,6 +98,23 @@ func RunJSONAs[T any](ctx context.Context, r *Runner, task string, opts ...RunOp
 	return out, outcome, err
 }
 
+// checkJSONOut rejects an out that json.Unmarshal could never fill — nil, not
+// a pointer, or a nil pointer — so RunJSON fails before spending a completion
+// on an answer it cannot deliver.
+func checkJSONOut(out any) error {
+	if out == nil {
+		return errors.New("agent: RunJSON: out must be a non-nil pointer, got nil")
+	}
+	v := reflect.ValueOf(out)
+	if v.Kind() != reflect.Pointer {
+		return fmt.Errorf("agent: RunJSON: out must be a non-nil pointer, got non-pointer %T", out)
+	}
+	if v.IsNil() {
+		return fmt.Errorf("agent: RunJSON: out must be a non-nil pointer, got nil %T", out)
+	}
+	return nil
+}
+
 // runJSON is the shared implementation behind RunJSON. cfg.seed is nil
 // (reseed every call) or a prior Outcome's Messages ([Continue]); attach
 // rides on the seeded task turn (see [Attach]); steering drains at the loop's
@@ -91,12 +123,18 @@ func RunJSONAs[T any](ctx context.Context, r *Runner, task string, opts ...RunOp
 func (r *Runner) runJSON(ctx context.Context, cfg runConfig, task string, schema json.RawMessage, out any) (outcome *Outcome, err error) {
 	prompt := task + "\n\n" + jsonInstruction(schema)
 
-	ctx, em := r.begin(ctx, cfg, prompt)
+	ctx, em := r.begin(ctx, cfg, task)
 	// Finalize closes the run on every return path — including after the
 	// repair completion below, so the run's last recorded turn is the repair
 	// and Finalize.Step names it (see [emitFinalize]).
-	defer func() { r.emitFinalize(ctx, em, outcome) }()
+	returned := false
+	defer func() { r.emitFinalize(ctx, em, outcome, err, !returned) }()
+	outcome, err = r.runJSONBody(ctx, em, prompt, task, cfg, schema, out)
+	returned = true
+	return outcome, err
+}
 
+func (r *Runner) runJSONBody(ctx context.Context, em runEmitter, prompt, task string, cfg runConfig, schema json.RawMessage, out any) (outcome *Outcome, err error) {
 	// Reserve the last iteration for a forced finalization turn: if the model is
 	// still investigating when the iteration cap is reached, it gets one final
 	// completion that demands the JSON answer now, instead of the loop returning
@@ -140,8 +178,8 @@ func (r *Runner) runJSON(ctx context.Context, cfg runConfig, task string, schema
 	// a budget stop, not a parse failure. Skipping the repair here
 	// also preserves the budget overshoot bound (no extra post-exhaustion call).
 	if outcome.TruncationReason == TruncTokenBudget || outcome.TruncationReason == TruncBudgetPool {
-		return outcome, fmt.Errorf("%w%s: %w",
-			ErrUnparseableOutput, truncationNote(outcome), perr)
+		return outcome, unparseableErr(outcome, fmt.Errorf("%w%s: %w",
+			ErrUnparseableOutput, truncationNote(outcome), perr))
 	}
 
 	// One repair round-trip: tell the model exactly what failed and demand JSON
@@ -159,8 +197,8 @@ func (r *Runner) runJSON(ctx context.Context, cfg runConfig, task string, schema
 	repairOutcome, rerr := r.repair(ctx, em, repair, schema, outcome.Iterations)
 	// The repair completion rides the SAME run emitter (transcript + durable
 	// sink), so its events land in the same on-disk transcript as the main
-	// run; the file closes when the deferred Finalize fires at this function's
-	// return.
+	// run; the file closes when runJSON's deferred Finalize fires after this
+	// function returns.
 	// The repair completion runs against its own throwaway single-turn history
 	// (see [Runner.repair]), not outcome.messages, so it never sees — and
 	// therefore repairOutcome.Messages never carries — the run's investigation.
@@ -194,10 +232,37 @@ func (r *Runner) runJSON(ctx context.Context, cfg runConfig, task string, schema
 				return outcome, nil
 			}
 		}
-		return outcome, fmt.Errorf("%w after one repair%s: %w",
-			ErrUnparseableOutput, truncationNote(outcome), perr2)
+		return outcome, unparseableErr(outcome, fmt.Errorf("%w after one repair%s: %w",
+			ErrUnparseableOutput, truncationNote(outcome), perr2))
 	}
 	return outcome, nil
+}
+
+// truncatedUnparseable is the error of a RunJSON run that both hit a limit
+// and produced no parseable answer. It reports the parse error's message
+// unchanged and unwraps to that error and to the [*IncompleteError], so
+// errors.Is(err, ErrUnparseableOutput) and errors.As(err, **IncompleteError)
+// both match. It does not print the IncompleteError, whose message carries its
+// own "agent: " prefix: the sentinel's message already carries it once.
+type truncatedUnparseable struct {
+	parse error
+	inc   *IncompleteError
+}
+
+func (e *truncatedUnparseable) Error() string   { return e.parse.Error() }
+func (e *truncatedUnparseable) Unwrap() []error { return []error{e.parse, e.inc} }
+
+// unparseableErr returns parse, an error wrapping [ErrUnparseableOutput], as
+// RunJSON's failure for outcome: unchanged when the run finished cleanly,
+// and also matching [*IncompleteError] when outcome is truncated.
+func unparseableErr(outcome *Outcome, parse error) error {
+	if outcome.TruncationReason == "" {
+		return parse
+	}
+	return &truncatedUnparseable{
+		parse: parse,
+		inc:   &IncompleteError{Reason: outcome.TruncationReason, Outcome: outcome},
+	}
 }
 
 // parseJSONInto strips text to its JSON body (think blocks and fences

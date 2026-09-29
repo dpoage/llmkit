@@ -183,6 +183,8 @@ func goldEvents() []struct {
 					Finalized:        true,
 					Usage:            Usage{InputTokens: 1000, OutputTokens: 200},
 					FinalText:        "Answer: 42.",
+					Status:           RunIncomplete,
+					Err:              "run stopped at max_steps",
 				},
 			},
 		},
@@ -472,7 +474,9 @@ func TestEventGoldenJSON(t *testing.T) {
       "input_tokens": 1000,
       "output_tokens": 200
     },
-    "final_text": "Answer: 42."
+    "final_text": "Answer: 42.",
+    "status": "incomplete",
+    "err": "run stopped at max_steps"
   }
 }`,
 		"decision": `{

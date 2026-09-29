@@ -362,8 +362,8 @@ func TestContinue_MaxIterationsTruncationStaysPlainRun(t *testing.T) {
 		llmkit.TextMessage(llmkit.RoleAssistant, "prior answer"),
 	}}
 	out, err := r.Run(context.Background(), "tool task", Continue(prev))
-	if err != nil {
-		t.Fatalf("Run: %v", err)
+	if ierr := incompleteErr(out, err, TruncMaxIterations); ierr != nil {
+		t.Fatalf("Run: %v", ierr)
 	}
 	if !out.Truncated() || out.TruncationReason != TruncMaxIterations {
 		t.Errorf("Truncated=%v TruncationReason=%q, want truncated with %q", out.Truncated(), out.TruncationReason, TruncMaxIterations)

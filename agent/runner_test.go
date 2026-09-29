@@ -151,8 +151,8 @@ func TestRun_MaxIterations(t *testing.T) {
 	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys", WithLimits(Limits{MaxIterations: 3}))
 
 	out, err := r.Run(context.Background(), "task")
-	if err != nil {
-		t.Fatalf("Run: %v", err)
+	if ierr := incompleteErr(out, err, TruncMaxIterations); ierr != nil {
+		t.Fatalf("Run: %v", ierr)
 	}
 	if !out.Truncated() || out.TruncationReason != TruncMaxIterations {
 		t.Errorf("expected max_iterations truncation, got truncated=%v reason=%q", out.Truncated(), out.TruncationReason)
@@ -171,8 +171,8 @@ func TestRun_TokenBudget(t *testing.T) {
 	r := NewRunner(fc, []Tool{echoTool{name: "echo"}}, "sys", WithLimits(Limits{TokenBudget: 10}))
 
 	out, err := r.Run(context.Background(), "task")
-	if err != nil {
-		t.Fatalf("Run: %v", err)
+	if ierr := incompleteErr(out, err, TruncTokenBudget); ierr != nil {
+		t.Fatalf("Run: %v", ierr)
 	}
 	if !out.Truncated() || out.TruncationReason != TruncTokenBudget {
 		t.Errorf("expected token_budget truncation, got truncated=%v reason=%q", out.Truncated(), out.TruncationReason)
@@ -595,9 +595,9 @@ func TestRun_StopErrorAfterToolsYieldsTypedError(t *testing.T) {
 // completion produced no text — never text carried over from an earlier
 // turn. An earlier turn's "thinking out loud" must not leak into the
 // outcome as a fake answer. The two trailing empty responses exhaust the
-// empty-turn-nudge cap (maxEmptyTurnNudges=2) before the loop breaks, so
-// the assertions below still exercise a genuine "model finished with
-// nothing" turn.
+// empty-turn-nudge cap (maxEmptyTurnNudges=2) and the run ends as
+// [TruncNoAnswer], an [*IncompleteError] carrying the Outcome whose FinalText
+// is the empty last completion's.
 func TestRun_ToolOnlyFinalTurnEmptiesFinalText(t *testing.T) {
 	withText := toolResp("c1", "ghost", `{}`, 5, 2)
 	withText.resp.Text = "thinking out loud"
@@ -611,8 +611,8 @@ func TestRun_ToolOnlyFinalTurnEmptiesFinalText(t *testing.T) {
 	r := NewRunner(fc, nil, "sys")
 
 	out, err := r.Run(context.Background(), "task")
-	if err != nil {
-		t.Fatalf("Run: %v", err)
+	if ierr := incompleteErr(out, err, TruncNoAnswer); ierr != nil {
+		t.Fatalf("Run: %v", ierr)
 	}
 	if out.FinalText != "" {
 		t.Errorf("FinalText = %q, want empty: the final turn produced no text and earlier-turn text must never leak", out.FinalText)
@@ -741,7 +741,7 @@ func TestAssistantMessageTextGuard(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			msg := assistantMessage(tt.resp)
+			msg := tt.resp.Message()
 			if !reflect.DeepEqual(msg.Content, tt.want) {
 				t.Fatalf("Content = %#v, want %#v", msg.Content, tt.want)
 			}

@@ -12,30 +12,11 @@ import (
 	"github.com/dpoage/llmkit"
 )
 
-// ErrUnknownRun reports that a [Source] has no record of the requested run.
-// Match it with errors.Is.
-var ErrUnknownRun = errors.New("agent: unknown run")
-
 // ErrReplayDiverged reports that a replayed run's tool calls or wire
 // requests no longer match the recorded sequence. A diverged replay FAILS
 // [Runner.Run] with an error wrapping this sentinel instead of finishing
 // with a wrong answer. Match it with errors.Is.
 var ErrReplayDiverged = errors.New("agent: replay diverged")
-
-// Source is the read side of recording: the ordered events of one run.
-// [Transcript] and the JSONL sink ([JSONL]) implement it; store/sqlite does
-// in a later round. [NewReplayClient] rebuilds a run's completions, and its
-// [ReplayClient.Tools] serve the recorded tool results, from any Source —
-// replay never depends on a JSONL file existing.
-//
-// Events returns the run's events in emission order; the caller owns the
-// returned slice. A Source with no record of run wraps [ErrUnknownRun] —
-// never an empty success.
-type Source interface {
-	// Events returns the run's events in emission order. run is the id the
-	// events carry ([llmkit.RunID]).
-	Events(ctx context.Context, run llmkit.RunID) ([]llmkit.Event, error)
-}
 
 // ReplayClient is an [llmkit.Client] that serves a fixed sequence of recorded
 // responses in order, instead of calling a real provider. It is the building
@@ -64,11 +45,22 @@ type Source interface {
 // record, tool-call mismatch — fails the same way, wrapping
 // [ErrReplayDiverged]. Complete refuses to serve further responses past it.
 //
+// Calls a [ToolPolicy] denied in the recorded run are NOT served by the
+// recorded tools: the recorded denial is a policy decision, not a tool
+// result. Their names stay registered in Tools, so a caller's own policy
+// still sees them. Install [WithToolPolicy] with [ReplayClient.ToolPolicy]
+// to reproduce the recorded denials, or with a policy of your own to decide
+// afresh.
+//
+// Tools other than [ReplayClient.Tools] execute live, and their results are
+// never compared with the record.
+//
 // A divergence in the run's FINAL tool turn can end the run before another
-// Complete happens (a recording truncated at its step cap, or a run that
-// finishes cleanly), so Run may return nil with the divergence still set.
-// Callers MUST assert [ReplayClient.Err] returns nil after a replayed run —
-// a diverged replay is a failed evaluation even when Run itself succeeded.
+// Complete happens: a recording that stopped at its step cap replays to the
+// same limit and Run returns an [*IncompleteError]. [ReplayClient.Err] is
+// the ONLY report of it: callers MUST assert it returns nil after a
+// replayed run — a diverged replay is a failed evaluation whatever Run
+// returned.
 //
 // ReplayClient is safe for concurrent use, though a single Runner calls it
 // sequentially.
@@ -103,7 +95,7 @@ type replayStep struct {
 //
 // caps is returned from Capabilities; pass a profile matching the recorded
 // model (or zero when it does not matter for the code under test).
-func NewReplayClient(src Source, run llmkit.RunID, caps llmkit.Capabilities) (*ReplayClient, error) {
+func NewReplayClient(src llmkit.Source, run llmkit.RunID, caps llmkit.Capabilities) (*ReplayClient, error) {
 	if src == nil {
 		return nil, errors.New("agent: nil event source")
 	}
@@ -120,7 +112,7 @@ func NewReplayClient(src Source, run llmkit.RunID, caps llmkit.Capabilities) (*R
 		switch {
 		case ev.Kind == llmkit.KindToolRun && ev.ToolRun != nil:
 			pending = append(pending, ev.ToolRun.Call.ID)
-			rc.set.add(ev.Step, *ev.ToolRun)
+			rc.set.add(ev.Step, len(rc.responses)-1, *ev.ToolRun)
 		case ev.Kind == llmkit.KindCompletion && ev.Completion != nil && ev.Completion.Err == "":
 			rc.responses = append(rc.responses, replayStep{
 				resp:          ev.Completion.Response,
@@ -137,8 +129,10 @@ func NewReplayClient(src Source, run llmkit.RunID, caps llmkit.Capabilities) (*R
 }
 
 // NewReplayClientFromResponses builds a ReplayClient that serves resps in
-// order without any tool-call structure validation. Useful for hand-scripted
-// tests.
+// order. It is the scripted test double: no tool-call structure is
+// validated, no recorded tool set exists (Tools is empty, ToolPolicy allows
+// every call), and the client never diverges except by running past the
+// last response. To replay a recorded run, use [NewReplayClient].
 func NewReplayClientFromResponses(resps []llmkit.Response, caps llmkit.Capabilities) *ReplayClient {
 	rc := &ReplayClient{caps: caps, set: &replayToolSet{}}
 	for _, r := range resps {
@@ -211,20 +205,29 @@ func matchToolIDs(step int, want, got []string) error {
 	return nil
 }
 
-// replayedToolCall is one recorded tool call, with its step and error/denial marks.
+// replayedToolCall is one recorded, served tool call, with its step and error mark.
 type replayedToolCall struct {
-	call       llmkit.ToolCall
-	result     string
-	isError    bool
-	denied     bool
-	denyReason string
-	step       int
-	used       bool
+	call    llmkit.ToolCall
+	result  string
+	isError bool
+	step    int
+	used    bool
 }
 
+// replayedDenial is one call a [ToolPolicy] denied in the recorded run.
+type replayedDenial struct {
+	call   llmkit.ToolCall
+	reason string
+}
+
+// replayStepCalls is one recorded tool turn: the calls a tool must serve and
+// the calls a policy must deny, plus resp, the index of the recorded response
+// that requested them.
 type replayStepCalls struct {
-	step  int
-	calls []replayedToolCall
+	step    int
+	resp    int
+	calls   []replayedToolCall
+	denials []replayedDenial
 }
 
 // replayToolSet is a [ReplayClient]'s recorded tool calls, grouped by step
@@ -232,36 +235,50 @@ type replayStepCalls struct {
 // Matching is by (name, arguments) over the UNCONSUMED calls of the current
 // step — not a strict cursor — so replay is deterministic under
 // [WithParallelTools] however the calls interleave; an exhausted step
-// advances to the next recorded tool turn.
+// advances to the next recorded tool turn. Denied calls are held apart from
+// the served ones: a denial is decided by the policy, so it never blocks a
+// step from advancing, but its name is still registered.
 type replayToolSet struct {
 	groups []replayStepCalls
 	gi     int
 }
 
-func (ts *replayToolSet) add(step int, tre llmkit.ToolRunEvent) {
+// add files one recorded ToolRun under step; resp is the index of the
+// recorded response that requested it.
+func (ts *replayToolSet) add(step, resp int, tre llmkit.ToolRunEvent) {
 	if len(ts.groups) == 0 || ts.groups[len(ts.groups)-1].step != step {
-		ts.groups = append(ts.groups, replayStepCalls{step: step})
+		ts.groups = append(ts.groups, replayStepCalls{step: step, resp: resp})
 	}
 	g := &ts.groups[len(ts.groups)-1]
+	if tre.Denied {
+		g.denials = append(g.denials, replayedDenial{call: tre.Call, reason: tre.DenyReason})
+		return
+	}
 	g.calls = append(g.calls, replayedToolCall{
-		call:       tre.Call,
-		result:     tre.Result,
-		isError:    tre.IsError,
-		denied:     tre.Denied,
-		denyReason: tre.DenyReason,
-		step:       step,
+		call:    tre.Call,
+		result:  tre.Result,
+		isError: tre.IsError,
+		step:    step,
 	})
 }
 
+// tools registers every recorded call name, denied-only names included, so
+// a policy the caller installs sees every call the model made.
 func (ts *replayToolSet) tools(rc *ReplayClient) []Tool {
 	var names []string
 	seen := map[string]bool{}
+	note := func(name string) {
+		if !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
+	}
 	for _, g := range ts.groups {
 		for _, c := range g.calls {
-			if !seen[c.call.Name] {
-				seen[c.call.Name] = true
-				names = append(names, c.call.Name)
-			}
+			note(c.call.Name)
+		}
+		for _, d := range g.denials {
+			note(d.call.Name)
 		}
 	}
 	tools := make([]Tool, 0, len(names))
@@ -277,14 +294,59 @@ func (ts *replayToolSet) tools(rc *ReplayClient) []Tool {
 // run fully offline — zero live tool executions. A run that recorded no tool
 // calls yields an empty slice.
 //
+// Every recorded call name is registered, including names the recorded
+// policy only ever denied; denied calls themselves are never served (see
+// [ReplayClient.ToolPolicy]).
+//
 // A call with no unconsumed match records this client's divergence (see
 // [ReplayClient]) and is returned as the tool's error; the harness renders
 // it as data, and the next Complete refuses to serve.
+//
+// Only these tools are compared with the record. Any other tool a caller
+// passes to the Runner executes live, and its result is never compared.
 func (rc *ReplayClient) Tools() []Tool {
 	if rc.tools == nil {
 		return []Tool{}
 	}
 	return slices.Clone(rc.tools)
+}
+
+// ToolPolicy returns a [ToolPolicy] that reproduces the recorded run's
+// policy denials: it denies a call, with the recorded reason, if and only
+// if its tool-call ID is the ID of a call the record denied in the current
+// recorded tool turn, and allows every other call. Records carry call IDs
+// by construction — the Runner cannot feed back a tool result for a call
+// without one — and replayed responses carry the recorded IDs verbatim.
+// The Runner renders the denial with its own denial renderer and marks the
+// replayed ToolRun event Denied with that reason. Install it with
+// [WithToolPolicy] when the record holds denials and the replay has no
+// policy of its own.
+//
+// It never overrides a caller's policy: a caller that composes its own
+// policy simply does not install this one. A record with no denials, or a
+// zero-value ReplayClient, yields a policy that allows every call.
+func (rc *ReplayClient) ToolPolicy() ToolPolicy {
+	return ToolPolicyFunc(func(_ context.Context, call *llmkit.ToolCall) error {
+		rc.mu.Lock()
+		defer rc.mu.Unlock()
+		if rc.set == nil {
+			return nil
+		}
+		// The current turn is the one the last served response requested.
+		for gi := range rc.set.groups {
+			g := &rc.set.groups[gi]
+			if g.resp != rc.idx-1 {
+				continue
+			}
+			for _, d := range g.denials {
+				if d.call.ID == call.ID {
+					return errors.New(d.reason)
+				}
+			}
+			break
+		}
+		return nil
+	})
 }
 
 // recordDiverged keeps the first divergence; caller holds rc.mu.
@@ -294,11 +356,15 @@ func (rc *ReplayClient) recordDiverged(err error) {
 	}
 }
 
-// Err returns the replay's first divergence, or nil when the replay matched
-// throughout. A divergence in the run's FINAL tool turn can end the run
-// before another Complete happens, so Run may return nil with a divergence
-// still set: callers MUST assert Err() == nil after a replayed run. The
-// error wraps [ErrReplayDiverged] and names the recorded step.
+// Err returns the replay's first recorded divergence, or nil when none was
+// recorded. A divergence in the run's final tool turn can end the run
+// before another Complete happens; Err is the only report of it, so callers
+// MUST assert Err() == nil after a replayed run. A recorded call the replay
+// never serves in its final tool turn — for example one a policy stricter than
+// the recorded one denies — records no divergence, so Err does not report
+// it. Results of tools that are not [ReplayClient.Tools] are never
+// compared with the record. The error wraps [ErrReplayDiverged] and names
+// the recorded step.
 func (rc *ReplayClient) Err() error {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
@@ -369,19 +435,15 @@ func (rc *ReplayClient) serveCall(name string, args json.RawMessage) (string, er
 }
 
 // serveRecorded renders one recorded call's outcome the way the original run
-// fed it to the model: a denial re-renders the denial text; an error strips
-// the "ERROR: " prefix so the Runner's renderer re-adds it (the fed-back
-// result is byte-identical and the history keeps the is_error mark); a
-// success returns the recorded result verbatim.
+// fed it to the model: an error strips the "ERROR: " prefix so the Runner's
+// renderer re-adds it (the fed-back result is byte-identical and the history
+// keeps the is_error mark); a success returns the recorded result verbatim.
+// Denied calls never reach here: they are not among the served calls.
 func serveRecorded(rec *replayedToolCall) (string, error) {
-	switch {
-	case rec.denied:
-		return "", fmt.Errorf("tool %s denied: %s", rec.call.Name, rec.denyReason)
-	case rec.isError:
+	if rec.isError {
 		return "", errors.New(strings.TrimPrefix(rec.result, "ERROR: "))
-	default:
-		return rec.result, nil
 	}
+	return rec.result, nil
 }
 
 func argsString(args json.RawMessage) string {

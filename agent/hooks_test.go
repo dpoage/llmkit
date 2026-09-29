@@ -28,9 +28,6 @@ type hookRecorder struct {
 	ends        []ToolEvent
 	healthTools []string
 	healthErrs  []*ToolHealthError
-	compactions []CompactionEvent
-	finalizes   []TruncationReason
-	repairs     int
 }
 
 func newHookRecorder() *hookRecorder { return &hookRecorder{} }
@@ -79,24 +76,6 @@ func (h *hookRecorder) hooks() Hooks {
 			defer h.mu.Unlock()
 			h.healthTools = append(h.healthTools, tool)
 			h.healthErrs = append(h.healthErrs, he)
-		},
-		Compaction: func(_ context.Context, ev CompactionEvent) {
-			h.record("compact")
-			h.mu.Lock()
-			defer h.mu.Unlock()
-			h.compactions = append(h.compactions, ev)
-		},
-		Repair: func(context.Context) {
-			h.record("repair")
-			h.mu.Lock()
-			defer h.mu.Unlock()
-			h.repairs++
-		},
-		Finalize: func(_ context.Context, reason TruncationReason) {
-			h.record("finalize:" + string(reason))
-			h.mu.Lock()
-			defer h.mu.Unlock()
-			h.finalizes = append(h.finalizes, reason)
 		},
 	}
 }
@@ -299,12 +278,12 @@ func TestHook_ToolLifecycle_UnknownToolDoesNotFire(t *testing.T) {
 	}
 }
 
-// TestHook_Compaction_FiresOnRealPrune verifies Compaction fires exactly when
-// a compaction pass actually pruned, with Before/After token estimates and the
-// pruned-message count. A threshold crossing with nothing to reclaim is
-// silent: the first crossing (4 results, all inside the recent window) must
-// NOT fire; the second (5 results) prunes exactly one.
-func TestHook_Compaction_FiresOnRealPrune(t *testing.T) {
+// TestCompaction_EventOnRealPruneOnly verifies the Compaction event is
+// emitted exactly when a compaction pass actually pruned, with Before/After
+// token estimates and the pruned-message count. A threshold crossing with
+// nothing to reclaim is silent: the first crossing (4 results, all inside the
+// recent window) must NOT emit; the second (5 results) prunes exactly one.
+func TestCompaction_EventOnRealPruneOnly(t *testing.T) {
 	steps := make([]scriptStep, 0, 6)
 	for i := range 5 {
 		steps = append(steps, toolResp(fmt.Sprintf("c%d", i), "big", `{}`, 10, 4))
@@ -312,9 +291,7 @@ func TestHook_Compaction_FiresOnRealPrune(t *testing.T) {
 	steps = append(steps, textResp("done", 5, 2))
 	fc := newFakeClient(steps...)
 
-	rec := newHookRecorder()
 	r := NewRunner(fc, []Tool{bigResultTool{name: "big"}}, "sys",
-		WithHooks(rec.hooks()),
 		WithLimits(Limits{HistoryTokenBudget: 3500}))
 
 	out, err := r.Run(context.Background(), "task")
@@ -324,10 +301,22 @@ func TestHook_Compaction_FiresOnRealPrune(t *testing.T) {
 	if out.FinalText != "done" {
 		t.Fatalf("FinalText = %q", out.FinalText)
 	}
-	if len(rec.compactions) != 1 {
-		t.Fatalf("Compaction fired %d times, want exactly 1 (events: %v)", len(rec.compactions), rec.events)
+	var compactions []llmkit.Event
+	for i, e := range out.Transcript.Record {
+		if e.Kind != llmkit.KindCompaction {
+			continue
+		}
+		compactions = append(compactions, e)
+		// The event precedes the completion that consumes the compacted
+		// history and carries that completion's step.
+		if next := out.Transcript.Record[i+1]; next.Kind != llmkit.KindCompletion || next.Step != e.Step {
+			t.Errorf("compaction at step %d followed by %s at step %d, want the completion at the same step", e.Step, next.Kind, next.Step)
+		}
 	}
-	ev := rec.compactions[0]
+	if len(compactions) != 1 {
+		t.Fatalf("compaction events = %d, want exactly 1", len(compactions))
+	}
+	ev := compactions[0].Compaction
 	if ev.Pruned != 1 {
 		t.Errorf("Pruned = %d, want 1", ev.Pruned)
 	}
@@ -340,27 +329,17 @@ func TestHook_Compaction_FiresOnRealPrune(t *testing.T) {
 		t.Errorf("BeforeTokens = %d, want >= 5000 (five 4000-byte results)", ev.BeforeTokens)
 	}
 	// step is the completion that will consume the compacted history: the
-	// sixth, after five tool turns — and it must be the SAME number that
-	// completion's Before/AfterCompletion report (one joinable base).
-	if ev.Step != 6 {
-		t.Errorf("Step = %d, want 6", ev.Step)
-	}
-	compactIdx := -1
-	for i, e := range rec.events {
-		if e == "compact" {
-			compactIdx = i
-		}
-	}
-	if compactIdx < 0 || compactIdx+1 >= len(rec.events) || rec.events[compactIdx+1] != "before:6" {
-		t.Errorf("compaction at events[%d] not followed by before:6 (events: %v)", compactIdx, rec.events)
+	// sixth, after five tool turns.
+	if compactions[0].Step != 6 {
+		t.Errorf("Step = %d, want 6", compactions[0].Step)
 	}
 }
 
-// TestHook_Finalize_FiresWithStopReason verifies Finalize fires exactly when
-// the reserved finalization turn is taken, with the stop condition as reason,
-// that the finalization completion is tool-less, and that a plain Run (no
-// finalize prompt) never fires it.
-func TestHook_Finalize_FiresWithStopReason(t *testing.T) {
+// TestFinalization_TurnIsToolLessAndPlainRunSkipsIt verifies the reserved
+// finalization turn is taken when a finalize prompt is set — Outcome.Finalized
+// is true and the finalization completion carries no tools — and that a plain
+// Run (no finalize prompt) never takes it.
+func TestFinalization_TurnIsToolLessAndPlainRunSkipsIt(t *testing.T) {
 	fc := newFakeClient(
 		toolResp("c1", "echo", `{"v":"x"}`, 10, 4),
 		textResp("final answer under pressure", 5, 2),
@@ -378,8 +357,8 @@ func TestHook_Finalize_FiresWithStopReason(t *testing.T) {
 	if !out.Truncated() || out.TruncationReason != TruncMaxIterations {
 		t.Fatalf("Truncated=%v reason=%q, want TruncMaxIterations", out.Truncated(), out.TruncationReason)
 	}
-	if len(rec.finalizes) != 1 || rec.finalizes[0] != TruncMaxIterations {
-		t.Fatalf("Finalize calls = %v, want exactly [TruncMaxIterations]", rec.finalizes)
+	if !out.Finalized {
+		t.Fatal("Outcome.Finalized = false, want true after the finalization turn")
 	}
 	// The finalization completion is the second one: the Before hook must show
 	// it carrying NO tools.
@@ -394,29 +373,27 @@ func TestHook_Finalize_FiresWithStopReason(t *testing.T) {
 		t.Errorf("FinalText = %q, want the finalization turn's output", out.FinalText)
 	}
 
-	// Plain Run has no finalize prompt: the same stop condition must NOT fire
-	// Finalize.
-	rec2 := newHookRecorder()
+	// Plain Run has no finalize prompt: the same stop condition must NOT take
+	// a finalization turn.
 	fc2 := newFakeClient(
 		toolResp("c1", "echo", `{"v":"x"}`, 10, 4),
 		textResp("unused", 5, 2),
 	)
 	r2 := NewRunner(fc2, []Tool{echoTool{name: "echo"}}, "sys",
-		WithHooks(rec2.hooks()),
 		WithLimits(Limits{MaxIterations: 1}))
-	if _, err := r2.Run(context.Background(), "task"); err != nil {
-		t.Fatalf("Run: %v", err)
+	out2, err2 := r2.Run(context.Background(), "task")
+	if ierr := incompleteErr(out2, err2, TruncMaxIterations); ierr != nil {
+		t.Fatalf("Run: %v", ierr)
 	}
-	if len(rec2.finalizes) != 0 {
-		t.Errorf("Finalize fired %d times on the plain Run path, want 0", len(rec2.finalizes))
+	if out2.Finalized {
+		t.Error("Outcome.Finalized = true on the plain Run path, want false")
 	}
 }
 
-// TestHook_Repair_FiresOnceAtRepairStart verifies the Repair hook fires at
-// the start of RunJSON's single repair pass and the repair completion goes
-// through the Before/After pair with a FRESH outcome (step restarts at 0) and
+// TestRunJSON_RepairTurnIsSingleFreshUserTurn verifies RunJSON's single
+// repair pass goes through the Before/After hook pair at the next step with
 // the parse-failure prompt as its only message.
-func TestHook_Repair_FiresOnceAtRepairStart(t *testing.T) {
+func TestRunJSON_RepairTurnIsSingleFreshUserTurn(t *testing.T) {
 	fc := newFakeClient(
 		textResp("not json at all", 5, 5),
 		textResp(validItemJSON, 5, 5),
@@ -428,10 +405,7 @@ func TestHook_Repair_FiresOnceAtRepairStart(t *testing.T) {
 	if _, err := r.RunJSON(context.Background(), "task", nil, &out); err != nil {
 		t.Fatalf("RunJSON: %v", err)
 	}
-	if rec.repairs != 1 {
-		t.Fatalf("repairs = %d, want 1", rec.repairs)
-	}
-	want := []string{"before:1", "after:1", "repair", "before:2", "after:2"}
+	want := []string{"before:1", "after:1", "before:2", "after:2"}
 	if len(rec.events) != len(want) {
 		t.Fatalf("events = %v, want %v", rec.events, want)
 	}
@@ -494,11 +468,11 @@ func TestJSONLOnErr_FiresOnUnwritableDir(t *testing.T) {
 }
 
 // TestHooks_FullRunSequence pins the FULL hook sequence of one RunJSON: a
-// tool-call turn, an unparseable final answer, then the repair pass (Repair
-// at entry, then the repair completion's Before/After pair). The repair's
-// step continues the parent run's sequence: the parent recorded steps 1
-// and 2, so the repair completion reports step 3 — consumers joining hooks
-// and transcript events on Step see one monotonic sequence.
+// tool-call turn, an unparseable final answer, then the repair completion's
+// Before/After pair. The repair's step continues the parent run's sequence:
+// the parent recorded steps 1 and 2, so the repair completion reports step
+// 3 — consumers joining hooks and transcript events on Step see one
+// monotonic sequence.
 func TestHooks_FullRunSequence(t *testing.T) {
 	fc := newFakeClient(
 		toolResp("c1", "echo", `{"v":"hi"}`, 10, 4),
@@ -516,7 +490,6 @@ func TestHooks_FullRunSequence(t *testing.T) {
 		"before:1", "after:1", // main turn 1
 		"start:1:echo", "end:1:echo", // tool lifecycle
 		"before:2", "after:2", // main turn 2 (unparseable final answer)
-		"repair",              // repair pass entry
 		"before:3", "after:3", // repair completion — continues the parent sequence
 	}
 	if len(rec.events) != len(want) {
@@ -526,8 +499,5 @@ func TestHooks_FullRunSequence(t *testing.T) {
 		if rec.events[i] != want[i] {
 			t.Errorf("events[%d] = %q, want %q", i, rec.events[i], want[i])
 		}
-	}
-	if rec.repairs != 1 {
-		t.Errorf("repairs = %d, want 1", rec.repairs)
 	}
 }

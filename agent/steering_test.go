@@ -386,8 +386,8 @@ func TestSteeringPendingAfterLimitStop(t *testing.T) {
 	cl.releaseNow(0)
 	waitDone(t, done)
 
-	if err != nil {
-		t.Fatalf("run: %v", err)
+	if ierr := incompleteErr(outcome, err, TruncMaxIterations); ierr != nil {
+		t.Fatalf("run: %v", ierr)
 	}
 	if outcome.TruncationReason != TruncMaxIterations {
 		t.Fatalf("TruncationReason = %q, want %q", outcome.TruncationReason, TruncMaxIterations)
@@ -418,8 +418,8 @@ func TestSteeringContinueDeliversPending(t *testing.T) {
 	s.FollowUp(llmkit.Text("FOLLOW-PEND"))
 	cl1.releaseNow(0)
 	waitDone(t, done1)
-	if err1 != nil {
-		t.Fatalf("run 1: %v", err1)
+	if ierr := incompleteErr(out1, err1, TruncMaxIterations); ierr != nil {
+		t.Fatalf("run 1: %v", ierr)
 	}
 	if s.Pending() != 2 {
 		t.Fatalf("Pending = %d after the limit stop, want 2", s.Pending())
@@ -718,7 +718,7 @@ func TestSteeringSteerRescueDoesNotConsumeNudgeBudget(t *testing.T) {
 	}()
 
 	// Two steer-rescued empty turns, then genuinely empty turns that ride
-	// the nudge path.
+	// the nudge path until the budget is spent and the run ends TruncNoAnswer.
 	cl.waitServed(t, 0)
 	s.Steer(llmkit.Text("STEER-A"))
 	cl.releaseNow(0)
@@ -731,8 +731,8 @@ func TestSteeringSteerRescueDoesNotConsumeNudgeBudget(t *testing.T) {
 	}
 	waitDone(t, done)
 
-	if err != nil {
-		t.Fatalf("run: %v", err)
+	if ierr := incompleteErr(outcome, err, TruncNoAnswer); ierr != nil {
+		t.Fatalf("run: %v (the two nudges ran out after the steer rescues, so the run ends unanswered)", ierr)
 	}
 	reqs := cl.requests()
 	// The request in which a steer turn FIRST appears must be free of the

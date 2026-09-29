@@ -284,12 +284,12 @@ func ExampleSteering() {
 	// undelivered: 0
 }
 
-// ExampleSource records a run into the durable JSONL sink, then reads it
-// back through the Source interface — the same read side NewReplayClient
+// ExampleJSONLSink_Events records a run into the durable JSONL sink, then reads it
+// back through the llmkit.Source interface — the same read side NewReplayClient
 // replays from. Every event a Runner emits lands in the file: start, one
 // completion per model turn, one tool_run per executed call, and the
 // closing finalize.
-func ExampleSource() {
+func ExampleJSONLSink_Events() {
 	dir, err := os.MkdirTemp("", "llmkit-example")
 	if err != nil {
 		log.Fatal(err)
@@ -323,7 +323,7 @@ func ExampleSource() {
 		log.Fatal(err)
 	}
 
-	// The sink reads back any recorded run by id — the Source seam replay
+	// The sink reads back any recorded run by id — the llmkit.Source seam replay
 	// builds on.
 	src := agent.JSONL(dir, nil)
 	events, err := src.Events(context.Background(), "demo-run")
@@ -335,8 +335,10 @@ func ExampleSource() {
 	}
 
 	// Replay the recorded run offline: the client's bound tools serve the
-	// recorded results, and Err() must be nil — a non-nil value means the
-	// replay diverged from its record.
+	// recorded results (tools passed in place of rc.Tools() would run live and
+	// go uncompared), and Err() must be nil — a non-nil value means the
+	// replay diverged from its record. This record has no policy denials; a
+	// record with denials also needs agent.WithToolPolicy(rc.ToolPolicy()).
 	rc, err := agent.NewReplayClient(src, "demo-run", llmkit.Capabilities{})
 	if err != nil {
 		log.Fatal(err)

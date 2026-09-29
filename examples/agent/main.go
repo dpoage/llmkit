@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -120,21 +121,29 @@ func run() error {
 
 	log.Printf("task: %s (parallel=%t)", *task, *parallel)
 	outcome, err := runner.Run(context.Background(), *task)
-	if err != nil {
+	var incomplete *agent.IncompleteError
+	switch {
+	case errors.As(err, &incomplete):
+		// A limit stopped the run before the model finished: its last text
+		// is not an answer.
+		outcome = incomplete.Outcome
+		fmt.Println()
+		fmt.Println("stopped:   ", incomplete.Reason, "(no final answer)")
+		if outcome.FinalText != "" {
+			fmt.Println("last text: ", outcome.FinalText)
+		}
+	case err != nil:
 		return fmt.Errorf("run: %w", err)
-	}
-
-	fmt.Println()
-	if outcome.FinalText != "" {
-		fmt.Println("final:     ", outcome.FinalText)
-	} else {
-		fmt.Println("final:      (no assistant text produced)")
+	default:
+		fmt.Println()
+		if outcome.FinalText != "" {
+			fmt.Println("final:     ", outcome.FinalText)
+		} else {
+			fmt.Println("final:      (no assistant text produced)")
+		}
 	}
 	u := outcome.Usage
 	fmt.Printf("usage:      input=%d output=%d over %d turn(s)\n", u.InputTokens, u.OutputTokens, outcome.Iterations)
-	if outcome.Truncated() {
-		fmt.Println("truncated: ", outcome.TruncationReason)
-	}
 	return nil
 }
 

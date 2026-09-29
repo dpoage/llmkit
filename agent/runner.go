@@ -3,12 +3,10 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"github.com/dpoage/llmkit"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -31,14 +29,16 @@ type Runner struct {
 	systemPrompt string
 	limits       Limits
 
-	// observer, when non-nil, is the run's single durable event sink (see
-	// [WithObserver]).
-	observer llmkit.Observer
+	// observers are the durable event sinks, in registration order (see
+	// [WithObserver]); every run's chain fans out to the in-memory transcript
+	// first and then to each of these.
+	observers []llmkit.Observer
 	// maxTokens caps output tokens per completion (see [WithMaxTokens]); zero
 	// lets the adapter apply its own default.
 	maxTokens int
-	// hooks holds the optional observer callbacks (see [Hooks] and [WithHooks]).
-	hooks Hooks
+	// hooks holds every [WithHooks] registration, in registration order (see
+	// [Hooks]); the fire helpers in record.go walk it.
+	hooks []Hooks
 	// requestPolicy, when non-nil, shapes every completion request (see
 	// [RequestPolicy] and [WithRequestPolicy]).
 	requestPolicy RequestPolicy
@@ -65,22 +65,26 @@ func WithLimits(l Limits) Option {
 	return func(r *Runner) { r.limits = l }
 }
 
-// WithObserver installs obs as the Runner's single durable event sink: every
-// [llmkit.Event] the Runner emits — start, completion, tool runs, compaction,
-// steering, finalize — fans out to the in-memory [Transcript] first and obs
-// last (see [llmkit.Observers]). The transcript always backs
-// [Outcome.Transcript]; obs is the durable record.
+// WithObserver appends obs to the Runner's event sinks: every [llmkit.Event]
+// the Runner emits — start, completion, tool runs, compaction, steering,
+// finalize — fans out to the in-memory [Transcript] first and then to each
+// WithObserver sink in registration order (see [llmkit.Observers], whose
+// semantics apply: a nil Observer interface value is skipped, and a panic in
+// one sink propagates at once, so later sinks do not see that event). The
+// transcript always backs [Outcome.Transcript]; the sinks are the durable
+// record and side channels (spend ledgers, metrics, traces).
 //
 // Emission happens on the loop goroutine, so obs must be safe for concurrent
 // use only because concurrent Run calls on one Runner are allowed — each run
-// emits from its own goroutine ([JSONL] is safe). The sink reports its own
+// emits from its own goroutine ([JSONL] is safe). A sink reports its own
 // failures through the callback it was constructed with ([JSONL]) and never
-// fails the run. A Runner has exactly ONE durable sink: a second
-// WithObserver replaces the first rather than stacking a second history —
-// compose side observers (metrics, traces) ahead of it with
-// [llmkit.Observers] instead.
+// fails the run. The Runner does not enforce one durable history: register at
+// most one sink that records the run's history. A second [JSONL] on a
+// different directory writes a second copy of every run; one on the same
+// directory records nothing, because its exclusive create of each run's file
+// fails, and it reports that refusal through its onErr.
 func WithObserver(obs llmkit.Observer) Option {
-	return func(r *Runner) { r.observer = obs }
+	return func(r *Runner) { r.observers = append(r.observers, obs) }
 }
 
 // WithMaxTokens caps output tokens per completion. Zero uses the adapter
@@ -91,8 +95,9 @@ func WithMaxTokens(n int) Option {
 
 // WithBudgetPool makes the Runner share pool across its runs: the Runner
 // checks the pool once per main-loop turn (ErrBudgetExhausted stops the run
-// cleanly with TruncBudgetPool) and charges it after every successful
-// completion with that completion's llmkit.Usage.ChargeableTokens
+// with TruncBudgetPool, which Run reports as an [*IncompleteError]) and
+// charges it after every successful completion with that completion's
+// llmkit.Usage.ChargeableTokens
 // (CacheReadWeight-discounted). Continuation, finalization, and repair
 // completions are charged without a fresh check. A nil pool — the zero
 // default — is unlimited: no check, no charge. The pool may be shared by
@@ -104,6 +109,12 @@ func WithBudgetPool(pool *BudgetPool) Option {
 
 // NewRunner builds a Runner bound to client, the given tools, and a system
 // prompt. Options tune limits, transcript persistence, and output token caps.
+//
+// NewRunner panics if tools contains a nil entry or two tools whose
+// Def().Name is the same: the model addresses a tool by name alone, so a
+// duplicate would advertise one tool's schema and dispatch another. The panic
+// value is a string naming the tool index (nil) or the duplicated name and
+// both indexes.
 func NewRunner(client llmkit.Client, tools []Tool, systemPrompt string, opts ...Option) *Runner {
 	r := &Runner{
 		client:       client,
@@ -126,17 +137,18 @@ func NewRunner(client llmkit.Client, tools []Tool, systemPrompt string, opts ...
 // fresh one.
 //
 // Pass [Attach] to carry image or document blocks on the task turn.
-
+//
 // Pass [WithSteering] to inject queued user turns while the run is in
 // flight ([Steering]).
 //
-// A limit stop is not an error: it returns an [Outcome] with a non-empty
-// [Outcome.TruncationReason] and the last completion's text in
-// [Outcome.FinalText]. Every other failure returns a non-nil error next to
-// the Outcome: a failed completion, a [RequestPolicy] error,
-// [ErrSteeringInUse], context cancellation, or [StopReasonError]. The
-// returned Outcome's Transcript is always non-nil, even on error, capturing
-// whatever happened before the failure.
+// A limit stop returns an [*IncompleteError] next to the Outcome, whose
+// [Outcome.TruncationReason] is non-empty and whose [Outcome.FinalText] is the
+// last completion's text, not necessarily an answer; the error's Outcome is
+// that same pointer, and [Continue] accepts it. Every other failure returns
+// its own non-nil error next to the Outcome: a failed completion, a
+// [RequestPolicy] error, [ErrSteeringInUse], context cancellation, or
+// [StopReasonError]. The returned Outcome's Transcript is always non-nil,
+// even on error, capturing whatever happened before the failure.
 //
 // Max-tokens continuation: when a turn stops at the output token cap
 // (StopMaxTokens) with no tool calls, Run makes ONE extra continuation
@@ -149,7 +161,6 @@ func NewRunner(client llmkit.Client, tools []Tool, systemPrompt string, opts ...
 // completed rather than returned half-written. It costs at most one
 // additional completion per truncated turn and is reflected in the
 // Outcome's Iterations and Usage.
-
 func (r *Runner) Run(ctx context.Context, task string, opts ...RunOption) (outcome *Outcome, err error) {
 	var cfg runConfig
 	for _, opt := range opts {
@@ -158,114 +169,14 @@ func (r *Runner) Run(ctx context.Context, task string, opts ...RunOption) (outco
 	ctx, em := r.begin(ctx, cfg, task)
 	// Finalize closes every run, on every return path — clean finish,
 	// truncation stop, or error (see [emitFinalize]).
-	defer func() { r.emitFinalize(ctx, em, outcome) }()
+	returned := false
+	defer func() { r.emitFinalize(ctx, em, outcome, err, !returned) }()
 	outcome, err = r.run(ctx, em, cfg.seed, task, cfg.attach, "", nil, cfg.steering)
+	if err == nil && outcome.TruncationReason != "" {
+		err = &IncompleteError{Reason: outcome.TruncationReason, Outcome: outcome}
+	}
+	returned = true
 	return outcome, err
-}
-
-// runEmitter is one run's emission path: the in-memory [Transcript] (always
-// present; it backs [Outcome.Transcript]) plus the observer chain that fans
-// each event out to the transcript first and the single durable sink
-// ([WithObserver]) last — assembled once per run with [llmkit.Observers].
-type runEmitter struct {
-	tr  *Transcript
-	obs llmkit.Observer
-}
-
-// emit fans ev out through the run's chain, stamping only the run-level fact
-// the Runner owns: ParentRunID for a continued run. Step is each emission
-// site's to set.
-func (e runEmitter) emit(ctx context.Context, ev llmkit.Event) {
-	if e.tr.ParentRunID != "" {
-		ev.ParentRunID = e.tr.ParentRunID
-	}
-	e.obs.Observe(ctx, ev)
-}
-
-// begin arms a run: it mints (or adopts, via [WithRunID]) the run's
-// [llmkit.RunID], places it in the context every emitter reads, builds the
-// run's observer chain, and emits the run's Start event — the first event of
-// every run, so a sink can open its run record before the first Completion.
-func (r *Runner) begin(ctx context.Context, cfg runConfig, task string) (context.Context, runEmitter) {
-	runID := cfg.runID
-	if runID == "" {
-		runID = llmkit.NewRunID()
-	}
-	ctx = llmkit.WithRun(ctx, runID)
-	tr := NewTranscript()
-	tr.RunID, tr.ParentRunID = runID, cfg.parentRunID
-	em := runEmitter{tr: tr, obs: llmkit.Observers(tr, r.observer)}
-	ev := llmkit.NewEvent(ctx, llmkit.KindStart)
-	// A run opens OUTSIDE any turn: Start is Step 0 even when the context
-	// already carries a step — a nested Runner started from inside a
-	// parent's tool phase, or a caller pre-arming WithStep. The child run's
-	// turns number from 1 in their own right.
-	ev.Step = 0
-	ev.Start = &llmkit.StartEvent{Task: task, Tools: r.toolNames()}
-	em.emit(ctx, ev)
-	return ctx, em
-}
-
-// emitFinalize closes the run with the Finalize event on EVERY run end,
-// including error returns. Step carries the number of completed turns
-// (Outcome.Iterations); a failed completion does not advance it, so a run
-// whose only completion failed reports Step 0.
-func (r *Runner) emitFinalize(ctx context.Context, em runEmitter, o *Outcome) {
-	if o == nil {
-		// The run panicked mid-turn (a hook bug): no outcome exists. Still
-		// emit the Finalize — with zero counters — so a sink closes its
-		// record; the panic, not the event, is what propagates to the caller.
-		o = &Outcome{}
-	}
-	ev := llmkit.NewEvent(ctx, llmkit.KindFinalize)
-	ev.Step = o.Iterations
-	ev.Finalize = &llmkit.FinalizeEvent{
-		TruncationReason: string(o.TruncationReason),
-		Finalized:        o.Finalized,
-		Usage:            o.Usage,
-		FinalText:        o.FinalText,
-	}
-	em.emit(ctx, ev)
-}
-
-// steerEvent builds the Steer event for one delivered steering turn: Step is
-// the turn the message was delivered before (the completion about to run),
-// FollowUp marks a follow-up queued for the would-be finish.
-func steerEvent(ctx context.Context, msg llmkit.Message, followUp bool, step int) llmkit.Event {
-	ev := llmkit.NewEvent(ctx, llmkit.KindSteer)
-	ev.Step = step
-	ev.Steer = &llmkit.SteerEvent{Message: msg, FollowUp: followUp}
-	return ev
-}
-
-// toolRunEvent builds the ToolRun event for one dispatched call: the model's
-// call, the textual result exactly as fed to the model, and the error or
-// policy-denial marks. A denial carries Denied and DenyReason with no result
-// — the rendered denial text still rides the conversation as the
-// tool-result message, per [ToolPolicy]'s contract.
-func toolRunEvent(ctx context.Context, call llmkit.ToolCall, res toolResult, step int) llmkit.Event {
-	ev := llmkit.NewEvent(ctx, llmkit.KindToolRun)
-	ev.Step = step
-	tre := &llmkit.ToolRunEvent{Call: call}
-	if res.denied {
-		tre.Denied = true
-		tre.DenyReason = res.denyReason
-	} else {
-		tre.Result = res.result
-		tre.IsError = res.isErr
-	}
-	ev.ToolRun = tre
-	return ev
-}
-
-// toolNames lists the tool names offered to the model, in offer order — the
-// Start event's Tools payload.
-func (r *Runner) toolNames() []string {
-	names := make([]string, len(r.tools.defs))
-	for i, d := range r.tools.defs {
-		names[i] = d.Name
-	}
-	return names
 }
 
 // RunOption is a per-call option for [Runner.Run], [Runner.RunJSON], and
@@ -395,7 +306,13 @@ const maxEmptyTurnNudges = 2
 const emptyTurnNudge = "You made no tool call and produced no final answer. Continue: call a tool or emit your final answer now."
 
 func (r *Runner) run(ctx context.Context, em runEmitter, seed []llmkit.Message, task string, attach []llmkit.Block, finalizePrompt string, responseSchema json.RawMessage, steering *Steering) (*Outcome, error) {
-	outcome := &Outcome{Transcript: em.tr, RunID: em.tr.RunID}
+	s := &runState{
+		outcome:          &Outcome{Transcript: em.tr, RunID: em.tr.RunID},
+		finalizePrompt:   finalizePrompt,
+		responseSchema:   responseSchema,
+		compactThreshold: r.limits.HistoryTokenBudget,
+	}
+	outcome := s.outcome
 	// Bind before any work so a second concurrent run on the same handle
 	// cannot interleave its turns into this run's queue.
 	if steering != nil {
@@ -405,41 +322,35 @@ func (r *Runner) run(ctx context.Context, em runEmitter, seed []llmkit.Message, 
 		defer steering.unbind()
 	}
 
-	var messages []llmkit.Message
 	taskMsg := taskTurn(task, attach)
 	if len(seed) > 0 {
 		seed = trimDanglingToolTurn(seed)
-		messages = make([]llmkit.Message, 0, len(seed)+1)
-		messages = append(messages, seed...)
-		messages = append(messages, taskMsg)
+		s.messages = make([]llmkit.Message, 0, len(seed)+1)
+		s.messages = append(s.messages, seed...)
+		s.messages = append(s.messages, taskMsg)
 	} else {
-		messages = []llmkit.Message{taskMsg}
+		s.messages = []llmkit.Message{taskMsg}
 	}
 
 	// Snapshot the conversation into the Outcome on every return path so a caller
 	// that wants to continue this conversation ([Continue]) always has the latest
-	// history available, even from a truncated or erroring run. messages is
+	// history available, even from a truncated or erroring run. s.messages is
 	// reassigned throughout the loop; the deferred closure reads it by reference
 	// at return time.
-	defer func() { outcome.Messages = messages }()
+	defer func() { outcome.Messages = s.messages }()
 
 	// History-compaction state. toolNameByID lets a tool-result stub name the
 	// tool it answered; on a continued run the map starts from the seed's
 	// assistant tool calls, so a PRIOR run's results also stub with their
 	// real tool names instead of the generic fallback (see [compactStub]).
-	toolNameByID := map[string]string{}
-	for _, m := range messages {
+	s.toolNameByID = map[string]string{}
+	for _, m := range s.messages {
 		if m.Role == llmkit.RoleAssistant {
 			for _, call := range m.ToolCalls {
-				toolNameByID[call.ID] = call.Name
+				s.toolNameByID[call.ID] = call.Name
 			}
 		}
 	}
-	compactThreshold := r.limits.HistoryTokenBudget
-
-	// emptyTurnNudges counts how many empty/think-only turns have already
-	// been nudged this run (see [maxEmptyTurnNudges]).
-	emptyTurnNudges := 0
 
 	for {
 		// Stop before the next turn if we've hit the iteration cap. The
@@ -448,10 +359,10 @@ func (r *Runner) run(ctx context.Context, em runEmitter, seed []llmkit.Message, 
 		// public Run (finalizePrompt == "") is a no-op and proceeds straight
 		// to the truncation mark.
 		if r.limits.MaxIterations >= 0 && outcome.Iterations >= r.limits.MaxIterations {
-			if err := r.finalizeAndTruncate(ctx, em, &messages, outcome, finalizePrompt, responseSchema, compactThreshold, toolNameByID, TruncMaxIterations); err != nil {
+			if err := r.finalizeAndTruncate(ctx, em, s, TruncMaxIterations); err != nil {
 				return outcome, err
 			}
-			r.finishTruncated(outcome, TruncMaxIterations)
+			s.stop(TruncMaxIterations)
 			break
 		}
 		// Stop before the next turn if we're already over budget. The budget
@@ -459,10 +370,10 @@ func (r *Runner) run(ctx context.Context, em runEmitter, seed []llmkit.Message, 
 		// gets (RunJSON only), so a near-budget agent can emit its answer
 		// instead of returning a silently empty result to the caller.
 		if r.overBudget(outcome.Usage) {
-			if err := r.finalizeAndTruncate(ctx, em, &messages, outcome, finalizePrompt, responseSchema, compactThreshold, toolNameByID, TruncTokenBudget); err != nil {
+			if err := r.finalizeAndTruncate(ctx, em, s, TruncTokenBudget); err != nil {
 				return outcome, err
 			}
-			r.finishTruncated(outcome, TruncTokenBudget)
+			s.stop(TruncTokenBudget)
 			break
 		}
 		// Consult the shared budget pool (if any) before issuing the next model
@@ -474,10 +385,10 @@ func (r *Runner) run(ctx context.Context, em runEmitter, seed []llmkit.Message, 
 			// Shared pool exhausted: give the model one reserved finalization
 			// turn (RunJSON only) so a near-budget agent can still emit its
 			// answer before we classify the stop as TruncBudgetPool.
-			if err := r.finalizeAndTruncate(ctx, em, &messages, outcome, finalizePrompt, responseSchema, compactThreshold, toolNameByID, TruncBudgetPool); err != nil {
+			if err := r.finalizeAndTruncate(ctx, em, s, TruncBudgetPool); err != nil {
 				return outcome, err
 			}
-			r.finishTruncated(outcome, TruncBudgetPool)
+			s.stop(TruncBudgetPool)
 			break
 		}
 
@@ -492,7 +403,7 @@ func (r *Runner) run(ctx context.Context, em runEmitter, seed []llmkit.Message, 
 			if steered := steering.drainSteers(); len(steered) > 0 {
 				for _, d := range steered {
 					em.emit(ctx, steerEvent(ctx, d.msg, false, outcome.Iterations+1))
-					messages = append(messages, d.msg)
+					s.messages = append(s.messages, d.msg)
 				}
 			}
 		}
@@ -502,9 +413,9 @@ func (r *Runner) run(ctx context.Context, em runEmitter, seed []llmkit.Message, 
 		// gets billed this turn. Re-arming the threshold upward after a firing
 		// keeps compaction bounded and avoids re-paying a prefix cache miss every
 		// subsequent turn (see compactRearmFactor).
-		messages, compactThreshold = r.maybeCompact(ctx, em, messages, compactThreshold, toolNameByID, outcome.Iterations+1)
+		s.messages, s.compactThreshold = r.maybeCompact(ctx, em, s.messages, s.compactThreshold, s.toolNameByID, outcome.Iterations+1)
 
-		resp, err := r.completeOnce(ctx, em, &messages, outcome, responseSchema, false)
+		resp, err := r.completeOnce(ctx, em, &s.messages, outcome, responseSchema, false)
 		if err != nil {
 			return outcome, err
 		}
@@ -531,10 +442,14 @@ func (r *Runner) run(ctx context.Context, em runEmitter, seed []llmkit.Message, 
 				if drained := steering.drainAll(); len(drained) > 0 {
 					for _, d := range drained {
 						em.emit(ctx, steerEvent(ctx, d.msg, d.followUp, outcome.Iterations+1))
-						messages = append(messages, d.msg)
+						s.messages = append(s.messages, d.msg)
 					}
 					continue
 				}
+			}
+			if resp.StopReason == llmkit.StopMaxTokens {
+				s.stop(TruncOutputCap)
+				break
 			}
 			// A turn with no tool call and no visible text (after stripping
 			// reasoning <think> blocks) is an empty/think-only turn, not a real
@@ -543,9 +458,13 @@ func (r *Runner) run(ctx context.Context, em runEmitter, seed []llmkit.Message, 
 			// through the normal loop top so it bills and counts like any
 			// other turn. A truncated, unclosed think block also strips to
 			// empty and gets the same nudge.
-			if strings.TrimSpace(llmkit.StripThinkBlocks(resp.Text)) == "" && emptyTurnNudges < maxEmptyTurnNudges {
-				emptyTurnNudges++
-				messages = append(messages, llmkit.TextMessage(llmkit.RoleUser, emptyTurnNudge))
+			if strings.TrimSpace(llmkit.StripThinkBlocks(resp.Text)) == "" {
+				if s.emptyTurnNudges >= maxEmptyTurnNudges {
+					s.stop(TruncNoAnswer)
+					break
+				}
+				s.emptyTurnNudges++
+				s.messages = append(s.messages, llmkit.TextMessage(llmkit.RoleUser, emptyTurnNudge))
 				continue
 			}
 			break
@@ -564,14 +483,8 @@ func (r *Runner) run(ctx context.Context, em runEmitter, seed []llmkit.Message, 
 				break
 			}
 			em.emit(ctx, toolRunEvent(ctx, call, executed[i], outcome.Iterations))
-			toolNameByID[call.ID] = call.Name
-			// ToolResult names the call; ToolError adds the IsError mark for
-			// a failed execution.
-			if executed[i].isErr {
-				messages = append(messages, llmkit.ToolError(call.ID, executed[i].result))
-			} else {
-				messages = append(messages, llmkit.ToolResult(call.ID, executed[i].result))
-			}
+			s.toolNameByID[call.ID] = call.Name
+			s.messages = append(s.messages, executed[i].message(call.ID))
 		}
 		if err := ctx.Err(); err != nil {
 			return outcome, err
@@ -582,15 +495,49 @@ func (r *Runner) run(ctx context.Context, em runEmitter, seed []llmkit.Message, 
 		// A budget hit post-tool still gets the one reserved finalization turn
 		// (RunJSON only) so a near-budget agent can emit its answer.
 		if r.overBudget(outcome.Usage) {
-			if err := r.finalizeAndTruncate(ctx, em, &messages, outcome, finalizePrompt, responseSchema, compactThreshold, toolNameByID, TruncTokenBudget); err != nil {
+			if err := r.finalizeAndTruncate(ctx, em, s, TruncTokenBudget); err != nil {
 				return outcome, err
 			}
-			r.finishTruncated(outcome, TruncTokenBudget)
+			s.stop(TruncTokenBudget)
 			break
 		}
 	}
 
 	return outcome, nil
+}
+
+// runState is one run's mutable loop state, owned by [Runner.run] and passed
+// to the helpers that need it. Everything the Runner is shared for lives on
+// the Runner; everything that changes per run lives here.
+type runState struct {
+	// messages is the conversation history, reassigned as the loop appends and
+	// compacts; run snapshots it into Outcome.Messages on every return path.
+	messages []llmkit.Message
+	// compactThreshold is the history-token threshold currently in force,
+	// re-armed upward after each real prune (see [Runner.maybeCompact]).
+	compactThreshold int64
+	// toolNameByID names the tool each tool-result answered, for compaction
+	// stubs.
+	toolNameByID map[string]string
+	// emptyTurnNudges counts empty/think-only turns already nudged this run
+	// (see [maxEmptyTurnNudges]).
+	emptyTurnNudges int
+	// finalizePrompt, when non-empty, enables the one reserved finalization
+	// turn at a stop condition (see [Runner.finalizeAndTruncate]).
+	finalizePrompt string
+	// responseSchema, when non-nil, rides every completion of the run
+	// (capability-gated; see [Runner.complete]).
+	responseSchema json.RawMessage
+	// outcome accumulates the run's result and is what run returns.
+	outcome *Outcome
+}
+
+// stop marks the run as truncated: reason, the stop condition that fired (not
+// "finalized"), lands in Outcome.TruncationReason. It is the single place a
+// run's truncation is recorded; [Runner.Run] converts it into an
+// [IncompleteError] at the run's end.
+func (s *runState) stop(reason TruncationReason) {
+	s.outcome.TruncationReason = reason
 }
 
 // trimDanglingToolTurn returns seed with a dangling trailing assistant
@@ -636,52 +583,33 @@ func trimDanglingToolTurn(seed []llmkit.Message) []llmkit.Message {
 // (finalizePrompt == "") never pays an extra model call. When it does fire it:
 //
 //   - appends finalizePrompt as a user-role message;
-//   - sets outcome.Finalized = true and fires [Hooks.Finalize] with reason
-//     (the Trunc* constant of the stop condition that triggered it);
+//   - sets outcome.Finalized = true;
 //   - compacts once so the prompt that is sent is the smallest it can be;
 //   - takes ONE tool-less completion via completeOnce (which itself handles
 //     the StopMaxTokens continuation retry), giving the model a cheap final
 //     shot at emitting its answer instead of leaving the caller with a
 //     silently empty output.
 //
-// responseSchema, when non-nil, is attached to the finalization completion so a
-// schema-aware adapter applies grammar-constrained decoding on the final turn
+// s.responseSchema, when non-nil, is attached to the finalization completion so
+// a schema-aware adapter applies grammar-constrained decoding on the final turn
 // too. The public Run path passes nil so no schema is attached.
 //
-// Returns done=true when a finalization turn was actually taken (so the caller
-// knows Finalized is now true), and a non-nil err only when the underlying
-// completion failed — in which case the caller should return early with the
-// error. The caller is responsible for finishTruncated(reason) + break: the
-// reason is the STOP condition (budget/iteration), not "finalized".
-func (r *Runner) finalizeAndTruncate(
-	ctx context.Context,
-	em runEmitter,
-	messages *[]llmkit.Message,
-	outcome *Outcome,
-	finalizePrompt string,
-	responseSchema json.RawMessage,
-	compactThreshold int64,
-	toolNameByID map[string]string,
-	reason TruncationReason,
-) error {
-	if finalizePrompt == "" || outcome.Finalized {
+// Returns a non-nil err only when the underlying completion failed — in which
+// case the caller should return early with the error. Otherwise the caller is
+// responsible for s.stop(reason) + break: the reason is the STOP condition
+// (budget/iteration), not "finalized".
+func (r *Runner) finalizeAndTruncate(ctx context.Context, em runEmitter, s *runState, reason TruncationReason) error {
+	if s.finalizePrompt == "" || s.outcome.Finalized {
 		return nil
 	}
-	*messages = append(*messages, llmkit.TextMessage(llmkit.RoleUser, finalizePrompt))
-	outcome.Finalized = true
-	// The finalization turn's step rides the context for the hook, the
-	// compaction below, and the completion itself — the same number every
-	// event of this turn reports.
-	ctx = llmkit.WithStep(ctx, outcome.Iterations+1)
-	if r.hooks.Finalize != nil {
-		r.hooks.Finalize(ctx, reason)
-	}
+	s.messages = append(s.messages, llmkit.TextMessage(llmkit.RoleUser, s.finalizePrompt))
+	s.outcome.Finalized = true
 	// Compact before the finalization turn: it is often the largest history of
 	// the run, and the model needs only its own reasoning chain (preserved) to
 	// emit the answer, not every earlier file dump. The re-armed threshold is
 	// discarded: this is the run's final turn, so no later compaction can fire.
-	*messages, _ = r.maybeCompact(ctx, em, *messages, compactThreshold, toolNameByID, outcome.Iterations+1)
-	if _, cerr := r.completeOnce(ctx, em, messages, outcome, responseSchema, true); cerr != nil {
+	s.messages, _ = r.maybeCompact(ctx, em, s.messages, s.compactThreshold, s.toolNameByID, s.outcome.Iterations+1)
+	if _, cerr := r.completeOnce(ctx, em, &s.messages, s.outcome, s.responseSchema, true); cerr != nil {
 		return cerr
 	}
 	return nil
@@ -697,7 +625,7 @@ func (r *Runner) finalizeAndTruncate(
 // no allocation and the append-only prefix (and its cache) is preserved.
 //
 // step is the completion that will consume the (possibly) compacted history;
-// it is reported on [Hooks.Compaction], which fires only when this call
+// it is stamped on the Compaction event, which is emitted only when this call
 // actually pruned — a threshold crossing with nothing to reclaim is silent.
 func (r *Runner) maybeCompact(ctx context.Context, em runEmitter, messages []llmkit.Message, threshold int64, toolNameByID map[string]string, step int) ([]llmkit.Message, int64) {
 	if threshold <= 0 {
@@ -718,28 +646,10 @@ func (r *Runner) maybeCompact(ctx context.Context, em runEmitter, messages []llm
 	}
 	before := estimateTokens(messages)
 	after := estimateTokens(compacted)
-	// The pruned history's consuming turn rides the hook's context too,
-	// matching the CompactionEvent.Step the event below reports.
+	// The pruned history's consuming turn rides the context the event
+	// sees, matching the Step it reports.
 	ctx = llmkit.WithStep(ctx, step)
-	if r.hooks.Compaction != nil {
-		r.hooks.Compaction(ctx, CompactionEvent{
-			Step:         step,
-			BeforeTokens: before,
-			AfterTokens:  after,
-			Pruned:       pruned,
-		})
-	}
-	// The Compaction event rides the same stream: Step is the completion that
-	// consumes the compacted history, and the token totals come from the same
-	// bytes/4 estimate the hook reports.
-	ev := llmkit.NewEvent(ctx, llmkit.KindCompaction)
-	ev.Step = step
-	ev.Compaction = &llmkit.CompactionEvent{
-		BeforeTokens: before,
-		AfterTokens:  after,
-		Pruned:       pruned,
-	}
-	em.emit(ctx, ev)
+	r.recordCompaction(ctx, em, step, before, after, pruned)
 	// Real pruning happened (one prefix cache miss paid). Re-arm upward so the
 	// next firing only comes after history has grown materially again, bounding
 	// total firings and avoiding turn-over-turn cache thrash.
@@ -757,19 +667,11 @@ func (r *Runner) maybeCompact(ctx context.Context, em runEmitter, messages []llm
 // transcript so the assistant turn is recorded there for parity with the main
 // run path. baseIter is the parent run's completed iteration count, so a parent
 // that recorded steps 1..N records its repair at N+1 — step numbering stays
-// monotonic across the boundary. No tool loop runs; [Hooks.Repair] fires at
-// entry. The single completion is issued via completeOnce, so a stop at the
-// output token cap pays the ONE max-tokens continuation completion on top —
-// the pass is bounded to at most two schema-bearing, tool-less completions.
+// monotonic across the boundary. No tool loop runs. The single completion is
+// issued via completeOnce, so a stop at the output token cap pays the ONE
+// max-tokens continuation completion on top — the pass is bounded to at most
+// two schema-bearing, tool-less completions.
 func (r *Runner) repair(ctx context.Context, em runEmitter, prompt string, responseSchema json.RawMessage, baseIter int) (*Outcome, error) {
-	// The repair turn's step rides the context from entry: Hooks.Repair —
-	// and any decision observer a policy runs inside it — reads the same
-	// number the repair completion reports (baseIter+1; complete re-wraps
-	// the context with its own step, the same value).
-	ctx = llmkit.WithStep(ctx, baseIter+1)
-	if r.hooks.Repair != nil {
-		r.hooks.Repair(ctx)
-	}
 	outcome := &Outcome{Transcript: em.tr, Iterations: baseIter, RunID: llmkit.RunFromContext(ctx)}
 	messages := []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, prompt)}
 	if _, err := r.completeOnce(ctx, em, &messages, outcome, responseSchema, true); err != nil {
@@ -799,9 +701,7 @@ func (r *Runner) completeOnce(ctx context.Context, em runEmitter, messages *[]ll
 	if err != nil {
 		return llmkit.Response{}, err
 	}
-	assistantMsg := assistantMessage(resp)
-	assistantMsg.ToolCalls = resp.ToolCalls
-	*messages = append(*messages, assistantMsg)
+	*messages = append(*messages, resp.Message())
 
 	// One continuation retry when output was truncated mid-generation: ask the
 	// model to continue and emit ONLY the remaining answer, then concatenate.
@@ -813,9 +713,7 @@ func (r *Runner) completeOnce(ctx context.Context, em runEmitter, messages *[]ll
 		if cerr != nil {
 			return llmkit.Response{}, cerr
 		}
-		contMsg := assistantMessage(cont)
-		contMsg.ToolCalls = cont.ToolCalls
-		*messages = append(*messages, contMsg)
+		*messages = append(*messages, cont.Message())
 		// Stitch the two halves so the caller (and FinalText) sees one answer.
 		// Models frequently ignore "continue from where you stopped" and instead
 		// restart, repeating some head of the first half. A naive resp.Text+cont.Text
@@ -862,41 +760,10 @@ func stitchContinuation(head, cont string) string {
 	return head + cont
 }
 
-// assistantMessage builds the assistant history message for a completion. A
-// response that surfaced content blocks (thinking, multi-part text) is
-// recorded VERBATIM — including thinking blocks, which providers bind to the
-// exact bytes they issued (signed on Anthropic): rebuilding the message from
-// resp.Text alone would drop them and break every later turn of a
-// thinking+tools loop. A response with no blocks degrades to the single-text
-// form. A response whose blocks omit any text block while resp.Text is
-// non-empty violates the llmkit.Response invariant (Text equals the
-// concatenation of BlockText blocks); the surfaced text is appended so the
-// history this Runner records always carries what llmkit.Stream delivered.
-// Think-only responses (Text == "") stay verbatim — no empty text block is
-// invented.
-func assistantMessage(resp llmkit.Response) llmkit.Message {
-	if len(resp.Blocks) > 0 {
-		blocks := resp.Blocks
-		if resp.Text != "" && !slices.ContainsFunc(blocks, func(b llmkit.Block) bool {
-			return b.Kind == llmkit.BlockText
-		}) {
-			blocks = append(slices.Clone(blocks), llmkit.Block{Kind: llmkit.BlockText, Text: resp.Text})
-		}
-		return llmkit.Message{Role: llmkit.RoleAssistant, Content: blocks}
-	}
-	if resp.Text == "" {
-		// A tool-call-only turn carries no text: an empty text block would be
-		// wire noise the transcript then echoes back ({"kind":"text"} with no
-		// content). The role-only message re-emits cleanly with its ToolCalls.
-		return llmkit.Message{Role: llmkit.RoleAssistant}
-	}
-	return llmkit.TextMessage(llmkit.RoleAssistant, resp.Text)
-}
-
 // stitchBlocks shapes the Block list of the stitched llmkit.Response that
 // completeOnce returns to ITS caller. It does not touch the conversation
 // history: completeOnce already appended each half verbatim via
-// [assistantMessage], so both halves' thinking blocks are carried in history
+// [llmkit.Response.Message], so both halves' thinking blocks are carried in history
 // in order exactly as the provider issued them. Only text blocks are
 // stitched (see [stitchContinuation]); thinking blocks from BOTH halves are
 // carried through untouched — never split, reordered, or re-emitted
@@ -955,7 +822,7 @@ func (r *Runner) complete(ctx context.Context, em runEmitter, messages []llmkit.
 	// forced finalization, repair) goes through here. step is the 1-based
 	// turn this completion belongs to (outcome.Iterations+1 at fire time):
 	// the SAME number the policy and every other hook report for this turn —
-	// ToolEvent.Step, CompactionEvent.Step — and the Event.Step of the
+	// ToolEvent.Step — and the Event.Step of the
 	// Completion event below, so consumers can join all hook families on
 	// Step. Captured before Complete because outcome.Iterations is
 	// incremented only after the call returns, keeping the hook pair's step
@@ -975,63 +842,35 @@ func (r *Runner) complete(ctx context.Context, em runEmitter, messages []llmkit.
 			return llmkit.Response{}, fmt.Errorf("agent: request policy at iteration %d: %w", step, err)
 		}
 	}
-	if r.hooks.BeforeCompletion != nil {
-		r.hooks.BeforeCompletion(ctx, step, &req)
-	}
-	// The logical completion is claimed on the ctx handed to the client:
-	// BeginCompletion mints a fresh span there, so a retry-wrapped
-	// client's Attempt events join this completion on SpanID (see
-	// [llmkit.Observer]). Delta and AfterCompletion receive the pre-claim
-	// ctx below (Step set, no span) — like RequestPolicy and
-	// BeforeCompletion above — so a provider client a hook calls claims
-	// its own span via BeginCompletion and emits its own Completion
-	// event, instead of inheriting the turn's span. The Runner is the
-	// outermost harness layer for the turn itself, so it — never the
-	// retry stage — emits this Completion event, and it never wraps its
-	// client with llmkit.Observe.
+	r.fireBeforeCompletion(ctx, step, &req)
+	// The Runner is the emitter for this turn: it mints the completion's
+	// span with BeginCompletion on the ctx handed to the client and emits
+	// the Completion event itself, per the emission rule documented on
+	// [llmkit.Observer]. clientCtx carries that span; ctx (Step set, no
+	// span) is what RequestPolicy, BeforeCompletion, Delta, and
+	// AfterCompletion receive.
 	clientCtx := llmkit.BeginCompletion(ctx)
 	start := time.Now()
 
 	var resp llmkit.Response
 	var err error
-	if r.hooks.Delta != nil {
+	if sink := r.deltaSink(ctx, step); sink != nil {
 		// Delta opts the turn into incremental delivery: llmkit.Stream uses
 		// the client's native stream when it implements StreamingClient and
 		// synthesizes deltas from the finished Response otherwise. The
 		// returned Response — and therefore everything below — is identical
 		// to the Complete path either way. The hook itself fires on the
 		// pre-claim ctx, not clientCtx.
-		resp, err = llmkit.Stream(clientCtx, r.client, req, func(d llmkit.Delta) error {
-			r.hooks.Delta(ctx, step, d)
-			return nil
-		})
+		resp, err = llmkit.Stream(clientCtx, r.client, req, sink)
 	} else {
 		resp, err = r.client.Complete(clientCtx, req)
 	}
-	if r.hooks.AfterCompletion != nil {
-		var respPtr *llmkit.Response
-		if err == nil {
-			respPtr = &resp
-		}
-		r.hooks.AfterCompletion(ctx, step, &req, respPtr, err)
-	}
-	// The Completion event: one per logical completion, success or failure
-	// (Err set, zero Response), emitted after the AfterCompletion hook so
-	// the hook family stays closest to the wire call. Built on clientCtx
-	// so its SpanID matches the one the client (and any Attempt events
-	// it emitted) saw. Provider and Model come from the client's own
-	// Identity, never from arguments to the emitter.
-	ev := llmkit.NewEvent(clientCtx, llmkit.KindCompletion)
-	ev.Step = step
-	ev.Duration = time.Since(start)
-	identity := llmkit.IdentityOf(r.client)
-	ce := &llmkit.CompletionEvent{Request: req, Response: resp, Provider: identity.Provider, Model: identity.Model}
-	if err != nil {
-		ce.Err = err.Error()
-		ce.Response = llmkit.Response{}
-	}
-	ev.Completion = ce
-	em.emit(clientCtx, ev)
+	r.fireAfterCompletion(ctx, step, &req, &resp, err)
+	// The Completion event: one per logical completion, success or failure,
+	// emitted after the AfterCompletion hook so the hook family stays
+	// closest to the wire call. Built on clientCtx so its SpanID matches
+	// the one the client (and any Attempt events it emitted) saw.
+	r.emitCompletion(clientCtx, em, step, start, req, resp, err)
 	if err != nil {
 		return llmkit.Response{}, fmt.Errorf("agent: completion failed at iteration %d: %w", step, err)
 	}
@@ -1052,189 +891,6 @@ func (r *Runner) complete(ctx context.Context, em runEmitter, messages []llmkit.
 	return resp, nil
 }
 
-// runTool dispatches one tool call. A missing tool, a Run error, or a
-// Tool.Run PANIC is returned to the model as an "ERROR:"-prefixed result
-// (isErr=true) rather than aborting the loop — in BOTH dispatch modes, so
-// toggling WithParallelTools never changes failure semantics. A panic is
-// the tool-boundary conversion of a bug into data for the model; a hook
-// panic (ToolStart/ToolEnd) is a harness bug and is NOT recovered here — it
-// propagates to the caller (see [Runner.executeTools] for the parallel-mode
-// path). Context cancellation surfaced by the tool is still rendered as a
-// tool error here; the loop's own ctx checks handle real cancellation.
-//
-// With WithToolTimeout set, the call runs under a derived deadline: on
-// expiry the model receives "ERROR: tool <name> timed out after <d>" and
-// the loop continues — the run's own context is unaffected. A timeout is
-// not a *ToolHealthError and does not fire [Hooks.ToolHealth].
-//
-// Hooks fire from the goroutine executing the call — concurrently under
-// WithParallelTools.
-func (r *Runner) runTool(ctx context.Context, call llmkit.ToolCall, step int) (result string, isErr bool) {
-	tool, ok := r.tools.lookup(call.Name)
-	if !ok {
-		return toolError(fmt.Errorf("unknown tool %q", call.Name)), true
-	}
-	runCtx := ctx
-	if r.toolTimeout > 0 {
-		var cancel context.CancelFunc
-		runCtx, cancel = context.WithTimeout(ctx, r.toolTimeout)
-		defer cancel()
-	}
-	if r.hooks.ToolStart != nil {
-		r.hooks.ToolStart(ctx, ToolEvent{Step: step, Call: call})
-	}
-	start := time.Now()
-	out, panicVal, err := invokeTool(runCtx, tool, call.Arguments)
-	duration := time.Since(start)
-	if panicVal != nil {
-		// A panicking Tool.Run is model-recoverable data: render it as this
-		// call's error result and keep the loop going.
-		result = fmt.Sprintf("ERROR: tool %s panicked: %v", call.Name, panicVal)
-		if r.hooks.ToolEnd != nil {
-			r.hooks.ToolEnd(ctx, ToolEvent{Step: step, Call: call, Result: result, IsError: true, Duration: duration})
-		}
-		return result, true
-	}
-	if err != nil {
-		// Deadline expiry: report the timeout as the tool result, leaving the
-		// run's own context untouched. The parent-ctx guard keeps a genuine
-		// run cancellation from being misreported as a tool timeout.
-		if r.toolTimeout > 0 && ctx.Err() == nil && runCtx.Err() == context.DeadlineExceeded {
-			timeoutResult := fmt.Sprintf("ERROR: tool %s timed out after %s", call.Name, r.toolTimeout)
-			if r.hooks.ToolEnd != nil {
-				r.hooks.ToolEnd(ctx, ToolEvent{Step: step, Call: call, Result: timeoutResult, IsError: true, Duration: duration})
-			}
-			return timeoutResult, true
-		}
-		// Record a tool-health signal only for a genuine *ToolHealthError AND
-		// only when ctx is not already cancelled: a failure caused by run
-		// teardown/cancellation must never be counted as a tool-health problem.
-		var he *ToolHealthError
-		if ctx.Err() == nil && errors.As(err, &he) && r.hooks.ToolHealth != nil {
-			r.hooks.ToolHealth(ctx, call.Name, he)
-		}
-		result = toolError(err)
-		if r.hooks.ToolEnd != nil {
-			r.hooks.ToolEnd(ctx, ToolEvent{Step: step, Call: call, Result: result, IsError: true, Duration: duration})
-		}
-		return result, true
-	}
-	if r.hooks.ToolEnd != nil {
-		r.hooks.ToolEnd(ctx, ToolEvent{Step: step, Call: call, Result: out, IsError: false, Duration: duration})
-	}
-	return out, false
-}
-
-// invokeTool invokes Tool.Run once, converting a panic into a non-nil
-// second return so the harness decides how to render it. A panic recovered
-// here never reaches the dispatching goroutine's own recover, which (in
-// parallel mode) is reserved for harness bugs — hook panics — only. A tool
-// that panics with nil still yields a non-nil marker: runtime turns
-// panic(nil) into a *runtime.PanicNilError.
-func invokeTool(ctx context.Context, tool Tool, args json.RawMessage) (out string, panicVal any, err error) {
-	defer func() {
-		if v := recover(); v != nil {
-			out, panicVal, err = "", v, nil
-		}
-	}()
-	out, err = tool.Run(ctx, args)
-	return out, nil, err
-}
-
-// toolResult is one executed tool call's outcome, as returned by
-// [Runner.executeTools]. denied marks a [ToolPolicy] denial: result still
-// carries the rendered model-visible text, while denyReason records the
-// policy's reason for the ToolRun event.
-type toolResult struct {
-	result     string
-	isErr      bool
-	denied     bool
-	denyReason string
-}
-
-// executeTools runs calls and returns one result per executed call, in the
-// model's original order. A [ToolPolicy], when installed, authorizes — and
-// may rewrite — every call BEFORE the first Tool.Run dispatches (see
-// [Runner.authorizeCalls]); a denied call keeps its slot with its rendered
-// error result, so the returned slice stays index-aligned with the calls in
-// both modes — including calls the pre-pass could not authorize because ctx
-// was already cancelled: those are denied with the context error, never
-// dispatched. Sequential mode (the default) runs calls one at a time and
-// stops before dispatching the next call once ctx is cancelled — the
-// returned slice then holds only the already-executed (or policy-resolved)
-// results. Parallel mode (WithParallelTools) runs each call on its own
-// goroutine (bounded by len(calls)) and waits for all of them: per-call
-// failures are isolated (a tool error or panic never fails its siblings —
-// runTool renders a panic as that call's error result), and the full-length
-// result slice is always returned. Neither mode mutates the conversation or
-// the transcript; the caller appends the results in call order after
-// executeTools returns.
-//
-// Hook panics are harness bugs and are never rendered to the model. In
-// sequential mode a panicking hook propagates to [Runner.Run]'s caller
-// unchanged. In parallel mode the per-call goroutine recovers it (the only
-// panic that can escape runTool — tool panics are fully contained there),
-// stashes the FIRST hook panic, and this function re-panics with the
-// original value AFTER all sibling goroutines have finished: no goroutine
-// leaks, no result is recorded for the interrupted turn, and the caller sees
-// the same panic value in both modes.
-func (r *Runner) executeTools(ctx context.Context, outcome *Outcome, calls []llmkit.ToolCall) []toolResult {
-	results := make([]toolResult, len(calls))
-	// The turn's Step rides the whole tool phase's context — the ToolPolicy
-	// (and any decision observer inside one), the ToolStart/ToolEnd hooks,
-	// and Tool.Run itself, hence any decorator a tool calls through — so
-	// decorator-emitted events carry the same turn the Runner's own ToolRun
-	// events name.
-	ctx = llmkit.WithStep(ctx, outcome.Iterations)
-	// Every call of the turn is authorized before the first Tool.Run, in
-	// both modes, so an interactive policy never overlaps the fan-out.
-	dispatch, denied := r.authorizeCalls(ctx, calls, results)
-	if !r.parallelTools || len(calls) < 2 {
-		for i, call := range dispatch {
-			if denied != nil && denied[i] {
-				continue // deny already rendered into results[i]
-			}
-			if err := ctx.Err(); err != nil {
-				return results[:i]
-			}
-			results[i].result, results[i].isErr = r.runTool(ctx, call, outcome.Iterations)
-		}
-		return results
-	}
-	var wg sync.WaitGroup
-	var hookPanic any // the first hook panic, re-panicked below
-	var panicMu sync.Mutex
-	for i, call := range dispatch {
-		wg.Add(1)
-		go func(i int, call llmkit.ToolCall) {
-			defer wg.Done()
-			// runTool fully contains tool panics; anything that escapes it
-			// into this goroutine is a harness bug (a hook). Stash the first
-			// one and let every sibling finish — the loop goroutine re-panics
-			// with the original value after wg.Wait, so the panic never dies
-			// in this goroutine and never renders as tool output.
-			defer func() {
-				if v := recover(); v != nil {
-					panicMu.Lock()
-					if hookPanic == nil {
-						hookPanic = v
-					}
-					panicMu.Unlock()
-				}
-			}()
-			if denied != nil && denied[i] {
-				return // deny already rendered into results[i]
-			}
-			results[i].result, results[i].isErr = r.runTool(ctx, call, outcome.Iterations)
-		}(i, call)
-	}
-	wg.Wait()
-	if hookPanic != nil {
-		panic(hookPanic)
-	}
-	return results
-}
-
 // overBudget reports whether cumulative usage has exceeded the token budget. A
 // negative budget means unlimited. Cache reads are discounted by
 // CacheReadWeight (resolved to 1.0 by Limits.resolve() when unset) so a
@@ -1244,10 +900,4 @@ func (r *Runner) overBudget(u llmkit.Usage) bool {
 		return false
 	}
 	return u.ChargeableTokens(r.limits.CacheReadWeight) > r.limits.TokenBudget
-}
-
-// finishTruncated marks the outcome as a clean partial result: reason records
-// the stop condition in Outcome.TruncationReason.
-func (r *Runner) finishTruncated(o *Outcome, reason TruncationReason) {
-	o.TruncationReason = reason
 }

@@ -159,6 +159,7 @@ package llmkit
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 )
 
@@ -609,6 +610,36 @@ type Response struct {
 	Usage Usage `json:"usage"`
 	// StopReason is the normalized stop reason.
 	StopReason StopReason `json:"stop_reason,omitempty"`
+}
+
+// Message returns the assistant history turn for this response: RoleAssistant
+// carrying the response's ToolCalls and its content, ready to append to the
+// next request's Messages. A response that surfaced content blocks (thinking,
+// multi-part text) is recorded VERBATIM — including thinking blocks, which
+// providers bind to the exact bytes they issued (signed on Anthropic):
+// rebuilding the message from Text alone would drop them and break every
+// later turn of a thinking+tools loop. A response with no blocks degrades to
+// the single-text form, or to no content when Text is empty (a tool-call-only
+// turn; an empty text block would be wire noise). A response whose blocks
+// omit any text block while Text is non-empty violates the Response
+// invariant (Text equals the concatenation of BlockText blocks); the
+// surfaced text is appended so the history always carries what the caller
+// received. Think-only responses (Text == "") stay verbatim — no empty text
+// block is invented.
+func (r Response) Message() Message {
+	msg := Message{Role: RoleAssistant, ToolCalls: r.ToolCalls}
+	switch {
+	case len(r.Blocks) > 0:
+		msg.Content = r.Blocks
+		if r.Text != "" && !slices.ContainsFunc(r.Blocks, func(b Block) bool {
+			return b.Kind == BlockText
+		}) {
+			msg.Content = append(slices.Clone(r.Blocks), Block{Kind: BlockText, Text: r.Text})
+		}
+	case r.Text != "":
+		msg.Content = []Block{{Kind: BlockText, Text: r.Text}}
+	}
+	return msg
 }
 
 // Capabilities describes what a given provider+model supports, so callers can

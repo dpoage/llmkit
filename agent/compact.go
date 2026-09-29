@@ -30,34 +30,6 @@ const compactRearmFactor = 2
 // decision.
 func EstimateHistoryTokens(msgs []llmkit.Message) int64 { return estimateTokens(msgs) }
 
-// SimulateCompaction applies the Runner's threshold-triggered history-compaction
-// policy to a single history snapshot, given the threshold currently in force
-// and the running tool-name map. It returns the (possibly) compacted snapshot
-// and the next threshold (re-armed upward iff a real prune occurred) — the
-// same policy the live Runner applies. Callers replaying recorded request
-// snapshots get the in-loop decision without re-implementing it.
-//
-// budget <= 0 disables compaction (returns the snapshot unchanged). recentK is
-// the trailing tool-result window to preserve; pass CompactRecentToolResults to
-// match the Runner.
-func SimulateCompaction(msgs []llmkit.Message, budget, threshold int64, recentK int, toolNameByID map[string]string) (out []llmkit.Message, nextThreshold int64) {
-	if budget <= 0 || threshold <= 0 {
-		return msgs, threshold
-	}
-	if estimateTokens(msgs) <= threshold {
-		return msgs, threshold
-	}
-	compacted, pruned := compactHistory(msgs, recentK, toolNameByID)
-	if pruned == 0 {
-		return msgs, threshold
-	}
-	return compacted, threshold * compactRearmFactor
-}
-
-// CompactRecentToolResults exposes the Runner's trailing-window size so callers
-// replaying compaction preserve the same recent tool results the live loop does.
-const CompactRecentToolResults = compactRecentToolResults
-
 // nonTextBlockEstimateBytes is the fixed byte estimate charged for every
 // non-text content block (image, document, thinking) in estimateTokens.
 // Inline media bytes are not billed linearly (a small image can cost more

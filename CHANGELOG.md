@@ -10,6 +10,23 @@ entry below is marked.
 
 ### Added
 
+- `llmkit`: `Source` (the read side of recording: one method,
+  `Events(ctx, run RunID) ([]Event, error)`, events in emission order, the
+  caller owns the slice) and `ErrUnknownRun`, which a `Source` with no
+  record of a run wraps instead of returning an empty success. Store and
+  replay code can depend on the root package alone.
+- `llmkit`: `FinalizeEvent.Status` (`json:"status,omitempty"`) and
+  `FinalizeEvent.Err` (`json:"err,omitempty"`), with the `RunStatus`
+  vocabulary `RunCompleted`, `RunIncomplete`, `RunRefused`, `RunFailed`,
+  `RunCanceled`, and `RunPanicked`. `Err` is the returned error's text and is
+  empty on a completed run. An empty `Status` marks a record written before
+  the field existed. `EventSchemaVersion` stays 2: the fields are additive,
+  and `Event.Validate` accepts any `Status` string.
+- `llmkit`: `Response.Message()` returns the assistant history turn for a
+  response — blocks verbatim (thinking blocks included), text-only when there
+  are no blocks, `ToolCalls` carried — so callers stop hand-rolling a turn
+  that drops thinking blocks. The live provider tests now build their
+  assistant turns with it.
 - `llmkit/retry`: a leaf package (standard library only) holding the shared
   retry loop: `retry.Config`, `retry.Default`, `retry.Do`, and
   `retry.ParseRetryAfter`. `Do` runs any operation — not just an
@@ -107,29 +124,31 @@ entry below is marked.
   receives `Attempt` events when set. Never stack `Options.Observer`
   and an outer `llmkit.Observe` on the same client.
 - `llmkit/agent`: run identity and durable observation on the tool loop.
-  `WithObserver(obs)` installs the Runner's single durable event sink
-  (last-wins — a second call replaces the first, never a second history)
+  `WithObserver(obs)` appends a durable event sink (sinks are called for
+  each event in registration order, and a panicking sink stops that event
+  from reaching later ones; an earlier revision made a second call
+  replace the first — see the Changed entry below)
   behind the always-present in-memory `Transcript`, which now stores
   `llmkit.Event` values in `Transcript.Record` and carries
   `RunID`/`ParentRunID`. `JSONL(dir, onErr)` streams one JSON line per
   event to one `<RunID>.jsonl` file per run — created exclusively at the
   run's start, closed at its finalize, refusals reported through `onErr`
-  and never failing the run — and reads them back through the same `Source`
-  interface replay builds on. The Runner emits `start`, `completion` (one
-  per logical completion, span-minted per turn), `tool_run` (with
-  `Denied`/`deny_reason` for policy denials), `compaction`, `steer`, and
+  and never failing the run — and reads them back through the same
+  `llmkit.Source` interface replay builds on. The Runner emits `start`,
+  `completion` (one per logical completion, span-minted per turn), `tool_run`
+  (with `Denied`/`DenyReason` for policy denials), `compaction`, `steer`, and
   `finalize` (on every run end including error returns). `WithRunID(id)`
   pins a run's identity; `Outcome.RunID` is exported; `Continue` chains
   carry `ParentRunID`.
-- `llmkit/agent`: the read side of recording. `Source` is a single-method
-  interface (`Events(ctx, run)`) implemented by `Transcript` and the JSONL
-  sink; `NewReplayClient(src, run, caps)` replays a recorded run from any
-  Source, `ReplayClient.Tools` serves the recorded tool results instead of
-  executing them (a fully offline replay, deterministic under parallel
-  dispatch), and `ReplayClient.Err` reports a diverged replay. The
-  sentinels `ErrUnknownRun` (a Source has no record of the run) and
-  `ErrReplayDiverged` (a replay no longer matches its record) support
-  errors.Is.
+- `llmkit/agent`: the read side of recording. `llmkit.Source` is a
+  single-method interface (`Events(ctx, run)`) implemented by `Transcript`
+  and the JSONL sink; `NewReplayClient(src, run, caps)` replays a recorded
+  run from any `llmkit.Source`, `ReplayClient.Tools` serves the recorded
+  tool results instead of executing them (a fully offline replay,
+  deterministic under parallel dispatch), and `ReplayClient.Err` reports a
+  diverged replay. The sentinels `llmkit.ErrUnknownRun` (a Source has no
+  record of the run) and `ErrReplayDiverged` (a replay no longer matches
+  its record) support errors.Is.
 - `llmkit`: `WithStep(ctx, step)` and `StepFromContext(ctx)` — the 1-based
   turn number in the context, mirroring `WithRun`'s empty-id rule (step <= 0
   is absent). `NewEvent` stamps `Event.Step` from it, so decorator-emitted
@@ -257,9 +276,39 @@ entry below is marked.
   as `Options.Observer` in `Session.Client`, `Config.Observer` in
   `Session.DecideClient`, and `agent.WithObserver
   (livetest.DefaultTally())` on every live `agent.Runner`.
+- `agent`: `ReplayClient.ToolPolicy()` (llmkit-bk8.1.5) returns a
+  `ToolPolicy` that denies a call, with the recorded reason, if and only if
+  its tool-call ID is the ID of a call the recorded run's policy denied in
+  the current recorded tool turn, and allows every other call. Install it
+  with `WithToolPolicy(rc.ToolPolicy())` to replay a record that holds
+  denials with no policy of your own; a caller's own policy is never
+  overridden.
+- `agent`: `TruncOutputCap` and `TruncNoAnswer` truncation reasons; `FinalizeEvent.Status` and `Err` are now set by the Runner (llmkit-bk8.6.1, llmkit-bk8.6.2, llmkit-4qh.16).
+- `agent`: after a hook panic, the run's `Finalize` event reports status
+  `panicked` with zero counters (llmkit-4qh.16).
 
 ### Changed
 
+- **Breaking:** `agent.Runner.Run` returns a new `*agent.IncompleteError`
+  (`Reason`, `Outcome`) whenever a limit stopped the run — iteration cap,
+  token budget, or budget pool — instead of a nil error next to a truncated
+  `Outcome`. `ie.Outcome` is the same pointer `Run` returns and
+  `ie.Reason == Outcome.TruncationReason`; `Continue(ie.Outcome)` still
+  works. A caller that printed `Outcome.FinalText` as the answer whenever
+  `err == nil` now sees the limit stop first. `RunJSON`/`RunJSONAs` keep
+  returning nil whenever the answer parsed, even after the forced
+  finalization turn at the cap (the `Outcome` keeps its
+  `TruncationReason`); a truncated run whose answer does not parse returns
+  an error matching both `ErrUnparseableOutput` and `*IncompleteError`,
+  except when the repair completion itself fails (transport error,
+  cancelled context): that failure is returned as is and matches neither.
+  `examples/chat` and `examples/agent` branch on it before printing text.
+- **Breaking:** `agent`: `Runner.Run` returns a `*IncompleteError` when a
+  run ends with `TruncNoAnswer` or `TruncOutputCap`.
+- **Breaking:** `agent.Source` and `agent.ErrUnknownRun` moved to
+  `llmkit.Source` / `llmkit.ErrUnknownRun` (no alias). `Transcript` and the
+  JSONL sink satisfy `llmkit.Source`, and `NewReplayClient` takes one. The
+  sentinel's text is now `llmkit: unknown run`; match it with `errors.Is`.
 - **Breaking:** `FinalizeEvent` loses `Iterations` — `Event.Step` on the
   finalize event already carries the completed-turn count (the Runner set
   both from the same value on every exit path). Old recordings still
@@ -275,6 +324,19 @@ entry below is marked.
   now. The rule is forward-compatible on the version (a future
   `schema_version` still loads) but not on kinds: one unknown kind fails
   the whole load.
+- **Breaking:** `agent.NewRunner` now panics on a `nil` tool and on two
+  tools that share a `Def().Name` — a new crash path in a constructor. A
+  `nil` entry already died with a nil-pointer dereference; a duplicate name
+  used to advertise the first tool's schema to the model and dispatch the
+  last tool. The panic value is a string naming the index (nil) or the
+  duplicated name and both indexes. Deduplicate the tool list before
+  constructing the Runner (llmkit-bk8.1.3).
+- `agent.Runner.RunJSON` returns an error, with a nil `Outcome`, when `out`
+  is nil, not a pointer, or a nil pointer — before any
+  completion or event, instead of after the model has answered. The `Start`
+  event of a RunJSON run now records the caller's raw `task`, not the task
+  plus the JSON-instruction prompt; the model's first user message still
+  carries the instruction. `EventSchemaVersion` stays 2 (llmkit-bk8.6.8).
 - **Breaking:** the agent transcript is the new event stream.
   `agent.Event`/`EventKind` and the `request`/`assistant`/`tool_result`
   kinds are deleted in favor of `llmkit.Event` (`Transcript.Events` is now
@@ -283,7 +345,7 @@ entry below is marked.
   `WithObserver(agent.JSONL(dir, onErr))` (the key's motivation moved to
   `WithRunID`); `Hooks.TranscriptError` is removed (sink failures go to the
   callback the sink was constructed with); `NewReplayClient` takes `(src
-  Source, run llmkit.RunID, caps)`. There are no compatibility aliases. A
+  llmkit.Source, run llmkit.RunID, caps)`. There are no compatibility aliases. A
   tool-call-only assistant turn no longer invents an empty text block in
   history (llmkit-ly5).
 - **Breaking:** the retry vocabulary moved from the root package into
@@ -521,13 +583,10 @@ entry below is marked.
   per-Runner, since `UsageEvent.Role` was already removed in 0.3.0 and
   this round deletes the "wrap your Recorder per role" workaround it
   left behind; a bare-client site moves to `provider.Options.Observer`
-  or `llmkit.Observe(c, obs)`. `agent.WithObserver` keeps only the last
-  sink it is given, so a Runner that also writes a transcript with
+  or `llmkit.Observe(c, obs)`. A Runner that also writes a transcript with
   `WithObserver(agent.JSONL(dir, onErr))` (see the transcript entry
-  above) takes both sinks in one call:
-  `agent.WithObserver(llmkit.Observers(ledger, agent.JSONL(dir, onErr)))`.
-  Two separate `WithObserver` calls keep only the second sink and
-  silently drop the first one's transcript or ledger.
+  above) registers both sinks with two `WithObserver` calls, or in one call
+  with `agent.WithObserver(llmkit.Observers(ledger, agent.JSONL(dir, onErr)))`.
 - **Breaking:** `provider.Wrap` is not like-for-like with the removed
   `WithRetry`: it also serializes tool calls (truncates a multi-tool-
   call response to one) when the wrapped client's `ParallelToolCalls`
@@ -546,9 +605,43 @@ entry below is marked.
   from a hook no longer inherits the turn's span; whether it emits its
   own `Completion` follows the emission rule on `llmkit.Observer`
   (llmkit-bk8.1.61).
+- **Breaking:** `agent.WithHooks` and `agent.WithObserver` now append instead
+  of replacing. `Hooks` callbacks fire in registration order. The run's
+  observer chain is the in-memory transcript first, then every
+  `WithObserver` sink in registration order (`llmkit.Observers` semantics:
+  nil skipped). A transcript sink and a spend ledger now compose as two
+  `WithObserver` calls; wrapping them in `llmkit.Observers` still works.
+  The Runner does
+  not enforce one durable history sink — register at most one, as a usage
+  rule (docs/design.md, 2026-09-28, superseding the 2026-09-20 last-wins
+  enforcement). A caller that relied on a later `WithHooks` or
+  `WithObserver` replacing an earlier one must stop registering the earlier
+  one. `ToolEnd` fires only for executed calls; `tool_run` events also
+  record unknown-tool calls and policy denials (a denial carries `Denied`
+  and `DenyReason`, not a result). A run that ends mid-turn, for any reason
+  including a cancelled context or a panic, can leave requested calls
+  without a `tool_run` event; the docs now say so (llmkit-bk8.6.6,
+  llmkit-bk8.9.9).
 
 ### Removed
 
+- **Breaking:** `agent.Hooks.Compaction`, `agent.Hooks.Repair`,
+  `agent.Hooks.Finalize`, and `agent.CompactionEvent`. None had a caller in
+  this repo. The compaction and finalization facts stay recorded: a
+  compaction pass is the `compaction` event (`llmkit.CompactionEvent`,
+  `llmkit.KindCompaction`), and a forced-finalization turn is
+  `Outcome.Finalized` / `FinalizeEvent.Finalized`. A repair pass has no
+  event of its own — its completion is an ordinary `completion` event at
+  the next step. `Hooks` is
+  now six callbacks: `BeforeCompletion`, `AfterCompletion`, `Delta`,
+  `ToolStart`, `ToolEnd`, `ToolHealth`. Migrate a compaction hook to an
+  `agent.WithObserver` sink that switches on `KindCompaction`.
+- **Breaking:** `agent.SimulateCompaction` and
+  `agent.CompactRecentToolResults`. `Runner`'s in-loop compaction is the one
+  owner of the policy; the exports duplicated it and had no in-repo caller.
+  The only known consumer was bugbot's `internal/eval/compact_measure_test.go`,
+  which must size history with `agent.EstimateHistoryTokens` (still exported)
+  or drive a `Runner` with `WithLimits(Limits{HistoryTokenBudget: n})`.
 - **Breaking:** `sandbox.WithToolchainBinds` and
   `sandbox.WithToolchainPath`. Replacement:
   `sandbox.WithHostToolchains(sandbox.ResolveHostToolchains(names))` on
@@ -660,6 +753,22 @@ entry below is marked.
 
 ### Fixed
 
+- `agent` (llmkit-bk8.1.5): replaying a run that recorded a `ToolPolicy`
+  denial no longer diverges under the same policy when that policy only
+  denies, and no longer rewrites the denial into an ordinary tool error when
+  there is no policy. Denied calls are not served by `ReplayClient.Tools()`
+  (their names stay registered), so a same-policy replay is clean for a
+  policy that only denies (argument-rewriting policies are not replayable
+  yet, llmkit-60a), and the replayed `ToolRun` events keep
+  `Denied`/`DenyReason`. Replaying a record with a denial and no policy now
+  fails with `ErrReplayDiverged` instead; pass `rc.ToolPolicy()`. The denial
+  text is rendered only by the Runner.
+- `agent` (llmkit-4qh.10, llmkit-bk8.6.8): the `ReplayClient`, `Tools`, and
+  `Err` docs state that tools other than `rc.Tools()` execute live and their
+  results are never compared with the record, that `Err` is the only
+  report of a divergence in the run's final tool turn, and that `Err` does
+  not report a recorded call left unserved in that turn (llmkit-lew).
+  `NewReplayClientFromResponses` is documented as the scripted test double.
 - `llmkit/sandbox` (llmkit-bk8.1.8): a command that cannot be launched now
   reports through the shell's exit-code convention on every real backend —
   `127` when the command is missing, `126` when it is not executable —

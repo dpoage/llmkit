@@ -1,9 +1,7 @@
 package agent
 
 import (
-	"bytes"
 	"context"
-	"fmt"
 
 	"github.com/dpoage/llmkit"
 )
@@ -64,54 +62,4 @@ func (f ToolPolicyFunc) Authorize(ctx context.Context, call *llmkit.ToolCall) er
 // every call.
 func WithToolPolicy(p ToolPolicy) Option {
 	return func(r *Runner) { r.toolPolicy = p }
-}
-
-// authorizeCalls consults the policy once per call in model order on the
-// caller's goroutine, returning the calls to dispatch (a private copy when
-// a policy is installed) and the denied indexes. Denied results are written
-// straight into results[i] so dispatch treats them like executed results.
-// Cancellation denies every remaining registered call with the context
-// error so neither mode can run a never-authorized call.
-func (r *Runner) authorizeCalls(ctx context.Context, calls []llmkit.ToolCall, results []toolResult) ([]llmkit.ToolCall, []bool) {
-	if r.toolPolicy == nil {
-		return calls, nil
-	}
-	// Clone the argument bytes: the policy rewrites Arguments in place, so
-	// neither the copy nor the RawMessage backing may alias the history.
-	dispatch := make([]llmkit.ToolCall, len(calls))
-	copy(dispatch, calls)
-	denied := make([]bool, len(calls))
-	for i := range dispatch {
-		dispatch[i].Arguments = bytes.Clone(dispatch[i].Arguments)
-		// Unregistered names never reach the policy; runTool owns that path.
-		if _, ok := r.tools.lookup(dispatch[i].Name); !ok {
-			continue
-		}
-		if ctx.Err() != nil {
-			// Never authorized: render "not run", not "denied" — a cancelled
-			// run is not a policy decision. The slice stays full-length and
-			// the event carries IsError with the context error text, without
-			// the Denied mark (that mark is for Authorize refusals only).
-			denied[i] = true
-			results[i] = toolResult{
-				result: toolError(fmt.Errorf("tool %s not run: %w", calls[i].Name, ctx.Err())),
-				isErr:  true,
-			}
-			continue
-		}
-		if err := r.toolPolicy.Authorize(ctx, &dispatch[i]); err != nil {
-			denied[i] = true
-			results[i] = toolResult{
-				result:     toolError(fmt.Errorf("tool %s denied: %w", calls[i].Name, err)),
-				isErr:      true,
-				denied:     true,
-				denyReason: err.Error(),
-			}
-			continue
-		}
-		// Only Arguments is part of the rewrite contract: revert Name/ID.
-		dispatch[i].Name = calls[i].Name
-		dispatch[i].ID = calls[i].ID
-	}
-	return dispatch, denied
 }

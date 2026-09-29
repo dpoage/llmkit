@@ -29,8 +29,9 @@ flowchart TD
     L -- yes --> X[Return StopReasonError]
     L -- no --> M{Queued steer or follow-up?}
     M -- yes --> A
-    M -- no --> N{Empty turn?}
+    N{Empty turn?}
     N -- nudges left --> A
+    N -- nudges spent --> Z[Stop with TruncNoAnswer]
     N -- no --> O[Run ends and returns the Outcome]
     K -- yes --> P[ToolPolicy authorizes every call in model order]
     P --> Q[Dispatch: sequential, or one goroutine per call with WithParallelTools]
@@ -48,7 +49,7 @@ The checks at the loop top run in this order:
 2. per-run token budget
 3. shared budget pool
 
-A run that fails a check stops cleanly with a truncation reason, not an error. Steering delivery sits below those checks, so a limit stop leaves queued turns undelivered.
+A run that fails a check stops with a truncation reason, and `Run` returns it as an `*IncompleteError`. Steering delivery sits below those checks, so a limit stop leaves queued turns undelivered.
 
 ## Tools
 
@@ -84,7 +85,7 @@ When to use: give the model capabilities it cannot have on its own — read file
 | `CacheReadWeight` | 1.0 (no discount) | treated as 1.0 |
 | `HistoryTokenBudget` | 0 (compaction off) | also off |
 
-A limit stop is data, not an error. `Run` returns an `Outcome` with a non-empty `TruncationReason` (`TruncMaxIterations`, `TruncTokenBudget`, or `TruncBudgetPool`) and the text of the last completion in `FinalText`. Other failures do return an error; the table under [What Run returns](#what-run-returns) lists them all.
+A limit stop is an error carrying data. `Run` returns the `Outcome` with a non-empty `TruncationReason` (`TruncMaxIterations`, `TruncTokenBudget`, or `TruncBudgetPool`) and the text of the last completion in `FinalText`, together with an `*IncompleteError` whose `Reason` repeats the truncation reason and whose `Outcome` is that same pointer. The text is not an answer. `RunJSON` returns a nil error when its final answer still parses; see [Structured output](#structured-output). The other failures are listed in the table under [What Run returns](#what-run-returns).
 
 `HistoryTokenBudget` turns on threshold-triggered compaction. When the estimated history size (bytes/4) crosses the threshold, the Runner replaces old tool results with short stubs. It keeps the most recent few results intact. The threshold then re-arms higher. Compaction mutates the prompt prefix, so each firing costs one cache miss; the re-arm bounds how often that happens.
 
@@ -144,19 +145,18 @@ When to use: guardrails. Allowlists and denylists, argument rewrites (constrain 
 
 ## Hooks
 
-`WithHooks` registers an observer struct with one optional callback per loop event. Every field is independent; a nil func is a no-op, and a zero `Hooks` value is valid.
+`WithHooks` registers a callback struct with one optional callback per live loop event. Every field is independent; a nil func is a no-op, and a zero `Hooks` value is valid. Each `WithHooks` call appends: callbacks fire in registration order, and a nil field in one registration does not suppress another registration's callback.
 
 | Hook | Fires |
 |---|---|
 | `BeforeCompletion` / `AfterCompletion` | around every completion, including continuation, finalization, and repair turns |
 | `Delta` | once per stream fragment; the Runner streams via `llmkit.Stream` only when set |
-| `ToolStart` / `ToolEnd` | around each `Tool.Run` |
+| `ToolStart` / `ToolEnd` | around each `Tool.Run` that is executed; never for a call naming an unregistered tool or a call a `ToolPolicy` denied |
 | `ToolHealth` | when a tool returns a `*ToolHealthError` |
-| `Compaction` | when compaction actually pruned history |
-| `Repair` | at the start of a `RunJSON` repair pass |
-| `Finalize` | when the reserved finalization turn is taken |
 
-Hooks run synchronously, inline on the goroutine that reaches the fire point. Every hook family reports the same 1-based step for a turn: `ToolEvent.Step`, `CompactionEvent.Step`, and the `step` the Runner stamps on the run's `llmkit.Event` values. Consumers join on it. A repair turn continues the numbering.
+Compaction, steering, and finalization are not hooks: they are events on the run's observer chain (`compaction`, `steer`, `finalize`) and fields of `Outcome` (`Finalized`). `ToolStart` / `ToolEnd` fire only for executed calls; the run's `tool_run` events also record unknown-tool calls and policy denials (a denial carries `Denied` and `DenyReason`, not a result). A run that ends mid-turn, for any reason including a cancelled context or a panic, can leave requested calls without a `tool_run` event.
+
+Hooks run synchronously, inline on the goroutine that reaches the fire point. Every hook reports the same 1-based step for a turn: `ToolEvent.Step` and the `step` the Runner stamps on the run's `llmkit.Event` values. Consumers join on it. A repair turn continues the numbering.
 
 Every hook receives a context without the turn's completion span — the same pre-claim context `RequestPolicy` sees — and so does every tool. A provider client called from a hook therefore never reports its `Attempt` events under the turn's span; whether it emits its own `Completion` follows the emission rule on `llmkit.Observer`. The Runner tags every `Completion` event it emits with the client's identity (`llmkit.IdentityOf(r.client)`): `Provider` and `Model` on the event name the client that served the turn.
 
@@ -168,7 +168,7 @@ agent.WithHooks(agent.Hooks{
 })
 ```
 
-A panicking hook is a harness bug: it propagates out of `Run` in both dispatch modes and is never rendered to the model. Hook functions must be safe for concurrent use under `WithParallelTools` or concurrent `Run` calls.
+A panicking hook is a harness bug: the remaining callbacks registered for that event do not fire, and the panic is never rendered to the model. Hook functions must be safe for concurrent use under `WithParallelTools` or concurrent `Run` calls.
 
 When to use: stream tokens to a UI with `Delta`, log tool activity, collect metrics, or record tool-health signals.
 
@@ -211,9 +211,10 @@ answer, outcome, err := agent.RunJSONAs[tripAnswer](ctx, runner, "Plan a 3-day t
 Parse and repair rules:
 
 1. If the answer fails to parse or violates the schema, the Runner makes one repair round-trip: it sends the precise error back and asks for valid JSON only.
-2. If the repair still fails, the error wraps `ErrUnparseableOutput`.
+2. If the repaired answer still fails to parse, the error wraps `ErrUnparseableOutput`.
 3. A run already stopped by the token budget or a budget pool skips the repair. It fails immediately, and the `Outcome` keeps the budget `TruncationReason`.
-4. `RunJSON` also reserves the last iteration for a forced-finalization turn, so a capped run still gets the chance …
+4. `RunJSON` also reserves the last iteration for a forced-finalization turn, so a capped run still gets the chance to emit its answer.
+5. A truncated run whose answer parses returns a nil error, and the `Outcome` keeps its `TruncationReason`. A truncated run whose answer does not parse returns an error that matches both `ErrUnparseableOutput` and `*IncompleteError`. The exception is a repair completion that itself fails (a transport error, a cancelled context): `RunJSON` returns that failure as listed under [What Run returns](#what-run-returns), which matches neither, even on a truncated run.
 
 When to use: any caller that needs a machine-readable answer — extraction, routing, scoring, and phase hand-offs between agents.
 
@@ -223,7 +224,7 @@ When to use: any caller that needs a machine-readable answer — extraction, rou
 
 Pool rules:
 
-- An exhausted pool stops a run cleanly with `TruncBudgetPool`.
+- An exhausted pool stops a run with `TruncBudgetPool`; `Run` reports it as an `*IncompleteError`.
 - One final turn per run can land after the ceiling, so real spend can modestly overshoot.
 - A nil pool is the default and means unlimited.
 
@@ -231,7 +232,7 @@ When to use: cap the total spend of a fan-out (many runners, one ceiling) withou
 
 ## Transcripts, observers, and replay
 
-Every run emits `llmkit.Event` values through one observer chain. The in-memory `agent.Transcript` sits first: it always exists and backs `Outcome.Transcript`. The single durable sink installed with `WithObserver` sits last.
+Every run emits `llmkit.Event` values through one observer chain. The in-memory `agent.Transcript` sits first: it always exists and backs `Outcome.Transcript`. Every sink installed with `WithObserver` follows, in registration order.
 
 `agent.JSONL(dir, onErr)` streams one JSON line per event to a file per run. The chain is built with `llmkit.Observers`. The events are the same ones bare clients see. A Runner already emits the `completion` event for every completion it makes, so never wrap a Runner's client with `llmkit.Observe` — that would double it.
 
@@ -243,7 +244,7 @@ Decorator-emitted kinds this table does not list — a provider `attempt`, and t
 |---|---|---|
 | `start` | 0 | the task text and the tool names offered; `parent_run_id` rides here on continued runs |
 | `completion` | turn | the full request–response round-trip (post-policy request, response, usage) or the failure as `err`; one per model turn, span-joined to any provider attempts |
-| `tool_run` | turn | the model's call, the result verbatim as fed to the model; `Denied` + `deny_reason` for policy denials, `is_error` for failures |
+| `tool_run` | turn | the model's call, the result verbatim as fed to the model; `denied` + `deny_reason` for policy denials, `is_error` for failures |
 | `compaction` | next turn | token totals before/after and the prune count; only when something was actually pruned |
 | `steer` | next turn | a delivered steering message; `follow_up` marks follow-up turns |
 | `finalize` | completed turns | why the run stopped (`truncation_reason`), total usage, the run's answer (`final_text`), whether forced finalization fired; the completed-turn count is the `step` itself; emitted on every run end, including error returns; a failed completion does not advance the step, so a run whose only completion failed reports step 0 |
@@ -275,25 +276,29 @@ Admission rules for the JSONL sink:
 - Admission — the exclusive create and that first `start` line — are one step under one lock, so a record is never created and then left empty.
 - The file outlives the run's admission state, so a second run can never take an id some run already recorded — it is refused as a leftover, which is what keeps one run's events out of another's record.
 
-The sink is best-effort: it never fails a run, and every failure flows to the `onErr` callback given at construction. Calling `WithObserver` twice is last-wins: a Runner has exactly one durable sink.
+The sink is best-effort: it never fails a run, and every failure flows to the `onErr` callback given at construction. `WithObserver` appends, so a transcript sink and a spend ledger compose without `llmkit.Observers`. A panic in one sink propagates and later sinks do not see that event. The Runner does not enforce one durable history: register at most one sink that records the run's history (see the usage rule in [design](design.md)).
 
 `Transcript.SaveJSONL` and `LoadJSONL` serialize the in-memory view. Every `LoadJSONL` line must be a valid `llmkit.Event` (`Event.Validate`'s rule: a known kind carrying exactly its own payload, and a non-zero `schema_version`) or the load errors naming the line.
 
 The rule is forward-compatible on the version (a future `schema_version` still loads) but not on kinds: one unknown kind fails the whole load, since a kind this build cannot name cannot be decoded safely.
 
-Both read sides meet at one interface:
+Both read sides meet at one interface, `llmkit.Source`, which lives in the root package so store and replay code need not import `agent`:
 
 ```go
 type Source interface {
-	Events(ctx context.Context, run llmkit.RunID) ([]llmkit.Event, error)
+	Events(ctx context.Context, run RunID) ([]Event, error)
 }
 ```
 
-`Transcript` and the `JSONL` sink both implement it. `store/sqlite` joins them in a later round. Both return a slice the caller owns, both fail with `ErrUnknownRun` for a run they have no record of, and the sink's read side refuses an id that is not a safe filename component.
+`Transcript` and the `JSONL` sink both implement it. `store/sqlite` joins them in a later round. Both return a slice the caller owns, both fail with `llmkit.ErrUnknownRun` for a run they have no record of, and the sink's read side refuses an id that is not a safe filename component.
 
 Read a JSONL run once it has finalized: the sink streams a line per event and nothing synchronizes a read against a write in flight, so a read that races an append can decode a torn last line and fail.
 
-Replay consumes `completion` events only (never attempts). `NewReplayClient(src, run, caps)` serves the recorded responses with tool-call structure validation. Its `Tools()` method returns one `Tool` per recorded name, bound to the client, serving the recorded results instead of executing. This is a fully offline replay with zero live tool executions, deterministic under `WithParallelTools`.
+Replay consumes `completion` events only (never attempts). `NewReplayClient(src, run, caps)` serves the recorded responses with tool-call structure validation. Its `Tools()` method returns one `Tool` per recorded name, bound to the client, serving the recorded results instead of executing. This is a fully offline replay with zero live tool executions, deterministic under `WithParallelTools`. Tools other than `rc.Tools()` execute live, and their results are never compared with the record.
+
+Calls a `ToolPolicy` denied in the recorded run are not served by those tools; their names stay registered in `Tools()` so any policy you install sees them. `rc.ToolPolicy()` denies a call, with the recorded reason, if and only if its tool-call ID is the ID of a call the record denied in the current recorded tool turn, and allows every other call. Records carry call IDs by construction: the Runner cannot feed back a tool result for a call without one, and replayed responses carry the recorded IDs. Install it with `WithToolPolicy(rc.ToolPolicy())` when the record has denials and the replay has no policy of its own; a policy you install yourself is never overridden. A record with a denial replayed with no policy at all diverges (`ErrReplayDiverged`) instead of finishing with the denial rewritten into a tool error.
+
+`NewReplayClientFromResponses(resps, caps)` is the scripted test double: it serves `resps` in order, validates no tool-call structure, and has no recorded tool set.
 
 Divergence rules:
 
@@ -308,19 +313,19 @@ rc, err := agent.NewReplayClient(src, runID, llmkit.Capabilities{})
 if err != nil {
 	return err
 }
-replayed, err := agent.NewRunner(rc, rc.Tools(), "sys").Run(ctx, "task")
-if err != nil {
-	// a mid-run divergence fails Run with an ErrReplayDiverged error
-	return err
+replayed, err := agent.NewRunner(rc, rc.Tools(), "sys",
+	agent.WithToolPolicy(rc.ToolPolicy()), // only needed when the record holds denials
+).Run(ctx, "task")
+if div := rc.Err(); div != nil {
+	return div
 }
-if err := rc.Err(); err != nil {
-	// a divergence in the run's final tool turn surfaces only here
+if err != nil {
 	return err
 }
 _ = replayed
 ```
 
-When to use: record a run once, then replay it deterministically against modified harness code — the building block for offline evaluation. `EstimateHistoryTokens` and `SimulateCompaction` export the compaction decision so replay tooling reproduces it exactly.
+When to use: record a run once, then replay it deterministically against modified harness code — the building block for offline evaluation. `EstimateHistoryTokens` exports the size estimate the compaction trigger uses, so replay tooling reports the same numbers as the live loop.
 
 ## Options
 
@@ -330,13 +335,13 @@ Constructor options apply to every run of a Runner; run options apply to a singl
 |---|---|
 | `WithLimits(l Limits)` | zero fields resolve to the package defaults |
 | `WithMaxTokens(n int)` | zero uses the adapter default |
-| `WithHooks(h Hooks)` | zero `Hooks`: every callback is a no-op |
+| `WithHooks(h Hooks)` | appends; no registration: every callback is a no-op |
 | `WithParallelTools()` | sequential dispatch within a turn |
 | `WithToolTimeout(d time.Duration)` | zero: no per-tool deadline |
 | `WithBudgetPool(pool *BudgetPool)` | nil pool: unlimited, no check, no charge |
 | `WithRequestPolicy(p RequestPolicy)` | nil policy: the request goes out as built, no clone |
 | `WithToolPolicy(p ToolPolicy)` | nil policy: every call is allowed |
-| `WithObserver(obs llmkit.Observer)` | nil: no durable sink; last-wins, one sink per Runner |
+| `WithObserver(obs llmkit.Observer)` | appends; nil: no sinks beyond the in-memory transcript |
 | `Attach(blocks ...llmkit.Block)` (run) | no blocks: the plain text task turn; repeated calls accumulate |
 | `Continue(prev *Outcome)` (run) | nil or empty `prev`: the run reseeds from `task`; else `ParentRunID` = `prev.RunID` |
 | `WithRunID(id llmkit.RunID)` (run) | empty: the Runner mints one with `llmkit.NewRunID` |
@@ -344,17 +349,18 @@ Constructor options apply to every run of a Runner; run options apply to a singl
 
 ## What Run returns
 
-`Run` returns `(*Outcome, error)`. The `Outcome` is non-nil even on error, and its `Transcript` captures everything up to the failure.
+`Run` returns `(*Outcome, error)`. The `Outcome` is non-nil on every error but one, and its `Transcript` captures everything up to the failure. The exception is `RunJSON` given an `out` that is not a non-nil pointer: it fails before the run starts, so the `Outcome` is nil.
 
 | Value | Meaning |
 |---|---|
 | `*StopReasonError` | the model's final turn ended with `StopError`, `StopRefusal`, or `StopContentFilter` and no tool calls. `Text` carries the refusal prose — never present it as the answer. Thread `err.Outcome` into `Continue` to keep the conversation going. |
-| `error` wrapping `ErrUnparseableOutput` | (`RunJSON` / `RunJSONAs` only) the final answer did not parse or violated the schema. The Runner repairs once; a run stopped by the token budget or a budget pool skips the repair and fails immediately, keeping the budget `TruncationReason` in the `Outcome`. |
+| `error` wrapping `ErrUnparseableOutput` | (`RunJSON` / `RunJSONAs` only) the final answer did not parse or violated the schema. The Runner repairs once; a run stopped by the token budget or a budget pool skips the repair and fails immediately, keeping the budget `TruncationReason` in the `Outcome`. When the run was also truncated, the same error matches `*IncompleteError` under `errors.As`. A truncated run whose answer parses returns a nil error. |
 | `ErrSteeringInUse` | the `Steering` handle is already bound to another active run |
 | context error (`context.Canceled`, `context.DeadlineExceeded`) | the run's context ended the run; the partial `Outcome` is still returned |
 | `agent: completion failed at iteration <step>: ...` | the client call failed (transport, provider error); the underlying error is wrapped |
 | `agent: request policy at iteration <step>: ...` | the `RequestPolicy` aborted the run before the wire call; nothing is recorded for that step |
-| `nil` error with `TruncationReason` set | a clean limit stop: `TruncMaxIterations`, `TruncTokenBudget`, or `TruncBudgetPool` |
+| `agent: RunJSON: out must be a non-nil pointer, ...` | (`RunJSON` only) `out` is nil, not a pointer, or a nil pointer. Returned before any completion or event, with a nil `Outcome`: no run started |
+| `*IncompleteError` | a limit ended the run before the model finished: `Reason` is `TruncMaxIterations`, `TruncTokenBudget`, or `TruncBudgetPool`, and `Reason` equals `Outcome.TruncationReason`. `Run` returns it directly; a `RunJSON` / `RunJSONAs` error matches it under `errors.As` only as the truncated form of the `ErrUnparseableOutput` error above. `err.Outcome` is the same pointer `Run` returned; its `FinalText` is the last completion's text, not an answer. Thread `err.Outcome` into `Continue` to carry on. |
 
 `ErrBudgetExhausted` is the `BudgetPool.Check` failure; the Runner converts it into the `TruncBudgetPool` stop, so `Run` itself does not return it. `ToolHealthError` is likewise never returned: it reaches `Hooks.ToolHealth` while the harness feeds the same text to the model as tool data.
 
