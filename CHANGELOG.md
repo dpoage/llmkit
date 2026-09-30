@@ -8,6 +8,8 @@ entry below is marked.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-30
+
 ### Added
 
 - `llmkit`: `Source` (the read side of recording: one method,
@@ -1565,7 +1567,8 @@ entry below is marked.
 - Relicensed AGPL-3.0; the `embed` package derives from MIT-licensed `known`
   and is relicensed by the copyright holder.
 
-[Unreleased]: https://github.com/dpoage/llmkit/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/dpoage/llmkit/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/dpoage/llmkit/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/dpoage/llmkit/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/dpoage/llmkit/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/dpoage/llmkit/compare/v0.2.0...v0.3.0
