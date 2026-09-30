@@ -233,10 +233,10 @@ When to use: any caller that needs a machine-readable answer — extraction, rou
 Pool rules:
 
 - When the pool check fails, `Run` stops the run with `TruncBudgetPool` and reports it as an `*IncompleteError`.
-- One final turn per run can land after the ceiling, so real spend can modestly overshoot.
+- The pool gates the start of each loop turn. It does not cap spend: a continuation, a `RunJSON` finalization turn, or a `RunJSON` repair can run after spend reaches the limit and still charge the pool. A run stopped by the token budget or the pool skips the repair.
 - A nil pool is the default and means unlimited.
 
-When to use: cap the total spend of a fan-out (many runners, one ceiling) without giving each run its own allowance. Record external spend against the same ceiling with `BudgetPool.Add`.
+When to use: share one token limit across a fan-out (many runners, one pool) without giving each run its own allowance. Record external spend against the same pool with `BudgetPool.Add`.
 
 ## Transcripts, observers, and replay
 
@@ -244,7 +244,7 @@ Every run emits `llmkit.Event` values through one observer chain. The in-memory 
 
 `agent.JSONL(dir, onErr)` streams events as JSON lines into a file named after the run's `RunID`. The chain is built with `llmkit.Observers`. The events are the same ones bare clients see. A Runner already emits the `completion` event for every completion it makes, so never wrap a Runner's client with `llmkit.Observe` — that would double it.
 
-Each event carries `run_id` (minted per run, or pinned with the `WithRunID` run option) and `schema_version`. The table below gives the `step` of each kind the Runner emits; the `finalize` row gives no step for a `panicked` run, and the JSON omits `step` when it is 0. A run continued with `Continue` stamps `parent_run_id` on every event, so a sink can reconstruct the whole lineage.
+Each event carries `run_id` (minted per run, or pinned with the `WithRunID` run option) and `schema_version`. The table below gives the `step` of each kind the Runner emits; the JSON omits `step` when it is 0, which includes a `panicked` `finalize`. A run continued with `Continue` stamps `parent_run_id` on every event, so a sink can reconstruct the whole lineage.
 
 Decorator-emitted kinds this table does not list — a provider `attempt`, and the `decision`/`embed`/`exec` events a tool's decorators emit — carry the same enclosing turn as `step` when they fire inside a Runner turn: the Runner places the turn in the context (`llmkit.WithStep`) those emitters read.
 
@@ -252,10 +252,10 @@ Decorator-emitted kinds this table does not list — a provider `attempt`, and t
 |---|---|---|
 | `start` | 0 | the task text and the tool names offered; `parent_run_id` rides here on continued runs |
 | `completion` | turn | the full request–response round-trip (post-policy request, response, usage) or the failure as `err`; one per model turn, span-joined to any provider attempts |
-| `tool_run` | turn | the model's call, the result verbatim as fed to the model; `denied` + `deny_reason` for policy denials, `is_error` for failures |
+| `tool_run` | turn | the model's call, the result verbatim as fed to the model; `denied` + `deny_reason` for policy denials, `is_error` for failures; `dispatched_arguments` when a `ToolPolicy` rewrote the arguments `Tool.Run` received (the `call` stays the model's) |
 | `compaction` | next turn | token totals before/after and the prune count; only when something was actually pruned |
 | `steer` | next turn | a delivered steering message; `follow_up` marks follow-up turns |
-| `finalize` | completed turns, unless `status` is `panicked` | how the run ended (`status`, `err`); unless `status` is `panicked`, also the truncation reason when there is one (`truncation_reason`), usage, the run's last text (`final_text`, as `Outcome.FinalText`), and whether forced finalization fired, with the completed-turn count as the `step` itself; a failed completion does not advance the step, so a run whose only completion failed reports step 0 |
+| `finalize` | completed turns; 0 when `status` is `panicked` | how the run ended (`status`, `err`); unless `status` is `panicked`, also the truncation reason when there is one (`truncation_reason`), usage, the run's last text (`final_text`, as `Outcome.FinalText`), and whether forced finalization fired, with the completed-turn count as the `step` itself; a failed completion does not advance the step, so a run whose only completion failed reports step 0; a `panicked` run reports step 0 whatever step its context carries, a nested Runner's parent tool phase included |
 
 When a panic in a hook, a `RequestPolicy`, a `ToolPolicy`, or the `RunJSON` out value's unmarshal unwinds a run after its `start` event, the Runner emits one `finalize` with `status` `panicked`, zero usage, and an empty `truncation_reason`, `final_text`, and `err`, whatever the run had completed. Observer panics behave as follows:
 
@@ -309,11 +309,15 @@ type Source interface {
 
 Read a JSONL run once it has finalized: the sink streams a line per event and nothing synchronizes a read against a write in flight, so a read that races an append can decode a torn last line and fail.
 
-Replay consumes `completion` events only (never attempts). `NewReplayClient(src, run, caps)` serves the recorded responses with tool-call structure validation. Its `Tools()` method returns one `Tool` per recorded name, bound to the client, serving the recorded results instead of executing. This is a fully offline replay with zero live tool executions, deterministic under `WithParallelTools`. Tools other than `rc.Tools()` execute live, and their results are never compared with the record.
+Replay consumes `completion` events only (never attempts). `NewReplayClient(src, run, caps)` serves the recorded responses. If the record holds N tool runs after the previous completion and before the response it serves, it checks that the request's last N tool-result messages carry the ids of those N tool runs, in order; fewer than N such messages is a mismatch. If the record holds no tool run there, it does no structure check. Its `Tools()` method returns one `Tool` per recorded name the recording Runner registered, bound to the client, serving the recorded results instead of executing. This is a fully offline replay with zero live tool executions: each tool serves the recorded call it is dispatched for, matched by tool-call ID within the recorded turn being replayed, so providers that reuse call IDs from turn to turn are safe. When the calls of a turn carry distinct IDs, the replay is deterministic under `WithParallelTools` whatever order they dispatch in, even for calls that share a name and arguments. Calls of one turn that share an ID are told apart by name and arguments; calls that share ID, name, and arguments receive their recorded results in dispatch order. The tool compares the arguments it receives, as JSON values, with the recorded ones (`dispatched_arguments` when a policy rewrote them, else the call's `arguments`), so a same-policy replay reproduces the policy's rewrites. The record spells a cleared payload as `null`, so an empty payload also matches `dispatched_arguments` of exactly `null`. Arguments that do not match are a divergence. Calling a replay tool's `Run` directly, with no call ID, serves the earliest unconsumed recorded call in the current turn that matches name and arguments; that fallback serves direct calls only, never a Runner-driven replay, because a Runner panics on a call with an empty ID. Tools other than `rc.Tools()` execute live, and their results are never compared with the record.
 
 Calls a `ToolPolicy` denied in the recorded run are not served by those tools; their names stay registered in `Tools()` so any policy you install sees them. `rc.ToolPolicy()` denies a call, with the recorded reason, if and only if its tool-call ID is the ID of a call the record denied in the current recorded tool turn, and allows every other call. Records carry call IDs by construction: the Runner cannot feed back a tool result for a call without one, and replayed responses carry the recorded IDs. Install it with `WithToolPolicy(rc.ToolPolicy())` when the record has denials and the replay has no policy of its own; a policy you install yourself is never overridden. A record with a denial replayed with no policy at all records a divergence, which `rc.Err()` reports. What `Run` returns depends on where the run ends: a step-capped record returns an `*IncompleteError`, and a record with a later completion returns a completion failure that wraps `ErrReplayDiverged`.
 
-`NewReplayClientFromResponses(resps, caps)` is the scripted test double: it serves `resps` in order, validates no tool-call structure, and has no recorded tool set.
+Replaying under a policy that rewrote arguments works when each rewrite produces valid JSON and is deterministic: a rewrite to bytes that are not valid JSON is not recorded in `dispatched_arguments`, so its replay diverges. Two accepted limits: a record written before `dispatched_arguments` existed holds only the model's arguments, so a same-policy replay of one recorded under a rewriting policy still diverges; and a reader built before the field existed drops it when it re-saves a record, with the same result.
+
+Calls to a tool the recording Runner did not register are not served either: that Runner answered them with its unknown-tool error before any policy saw them, `Tools()` leaves their names out, and the replaying Runner answers them through its own unknown-tool path with the same bytes. A name counts as not registered when it is empty; when the run's `start` event lists tools and the name is not among them; or, for a record whose `start` event lists none, when every recorded call of the name carries the unknown-tool error. When `start` lists tools, a listed name stays registered even if every call of it errored. `NewReplayClient` returns an error, naming the step, for a record holding a call to a name it treats as not registered whose result is not the unknown-tool error (for example a call to an empty name served by a Runner that registered an empty-named tool, which a replay cannot reproduce).
+
+`NewReplayClientFromResponses(resps, caps)` is the scripted test double: it serves `resps` in order, validates no tool-call structure, and has no recorded tool set. It reports no divergence unless it serves past its last response: an unused response is not a divergence.
 
 Divergence rules:
 
@@ -321,7 +325,7 @@ Divergence rules:
 - A call that matches nothing, a structure mismatch, or an exhausted record wraps `ErrReplayDiverged` naming the recorded step.
 - `Complete` refuses to serve past a divergence.
 
-A divergence in the run's final tool turn can end the run before another `Complete`, so assert `Err() == nil` after every replayed run:
+A replay can end without another `Complete`: after a divergence in the run's final tool turn, or when the replay finishes before the record does. Assert `Err() == nil` after every replayed run:
 
 ```go
 rc, err := agent.NewReplayClient(src, runID, llmkit.Capabilities{})
@@ -339,6 +343,15 @@ if err != nil {
 }
 _ = replayed
 ```
+
+If no divergence was recorded and the client has served at least one completion, `Err()` also reports recorded work the replay never reached. It reports it as a divergence that names the recorded step:
+
+- A recorded successful completion the replay never served. Example: the recorded run received a steering follow-up, and the replay has none.
+- A recorded tool call that no replay tool served, but only when you called `rc.Tools()`. Calling `rc.Tools()` opts into this check. If the record holds a call that a tool ran, a caller that takes `rc.Tools()` and never runs the tools, for example never passes them to the Runner, gets an error. For a caller that never calls `rc.Tools()` (live tools only), `Err()` makes no call check, because live tool results are never compared with the record.
+
+Calls that a `ToolPolicy` denied in the recorded run, and calls to a tool the recording Runner did not register, never count as unserved: no replay tool serves them. A caller policy stricter than the recorded one, which denies a recorded call in the final tool turn, therefore shows up in `Err()` when you took `rc.Tools()`.
+
+Call `Err()` after `Run` returns. If you call it during the run, after the client has served its first completion, it applies these checks to the replay so far. A report from these checks does not record a divergence, so the run continues.
 
 When to use: record a run once, then replay it deterministically against modified harness code — the building block for offline evaluation. `EstimateHistoryTokens` exports the size estimate the compaction trigger uses, so replay tooling reports the same numbers as the live loop.
 

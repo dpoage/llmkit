@@ -48,8 +48,9 @@ type Runner struct {
 	// parallelTools, when true, dispatches one turn's tool calls concurrently
 	// (see WithParallelTools).
 	parallelTools bool
-	// budgetPool, when non-nil, caps spend across runs (see WithBudgetPool);
-	// nil means unlimited.
+	// budgetPool, when non-nil, is shared across runs: it is checked before
+	// each main-loop turn and charged after every successful completion (see
+	// WithBudgetPool); nil means unlimited.
 	budgetPool *BudgetPool
 	// toolPolicy, when non-nil, gates every model-requested tool call (see
 	// WithToolPolicy); nil allows all calls.
@@ -112,11 +113,12 @@ func WithBudgetPool(pool *BudgetPool) Option {
 // prompt. Options such as [WithLimits], [WithMaxTokens], [WithHooks], and
 // [WithObserver] tune limits, output token caps, callbacks, and event sinks.
 //
-// NewRunner panics if tools contains a nil entry or two tools whose
-// Def().Name is the same: the model addresses a tool by name alone, so a
-// duplicate would advertise one tool's schema and dispatch another. The panic
-// value is a string naming the tool index (nil) or the duplicated name and
-// both indexes.
+// NewRunner panics if tools contains a nil entry, a tool whose Def().Name is
+// empty, or two tools whose Def().Name is the same: the model addresses a
+// tool by name alone, so an unnamed tool cannot be called and a duplicate
+// would advertise one tool's schema and dispatch another. The panic value is
+// a string naming the tool index (nil or empty name) or the duplicated name
+// and both indexes.
 func NewRunner(client llmkit.Client, tools []Tool, systemPrompt string, opts ...Option) *Runner {
 	r := &Runner{
 		client:       client,

@@ -6,24 +6,32 @@ import (
 	"sync/atomic"
 )
 
-// ErrBudgetExhausted is returned by BudgetPool.Check once the pool has no
-// headroom left for another model call. The [Runner] treats it as a limit
+// ErrBudgetExhausted is returned by BudgetPool.Check once the pool's
+// cumulative spend has reached its limit. The [Runner] treats it as a limit
 // stop (TruncBudgetPool, reported by Run as an [IncompleteError]), not an
 // infrastructure error.
 var ErrBudgetExhausted = errors.New("agent: shared budget pool exhausted")
 
 // BudgetPool is a concurrency-safe token budget shared across many
 // concurrent [Runner] runs. A Runner installed with [WithBudgetPool] checks
-// the pool once per main-loop turn and charges it after every successful
-// completion with that completion's chargeable tokens. Once a check finds
-// the pool exhausted, a run already in flight starts no further main-loop
-// turn, even with its own per-run allowance left. This
-// bounds total charged overshoot to at most one in-flight model call per
-// concurrent runner.
-// Note a RunJSON repair pass and a run
-// stopped mid-turn still spend real provider tokens that are gated pre-turn
-// but can land after the ceiling is crossed, so real-dollar overshoot can
-// modestly exceed the charged bound.
+// the pool once per main-loop turn, before the turn's first completion, and
+// charges it after every successful completion with that completion's
+// chargeable tokens. Once a check finds the pool exhausted, a run already
+// in flight starts no further main-loop turn, even with its own per-run
+// allowance left.
+//
+// The pool gates the start of main-loop turns. It does not cap spend.
+// Three kinds of completion run without a fresh check and still charge the
+// pool:
+//
+//   - the max-tokens continuation of a completion that stopped at the
+//     output cap (a capped 5/5 completion and its 5/5 continuation charge
+//     20 tokens to a pool with 3 tokens of headroom);
+//   - the forced-finalization turn that RunJSON takes when the iteration
+//     cap, the per-run token budget, or the pool stops the run, with its
+//     own continuation;
+//   - the RunJSON repair completion (a run that stopped with
+//     TruncTokenBudget or TruncBudgetPool skips it).
 //
 // The pool tracks cumulative spend (input+output tokens, cache-read
 // discounted) against a fixed limit. A nil *BudgetPool is the canonical
@@ -37,7 +45,8 @@ type BudgetPool struct {
 	spent atomic.Int64
 }
 
-// NewBudgetPool returns a pool bounding cumulative spend to limit tokens.
+// NewBudgetPool returns a pool whose Check fails once cumulative spend
+// reaches limit tokens.
 // limit must be positive; use a nil *BudgetPool to represent an unlimited pool.
 func NewBudgetPool(limit int64) *BudgetPool {
 	if limit <= 0 {
@@ -54,7 +63,7 @@ func (p *BudgetPool) Add(tokens int64) {
 	p.spent.Add(tokens)
 }
 
-// Check reports whether the pool still has headroom for another model call. It
+// Check reports whether cumulative spend is still below the limit. It
 // returns ErrBudgetExhausted once cumulative spend has reached the limit, and
 // nil otherwise. A nil pool is unlimited: Check always returns nil.
 func (p *BudgetPool) Check() error {

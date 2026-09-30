@@ -47,13 +47,17 @@ func (t *Transcript) Observe(_ context.Context, ev llmkit.Event) {
 
 // Events returns a COPY of the recorded events of run, in emission order —
 // caller owns the slice. It satisfies [llmkit.Source]; a transcript records
-// exactly one run, so any other id (including an empty one, unless the
-// transcript itself is unnamed) fails with an error wrapping
-// [llmkit.ErrUnknownRun].
+// exactly one run, so Events fails with an error wrapping
+// [llmkit.ErrUnknownRun] for any id other than the transcript's RunID, for
+// every id when RunID is empty (a hand-built transcript), and for its own
+// RunID while Record is empty: a Source never reports an empty success.
 func (t *Transcript) Events(_ context.Context, run llmkit.RunID) ([]llmkit.Event, error) {
 	if t.RunID == "" || run != t.RunID {
 		// An unnamed (hand-built) transcript records no run at all.
 		return nil, fmt.Errorf("agent: transcript records run %q, not %q: %w", t.RunID, run, llmkit.ErrUnknownRun)
+	}
+	if len(t.Record) == 0 {
+		return nil, fmt.Errorf("agent: transcript of run %q holds no events: %w", t.RunID, llmkit.ErrUnknownRun)
 	}
 	return slices.Clone(t.Record), nil
 }

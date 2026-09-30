@@ -27,8 +27,11 @@ import (
 // Authorize may assign a new value to call.Arguments. Tool.Run receives the
 // new arguments, and [ToolEvent.Call] carries them in [Hooks.ToolStart] and
 // [Hooks.ToolEnd]. The assistant turn in the conversation history and the
-// transcript keep the model's original arguments. Changes to call.Name or
-// call.ID are ignored.
+// transcript's tool-run Call keep the model's original arguments; when the
+// rewrite changed them, the event's DispatchedArguments records what
+// Tool.Run received, unless the new bytes are not valid JSON. Replaying such
+// a record under the same policy needs the rewrite to produce valid JSON and
+// be deterministic. Changes to call.Name or call.ID are ignored.
 //
 // A non-nil error denies the call. Tool.Run does not run, the model
 // receives the tool result "ERROR: tool <name> denied: <err>" with IsError

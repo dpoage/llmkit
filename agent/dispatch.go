@@ -19,9 +19,10 @@ type toolSet struct {
 }
 
 // newToolSet builds a dispatch table from tools, preserving their order in
-// the defs slice. It panics on a nil entry or on two tools sharing a
-// Def().Name: either is a construction bug, and silently keeping one of a
-// duplicate pair would advertise one tool's schema while dispatching another.
+// the defs slice. It panics on a nil entry, on a tool whose Def().Name is
+// empty, or on two tools sharing a Def().Name: each is a construction bug,
+// and silently keeping one of a duplicate pair would advertise one tool's
+// schema while dispatching another.
 func newToolSet(tools []Tool) toolSet {
 	ts := toolSet{byName: make(map[string]Tool, len(tools))}
 	index := make(map[string]int, len(tools))
@@ -30,6 +31,9 @@ func newToolSet(tools []Tool) toolSet {
 			panic(fmt.Sprintf("agent: NewRunner: tool at index %d is nil", i))
 		}
 		def := t.Def()
+		if def.Name == "" {
+			panic(fmt.Sprintf("agent: NewRunner: tool at index %d has an empty name", i))
+		}
 		if first, dup := index[def.Name]; dup {
 			panic(fmt.Sprintf("agent: NewRunner: duplicate tool name %q at indexes %d and %d", def.Name, first, i))
 		}
@@ -122,6 +126,19 @@ func (r *Runner) authorizeCalls(ctx context.Context, calls []llmkit.ToolCall, re
 		// Only Arguments is part of the rewrite contract: revert Name/ID.
 		dispatch[i].Name = calls[i].Name
 		dispatch[i].ID = calls[i].ID
+		// A rewrite is what Tool.Run receives, so the ToolRun event carries
+		// it beside the model's call. Snapshot it here: a tool may write to
+		// the bytes it is handed. A cleared payload is spelled null, since
+		// an empty value would read as "not rewritten". A rewrite to bytes
+		// that are not JSON is left out: the event could not be encoded.
+		if !argsEqual(dispatch[i].Arguments, calls[i].Arguments) {
+			switch {
+			case len(dispatch[i].Arguments) == 0:
+				results[i].dispatchedArgs = json.RawMessage("null")
+			case json.Valid(dispatch[i].Arguments):
+				results[i].dispatchedArgs = bytes.Clone(dispatch[i].Arguments)
+			}
+		}
 	}
 	return dispatch, denied
 }
@@ -154,6 +171,9 @@ func (r *Runner) runTool(ctx context.Context, call llmkit.ToolCall, step int) (r
 		runCtx, cancel = context.WithTimeout(ctx, r.toolTimeout)
 		defer cancel()
 	}
+	// Tool.Run learns which call it serves (see [callIDFrom]); the tool
+	// hooks receive the run's ctx without it.
+	runCtx = withCallID(runCtx, call.ID)
 	r.fireToolStart(ctx, step, call)
 	start := time.Now()
 	out, panicVal, err := invokeTool(runCtx, tool, call.Arguments)
@@ -205,12 +225,32 @@ func invokeTool(ctx context.Context, tool Tool, args json.RawMessage) (out strin
 // toolResult is one executed tool call's outcome, as returned by
 // [Runner.executeTools]. denied marks a [ToolPolicy] denial: result still
 // carries the rendered model-visible text, while denyReason records the
-// policy's reason for the ToolRun event.
+// policy's reason for the ToolRun event. dispatchedArgs is set only when a
+// policy rewrote the arguments Tool.Run received (see
+// [llmkit.ToolRunEvent].DispatchedArguments).
 type toolResult struct {
-	result     string
-	isErr      bool
-	denied     bool
-	denyReason string
+	result         string
+	isErr          bool
+	denied         bool
+	denyReason     string
+	dispatchedArgs json.RawMessage
+}
+
+// callIDKey keys the ID of the call a Tool.Run serves in its context.
+type callIDKey struct{}
+
+// withCallID returns ctx carrying id as the call the tool invocation serves.
+func withCallID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, callIDKey{}, id)
+}
+
+// callIDFrom returns the ID of the call Tool.Run serves, or "" when ctx
+// carries none (a tool invoked outside a Runner's dispatch, or a call the
+// model gave no ID). Only replay tools read it, to match a served call to its
+// recorded counterpart by identity instead of by arguments.
+func callIDFrom(ctx context.Context) string {
+	id, _ := ctx.Value(callIDKey{}).(string)
+	return id
 }
 
 // deniedResult renders a [ToolPolicy] refusal: the model-visible denial

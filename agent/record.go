@@ -65,11 +65,13 @@ func (r *Runner) begin(ctx context.Context, cfg runConfig, task string) (context
 // outcome's status, usage, and truncation reason, with Step the number of
 // completed turns (Outcome.Iterations); a failed completion does not advance
 // it, so a run whose only completion failed reports Step 0. With panicked set
-// it reports Status RunPanicked with every other payload field zero, and
-// leaves Step as NewEvent stamped it from ctx.
+// it reports Status RunPanicked with every other payload field zero and Step
+// 0, whatever step the context carries (a pre-armed [llmkit.WithStep], or a
+// parent's tool phase around a nested Runner).
 func (r *Runner) emitFinalize(ctx context.Context, em runEmitter, o *Outcome, err error, panicked bool) {
 	ev := llmkit.NewEvent(ctx, llmkit.KindFinalize)
 	if panicked {
+		ev.Step = 0
 		ev.Finalize = &llmkit.FinalizeEvent{Status: llmkit.RunPanicked}
 	} else {
 		ev.Step = o.Iterations
@@ -115,14 +117,15 @@ func steerEvent(ctx context.Context, msg llmkit.Message, followUp bool, step int
 }
 
 // toolRunEvent builds the ToolRun event for one dispatched call: the model's
-// call, the textual result exactly as fed to the model, and the error or
+// call (never the policy's rewrite; a rewrite rides DispatchedArguments), the
+// textual result exactly as fed to the model, and the error or
 // policy-denial marks. A denial carries Denied and DenyReason with no result
 // — the rendered denial text still rides the conversation as the
 // tool-result message, per [ToolPolicy]'s contract.
 func toolRunEvent(ctx context.Context, call llmkit.ToolCall, res toolResult, step int) llmkit.Event {
 	ev := llmkit.NewEvent(ctx, llmkit.KindToolRun)
 	ev.Step = step
-	tre := &llmkit.ToolRunEvent{Call: call}
+	tre := &llmkit.ToolRunEvent{Call: call, DispatchedArguments: res.dispatchedArgs}
 	if res.denied {
 		tre.Denied = true
 		tre.DenyReason = res.denyReason

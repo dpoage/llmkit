@@ -145,7 +145,8 @@ entry below is marked.
   and the JSONL sink; `NewReplayClient(src, run, caps)` replays a recorded
   run from any `llmkit.Source`, `ReplayClient.Tools` serves the recorded
   tool results instead of executing them (a fully offline replay,
-  deterministic under parallel dispatch), and `ReplayClient.Err` reports a
+  deterministic under parallel dispatch for calls with distinct call
+  IDs), and `ReplayClient.Err` reports a
   diverged replay. The sentinels `llmkit.ErrUnknownRun` (a Source has no
   record of the run) and `ErrReplayDiverged` (a replay no longer matches
   its record) support errors.Is.
@@ -685,6 +686,21 @@ entry below is marked.
   including a cancelled context or a panic, can leave requested calls
   without a `tool_run` event; the docs now say so (llmkit-bk8.6.6,
   llmkit-bk8.9.9).
+- Docs only: `agent.BudgetPool` no longer claims a bound of one in-flight
+  model call per concurrent runner. The pool gates the start of each
+  main-loop turn and does not cap spend: a max-tokens continuation, the
+  `RunJSON` finalization turn (with its continuation), and the `RunJSON`
+  repair run without a fresh check and still charge the pool: a pool with a
+  3-token limit was charged 20 tokens by a capped 5/5 completion plus its
+  5/5 continuation. The `Observer` emission rule also covers a model call
+  a client makes inside its own `Complete`, on the ctx it received,
+  through `llmkit.Observe` or a provider stack. If that ctx carries a span,
+  as it does when an emitter or an agent `Runner` called the client, the
+  nested call emits no `Completion` of its own, and its spend reaches the
+  ledger only through the `Response.Usage` the enclosing client returns.
+  If that ctx carries no span, the nested emitter mints its own span. A
+  nested agent `Runner` mints its own span (llmkit-bk8.9.15,
+  llmkit-bk8.3.4).
 
 ### Removed
 
@@ -840,8 +856,8 @@ entry below is marked.
 - `agent` (llmkit-4qh.10, llmkit-bk8.6.8): the `ReplayClient`, `Tools`, and
   `Err` docs state that tools other than `rc.Tools()` execute live and their
   results are never compared with the record, that `Err` reports a
-  divergence in the run's final tool turn, and that `Err` does
-  not report a recorded call left unserved in that turn (llmkit-lew).
+  divergence in the run's final tool turn (the llmkit-lew entry covers a
+  recorded call left unserved there).
   `NewReplayClientFromResponses` is documented as the scripted test double.
 - `llmkit/sandbox` (llmkit-bk8.1.8): a command that cannot be launched now
   reports through the shell's exit-code convention on every real backend —
@@ -1029,6 +1045,62 @@ entry below is marked.
   `Capabilities`. `AGENTS.md` and `CLAUDE.md` no longer say that
   `provider/live_registry_test.go` enforces the acceptance rule for
   adapter and agent-loop changes.
+- `agent`, `llmkit` (llmkit-60a, llmkit-rq7): a run recorded under a
+  `ToolPolicy` that rewrites arguments now replays cleanly under the same
+  policy, and replay under `WithParallelTools` no longer swaps the recorded
+  results of same-name, same-arguments calls in one turn when their call IDs
+  differ. The tools of `ReplayClient.Tools()` serve each call by its
+  tool-call ID within the recorded turn (providers that reuse call IDs across
+  turns are safe; calls of one turn sharing an ID are told apart by name and
+  arguments) and compare the arguments the tool receives, as JSON values,
+  with the recorded ones: `ToolRunEvent.DispatchedArguments` when a policy
+  rewrote them, else the model's. The record spells a cleared payload as
+  `null`, so an empty payload also matches `DispatchedArguments` of exactly
+  `null`. Any other mismatch is an `ErrReplayDiverged` divergence naming the
+  step. `ToolRunEvent.DispatchedArguments`
+  (`json:"dispatched_arguments,omitempty"`) holds the rewritten arguments and
+  is present only when a policy rewrote them to valid JSON or cleared them;
+  `Call` stays the model's call and `EventSchemaVersion` stays 2. A replay
+  tool called directly, with no call ID, keeps the earliest-unconsumed
+  (name, arguments) matching; a Runner-driven replay never relies on it,
+  since a Runner panics on an empty call ID. `ReplayClient.Tools()` no
+  longer registers a name the recording Runner did not register (an empty
+  name, a name missing from the run's `start` event, or, when that event
+  lists no tools, a name whose every call is the unknown-tool error): those
+  calls replay through the Runner's own unknown-tool path, unseen by a
+  policy, and a record whose
+  call to such a name has any other outcome makes `NewReplayClient` return
+  an error naming the step. Accepted limits: a record written before this
+  change under a rewriting policy still diverges on a same-policy replay; a
+  reader built before this change drops the field when it re-saves a
+  record; a rewrite must produce valid JSON and be deterministic to replay.
+  This supersedes the "not replayable yet" note in the llmkit-bk8.1.5 entry
+  above.
+- agent guards (llmkit-ass, llmkit-5ah, llmkit-bk8.9.14): **Breaking:**
+  `agent.NewRunner` now also panics on a tool whose `Def().Name` is empty —
+  the model cannot address it — with a string naming the tool index; give
+  the tool a name. `Transcript.Events` returns an error wrapping
+  `llmkit.ErrUnknownRun`, not an empty slice and a nil error, for the transcript's own `RunID`
+  when its `Record` is empty. The Runner now emits every `finalize` event
+  with status `panicked` with `Step` 0 (omitted in JSON); it took the step
+  from a context armed with `llmkit.WithStep`, or from a parent's tool
+  phase around a nested Runner.
+- `agent`: `ReplayClient.Err` reports recorded work a replay never reached
+  (llmkit-lew), as an error wrapping `ErrReplayDiverged` that names the
+  recorded step: a recorded successful completion the replay never served,
+  and, only when the caller took `rc.Tools()`, a recorded call that a tool
+  ran and no replay tool served. A replay that used to pass without a
+  recorded follow-up now fails. If the caller took `rc.Tools()`, a replay
+  that used to pass under a policy stricter than the record now fails too;
+  so does a caller that never runs the tools, for a record that holds a
+  call a tool ran. Neither report happens before the replay serves its
+  first completion (a divergence recorded earlier, for example by a replay
+  tool called directly, is still returned), and
+  `NewReplayClientFromResponses` never reports an
+  unused response. The `ReplayClient` and `Complete` docs, and
+  `docs/agent-loop.md`, now say `Complete` checks tool-result structure only
+  when the record holds tool runs after the previous completion and before
+  the response it serves (llmkit-8ey).
 
 ## [0.5.0] - 2026-09-20
 

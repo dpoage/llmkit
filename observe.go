@@ -25,11 +25,20 @@ import (
 //     New/Wrap stack above its retry stage) mints and emits only when
 //     the ctx it receives carries no span; a ctx that already carries
 //     one belongs to an enclosing emitter, and the call passes through
-//     without a new span or event. A stack claims even when it has no
-//     Options.Observer; it then emits nothing.
+//     without a new span or Completion event. A stack claims even when it
+//     has no Options.Observer; it then emits nothing.
 //   - The agent Runner mints on the ctx it hands its client, on every
 //     turn, and emits that turn's Completion.
 //   - Hooks and tools receive a ctx without the turn's span.
+//
+// A client can make a model call inside its own Complete, on the ctx it
+// received, through one of those emitters. If that ctx carries a span (it
+// does when an emitter or the agent Runner called the client), the nested
+// call emits no Completion, and its spend reaches the ledger only through
+// the Response.Usage the enclosing client returns; a provider stack's
+// Attempt events still join the enclosing span. If that ctx carries no
+// span, the nested emitter mints its own. An agent Runner run inside a
+// client's Complete mints its own span and emits its own Completions.
 //
 // Attempt events come only from the provider retry stage inside the same
 // logical completion, joined to it by Event.SpanID; deterministic
@@ -185,11 +194,13 @@ type Event struct {
 	// Step is the 1-based model turn within an agent run. [NewEvent] stamps
 	// it from the context ([WithStep]), so decorator-emitted events inside a
 	// Runner turn — the retry stage's Attempt, a decision, a sandbox Exec or
-	// embedding from a tool — carry that turn. On a [KindFinalize] event whose
-	// status is not [RunPanicked], Step is the count of COMPLETED turns, not
-	// a turn number: it is 0 when no turn completed, so a finalize can carry
-	// Step 0 inside a run whose first completion failed (beside that
-	// completion's own Step 1).
+	// embedding from a tool — carry that turn. On a [KindFinalize] event,
+	// Step is the count of COMPLETED turns, not a turn number: it is 0 when
+	// no turn completed, so a finalize can carry Step 0 inside a run whose
+	// first completion failed (beside that completion's own Step 1). The
+	// Runner emits every RunPanicked finalize with Step 0 (omitted in
+	// JSON), whatever step the context carries; a hand-built event or an
+	// older record may carry another step.
 	Step int `json:"step,omitempty"`
 	// Time is when the observed operation ended, set by the emitter. Sinks
 	// never re-stamp it.
@@ -301,16 +312,28 @@ type AttemptEvent struct {
 }
 
 // ToolRunEvent records one tool call ([KindToolRun]). Call is the model's
-// request; Result is the model-visible textual result. IsError marks a
-// failed execution (Result carries the "ERROR:"-prefixed message). Denied
-// marks a policy denial — then Result is empty and DenyReason says why;
-// there is no separate policy-denied event kind.
+// request, exactly as the model made it; Result is the model-visible textual
+// result. IsError marks a failed execution (Result carries the
+// "ERROR:"-prefixed message). Denied marks a policy denial — then Result is
+// empty and DenyReason says why; there is no separate policy-denied event
+// kind.
+//
+// DispatchedArguments holds the arguments Tool.Run received when a tool
+// policy rewrote them to valid JSON or cleared them; a cleared payload is
+// the JSON literal null. It is empty when the call ran with arguments that
+// decode to the same JSON value as Call.Arguments, for a denied call or a
+// call to an unregistered tool (neither reaches Tool.Run), and when the
+// rewrite is not valid JSON: a replay under the same policy then hands its
+// tool the rewritten bytes, compares them with Call.Arguments, and
+// diverges. A record written before the field existed reads as never
+// rewritten.
 type ToolRunEvent struct {
-	Call       ToolCall `json:"call"`
-	Result     string   `json:"result,omitempty"`
-	IsError    bool     `json:"is_error,omitempty"`
-	Denied     bool     `json:"denied,omitempty"`
-	DenyReason string   `json:"deny_reason,omitempty"`
+	Call                ToolCall        `json:"call"`
+	DispatchedArguments json.RawMessage `json:"dispatched_arguments,omitempty"`
+	Result              string          `json:"result,omitempty"`
+	IsError             bool            `json:"is_error,omitempty"`
+	Denied              bool            `json:"denied,omitempty"`
+	DenyReason          string          `json:"deny_reason,omitempty"`
 }
 
 // CompactionEvent records one compaction pass ([KindCompaction]): context
@@ -362,8 +385,9 @@ const (
 //
 // When a panic in an agent hook, request policy, tool policy, or RunJSON
 // out-value unmarshal unwinds a run after its Start event, the Runner emits
-// a Finalize with Status [RunPanicked], an empty TruncationReason,
-// FinalText, and Err, and zero Usage.
+// a Finalize with Status [RunPanicked], Step 0 (whatever step the context
+// carries, a nested Runner's parent tool phase included), an empty
+// TruncationReason, FinalText, and Err, and zero Usage.
 type FinalizeEvent struct {
 	TruncationReason string `json:"truncation_reason,omitempty"`
 	Finalized        bool   `json:"finalized,omitempty"`

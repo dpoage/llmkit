@@ -173,8 +173,8 @@ func (r *Runner) runJSONBody(ctx context.Context, em runEmitter, prompt, task st
 	// A run cut short by the budget pool or its own per-run token budget has no
 	// headroom for a repair completion, and a budget-stopped empty/unparseable
 	// output must keep its budget TruncationReason so the caller classifies it as
-	// a budget stop, not a parse failure. Skipping the repair here
-	// also preserves the budget overshoot bound (no extra post-exhaustion call).
+	// a budget stop, not a parse failure. Skipping the repair here makes no
+	// model call after the stop's own finalization turn.
 	if outcome.TruncationReason == TruncTokenBudget || outcome.TruncationReason == TruncBudgetPool {
 		return outcome, unparseableErr(outcome, fmt.Errorf("%w%s: %w",
 			ErrUnparseableOutput, truncationNote(outcome), perr))
