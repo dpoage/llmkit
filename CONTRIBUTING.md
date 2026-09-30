@@ -28,10 +28,10 @@ Send these without an issue:
 
 ## Sign your work
 
-llmkit is AGPL-3.0, and your contribution ships under AGPL-3.0. llmkit uses the
-[Developer Certificate of Origin](https://developercertificate.org/) (DCO) to
-record that you have the right to send what you send. There is no separate
-contributor license agreement.
+llmkit is MIT-licensed, and your contribution ships under the MIT License.
+llmkit uses the [Developer Certificate of Origin](https://developercertificate.org/)
+(DCO) to record that you have the right to send what you send. There is no
+separate contributor license agreement.
 
 Add the trailer to every commit:
 

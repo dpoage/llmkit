@@ -308,6 +308,9 @@ entry below is marked.
 
 ### Changed
 
+- **License:** llmkit is relicensed from AGPL-3.0 to the MIT License. Code
+  you import, modify, or ship from this version on follows the MIT terms;
+  releases up to and including v0.5.0 stay available under AGPL-3.0.
 - **Breaking:** `llmkit.Delta` gains `Thinking string`, and a `DeltaThinking`
   fragment now carries its text in `Thinking` with `Text` empty. `Text` still
   carries `DeltaText` fragments, and `Thinking` is empty on `DeltaText` and

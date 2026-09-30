@@ -177,11 +177,10 @@ v0.2.0 changed the message model to content blocks, and v0.3.0 changed
 
 llmkit takes changes as pull requests from a fork; direct pushes are blocked.
 Every commit needs a Developer Certificate of Origin sign-off (`git commit -s`),
-and your contribution ships under AGPL-3.0. Read
+and your contribution ships under the MIT License. Read
 [CONTRIBUTING.md](CONTRIBUTING.md) before you start, and report vulnerabilities
 through [SECURITY.md](SECURITY.md) rather than a public issue.
 
 ## License
 
-AGPL-3.0. The `embed` package derives from MIT-licensed `known`; the copyright
-holder relicensed it here.
+MIT. See [LICENSE](LICENSE).
