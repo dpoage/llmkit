@@ -6,13 +6,10 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/url"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/dpoage/llmkit"
-	"github.com/dpoage/llmkit/retry"
 )
 
 // TestNew_RejectsUnknownAuth pins the typed-Auth contract: New must refuse
@@ -219,7 +216,7 @@ func TestNew_RejectsOpenAICompatibleEmptyBaseURL(t *testing.T) {
 // against their SDK defaults. New never dials — the unroutable BaseURL in
 // the accepted case would hang visibly if it did.
 func TestNew_BaseURLRules(t *testing.T) {
-	isolateBaseURLSources(t)
+	isolateEnv(t, baseURLEnvSources...)
 	t.Run("openai-compatible accepts explicit BaseURL", func(t *testing.T) {
 		spec := Spec{Type: TypeOpenAICompatible, Model: "test-model", Secret: "k", BaseURL: "http://10.255.255.1:1"}
 		client, err := New(context.Background(), spec, Options{})
@@ -244,35 +241,14 @@ func TestNew_BaseURLRules(t *testing.T) {
 	}
 }
 
-// hostCapturingTransport records the resolved req.URL and fails the round
-// trip, so a test can bind a Type's vendor-default host with no network I/O.
-type hostCapturingTransport struct {
-	mu  sync.Mutex
-	url *url.URL
-}
-
-func (t *hostCapturingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	t.mu.Lock()
-	t.url = req.URL
-	t.mu.Unlock()
-	return nil, errors.New("hostCapturingTransport: no network")
-}
-
-func (t *hostCapturingTransport) observed() *url.URL {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.url
-}
-
 // TestNew_VendorHosts pins the vendor-default endpoint each Type resolves
-// to with an empty spec.BaseURL. isolateBaseURLSources removes the ambient
+// to with an empty spec.BaseURL. isolateEnv removes the ambient
 // sources New refuses an empty BaseURL on, so the result does not depend on
-// the calling shell. A RoundTripper is bound and the resolved req.URL is
-// read, so an SDK bump that silently changes the default host fails this
-// test. Retry is capped at one attempt since the transport always fails and
-// the shared retry wrapper would otherwise back off the induced failure.
+// the calling shell. A recordingTransport is bound and the resolved req.URL
+// is read, so an SDK bump that silently changes the default host fails this
+// test.
 func TestNew_VendorHosts(t *testing.T) {
-	isolateBaseURLSources(t)
+	isolateEnv(t, baseURLEnvSources...)
 
 	for _, tc := range []struct {
 		typ  Type
@@ -283,18 +259,19 @@ func TestNew_VendorHosts(t *testing.T) {
 		{TypeGoogle, "generativelanguage.googleapis.com"},
 	} {
 		t.Run(string(tc.typ), func(t *testing.T) {
-			rt := &hostCapturingTransport{}
+			rt := &recordingTransport{wireProvider: string(tc.typ)}
 			spec := Spec{Type: tc.typ, Model: "test-model", Secret: "k"}
-			opts := Options{HTTPClient: &http.Client{Transport: rt}, Retry: retry.Config{MaxAttempts: 1}}
+			opts := Options{HTTPClient: &http.Client{Transport: rt}}
 			client, err := New(context.Background(), spec, opts)
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
 			_, _ = client.Complete(context.Background(), simpleRequest())
-			u := rt.observed()
-			if u == nil {
+			req := rt.observed()
+			if req == nil {
 				t.Fatal("no request observed; the adapter never reached the transport")
 			}
+			u := req.URL
 			if u.Host != tc.host {
 				t.Errorf("resolved host = %q, want %q", u.Host, tc.host)
 			}

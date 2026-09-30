@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/retry"
@@ -33,16 +34,23 @@ type VendorError struct {
 	// Type is the vendor error type from the body ("overloaded_error"); ""
 	// when absent.
 	Type string
-	// Message is the full response body. Classification reads it (a 400's
-	// context-length phrase can sit past any cap), so callers pass the
-	// full body here; [NormalizeCapped] caps the returned APIError.Message
-	// and [NormalizeSDKError] leaves it uncapped.
+	// Message is the full response body. Classification reads all of it (a
+	// 400's context-length phrase can sit past any cap), so callers pass the
+	// full body here; [NormalizeSDKError] cuts the returned
+	// APIError.Message afterwards.
 	Message string
 	// Header carries the response headers (Retry-After); nil when the SDK
 	// hides them.
 	Header http.Header
 	// Err is the SDK error, chained for Unwrap.
 	Err error
+	// Redact, when non-nil, removes credentials from what the returned
+	// *llmkit.APIError shows: Message, and Err's chain when it holds one.
+	// [NormalizeSDKError] classifies on the unredacted Message first and
+	// redacts before it caps, so the Kind is the one the full text gives
+	// and the cap never leaves the front of a credential. nil redacts
+	// nothing.
+	Redact *Redactor
 }
 
 // vendorKind maps an in-band vendor error type onto its llmkit sentinel
@@ -69,14 +77,23 @@ var vendorKind = map[string]error{
 
 // NormalizeSDKError classifies one VendorError and wraps the result as a
 // *llmkit.APIError. A status >= 400 classifies from the status
-// ([ClassifyStatus], body-disambiguated); a status < 400 classifies from
-// the vendor type in band, falling back to ErrServer. Retry-After is parsed
-// for every status: RetryAfter/HasRetryAfter are set whenever the header is
-// present and parses. v.Err is preserved for Unwrap chaining.
+// (body-disambiguated); a status < 400 classifies from the vendor type in
+// band, falling back to ErrServer. Retry-After is parsed for every status:
+// RetryAfter/HasRetryAfter are set whenever the header is present and
+// parses. v.Err is preserved for Unwrap chaining, unless v.Redact finds
+// a credential in it.
+//
+// It defines the Message cap ([capMessage]); [Redactor.Scrub] applies the
+// same function when it rebuilds an *APIError. Classification reads the
+// whole v.Message; the returned Message is then v.Message when it is at
+// most 200 bytes, and otherwise the longest prefix of at most 200 bytes
+// that ends on a rune boundary, followed by "...". When v.Redact is set,
+// the cut falls on the redacted text. The full text stays reachable
+// through v.Err when the caller supplies it and nothing was redacted.
 func NormalizeSDKError(provider string, v VendorError) error {
 	var kind error
 	if v.Status >= 400 {
-		kind = ClassifyStatus(v.Status, v.Message)
+		kind = classifyStatus(v.Status, v.Message)
 	} else {
 		kind = llmkit.ErrServer
 		if k, ok := vendorKind[v.Type]; ok {
@@ -90,34 +107,42 @@ func NormalizeSDKError(provider string, v VendorError) error {
 			ra, hasRA = d, true
 		}
 	}
+	msg, _ := v.Redact.Text(v.Message)
 	return &llmkit.APIError{
 		Kind:          kind,
 		StatusCode:    v.Status,
 		RetryAfter:    ra,
 		HasRetryAfter: hasRA,
 		Provider:      provider,
-		Message:       v.Message,
-		Err:           v.Err,
+		Message:       capMessage(msg),
+		Err:           v.Redact.Scrub(v.Err),
 	}
 }
 
-// maxMessageBytes is the byte length at which [NormalizeCapped] cuts an
-// APIError Message.
+// maxMessageBytes is the byte length above which [NormalizeSDKError] cuts
+// an APIError Message.
 const maxMessageBytes = 200
 
+// capMessage returns msg when it is at most maxMessageBytes long, and
+// otherwise its longest prefix of at most maxMessageBytes that ends on a
+// rune boundary, followed by "...".
+func capMessage(msg string) string {
+	if len(msg) <= maxMessageBytes {
+		return msg
+	}
+	cut := maxMessageBytes
+	for cut > 0 && !utf8.RuneStart(msg[cut]) {
+		cut--
+	}
+	return msg[:cut] + "..."
+}
+
 // NormalizeCapped is [NormalizeSDKError] for a message taken from a
-// server response body: it trims surrounding whitespace from v.Message,
-// classifies against the whole trimmed text (a context-length phrase can
-// sit past any cap), then cuts the returned APIError's Message to 200
-// bytes plus "..." when it is longer. The cut is by byte, so it can split
-// a multibyte rune.
+// server response body: it trims surrounding whitespace from v.Message
+// first. The cap is NormalizeSDKError's.
 func NormalizeCapped(provider string, v VendorError) error {
 	v.Message = strings.TrimSpace(v.Message)
-	err := NormalizeSDKError(provider, v)
-	if apiErr, ok := err.(*llmkit.APIError); ok && len(apiErr.Message) > maxMessageBytes {
-		apiErr.Message = apiErr.Message[:maxMessageBytes] + "..."
-	}
-	return err
+	return NormalizeSDKError(provider, v)
 }
 
 // ResponseHeader returns the headers of an SDK error's HTTP response, or nil
@@ -139,7 +164,8 @@ func ResponseHeader(resp *http.Response) http.Header {
 // would run against a dead context). Every other case, including a
 // DeadlineExceeded from the per-attempt RequestTimeout, is a retryable
 // *llmkit.APIError{Kind: ErrServer, StatusCode: 0} with the SDK error
-// chained.
+// chained. The Message is the SDK error's text, capped by
+// [NormalizeSDKError].
 func TransportError(provider string, ctx context.Context, err error) error {
 	if cerr := ctx.Err(); errors.Is(cerr, context.Canceled) {
 		// Chain the cancellation so errors.Is finds Canceled even when the
@@ -151,10 +177,30 @@ func TransportError(provider string, ctx context.Context, err error) error {
 		}
 		return fmt.Errorf("llmkit: %s: %w: %w", provider, err, context.Canceled)
 	}
-	return &llmkit.APIError{
-		Kind:     llmkit.ErrServer,
-		Provider: provider,
-		Message:  err.Error(),
-		Err:      err,
+	return NormalizeSDKError(provider, VendorError{Message: err.Error(), Err: err})
+}
+
+// DoError normalizes an error returned by http.Client.Do, for consumers
+// that call Do themselves (decide, embed). net/http returns a non-nil
+// Response with a non-nil error only when the client's CheckRedirect
+// failed, and the default 10-redirect stop is the default CheckRedirect,
+// so resp != nil marks a redirect-policy failure. That failure is
+// deterministic: a retry would take the same redirects. DoError closes
+// resp.Body and returns a terminal *llmkit.APIError{Kind:
+// ErrInvalidRequest, StatusCode: 0} with err chained and its text capped
+// by [NormalizeSDKError]. A caller's cancellation still wins, exactly as
+// in [TransportError]; every other failure (resp == nil) is delegated to
+// TransportError and stays retryable.
+func DoError(provider string, ctx context.Context, resp *http.Response, err error) error {
+	if resp == nil || errors.Is(ctx.Err(), context.Canceled) {
+		return TransportError(provider, ctx, err)
 	}
+	if resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	return NormalizeSDKError(provider, VendorError{
+		Type:    "invalid_request_error",
+		Message: err.Error(),
+		Err:     err,
+	})
 }

@@ -277,6 +277,22 @@ type wireGate struct {
 	effOn     bool
 }
 
+// wireGates is the table of every wire-gated Capabilities field, pairing
+// each with its ceiling and effective value. ApplyOverride walks it; a test
+// reads its names and requires every Capabilities bool to be either here or
+// on the explicit advisory/decorator list, so a new field cannot skip both.
+func wireGates(ceiling, effective llmkit.Capabilities) []wireGate {
+	return []wireGate{
+		{"StructuredOutput", ceiling.StructuredOutput, effective.StructuredOutput},
+		{"Thinking", ceiling.Thinking, effective.Thinking},
+		{"ToolChoice", ceiling.ToolChoice, effective.ToolChoice},
+		{"StopSequences", ceiling.StopSequences, effective.StopSequences},
+		{"TopP", ceiling.TopP, effective.TopP},
+		{"TopK", ceiling.TopK, effective.TopK},
+		{"Seed", ceiling.Seed, effective.Seed},
+	}
+}
+
 // ApplyOverride resolves the effective profile: override receives the
 // table-derived profile and its return value becomes effective (nil
 // override keeps the table unchanged). ceiling names every wire-gated
@@ -290,16 +306,7 @@ func ApplyOverride(provider string, ceiling, table llmkit.Capabilities, override
 	if override != nil {
 		effective = override(table)
 	}
-	gates := []wireGate{
-		{"StructuredOutput", ceiling.StructuredOutput, effective.StructuredOutput},
-		{"Thinking", ceiling.Thinking, effective.Thinking},
-		{"ToolChoice", ceiling.ToolChoice, effective.ToolChoice},
-		{"StopSequences", ceiling.StopSequences, effective.StopSequences},
-		{"TopP", ceiling.TopP, effective.TopP},
-		{"TopK", ceiling.TopK, effective.TopK},
-		{"Seed", ceiling.Seed, effective.Seed},
-	}
-	for _, g := range gates {
+	for _, g := range wireGates(ceiling, effective) {
 		if g.effOn && !g.ceilingOn {
 			return llmkit.Capabilities{}, Refuse(provider,
 				fmt.Sprintf("Capabilities.%s=true is above the ceiling for provider %s: the adapter has no wire field for it", g.name, provider),

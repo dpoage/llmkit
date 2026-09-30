@@ -108,11 +108,16 @@ func (c *Client) Ask(ctx context.Context, state any, questions Questions) (Respo
 		return Response{}, err
 	}
 	start := time.Now()
+	// An echo of the Secret or the BaseURL password is masked in a returned
+	// error: every attempt's error is scrubbed before retry.Do, the
+	// observer or the caller sees it, and a response body is redacted
+	// before its Message is capped.
+	redact := adapter.NewRedactor(c.apiKey, c.endpoint)
 	var resp Response
 	err = retry.Do(ctx, c.retry, llmkit.Classify, func(actx context.Context) error {
-		r, err := c.attempt(actx, body, questions)
+		r, err := c.attempt(actx, redact, body, questions)
 		if err != nil {
-			return err
+			return redact.Scrub(err)
 		}
 		resp = r
 		return nil
@@ -152,8 +157,8 @@ func (c *Client) emitDecision(ctx context.Context, stateRaw json.RawMessage, que
 
 // attempt performs one HTTP round trip and response parse. body is built
 // once per Ask and reused across attempts; questions is read-only.
-func (c *Client) attempt(ctx context.Context, body []byte, questions Questions) (Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
+func (c *Client) attempt(ctx context.Context, redact *adapter.Redactor, body []byte, questions Questions) (Response, error) {
+	req, err := adapter.NewRequest(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
 	if err != nil {
 		return Response{}, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, Provider: providerName, Message: fmt.Sprintf("build request: %s", err), Err: err}
 	}
@@ -163,9 +168,9 @@ func (c *Client) attempt(ctx context.Context, body []byte, questions Questions) 
 
 	httpResp, err := c.client.Do(req)
 	if err != nil {
-		// url.Error text carries the URL and cause, never the Authorization
-		// header, so the API key cannot leak through it.
-		return Response{}, adapter.TransportError(providerName, ctx, err)
+		// url.Error text carries the URL, its username included, and the
+		// cause; Ask scrubs both.
+		return Response{}, adapter.DoError(providerName, ctx, httpResp, err)
 	}
 	defer func() { _ = httpResp.Body.Close() }()
 
@@ -185,6 +190,7 @@ func (c *Client) attempt(ctx context.Context, body []byte, questions Questions) 
 			Status:  httpResp.StatusCode,
 			Message: msg,
 			Header:  httpResp.Header,
+			Redact:  redact,
 		})
 	}
 	return parseResponse(httpResp.StatusCode, respBody, questions)

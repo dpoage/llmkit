@@ -53,8 +53,9 @@ var googleCeiling = llmkit.Capabilities{
 // New builds a Gemini-backed Client. genai's only built-in retry path is for
 // file uploads, so the shared retry wrapper is the sole retry layer for
 // completions. The installed HTTP client wraps the caller's transport with
-// a status recorder so error classification can fall back to the transport
-// status when genai drops it (see normalizeErr).
+// adapter.WireTransport so error classification can tell a call that sent
+// nothing from one that did, and fall back to the transport status when
+// genai drops it (see normalizeErr).
 //
 // HTTPOptions.BaseURL is always set explicitly — opts.BaseURL, or the
 // vendor default when empty — because genai's getBaseURL checks an explicit
@@ -79,19 +80,11 @@ func New(ctx context.Context, model string, opts Options) (llmkit.Client, error)
 	if cc.HTTPOptions.BaseURL == "" {
 		cc.HTTPOptions.BaseURL = "https://generativelanguage.googleapis.com/"
 	}
-	// Always install the recording client (see recordStatusTransport):
+	// Always install the recording client (see adapter.WireTransport):
 	// genai substitutes its own default client when HTTPClient is nil, so
-	// without this the transport status would be invisible to normalizeErr.
-	base := opts.HTTPClient
-	if base == nil {
-		base = &http.Client{}
-	}
-	wrapped := *base
-	if wrapped.Transport == nil {
-		wrapped.Transport = http.DefaultTransport
-	}
-	wrapped.Transport = &recordStatusTransport{rt: wrapped.Transport}
-	cc.HTTPClient = &wrapped
+	// without this the request count and transport status would be invisible
+	// to normalizeErr.
+	cc.HTTPClient = adapter.WireClient(opts.HTTPClient)
 	client, err := genai.NewClient(ctx, cc)
 	if err != nil {
 		return nil, adapter.Refuse("google", "failed to construct genai client: "+err.Error(), err)
@@ -103,43 +96,12 @@ func New(ctx context.Context, model string, opts Options) (llmkit.Client, error)
 	}, nil
 }
 
-// transportStatusKey keys the per-request status recorder in the request
-// context.
-type transportStatusKey struct{}
-
-// transportStatus records the HTTP status of the most recent response for
-// one Complete call. genai drops the transport *http.Response when an error
-// body parses as a Google error object without a "code" field (its only
-// error type, genai.APIError, has no Unwrap), so the status captured at the
-// transport is the only available fallback in that branch.
-type transportStatus struct {
-	code int
-}
-
-// recordStatusTransport wraps the SDK's transport, recording each response's
-// status code into the per-request recorder carried on the request context.
-// Last write wins: redirect hops overwrite earlier ones, leaving the final
-// status the SDK itself saw. The recorder lives in the context, so
-// concurrent Complete calls on a shared adapter never contend.
-type recordStatusTransport struct {
-	rt http.RoundTripper
-}
-
-func (t *recordStatusTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	resp, err := t.rt.RoundTrip(req)
-	if resp != nil {
-		if s, ok := req.Context().Value(transportStatusKey{}).(*transportStatus); ok && s != nil {
-			s.code = resp.StatusCode
-		}
-	}
-	return resp, err
-}
-
 func (g *googleAdapter) Capabilities() llmkit.Capabilities { return g.caps }
 
 func (g *googleAdapter) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
-	// Per-request transport-status recorder for normalizeErr's fallback.
-	ctx = context.WithValue(ctx, transportStatusKey{}, &transportStatus{})
+	// Per-call wire recorder for normalizeErr: request count and the
+	// transport-status fallback.
+	ctx, _ = adapter.WithWire(ctx)
 	contents, cfg, err := g.buildRequest(req)
 	if err != nil {
 		return llmkit.Response{}, err
@@ -147,6 +109,9 @@ func (g *googleAdapter) Complete(ctx context.Context, req llmkit.Request) (llmki
 	resp, err := g.client.Models.GenerateContent(ctx, g.model, contents, cfg)
 	if err != nil {
 		return llmkit.Response{}, g.normalizeErr(ctx, err)
+	}
+	if err := g.checkCompletion(ctx, resp); err != nil {
+		return llmkit.Response{}, err
 	}
 	return g.toResponse(resp), nil
 }
@@ -171,6 +136,12 @@ func (g *googleAdapter) buildRequest(req llmkit.Request) ([]*genai.Content, *gen
 		cfg.SystemInstruction = &genai.Content{
 			Parts: []*genai.Part{{Text: p.System}},
 		}
+	}
+	// genai carries maxOutputTokens as int32; reject a larger value instead
+	// of letting it wrap (1<<31 goes out as -2147483648). Vendor-specific,
+	// like the Seed range below. Prepare already defaulted MaxTokens > 0.
+	if int64(p.MaxTokens) > int64(math.MaxInt32) {
+		return nil, nil, adapter.Refuse("google", "MaxTokens out of range for int32", nil)
 	}
 	cfg.MaxOutputTokens = int32(p.MaxTokens)
 	if p.Temperature != nil {
@@ -531,7 +502,38 @@ func (g *googleAdapter) toResponse(resp *genai.GenerateContentResponse) llmkit.R
 		}
 	}
 	out.StopReason = mapGoogleStop(stop, len(out.ToolCalls) > 0)
+	if len(resp.Candidates) == 0 && promptBlocked(resp) {
+		// A blocked prompt produces no candidates; the block, not a
+		// natural end of turn, is why the response is empty.
+		out.StopReason = llmkit.StopContentFilter
+	}
 	return out
+}
+
+// promptBlocked reports a response whose promptFeedback names a block
+// reason. BLOCKED_REASON_UNSPECIFIED is the proto placeholder, not a block.
+func promptBlocked(resp *genai.GenerateContentResponse) bool {
+	pf := resp.PromptFeedback
+	return pf != nil && pf.BlockReason != "" && pf.BlockReason != genai.BlockedReasonUnspecified
+}
+
+// checkCompletion returns the error for a 2xx response that carries no
+// completion: zero candidates and no promptFeedback block reason (a
+// blocked prompt is a StopContentFilter response, not an error). A gateway
+// or proxy answered 2xx with an error object, `{}`, or nothing, and genai
+// decoded it without complaint; genai turns a 3xx into an APIError before
+// this check runs. It is an *llmkit.APIError, ErrServer and retryable, with
+// the status the wire returned. genai discards the body of a 2xx response
+// and Gemini errors carry no error.type, so neither the body's message nor
+// a vendor kind is recoverable here.
+func (g *googleAdapter) checkCompletion(ctx context.Context, resp *genai.GenerateContentResponse) error {
+	if len(resp.Candidates) > 0 || promptBlocked(resp) {
+		return nil
+	}
+	return adapter.NormalizeSDKError("google", adapter.VendorError{
+		Status:  adapter.WireStatus(ctx),
+		Message: "response carried no completion (no candidates, no promptFeedback.blockReason)",
+	})
 }
 
 // functionCallArgs renders a FunctionCall's Args as the canonical JSON the
@@ -582,11 +584,9 @@ func (g *googleAdapter) normalizeErr(ctx context.Context, err error) error {
 		if status == 0 {
 			// The error body parsed as a Google error object without a code
 			// field, so the SDK discarded the transport response. Classify
-			// from the status the wrapping transport recorded for this
-			// request instead of mislabeling every such failure a 400.
-			if s, ok := ctx.Value(transportStatusKey{}).(*transportStatus); ok && s != nil {
-				status = s.code
-			}
+			// from the status the wire recorded for this call instead of
+			// mislabeling every such failure a 400.
+			status = adapter.WireStatus(ctx)
 		}
 		return adapter.NormalizeSDKError("google", adapter.VendorError{
 			Status:  status,
@@ -594,8 +594,9 @@ func (g *googleAdapter) normalizeErr(ctx context.Context, err error) error {
 			Err:     err,
 		})
 	}
-	// No HTTP response: transport failure or caller's context ending mid-call.
-	return adapter.TransportError("google", ctx, err)
+	// No HTTP response: a refusal when nothing was sent, else a transport
+	// failure or the caller's context ending mid-call.
+	return adapter.NoResponseError("google", ctx, err)
 }
 
 // Sources (vendor docs consulted for this table; every number comes from

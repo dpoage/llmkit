@@ -89,10 +89,9 @@ func New(model string, opts Options) (llmkit.Client, error) {
 		return nil, err
 	}
 
-	httpClient := opts.HTTPClient
-	if httpClient == nil {
-		httpClient = &http.Client{}
-	}
+	// The wrapped client counts requests per call (see adapter.WithWire);
+	// nil opts.HTTPClient gets an explicit &http.Client{} inside WireClient.
+	httpClient := adapter.WireClient(opts.HTTPClient)
 	reqOpts := []option.RequestOption{
 		option.WithoutEnvironmentDefaults(),
 		option.WithHTTPClient(httpClient),
@@ -120,14 +119,23 @@ func New(model string, opts Options) (llmkit.Client, error) {
 func (a *anthropicAdapter) Capabilities() llmkit.Capabilities { return a.caps }
 
 func (a *anthropicAdapter) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
+	// Per-call wire recorder: normalizeErr tells a failure that sent
+	// nothing from one that did.
+	ctx, _ = adapter.WithWire(ctx)
 	params, prepared, err := a.buildParams(req)
 	if err != nil {
 		return llmkit.Response{}, err
 	}
 
-	msg, err := a.client.Messages.New(ctx, params)
+	// httpResp is captured for its Header only: the SDK has already read
+	// and closed the body when it decoded msg.
+	var httpResp *http.Response
+	msg, err := a.client.Messages.New(ctx, params, option.WithResponseInto(&httpResp))
 	if err != nil {
 		return llmkit.Response{}, a.normalizeErr(ctx, err)
+	}
+	if noCompletion(msg) {
+		return llmkit.Response{}, a.noCompletionError(ctx, msg, adapter.ResponseHeader(httpResp))
 	}
 	return a.finalize(prepared, a.toResponse(msg)), nil
 }
@@ -724,6 +732,47 @@ func mapAnthropicStop(sr anthropic.StopReason, hasToolCalls bool) llmkit.StopRea
 	}
 }
 
+// noCompletion reports a message that carries no completion: a nil message
+// (the SDK's decode of a JSON `null` body), or no content blocks AND no
+// stop_reason. It is not keyed on the type field — gateways may omit it —
+// and an empty content array with a stop_reason (end_turn on a turn that
+// produced nothing) is a real completion.
+func noCompletion(msg *anthropic.Message) bool {
+	return msg == nil || (len(msg.Content) == 0 && msg.StopReason == "")
+}
+
+// noCompletionError is the error for a response below 400 that carries no
+// completion: a gateway or proxy answered 2xx (or a 3xx the client did not
+// follow) with an error object, `{}`, `null`, or nothing usable, and the
+// SDK decoded it without complaint. It is an *llmkit.APIError with the
+// status the wire returned; the kind follows the body's in-band error.type
+// (adapter's vendorKind) and is ErrServer, retryable, when the body names
+// none. header is the response's headers (Retry-After), nil when the
+// caller has none.
+func (a *anthropicAdapter) noCompletionError(ctx context.Context, msg *anthropic.Message, header http.Header) error {
+	var body struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	// An unparseable body leaves both fields empty, like an absent one; a
+	// nil message (a `null` body) has no body to read.
+	if msg != nil {
+		_ = json.Unmarshal([]byte(msg.RawJSON()), &body)
+	}
+	text := body.Error.Message
+	if text == "" {
+		text = "response carried no completion (no content, no stop_reason)"
+	}
+	return adapter.NormalizeSDKError("anthropic", adapter.VendorError{
+		Status:  adapter.WireStatus(ctx),
+		Type:    body.Error.Type,
+		Message: text,
+		Header:  header,
+	})
+}
+
 func (a *anthropicAdapter) normalizeErr(ctx context.Context, err error) error {
 	var apiErr *anthropic.Error
 	if errors.As(err, &apiErr) {
@@ -735,8 +784,10 @@ func (a *anthropicAdapter) normalizeErr(ctx context.Context, err error) error {
 			Err:     err,
 		})
 	}
-	// No HTTP response: transport failure or caller's context ending mid-call.
-	return adapter.TransportError("anthropic", ctx, err)
+	// No HTTP response: a refusal when the SDK rejected the call before
+	// sending anything, else a transport failure or the caller's context
+	// ending mid-call.
+	return adapter.NoResponseError("anthropic", ctx, err)
 }
 
 // Sources (vendor docs consulted for this table):

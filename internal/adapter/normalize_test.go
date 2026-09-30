@@ -76,9 +76,3 @@ func TestTransportError_CanceledText(t *testing.T) {
 		}
 	})
 }
-
-func TestResponseHeader(t *testing.T) {
-	if got := ResponseHeader(nil); got != nil {
-		t.Errorf("ResponseHeader(nil) = %v, want nil", got)
-	}
-}

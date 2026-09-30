@@ -7,6 +7,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/internal/adapter"
 )
 
 var _ llmkit.StreamingClient = (*anthropicAdapter)(nil)
@@ -44,6 +45,7 @@ func (e streamProtocolError) Error() string { return e.msg }
 // position in Response.ToolCalls), not wire content-block indices — text and
 // thinking blocks occupy wire indices too.
 func (a *anthropicAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(llmkit.Delta) error) (llmkit.Response, error) {
+	ctx, _ = adapter.WithWire(ctx)
 	params, prepared, err := a.buildParams(req)
 	if err != nil {
 		return llmkit.Response{}, err
@@ -136,6 +138,9 @@ func (a *anthropicAdapter) Stream(ctx context.Context, req llmkit.Request, fn fu
 		// on the equivalent truncated body; this is the same server-class
 		// failure.
 		return llmkit.Response{}, a.normalizeErr(ctx, errEarlyStreamEnd)
+	}
+	if noCompletion(&acc) {
+		return llmkit.Response{}, a.noCompletionError(ctx, &acc, nil)
 	}
 	return a.finalize(prepared, a.toResponse(&acc)), nil
 }

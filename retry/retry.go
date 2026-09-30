@@ -280,8 +280,16 @@ func ParseRetryAfter(v string, now time.Time) (time.Duration, bool) {
 }
 
 // backoffDelay picks the wait before retrying after the given attempt
-// (1-indexed): a server Retry-After when supplied (capped at MaxDelay),
-// otherwise exponential backoff with jitter.
+// (1-indexed): a server Retry-After when supplied (negative treated as zero,
+// capped at MaxDelay when MaxDelay > 0), otherwise exponential backoff with
+// jitter.
+//
+// The backoff result is never negative and never above MaxDelay when
+// MaxDelay > 0. A BaseDelay at or below zero yields zero (an immediate
+// retry, jitter included). With MaxDelay <= 0 the delay is uncapped: a
+// doubling past int64 lands at 1<<62 (an absurd wait, not a negative one),
+// and a jittered product past int64 saturates at math.MaxInt64 rather than
+// wrapping negative.
 func backoffDelay(cfg Config, attempt int, after time.Duration, hasAfter bool) time.Duration {
 	if hasAfter {
 		if after < 0 {
@@ -294,10 +302,14 @@ func backoffDelay(cfg Config, attempt int, after time.Duration, hasAfter bool) t
 	}
 
 	delay := cfg.BaseDelay
+	if delay <= 0 {
+		return 0
+	}
 	for range attempt - 1 {
 		delay *= 2
 		// Overflow clamp: a doubled delay past int64 means an absurd wait,
-		// not a negative one; zero BaseDelay stays zero.
+		// not a negative one. A BaseDelay at or below zero has already
+		// returned zero above, so it is never misread as overflow.
 		if delay < 0 {
 			delay = 1 << 62
 			break
@@ -314,7 +326,17 @@ func backoffDelay(cfg Config, attempt int, after time.Duration, hasAfter bool) t
 	if cfg.Jitter > 0 {
 		// factor in [1-jitter, 1+jitter].
 		factor := 1 + cfg.Jitter*(2*jitterSource(cfg)-1)
-		delay = time.Duration(float64(delay) * factor)
+		// The product can exceed int64 (delay above MaxInt64/2, factor above
+		// 1): converting it would wrap to math.MinInt64, so it saturates at
+		// math.MaxInt64. A non-positive or NaN product is zero.
+		switch scaled := float64(delay) * factor; {
+		case scaled >= math.MaxInt64: // float64(MaxInt64) is 2^63
+			delay = math.MaxInt64
+		case scaled > 0:
+			delay = time.Duration(scaled)
+		default:
+			delay = 0
+		}
 		// The factor can push a MaxDelay-sized delay above MaxDelay, so the
 		// cap is re-applied AFTER jitter: jitter never moves a sleep past
 		// MaxDelay. MaxDelay <= 0 stays uncapped, as above.

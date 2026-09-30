@@ -78,14 +78,29 @@ func (rt *recordingTransport) sent() int {
 	return len(rt.reqs)
 }
 
-// unsetEnvForTest ensures name is absent for the duration of t, restoring
+// baseURLEnvSources lists the three variables New refuses an empty
+// Spec.BaseURL on.
+var baseURLEnvSources = []string{"OPENAI_BASE_URL", "ANTHROPIC_BASE_URL", "GOOGLE_GEMINI_BASE_URL"}
+
+// isolateEnv removes, for the duration of t, every named variable, restoring
 // whatever value (or absence) the host process had. t.Setenv has no unset
 // form, and several reads key off os.LookupEnv's ok result rather than the
 // value, so an empty-but-present variable is not equivalent to an absent one.
-func unsetEnvForTest(t *testing.T, name string) {
+//
+// It first points ANTHROPIC_CONFIG_DIR at an empty directory, which takes
+// precedence over XDG_CONFIG_HOME and $HOME in the Anthropic SDK's profile
+// lookup and holds no profile, so a test that builds a vendor Type with an
+// empty Spec.BaseURL does not depend on the calling shell or its dotfiles
+// (isolateEnv(t, baseURLEnvSources...)). The redirect precedes the removals,
+// so a caller that names ANTHROPIC_CONFIG_DIR ends with it absent.
+func isolateEnv(t *testing.T, names ...string) {
 	t.Helper()
-	old, had := os.LookupEnv(name)
-	if had {
+	t.Setenv("ANTHROPIC_CONFIG_DIR", t.TempDir())
+	for _, name := range names {
+		old, had := os.LookupEnv(name)
+		if !had {
+			continue
+		}
 		if err := os.Unsetenv(name); err != nil {
 			t.Fatalf("unsetenv %s: %v", name, err)
 		}
@@ -95,20 +110,6 @@ func unsetEnvForTest(t *testing.T, name string) {
 			}
 		})
 	}
-}
-
-// isolateBaseURLSources removes, for the duration of t, every ambient source
-// New refuses an empty Spec.BaseURL on: the three base-URL variables and the
-// Anthropic SDK profile files. A test that builds a vendor Type with an empty
-// Spec.BaseURL calls it so it does not depend on the calling shell or its
-// dotfiles. ANTHROPIC_CONFIG_DIR takes precedence over XDG_CONFIG_HOME and
-// $HOME in the SDK's profile lookup, and the empty directory holds no profile.
-func isolateBaseURLSources(t *testing.T) {
-	t.Helper()
-	for _, name := range []string{"OPENAI_BASE_URL", "ANTHROPIC_BASE_URL", "GOOGLE_GEMINI_BASE_URL"} {
-		unsetEnvForTest(t, name)
-	}
-	t.Setenv("ANTHROPIC_CONFIG_DIR", t.TempDir())
 }
 
 // anthropicEnvSources lists every variable the Anthropic SDK's default
@@ -332,16 +333,14 @@ var openAIPoisonRows = []poisonRow{
 // profile poison marker — one poison source at a time, HOME pointed at a
 // fresh empty temp dir on every row.
 func TestNew_HermeticConstruction(t *testing.T) {
-	for _, name := range append([]string{
+	isolateEnv(t, append([]string{
 		"OPENAI_API_KEY", "OPENAI_ORG_ID", "OPENAI_PROJECT_ID",
 		"OPENAI_CUSTOM_HEADERS", "OPENAI_BASE_URL", "OPENAI_ADMIN_KEY",
 		"OPENAI_WEBHOOK_SECRET",
 		"GOOGLE_API_KEY", "GEMINI_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI",
 		"GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION",
 		"GOOGLE_GEMINI_BASE_URL",
-	}, anthropicEnvSources...) {
-		unsetEnvForTest(t, name)
-	}
+	}, anthropicEnvSources...)...)
 
 	groups := []hermeticGroup{
 		{
@@ -449,7 +448,7 @@ func TestNew_RefusesEmptyBaseURLWithEnvVarSet(t *testing.T) {
 		{TypeAnthropic, "ANTHROPIC_BASE_URL", "api.anthropic.com", "anthropic"},
 		{TypeGoogle, "GOOGLE_GEMINI_BASE_URL", "generativelanguage.googleapis.com", "google"},
 	}
-	isolateBaseURLSources(t)
+	isolateEnv(t, baseURLEnvSources...)
 
 	for _, tc := range cases {
 		t.Run(string(tc.typ), func(t *testing.T) {
@@ -498,7 +497,7 @@ func TestNew_RefusesEmptyBaseURLWithEnvVarSet(t *testing.T) {
 			})
 
 			t.Run("var unset, BaseURL empty: succeeds, goes to vendor default", func(t *testing.T) {
-				unsetEnvForTest(t, tc.envVar)
+				isolateEnv(t, tc.envVar)
 				rt := &recordingTransport{wireProvider: tc.wireProvider}
 				spec := Spec{Type: tc.typ, Model: "test-model", Secret: "k"}
 				client, err := New(context.Background(), spec, Options{HTTPClient: &http.Client{Transport: rt}})
@@ -624,6 +623,51 @@ var anthropicProfileRows = []struct {
 		writeAnthropicProfile(t, filepath.Join(home, ".config", "anthropic"), "default", profilePoisonURL, "wrkspc-poison")
 		return ""
 	}},
+	{"empty ANTHROPIC_AUTH_TOKEN plus dotfile", func(t *testing.T, home string) string {
+		t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+		return writeAnthropicProfile(t, filepath.Join(home, ".config", "anthropic"), "default", profilePoisonURL, "wrkspc-poison")
+	}},
+	{"empty ANTHROPIC_IDENTITY_TOKEN completes no federation, plus dotfile", func(t *testing.T, home string) string {
+		t.Setenv("ANTHROPIC_FEDERATION_RULE_ID", "fdrl-poison")
+		t.Setenv("ANTHROPIC_ORGANIZATION_ID", "org-poison")
+		t.Setenv("ANTHROPIC_IDENTITY_TOKEN", "")
+		return writeAnthropicProfile(t, filepath.Join(home, ".config", "anthropic"), "default", profilePoisonURL, "wrkspc-poison")
+	}},
+	{"empty ANTHROPIC_IDENTITY_TOKEN_FILE completes no federation, plus dotfile", func(t *testing.T, home string) string {
+		t.Setenv("ANTHROPIC_FEDERATION_RULE_ID", "fdrl-poison")
+		t.Setenv("ANTHROPIC_ORGANIZATION_ID", "org-poison")
+		t.Setenv("ANTHROPIC_IDENTITY_TOKEN_FILE", "")
+		return writeAnthropicProfile(t, filepath.Join(home, ".config", "anthropic"), "default", profilePoisonURL, "wrkspc-poison")
+	}},
+	{"both identity-token variables empty completes no federation, plus dotfile", func(t *testing.T, home string) string {
+		t.Setenv("ANTHROPIC_FEDERATION_RULE_ID", "fdrl-poison")
+		t.Setenv("ANTHROPIC_ORGANIZATION_ID", "org-poison")
+		t.Setenv("ANTHROPIC_IDENTITY_TOKEN_FILE", "")
+		t.Setenv("ANTHROPIC_IDENTITY_TOKEN", "")
+		return writeAnthropicProfile(t, filepath.Join(home, ".config", "anthropic"), "default", profilePoisonURL, "wrkspc-poison")
+	}},
+	{"complete env federation via ANTHROPIC_IDENTITY_TOKEN_FILE plus dotfile", func(t *testing.T, home string) string {
+		t.Setenv("ANTHROPIC_FEDERATION_RULE_ID", "fdrl-poison")
+		t.Setenv("ANTHROPIC_ORGANIZATION_ID", "org-poison")
+		t.Setenv("ANTHROPIC_IDENTITY_TOKEN_FILE", writeFile(t, filepath.Join(t.TempDir(), "jwt"), []byte("jwt-poison")))
+		writeAnthropicProfile(t, filepath.Join(home, ".config", "anthropic"), "default", profilePoisonURL, "wrkspc-poison")
+		return ""
+	}},
+	{"env federation selected by ANTHROPIC_IDENTITY_TOKEN reads the empty ANTHROPIC_IDENTITY_TOKEN_FILE, plus dotfile", func(t *testing.T, home string) string {
+		t.Setenv("ANTHROPIC_FEDERATION_RULE_ID", "fdrl-poison")
+		t.Setenv("ANTHROPIC_ORGANIZATION_ID", "org-poison")
+		t.Setenv("ANTHROPIC_IDENTITY_TOKEN_FILE", "")
+		t.Setenv("ANTHROPIC_IDENTITY_TOKEN", "jwt-poison")
+		writeAnthropicProfile(t, filepath.Join(home, ".config", "anthropic"), "default", profilePoisonURL, "wrkspc-poison")
+		return ""
+	}},
+	{"empty-but-present federation variables count as present, plus dotfile", func(t *testing.T, home string) string {
+		t.Setenv("ANTHROPIC_FEDERATION_RULE_ID", "")
+		t.Setenv("ANTHROPIC_ORGANIZATION_ID", "")
+		t.Setenv("ANTHROPIC_IDENTITY_TOKEN", "jwt-poison")
+		writeAnthropicProfile(t, filepath.Join(home, ".config", "anthropic"), "default", profilePoisonURL, "wrkspc-poison")
+		return ""
+	}},
 }
 
 // TestNew_RefusesAnthropicProfileBaseURL pins, with an empty
@@ -635,9 +679,7 @@ var anthropicProfileRows = []struct {
 // the Spec secret and no Anthropic-Workspace-Id. With Spec.BaseURL set, no
 // row is refused and every request goes to Spec.BaseURL.
 func TestNew_RefusesAnthropicProfileBaseURL(t *testing.T) {
-	for _, name := range anthropicEnvSources {
-		unsetEnvForTest(t, name)
-	}
+	isolateEnv(t, anthropicEnvSources...)
 	modes := []struct {
 		name       string
 		auth       Auth

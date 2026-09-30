@@ -46,7 +46,7 @@ placeholder key. An invalid field returns an error wrapping
 |---|---|---|
 | `Secret` | Yes | Non-empty, no surrounding whitespace (the same rule as `provider.Spec.Secret`). |
 | `Model` | Yes | A versioned id (`jev-1.13.0`) or alias (`jev-latest`, `jev-preview`). There is no default alias. |
-| `BaseURL` | No | Endpoint root for tests and gateways, without `/v1`. Default: `https://api.typesafe.ai`; the path `/v1/systemone` is appended. |
+| `BaseURL` | No | Endpoint root for tests and gateways, without `/v1`. Default: `https://api.typesafe.ai`. `New` refuses a `BaseURL` that is not an `http` or `https` URL with a host (the scheme is case-insensitive) or that contains `#` anywhere, an empty fragment included, with `ErrInvalidRequest`; the error never echoes the URL or its userinfo. The path `/v1/systemone` is appended to the URL's path (trailing `/` characters dropped) and a query is kept after it: `https://gw.example/x?api-version=1` requests `/x/v1/systemone?api-version=1`. The path is not cleaned: `//` and dot segments are not collapsed or resolved. A URL that parses but cannot be dialed (`http://localhost:99999`) is accepted and fails at request time as a retryable transport error. |
 | `HTTPClient` | No | Used as-is, including its `Timeout`. Default: a plain client with no `http.Client.Timeout`, so the per-attempt `RequestTimeout` is the only bound. |
 | `Retry` | No | Resolved at construction via `retry.Config.Or`: 3 attempts, 30 s per-attempt timeout, `BaseDelay` (500 ms), `MaxDelay` (30 s), and `Jitter` (20%) from `retry.Default`. An explicit `Jitter` of 0 resolves like every other unset field; pin `Retry.Rand` for the resolved defaults with no jitter. |
 | `Observer` | No | Receives one [`llmkit.DecisionEvent`](https://pkg.go.dev/github.com/dpoage/llmkit#DecisionEvent) per `Ask` that passes pre-wire validation (success or failure; a caller's already-cancelled ctx emits one with `Err` set and zero wire hits; a `buildRequest` refusal emits nothing), via its `Observe(ctx, llmkit.Event)` method. Default: nil (no events). |
@@ -319,8 +319,8 @@ marked:
 | Any other 4xx (404, 409, ...) | `ErrInvalidRequest` | No |
 | Any other non-200 status below 400 (a 3xx, an unexpected 2xx) | `ErrServer` | Yes (decide row: no vendor `Type` to classify from) |
 | Transport failure (timeout, connection reset) | `ErrServer` (`StatusCode` 0) | Yes |
+| Redirect-policy failure (the client stopped after 10 redirects, or the `CheckRedirect` of `Config.HTTPClient` returned an error) | `ErrInvalidRequest` (`StatusCode` 0) | No; terminal |
 | 200 body that violates the answer contract | `ErrServer` (`StatusCode` 200) | Yes (decide row: retried like any `ErrServer`) |
-| The HTTP request could not be built (a `BaseURL` that `net/url` cannot parse) | `ErrInvalidRequest` | No (decide row) |
 
 A 200 response that violates the answer contract is a server contract
 violation. The client returns `ErrServer` with `StatusCode` 200 and retries
@@ -354,13 +354,18 @@ set, ends the loop immediately — whether that happens mid-attempt or while
 waiting between retries — without another attempt. The error `Ask` returns
 then chains the context error and is not an `*llmkit.APIError`. One
 exception: a terminal error keeps its identity even when the `ctx` is
-already done. An already-cancelled `ctx` with a `BaseURL` that `net/url`
-cannot parse returns `ErrInvalidRequest`. A per-attempt `RequestTimeout`
+already done. An already-cancelled `ctx` with a question that fails pre-wire
+validation returns `ErrInvalidRequest`. A per-attempt `RequestTimeout`
 expiring under a live parent is not a parent cancellation and is retried
 like any other `ErrServer`.
 
-Error messages carry the vendor body text, truncated to 200 characters plus
-an appended `...`. llmkit never places the API key into an error.
+For a non-200 status, `APIError.Message` carries the vendor body text; for a
+transport or redirect failure, it carries the error's text. A `Message` of
+either kind longer than 200 bytes is cut at the last rune boundary at or
+before byte 200 and gets `...` appended. llmkit never places the API key
+into an error, and `Ask` masks an echo of the `Secret` or the `BaseURL`
+password in the error it returns; the `decide` package documentation gives
+the forms covered.
 
 ## Usage and observability
 

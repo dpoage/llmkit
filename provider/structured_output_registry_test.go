@@ -13,16 +13,6 @@ import (
 	"github.com/dpoage/llmkit/provider/internal/openai"
 )
 
-// structuredOutputOverride returns a Capabilities override that flips
-// StructuredOutput to b while keeping every other value of the adapter's
-// table profile.
-func structuredOutputOverride(b bool) func(llmkit.Capabilities) llmkit.Capabilities {
-	return func(c llmkit.Capabilities) llmkit.Capabilities {
-		c.StructuredOutput = b
-		return c
-	}
-}
-
 // hasNestedField returns a closure suitable for use with runOne that
 // reports whether `body` contains the nested key path (e.g. ["a","b"] checks
 // body["a"]["b"]). The leaf must be present and non-nil.
@@ -92,7 +82,7 @@ func TestStructuredOutput_AllGatedByCapability(t *testing.T) {
 		runOne(t, "openai", func(base string) llmkit.Client {
 			c, err := openai.New("gpt-test", openai.Options{
 				APIKey: "k", BaseURL: base,
-				Capabilities: structuredOutputOverride(false),
+				Capabilities: forceStructuredOutput(false),
 			})
 			if err != nil {
 				t.Fatalf("openai.New: %v", err)
@@ -104,7 +94,7 @@ func TestStructuredOutput_AllGatedByCapability(t *testing.T) {
 		runOne(t, "openai-compatible", func(base string) llmkit.Client {
 			c, err := openai.New("llama-test", openai.Options{
 				APIKey: "k", BaseURL: base, Compatible: true,
-				Capabilities: structuredOutputOverride(false),
+				Capabilities: forceStructuredOutput(false),
 			})
 			if err != nil {
 				t.Fatalf("openai.New: %v", err)
@@ -116,7 +106,7 @@ func TestStructuredOutput_AllGatedByCapability(t *testing.T) {
 		runOne(t, "google", func(base string) llmkit.Client {
 			a, err := google.New(context.Background(), "gemini-test", google.Options{
 				APIKey: "k", BaseURL: base,
-				Capabilities: structuredOutputOverride(false),
+				Capabilities: forceStructuredOutput(false),
 			})
 			if err != nil {
 				t.Fatalf("google.New: %v", err)
@@ -128,7 +118,7 @@ func TestStructuredOutput_AllGatedByCapability(t *testing.T) {
 		runOne(t, "anthropic", func(base string) llmkit.Client {
 			c, err := anthropic.New("claude-test", anthropic.Options{
 				APIKey: "k", BaseURL: base,
-				Capabilities: structuredOutputOverride(false),
+				Capabilities: forceStructuredOutput(false),
 			})
 			if err != nil {
 				t.Fatalf("anthropic.New: %v", err)
@@ -151,7 +141,7 @@ func TestStructuredOutput_ConfigOverride_FlipsOpenAICompatibleCapabilities(t *te
 		BaseURL:      "http://example.invalid",
 		Model:        "llama3",
 		Secret:       "k",
-		Capabilities: structuredOutputOverride(true),
+		Capabilities: forceStructuredOutput(true),
 	}
 	client, err := New(context.Background(), provider, Options{})
 	if err != nil {
@@ -166,12 +156,12 @@ func TestStructuredOutput_ConfigOverride_FlipsOpenAICompatibleCapabilities(t *te
 // override forcing StructuredOutput off suppresses it even on a first-party
 // provider that would default to true.
 func TestStructuredOutput_ConfigOverride_OffUnaffected(t *testing.T) {
-	isolateBaseURLSources(t)
+	isolateEnv(t, baseURLEnvSources...)
 	provider := Spec{
 		Type:         TypeOpenAI,
 		Model:        "gpt-test",
 		Secret:       "k",
-		Capabilities: structuredOutputOverride(false),
+		Capabilities: forceStructuredOutput(false),
 	}
 	client, err := New(context.Background(), provider, Options{})
 	if err != nil {
@@ -186,7 +176,7 @@ func TestStructuredOutput_ConfigOverride_OffUnaffected(t *testing.T) {
 // guard: a provider without the override must keep its default capability
 // (true for first-party, false for openai-compatible).
 func TestStructuredOutput_ConfigOverride_UnaffectedWhenUnset(t *testing.T) {
-	isolateBaseURLSources(t)
+	isolateEnv(t, baseURLEnvSources...)
 	t.Run("first-party default true", func(t *testing.T) {
 		provider := Spec{Type: TypeOpenAI, Model: "gpt-x", Secret: "k"}
 		client, err := New(context.Background(), provider, Options{})

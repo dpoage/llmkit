@@ -107,10 +107,9 @@ func New(model string, opts Options) (llmkit.Client, error) {
 		return nil, err
 	}
 
-	httpClient := opts.HTTPClient
-	if httpClient == nil {
-		httpClient = &http.Client{}
-	}
+	// The wrapped client counts requests per call (see adapter.WithWire);
+	// nil opts.HTTPClient gets an explicit &http.Client{} inside WireClient.
+	httpClient := adapter.WireClient(opts.HTTPClient)
 	reqOpts := []option.RequestOption{
 		option.WithEnvironmentProduction(),
 		option.WithAPIKey(opts.APIKey),
@@ -132,13 +131,23 @@ func New(model string, opts Options) (llmkit.Client, error) {
 func (o *openaiAdapter) Capabilities() llmkit.Capabilities { return o.caps }
 
 func (o *openaiAdapter) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
+	// Per-call wire recorder: normalizeErr tells a failure that sent
+	// nothing from one that did.
+	ctx, _ = adapter.WithWire(ctx)
 	params, err := o.buildParams(req)
 	if err != nil {
 		return llmkit.Response{}, err
 	}
-	cc, err := o.client.New(ctx, params)
+	// httpResp is captured for its Header only: the SDK has already read
+	// and closed the body when it decoded cc.
+	var httpResp *http.Response
+	cc, err := o.client.New(ctx, params, option.WithResponseInto(&httpResp))
 	if err != nil {
 		return llmkit.Response{}, o.normalizeErr(ctx, err)
+	}
+	// A JSON `null` body decodes to a nil completion: no choices either.
+	if cc == nil || len(cc.Choices) == 0 {
+		return llmkit.Response{}, o.noCompletion(ctx, cc, adapter.ResponseHeader(httpResp))
 	}
 	return o.toResponse(cc), nil
 }
@@ -418,6 +427,29 @@ func (o *openaiAdapter) toResponse(cc *openai.ChatCompletion) llmkit.Response {
 	return resp
 }
 
+// noCompletion is the error for a response below 400 that carries no
+// choices: a gateway or proxy answered 2xx (or a 3xx the client did not
+// follow) with an error object, `{}`, `null`, or nothing usable, and the
+// SDK decoded it without complaint. It is an *llmkit.APIError with the
+// status the wire returned; the kind follows the body's in-band error.type
+// (adapter's vendorKind) and is ErrServer, retryable, when the body names
+// none. header is the response's headers (Retry-After).
+func (o *openaiAdapter) noCompletion(ctx context.Context, cc *openai.ChatCompletion, header http.Header) error {
+	var typ, msg string
+	if cc != nil {
+		typ, msg = decodeSSEError([]byte(cc.RawJSON()))
+	}
+	if msg == "" {
+		msg = "response carried no completion (choices empty)"
+	}
+	return adapter.NormalizeSDKError(o.provider, adapter.VendorError{
+		Status:  adapter.WireStatus(ctx),
+		Type:    typ,
+		Message: msg,
+		Header:  header,
+	})
+}
+
 // mapOpenAIStop is this adapter's recognized finish_reason table: "stop" is
 // tool-call-aware (a compatible backend that emits "stop" alongside
 // tool_calls means the model wants to call them, not that it finished
@@ -471,8 +503,10 @@ func (o *openaiAdapter) normalizeErr(ctx context.Context, err error) error {
 			Err:     err,
 		})
 	}
-	// No HTTP response: transport failure or caller's context ending mid-call.
-	return adapter.TransportError(o.provider, ctx, err)
+	// No HTTP response: a refusal when the SDK rejected the call before
+	// sending anything, else a transport failure or the caller's context
+	// ending mid-call.
+	return adapter.NoResponseError(o.provider, ctx, err)
 }
 
 // sseErrorBody is the error object an OpenAI-compatible server sends inside

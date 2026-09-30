@@ -54,8 +54,8 @@ func TestNew_Defaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if c.endpoint != "https://api.typesafe.ai/v1/systemone" {
-		t.Errorf("endpoint = %q, want the vendor default with the System One path", c.endpoint)
+	if got := c.endpoint.String(); got != "https://api.typesafe.ai/v1/systemone" {
+		t.Errorf("endpoint = %q, want the vendor default with the System One path", got)
 	}
 
 	def := retry.Default()
@@ -98,8 +98,8 @@ func TestNew_ExplicitRetryAndBaseURLKept(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if c.endpoint != "http://localhost:9000/v1/systemone" {
-		t.Errorf("endpoint = %q, want trailing slash trimmed and path appended", c.endpoint)
+	if got := c.endpoint.String(); got != "http://localhost:9000/v1/systemone" {
+		t.Errorf("endpoint = %q, want trailing slash trimmed and path appended", got)
 	}
 	if !reflect.DeepEqual(c.retry, policy) {
 		t.Errorf("retry = %+v, want the explicit policy kept as-is", c.retry)

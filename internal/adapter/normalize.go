@@ -1,6 +1,9 @@
-// Package adapter holds the parsing/normalization helpers shared by the three
-// first-party provider adapters (anthropic, openai, google). It is internal
-// on purpose: these helpers are implementation detail, not public API.
+// Package adapter holds the code shared by the anthropic, openai, and
+// google adapters, and in part by decide and embed: request preparation and
+// capability gating, vendor error classification and the Message cap, the
+// zero-request rule, BaseURL validation, and credential redaction. It is
+// internal on purpose: these helpers are implementation detail, not public
+// API.
 package adapter
 
 import (
@@ -10,9 +13,9 @@ import (
 	"github.com/dpoage/llmkit"
 )
 
-// ClassifyStatus maps an HTTP status code to a sentinel error Kind. body is
+// classifyStatus maps an HTTP status code to a sentinel error Kind. body is
 // the (optional) error message, used to disambiguate 400s into ErrContextTooLong.
-func ClassifyStatus(status int, body string) error {
+func classifyStatus(status int, body string) error {
 	switch {
 	case status == http.StatusTooManyRequests:
 		return llmkit.ErrRateLimited

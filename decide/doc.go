@@ -73,7 +73,10 @@
 //	any other non-200, < 400   -> ErrServer (a 3xx or unexpected 2xx the
 //	                              vendor never documents a Type for)
 //	transport failure          -> ErrServer (StatusCode 0)
-//	request could not be built (a BaseURL net/url cannot parse) -> ErrInvalidRequest
+//	redirect-policy failure    -> ErrInvalidRequest (StatusCode 0), terminal,
+//	                              not retried: the client stopped after 10
+//	                              redirects, or Config.HTTPClient's
+//	                              CheckRedirect returned an error
 //
 // A response that violates the answer contract — a missing model or
 // usage block, a missing or extra answer, a type that does not match
@@ -83,16 +86,43 @@
 // state, empty question id, nil instructions, a Choice without options,
 // a Score with fewer than two levels, a JSON number or boolean where
 // only text kinds are accepted) never touch the network and wrap
-// llmkit.ErrInvalidRequest, terminal. Error messages carry the vendor
-// body text truncated to 200 characters. The package never places the
-// API key into an error.
+// llmkit.ErrInvalidRequest, terminal. For a non-200 status, Message
+// carries the vendor body text; for a transport or redirect failure, it
+// carries the error's text. A Message of either kind longer than 200
+// bytes is cut at the last rune boundary at or before byte 200 and gets
+// "..." appended.
+//
+// When the server or the transport echoes [Config.Secret] or the password
+// of [Config.BaseURL] into an error, as sent, escaped by Go's encoding/json
+// or Go-quoted (%q), Ask masks the echo in the error it returns, in every
+// error under it, and in the Observer event's Err. That covers a vendor
+// body, a contract-violation message that quotes an answer id or type, a
+// transport error that quotes server bytes, and the last attempt's error
+// in the "(last attempt: ...)" text of a cancelled retry. The mask is
+// "***" when neither credential holds '*'. Credentials are masked as
+// values, so a short Secret or password also masks the same characters
+// elsewhere in the server's and the transport's text. Text llmkit writes
+// itself, such as the "llmkit: typesafe error (status 500):" prefix or the
+// context error of a cancelled retry, may still contain text that matches
+// the Secret or the password, for example the characters of a short one.
+// The URL username is not a value: only where it appears as URL userinfo
+// ("scheme://user[:password]@") is it replaced. Redaction happens before
+// the 200-byte cap, and classification reads the unredacted text, so the
+// Kind is the one the vendor's text gives. When a redaction happens the
+// error chain is cut: the *llmkit.APIError keeps Kind, StatusCode,
+// RetryAfter, HasRetryAfter and Provider, and errors.Is still matches
+// context.Canceled and context.DeadlineExceeded when they matched; the
+// underlying transport error, net.Error included, is no longer reachable.
+// An error with nothing to redact is returned as it was, chain intact.
 //
 // # Retries
 //
 // Ask retries every *llmkit.APIError [llmkit.Classify] marks retryable —
 // ErrRateLimited, ErrOverloaded, and every ErrServer (any status 500 or
-// above, a sub-400 non-200 status, a transport failure, a 200
-// answer-contract violation) — through the shared retry loop, [retry.Do].
+// above, a sub-400 non-200 status, a transport failure other than a
+// redirect-policy failure, a 200 answer-contract violation) — through the
+// shared retry loop, [retry.Do]. A redirect-policy failure is terminal:
+// ErrInvalidRequest with StatusCode 0, returned without a retry.
 // Each attempt runs under a per-attempt RequestTimeout deadline; a
 // stalled attempt is retried like any other ErrServer. For a non-200
 // response the client parses the Retry-After header and carries its
@@ -111,9 +141,9 @@
 // context.DeadlineExceeded) reaches it, and it is not an
 // *llmkit.APIError. One exception: a terminal error keeps its identity
 // even when the ctx is already done. An already-cancelled ctx with a
-// BaseURL net/url cannot parse returns ErrInvalidRequest. A per-attempt
-// RequestTimeout expiring under a live parent is not a parent
-// cancellation and is retried like any other ErrServer.
+// question that fails pre-wire validation returns ErrInvalidRequest. A
+// per-attempt RequestTimeout expiring under a live parent is not a
+// parent cancellation and is retried like any other ErrServer.
 //
 // Unset knobs resolve at construction, via [retry.Config.Or], to the
 // decide defaults: 3 attempts and a 30s per-attempt timeout (Jev
@@ -154,7 +184,18 @@
 //   - a Secret that is empty, whitespace-only, or whitespace-padded (the
 //     same rule as provider.Spec.Secret);
 //   - an empty Model;
-//   - a Retry.Jitter outside [0, 1].
+//   - a Retry.Jitter outside [0, 1], NaN included;
+//   - a BaseURL that is not an http or https URL with a host (the scheme
+//     is case-insensitive), or that contains '#' anywhere, an empty
+//     fragment included.
+//
+// No such error echoes the Secret or any part of BaseURL, its userinfo
+// included. A BaseURL that parses but cannot be dialed, such as
+// "http://localhost:99999", is accepted and fails at request time as a
+// retryable transport error. A BaseURL query is kept after the joined
+// path: "https://gw.example/x?api-version=1" requests
+// "/x/v1/systemone?api-version=1". The path is not cleaned: "//" and dot
+// segments in BaseURL are not collapsed or resolved.
 //
 // New performs no network I/O and no environment lookups, so construction
 // is hermetic.

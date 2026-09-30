@@ -54,7 +54,7 @@ func TestSchemaCompat_Registry_OpenAICompatibleEnablesDowngrade(t *testing.T) {
 		BaseURL:      base,
 		Model:        "MiniMax-M3",
 		Secret:       "k",
-		Capabilities: structuredOutputOverride(true),
+		Capabilities: forceStructuredOutput(true),
 	}, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)

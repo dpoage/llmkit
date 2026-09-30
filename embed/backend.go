@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -32,19 +34,56 @@ type wireCodec interface {
 	encodeRequest(model string, texts []string) any
 	// decodeResponse parses a 200 response body for want texts. A
 	// non-nil vendorErr means the body carries an in-band error object;
-	// the shared loop classifies it through the same trim-and-cap helper
-	// as a non-200 response ([adapter.NormalizeCapped]). vectors and
+	// the shared loop classifies it through the same helper as a non-200
+	// response ([adapter.NormalizeCapped], which trims and delegates the
+	// 200-byte cap to [adapter.NormalizeSDKError]). vectors and
 	// vendorErr are never both set.
 	decodeResponse(body []byte, want int) (vectors [][]float32, vendorErr *adapter.VendorError, err error)
+}
+
+// backendCodecs is the one Backend-to-codec mapping. It is the accepted
+// set of [ParseBackend] and [Config.Validate] and the codec source of
+// [New]; the order is the order of ParseBackend's error text. A Backend
+// added here needs its codec in the same row, so no accepted Backend can
+// reach the embed loop without one.
+var backendCodecs = []struct {
+	backend Backend
+	codec   wireCodec
+}{
+	{BackendOllama, ollamaCodec{}},
+	{BackendOpenAICompatible, openaiCodec{}},
+}
+
+// codecFor returns the codec of the backend named s. The error names s
+// and lists every accepted backend, so a bad config value is actionable
+// without reading this package.
+func codecFor(s string) (wireCodec, error) {
+	names := make([]string, len(backendCodecs))
+	for i, e := range backendCodecs {
+		if string(e.backend) == s {
+			return e.codec, nil
+		}
+		names[i] = strconv.Quote(string(e.backend))
+	}
+	return nil, fmt.Errorf("embed: unknown backend %q: expected %s", s, joinOr(names))
+}
+
+// joinOr renders names as `"a"`, `"a" or "b"`, or `"a", "b" or "c"`.
+func joinOr(names []string) string {
+	if len(names) < 2 {
+		return strings.Join(names, "")
+	}
+	return strings.Join(names[:len(names)-1], ", ") + " or " + names[len(names)-1]
 }
 
 // backendEmbedder is the Embedder every wireCodec drives. It owns the
 // one retry/batch/dimension loop; a codec supplies only the wire shape.
 type backendEmbedder struct {
-	name     string // also the backend tag in error text
-	baseURL  string
+	name     string   // also the backend tag in error text
+	endpoint *url.URL // BaseURL joined with the codec's path; never mutated
 	model    string
 	apiKey   string
+	redact   *adapter.Redactor // masks echoes of apiKey and the BaseURL password, and BaseURL userinfo, in returned errors
 	client   *http.Client
 	retry    retry.Config
 	maxBatch int
@@ -56,12 +95,15 @@ type backendEmbedder struct {
 
 var _ Embedder = (*backendEmbedder)(nil)
 
-func newBackendEmbedder(cfg Config, codec wireCodec) *backendEmbedder {
+// newBackendEmbedder builds the embedder for a validated Config: codec
+// and root are what [Config.validate] returned for cfg.
+func newBackendEmbedder(cfg Config, codec wireCodec, root *url.URL) *backendEmbedder {
 	return &backendEmbedder{
 		name:     string(cfg.Backend),
-		baseURL:  strings.TrimRight(cfg.BaseURL, "/"),
+		endpoint: adapter.JoinEndpoint(root, codec.path()),
 		model:    cfg.Model,
 		apiKey:   cfg.Secret,
+		redact:   adapter.NewRedactor(cfg.Secret, root),
 		client:   cfg.httpClient(),
 		retry:    cfg.retryPolicy(),
 		maxBatch: cfg.MaxBatch,
@@ -95,10 +137,13 @@ func (b *backendEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]f
 		var res [][]float32
 		err := retry.Do(ctx, b.retry, llmkit.Classify, func(actx context.Context) error {
 			r, err := b.doEmbed(actx, chunk)
-			if err == nil {
-				res = r
+			if err != nil {
+				// Scrub every attempt's error before retry.Do, the
+				// observer or the caller sees it.
+				return b.redact.Scrub(err)
 			}
-			return err
+			res = r
+			return nil
 		})
 		if err != nil {
 			return nil, err
@@ -133,7 +178,7 @@ func (b *backendEmbedder) doEmbed(ctx context.Context, texts []string) ([][]floa
 		return nil, fmt.Errorf("%s: marshal request: %w", b.name, err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.baseURL+b.codec.path(), bytes.NewReader(body))
+	req, err := adapter.NewRequest(ctx, http.MethodPost, b.endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("%s: create request: %w", b.name, err)
 	}
@@ -144,7 +189,7 @@ func (b *backendEmbedder) doEmbed(ctx context.Context, texts []string) ([][]floa
 
 	resp, err := b.client.Do(req)
 	if err != nil {
-		return nil, adapter.TransportError(b.name, ctx, err)
+		return nil, adapter.DoError(b.name, ctx, resp, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -158,12 +203,12 @@ func (b *backendEmbedder) doEmbed(ctx context.Context, texts []string) ([][]floa
 			return nil, fmt.Errorf("%s: response body exceeds the %d-byte limit", b.name, maxResponseBytes)
 		}
 		// Non-200: classify by status from the truncated body; the
-		// 200-byte Message cap in [adapter.NormalizeCapped] still applies on top.
+		// 200-byte Message cap in [adapter.NormalizeSDKError] still applies on top.
 		respBody = respBody[:maxResponseBytes]
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, responseError(b.name, resp, respBody)
+		return nil, b.responseError(resp, respBody)
 	}
 
 	vectors, vendorErr, err := b.codec.decodeResponse(respBody, len(texts))
@@ -172,6 +217,7 @@ func (b *backendEmbedder) doEmbed(ctx context.Context, texts []string) ([][]floa
 	}
 	if vendorErr != nil {
 		vendorErr.Header = resp.Header
+		vendorErr.Redact = b.redact
 		return nil, adapter.NormalizeCapped(b.name, *vendorErr)
 	}
 
@@ -184,14 +230,15 @@ func (b *backendEmbedder) doEmbed(ctx context.Context, texts []string) ([][]floa
 // responseError normalizes a non-200 response into the kit's vocabulary.
 // Both APIError routes built from server-supplied text — this one and the
 // openai-compatible 200 error-object route — call
-// [adapter.NormalizeCapped], so the trim-and-cap rule cannot drift
-// between them. It classifies against the whole trimmed body, which
-// doEmbed has already cut to maxResponseBytes; only the returned Message
-// is capped.
-func responseError(backend string, resp *http.Response, body []byte) error {
-	return adapter.NormalizeCapped(backend, adapter.VendorError{
+// [adapter.NormalizeCapped] with the embedder's Redactor, so the
+// trim-redact-cap rule cannot drift between them. It classifies against
+// the whole trimmed body, which doEmbed has already cut to
+// maxResponseBytes; only the returned Message is redacted and capped.
+func (b *backendEmbedder) responseError(resp *http.Response, body []byte) error {
+	return adapter.NormalizeCapped(b.name, adapter.VendorError{
 		Status:  resp.StatusCode,
 		Message: string(body),
 		Header:  resp.Header,
+		Redact:  b.redact,
 	})
 }

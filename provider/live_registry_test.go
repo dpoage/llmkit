@@ -5,10 +5,13 @@ package provider_test
 //
 // liveCases describes every acceptance case the live matrix runs, keyed to an
 // llmkit.Capabilities field (Gate) or unconditional. The case BODIES live in
-// the `live`-tagged live_test.go (liveCaseBodies); the tagged runner enforces
-// descriptor↔body parity in both directions. This file — and the reflection
-// test below — have no build tag, so the hermetic suite fails whenever a
-// capability is added or a case is deleted without a paired update.
+// the `live`-tagged live_test.go (liveCaseBodies). Two checks enforce the
+// pairing. This file's reflection test has no build tag, so the plain
+// `go test ./...` suite fails when an llmkit.Capabilities field has no gated
+// case; it does not look at bodies. The `live`-tagged TestLiveCaseParity
+// fails when a descriptor has no body or a body has no descriptor; CI runs it
+// as `go test -tags live -count=1 -run 'TestLiveCaseParity' ./provider/`,
+// which needs no credentials, and it is not part of the plain suite.
 
 import (
 	"reflect"

@@ -18,7 +18,7 @@ import (
 // error wraps llmkit.ErrInvalidRequest and its text names both the field
 // and the provider.
 func TestNew_CeilingRefusesAboveWireCapability(t *testing.T) {
-	isolateBaseURLSources(t)
+	isolateEnv(t, baseURLEnvSources...)
 	cases := []struct {
 		name     string
 		typ      Type
@@ -68,7 +68,7 @@ func TestNew_CeilingRefusesAboveWireCapability(t *testing.T) {
 // Google has no refused field: setting every wire-gated field true still
 // succeeds there.
 func TestNew_CeilingAllowsEverythingElse(t *testing.T) {
-	isolateBaseURLSources(t)
+	isolateEnv(t, baseURLEnvSources...)
 	cases := []struct {
 		name     string
 		typ      Type

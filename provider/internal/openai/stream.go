@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/internal/adapter"
 	"github.com/openai/openai-go/v3"
 )
 
@@ -29,6 +30,7 @@ var _ llmkit.StreamingClient = (*openaiAdapter)(nil)
 // "llmkit: stream fn: ..." with a zero Response. Open and transport errors
 // go through the same error normalization as Complete.
 func (o *openaiAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(llmkit.Delta) error) (llmkit.Response, error) {
+	ctx, _ = adapter.WithWire(ctx)
 	params, err := o.buildParams(req)
 	if err != nil {
 		return llmkit.Response{}, err

@@ -42,6 +42,16 @@ jobs:
       - name: test
         run: go test -race -count=1 ./...
 
+      - name: live registry parity (live tag, no credentials)
+        # TestLiveCaseParity lives behind the `live` build tag, so the plain
+        # `go test ./...` above never runs it. It checks that every live case
+        # descriptor has a body and every body has a descriptor. `-run` selects
+        # only that test: no live case body runs, no vendor is dialed, and no
+        # credential is needed. `!cancelled()` reports it even when the plain
+        # test step failed.
+        if: ${{ !cancelled() }}
+        run: go test -tags live -count=1 -run 'TestLiveCaseParity' ./provider/
+
   lint:
     name: golangci-lint
     runs-on: ubuntu-latest
@@ -79,6 +89,32 @@ jobs:
         with:
           version: v2.13.2
           args: --build-tags integration,live ./...
+
+      - name: golangci-lint (GOOS=darwin)
+        # sandbox/clone_other.go and bwrap_proc_other.go carry a `!linux` build
+        # constraint, and write_other.go carries `!unix`, so the ubuntu runs
+        # above never compile them. GOOS=darwin compiles the first two; the
+        # GOOS=windows step below compiles all three.
+        # The action execs the linter with the step's environment (it sets no
+        # env of its own), so GOOS reaches the linter and it loads packages
+        # for that target. Plain tags: the integration and live files are not
+        # part of this run. `!cancelled()` as in the tagged run above.
+        if: ${{ !cancelled() }}
+        uses: golangci/golangci-lint-action@v9
+        env:
+          GOOS: darwin
+        with:
+          version: v2.13.2
+          args: ./...
+
+      - name: golangci-lint (GOOS=windows)
+        if: ${{ !cancelled() }}
+        uses: golangci/golangci-lint-action@v9
+        env:
+          GOOS: windows
+        with:
+          version: v2.13.2
+          args: ./...
 
   sandbox-integration:
     name: sandbox integration (bwrap + container CLI)

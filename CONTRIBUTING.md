@@ -71,8 +71,11 @@ go vet ./...
 go vet -tags live ./provider/ ./agent/ ./examples/... ./decide/
 go vet -tags integration ./embed/ ./sandbox/
 go test -race -count=1 ./...
+go test -tags live -count=1 -run 'TestLiveCaseParity' ./provider/  # live case registry parity; needs no credentials
 golangci-lint run ./...    # v2.13.2; config in .golangci.yml
 golangci-lint run --build-tags integration,live ./...  # same config; compiles the integration- and live-tagged files
+GOOS=darwin golangci-lint run ./...   # same config; compiles the `!linux` sandbox files
+GOOS=windows golangci-lint run ./...  # same config; compiles the `!linux` and `!unix` sandbox files
 gofmt -l .                 # must print nothing
 ```
 

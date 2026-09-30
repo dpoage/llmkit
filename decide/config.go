@@ -3,8 +3,10 @@ package decide
 import (
 	"fmt"
 	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/internal/adapter"
 	"github.com/dpoage/llmkit/retry"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -46,9 +48,14 @@ type Config struct {
 	Model string
 
 	// BaseURL overrides the vendor endpoint root. Empty selects
-	// "https://api.typesafe.ai". The request URL is BaseURL plus
-	// "/v1/systemone" (a trailing slash on BaseURL is dropped), so do not
-	// include "/v1".
+	// "https://api.typesafe.ai". It must be an http or https URL with a
+	// host (the scheme is case-insensitive) and no '#' anywhere, an empty
+	// fragment included; New refuses anything else. The request path
+	// "/v1/systemone" is appended to BaseURL's path (trailing '/' characters
+	// dropped), so do not include "/v1". A query is kept and stays after
+	// the path: "https://gw.example/x?api-version=1" requests
+	// "/x/v1/systemone?api-version=1". The path is not cleaned: "//" and
+	// dot segments are not collapsed or resolved.
 	BaseURL string
 
 	// HTTPClient is optional. nil selects a plain client with no
@@ -75,9 +82,10 @@ type Config struct {
 
 // New validates cfg and returns a Client. It returns an error wrapping
 // llmkit.ErrInvalidRequest for a Secret that is empty, whitespace-only, or
-// whitespace-padded, an empty Model, and a Retry.Jitter outside [0, 1].
-// Construction is hermetic: no network I/O, no environment lookups, and
-// the error never echoes Secret.
+// whitespace-padded, an empty Model, a Retry.Jitter outside [0, 1] (NaN
+// included), and a BaseURL that is not an http or https URL with a host
+// or that contains '#'. Construction is hermetic: no network I/O, no
+// environment lookups, and no error echoes Secret or any part of BaseURL.
 func New(cfg Config) (*Client, error) {
 	// Refuse a Secret that is empty or differs from strings.TrimSpace —
 	// the same refusal provider.New applies to Spec.Secret. The error
@@ -88,17 +96,21 @@ func New(cfg Config) (*Client, error) {
 	if cfg.Model == "" {
 		return nil, fmt.Errorf("decide: model is required: %w", llmkit.ErrInvalidRequest)
 	}
-	if cfg.Retry.Jitter < 0 || cfg.Retry.Jitter > 1 {
+	if !(cfg.Retry.Jitter >= 0 && cfg.Retry.Jitter <= 1) {
 		return nil, fmt.Errorf("decide: retry jitter must be in [0, 1], got %v: %w", cfg.Retry.Jitter, llmkit.ErrInvalidRequest)
 	}
 	base := cfg.BaseURL
 	if base == "" {
 		base = defaultBaseURL
 	}
+	root, err := adapter.ParseBaseURL("decide: BaseURL", base)
+	if err != nil {
+		return nil, err
+	}
 	return &Client{
 		apiKey:   cfg.Secret,
 		model:    cfg.Model,
-		endpoint: strings.TrimRight(base, "/") + systemOnePath,
+		endpoint: adapter.JoinEndpoint(root, systemOnePath),
 		client:   cfg.httpClient(),
 		retry:    cfg.retryPolicy(),
 		observer: cfg.Observer,
@@ -111,7 +123,7 @@ func New(cfg Config) (*Client, error) {
 type Client struct {
 	apiKey   string
 	model    string
-	endpoint string
+	endpoint *url.URL // BaseURL joined with systemOnePath; never mutated
 	client   *http.Client
 	retry    retry.Config
 	observer llmkit.Observer

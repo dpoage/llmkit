@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/internal/adapter"
 	"google.golang.org/genai"
 )
 
@@ -27,9 +28,8 @@ var errStreamNoFinishReason = errors.New("google: stream ended before finishReas
 // the response's calls). A fn error cancels the stream and is returned
 // wrapped, with no Response.
 func (g *googleAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(llmkit.Delta) error) (llmkit.Response, error) {
-	// Per-request transport-status recorder for normalizeErr's fallback,
-	// mirroring Complete.
-	ctx = context.WithValue(ctx, transportStatusKey{}, &transportStatus{})
+	// Per-call wire recorder for normalizeErr, mirroring Complete.
+	ctx, _ = adapter.WithWire(ctx)
 	contents, cfg, err := g.buildRequest(req)
 	if err != nil {
 		return llmkit.Response{}, err
@@ -59,11 +59,17 @@ func (g *googleAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(
 		return llmkit.Response{}, g.normalizeErr(ctx, err)
 	}
 	// A stream that carried candidate content but never a finishReason was
-	// truncated. A promptFeedback-only stream (no candidates — the
-	// blocked-prompt shape) is the legitimate Complete response and stays
-	// a success.
+	// truncated. A promptFeedback-only stream whose promptFeedback names a
+	// block reason (the blocked-prompt shape, no candidates) is the
+	// legitimate Complete response — StopContentFilter — and stays a
+	// success; a stream with neither candidates nor a block reason carried
+	// no completion (an empty stream, or data lines that held only an error
+	// object genai decoded to nothing) and is an error, as in Complete.
 	if len(agg.Candidates) > 0 && !sawFinish {
 		return llmkit.Response{}, g.normalizeErr(ctx, errStreamNoFinishReason)
+	}
+	if err := g.checkCompletion(ctx, agg); err != nil {
+		return llmkit.Response{}, err
 	}
 	return g.toResponse(agg), nil
 }

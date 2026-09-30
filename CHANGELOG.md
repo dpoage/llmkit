@@ -686,6 +686,27 @@ entry below is marked.
   including a cancelled context or a panic, can leave requested calls
   without a `tool_run` event; the docs now say so (llmkit-bk8.6.6,
   llmkit-bk8.9.9).
+- CI (llmkit-bk8.1.62, llmkit-bk8.9.13): the `build / vet / gofmt / test`
+  job runs `go test -tags live -count=1 -run 'TestLiveCaseParity'
+  ./provider/`, so a live case descriptor without a body, or a body without
+  a descriptor, fails the pull request; it needs no credentials and runs no
+  live case. The `golangci-lint` job runs a third and fourth time with
+  `GOOS=darwin` and `GOOS=windows`, so findings in the `!linux` and
+  `!unix` sandbox files are reported. The header of
+  `provider/live_registry_test.go` and `docs/testing.md` now say that the
+  plain suite checks capability coverage and the tagged `TestLiveCaseParity`
+  checks descriptor-to-body parity.
+- **Breaking:** `embed` (llmkit-bk8.1.15, llmkit-abn): an openai-compatible
+  `BaseURL` is the API root including `/v1`; `embed` appends `/embeddings`.
+  A `BaseURL` that already names the endpoint used to work
+  only by accident: a trailing `?` or `#` turned the appended path into a
+  query or fragment. Before, `BaseURL: "http://gw.example/v1/embeddings?"`
+  requested `/v1/embeddings` with the query `/embeddings`. After, it
+  requests `/v1/embeddings/embeddings`, because the `?` is an empty query
+  and the path is joined before it. Before, `BaseURL:
+  "http://gw.example/v1/embeddings#"` requested `/v1/embeddings` and
+  dropped the fragment. After, `New` refuses it, because any `#` in
+  `BaseURL` is refused. Migrate both to `http://gw.example/v1`.
 - Docs only: `agent.BudgetPool` no longer claims a bound of one in-flight
   model call per concurrent runner. The pool gates the start of each
   main-loop turn and does not cap spend: a max-tokens continuation, the
@@ -701,6 +722,9 @@ entry below is marked.
   If that ctx carries no span, the nested emitter mints its own span. A
   nested agent `Runner` mints its own span (llmkit-bk8.9.15,
   llmkit-bk8.3.4).
+- Provider adapters (llmkit-bk8.2.6): anthropic and openai now copy the
+  passed `*http.Client` at `New`; mutations to it after `New` are not
+  observed (google already behaved this way).
 
 ### Removed
 
@@ -1045,6 +1069,120 @@ entry below is marked.
   `Capabilities`. `AGENTS.md` and `CLAUDE.md` no longer say that
   `provider/live_registry_test.go` enforces the acceptance rule for
   adapter and agent-loop changes.
+- Pre-wire refusals (llmkit-bk8.2.6, llmkit-bk8.1.55, llmkit-bk8.1.57,
+  llmkit-bk8.5.4): an adapter call that fails while zero requests reached
+  the transport, with the caller's context live, now returns an error
+  wrapping `ErrInvalidRequest` instead of a retryable `ErrServer`, so the
+  retry stage no longer repeats a call the SDK rejected locally (anthropic
+  `Complete` with a `MaxTokens` large enough to require streaming, a
+  `BaseURL` that fails URL parsing, an SDK marshal failure). A failure
+  after a request was sent, including a refused dial, keeps its `ErrServer`
+  classification, and a canceled context still returns a plain error
+  chaining `context.Canceled`. google `Complete` and `Stream` now refuse a
+  `MaxTokens` above 2147483647 with `ErrInvalidRequest` instead of sending a
+  wrapped `maxOutputTokens` (1<<31 went out as -2147483648).
+- `APIError.Message` cap (llmkit-bk8.9.12, llmkit-bk8.1.37,
+  llmkit-bk8.1.53, llmkit-bk8.1.49, llmkit-bk8.1.41): an `*APIError` whose
+  `Message` comes from vendor or transport text caps it at 200 bytes. Text
+  longer than 200 bytes is cut at the last rune boundary at or before byte
+  200 and gets `...` appended. Five routes carry the cap: a non-200 status
+  (the chat adapters, `decide`, `embed`), an in-band error on a 200 (a chat
+  adapter's stream error event, an `embed` openai-compatible error object),
+  a transport failure (the chat adapters, `decide`, `embed`), a `decide` or
+  `embed` redirect-policy failure, and a chat adapter's zero-request
+  refusal, which quotes the SDK's error text. Before, the chat adapters'
+  status and in-band routes and every transport failure kept the whole
+  text, and the `decide` and `embed` cut could split a multibyte rune. The
+  cut no longer splits a rune, so a cut `Message` is valid UTF-8 when the
+  text it came from is. Classification reads the whole text before the
+  cut, so a context-length phrase past byte 200 still gives
+  `ErrContextTooLong`. The chained error of a transport, redirect, or
+  zero-request failure keeps the full text, except that a `decide` or
+  `embed` redaction (see the echo-masking bullet below) cuts the chain. A
+  redaction that rewrites a `Message` caps the rewritten text. `Message`s
+  llmkit writes itself are not capped: the chat adapters'
+  request-validation refusals, the Google adapter's `genai` client
+  construction failure at `New`, the OpenAI stream's "stream chunk does not
+  extend the accumulated completion" error, and in `decide` a
+  question-validation refusal, a request that cannot be built, and an
+  answer-contract violation. Some of them quote caller or response values.
+  `docs/decide.md` and the `decide` package doc now say bytes, not
+  characters.
+- `decide` and `embed` (llmkit-bk8.1.34): a redirect-policy failure — the
+  HTTP client stopping after 10 redirects, or an error from a caller's
+  `http.Client.CheckRedirect` — is now a terminal
+  `*APIError{Kind: ErrInvalidRequest, StatusCode: 0}` instead of a retried
+  `ErrServer`. A 302 loop cost 30 wire requests under three attempts; it
+  now costs 10, and 1 under a `CheckRedirect` that errors. Dial, TLS, and
+  EOF failures stay retryable, and so do an unsupported-scheme or
+  missing-host failure in a redirect `Location`; `New` refuses a `BaseURL`
+  with either (see the `BaseURL` bullet below). The chat
+  adapters still retry a redirect failure as a transport failure.
+- `llmkit/retry` (llmkit-bk8.1.23): `retry.Do` no longer computes a
+  negative backoff for an out-of-range `Config`. A negative `BaseDelay` now
+  waits zero. Before the first retry it waited a negative delay (an
+  immediate retry) whatever `MaxDelay` was; before later retries it was
+  misread as int64 overflow and took the `1<<62` (about 146-year) overflow
+  clamp, capped by a positive `MaxDelay`. A jittered delay past
+  `math.MaxInt64` now saturates at `math.MaxInt64` (still capped by a
+  positive `MaxDelay`); it wrapped to a negative delay, which retried
+  immediately. A positive `BaseDelay` with `MaxDelay` at or below zero stays
+  uncapped: its doubling still clamps at `1<<62`.
+- `decide` and `embed` (llmkit-bk8.1.15, llmkit-abn, llmkit-bk8.1.32,
+  llmkit-bk8.1.52, llmkit-bk8.8.2): `decide.New`, `embed.New`, and
+  `embed.Config.Validate` now refuse a bad `BaseURL` with an error that
+  wraps `ErrInvalidRequest` and names the field and the rule only: never the
+  URL, its userinfo, or `net/url`'s parse error, which quotes both. A
+  `BaseURL` is refused when it is not an `http` or `https` URL (the scheme
+  is case-insensitive, so `HTTP://` is accepted), has an empty host, does
+  not parse, or holds a `#` anywhere, an empty fragment included. Before,
+  `decide.New` accepted all of these and a URL that parsed but could not be
+  dialed (`api.typesafe.invalid`, `ftp://…`, `http://`) cost three attempts
+  with backoff; `http://user:pw@a b` put its password in the build-request
+  error; and `embed` returned a plain, unclassified error from `Embed`. A
+  URL that parses but cannot be dialed (`http://localhost:99999`) is still
+  accepted and still retried. A query in `BaseURL` is now kept after the
+  joined path:
+  `http://gw.example/v1?api-version=2024` requests
+  `/v1/embeddings?api-version=2024` (`embed`, openai-compatible),
+  `/v1/api/embed?api-version=2024` (`embed`, ollama), and
+  `/v1/v1/systemone?api-version=2024` (`decide`); before, the endpoint path
+  was appended to the query text (`api-version=2024/embeddings`). The path
+  itself is not cleaned: `%2F`, `//`, and dot segments reach the wire as
+  they did before, and userinfo still becomes Basic auth on `embed` requests
+  that carry no `Secret`. The request is built from the parsed URL, so a
+  `BaseURL` that passes validation cannot fail request construction with an
+  error that quotes it. `Retry.Jitter` of NaN is now refused by
+  `decide.New`, `embed.New`, and `embed.Config.Validate` like the other
+  values outside [0, 1]. `embed` keeps its backend-to-codec mapping in one
+  table that `ParseBackend`, `Validate`, and `New` share.
+- Provider adapters (llmkit-bk8.1.14, llmkit-bk8.1.56, llmkit-bk8.1.42):
+  Complete on the Anthropic, OpenAI, and openai-compatible adapters returns
+  an `*llmkit.APIError` for a response below 400 that decodes but carries
+  no completion. "No completion" is zero `choices` (OpenAI,
+  openai-compatible) and empty `content` with an empty `stop_reason`
+  (Anthropic). Such a JSON object (an error object, `{}`) used to return a
+  nil error with an empty `Response` reporting `StopReason` `""` (OpenAI,
+  openai-compatible) or `StopError` (Anthropic); a JSON `null` body used to
+  panic on these three adapters (llmkit-bk8.1.64). The error carries the
+  response status and, when the response has a parseable `Retry-After`,
+  `HasRetryAfter` and `RetryAfter`; `Kind` follows the body's `error.type`
+  (`invalid_request_error` is `ErrInvalidRequest`) and is `ErrServer`,
+  retryable, when the body names none. On the Google adapter, Complete on a
+  2xx body that is `{}`, an error object, or empty, and Stream on a 2xx
+  stream whose `data:` lines are `{}` or an error object, or that has no
+  lines, used to report `StopEndTurn` with a nil error. They now return an
+  `ErrServer` `*llmkit.APIError` at the response status with a generic
+  message: genai drops the error object of a 2xx body.
+- Google adapter (llmkit-bk8.1.51): a prompt blocked by
+  `promptFeedback.blockReason` with no candidates, in a 2xx Complete body or
+  a 2xx Stream of `data:` lines, returns `StopContentFilter` with no error.
+  It used to report `StopEndTurn`.
+- OpenAI adapter (llmkit-bk8.1.58): a choice carrying both
+  `message.refusal` and `message.tool_calls` is pinned to `StopRefusal` with
+  `ToolCalls` populated and the refusal as `Text`, on Complete and Stream,
+  first-party and openai-compatible. This is the existing behavior, now
+  tested and documented in `docs/providers.md`.
 - `agent`, `llmkit` (llmkit-60a, llmkit-rq7): a run recorded under a
   `ToolPolicy` that rewrites arguments now replays cleanly under the same
   policy, and replay under `WithParallelTools` no longer swaps the recorded
@@ -1101,6 +1239,35 @@ entry below is marked.
   `docs/agent-loop.md`, now say `Complete` checks tool-result structure only
   when the record holds tool runs after the previous completion and before
   the response it serves (llmkit-8ey).
+- `decide`, `embed` (llmkit-bk8.1.38): when the server or the transport echoes
+  `Config.Secret` or the password of `Config.BaseURL` into an error, as sent,
+  escaped by Go's `encoding/json` or Go-quoted (`%q`), `Ask`, `Embed` and
+  `EmbedBatch` mask the echo in the error they return, in every error under
+  it (`Unwrap() error` and `Unwrap() []error` included), in its `%+v` form
+  and in `DecisionEvent.Err` / `EmbedEvent.Err`.
+  Before, a vendor body that echoed the key (a non-200 body, an
+  openai-compatible 200 error object, a decide answer-contract violation, a
+  JSON type error, a transport error that quoted a malformed header or a
+  redirect `Location`)
+  put it verbatim into `APIError.Message` and `Error()`. The mask is `***`
+  when neither credential holds `*`. Credentials are masked as values, so a
+  short Secret or password also masks the same characters elsewhere in the
+  server's and the transport's text. Text llmkit writes itself, such as the
+  `llmkit: typesafe error (status 500):` prefix or the context error of a
+  cancelled retry, may still contain text that matches the Secret or the
+  password, for example the characters of a short one. The `BaseURL` username
+  is not a value: it is replaced only where it appears as URL userinfo
+  (`scheme://user[:password]@`), which `net/http`'s `url.Error` keeps in its
+  text. Redaction runs after classification and before the 200-byte cap, so
+  the Kind is unchanged and the cap never leaves the front of a key. When
+  a redaction happens the error chain is cut: `APIError` keeps `Kind`,
+  `StatusCode`, `RetryAfter`, `HasRetryAfter` and `Provider`, and
+  `errors.Is` still matches `context.Canceled` / `context.DeadlineExceeded`
+  when they matched, but the underlying transport error (a `net.Error`, say)
+  is no longer reachable. An error with nothing to redact is returned
+  unchanged. `decide` and `embed` still accept userinfo in `BaseURL`. On
+  `embed` requests that carry no `Secret` it still becomes Basic auth;
+  `decide` always sends its Bearer header.
 
 ## [0.5.0] - 2026-09-20
 

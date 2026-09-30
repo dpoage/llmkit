@@ -1052,37 +1052,3 @@ func TestAsk_SubBadRequestStatusIsErrServerRetried(t *testing.T) {
 		})
 	}
 }
-
-// TestAsk_MalformedBaseURLIsErrInvalidRequest pins a BaseURL that cannot become a valid request is a deterministic client-side defect: ErrInvalidRequest, terminal, no retry.
-func TestAsk_MalformedBaseURLIsErrInvalidRequest(t *testing.T) {
-	var sleeps []time.Duration
-	policy := retry.Config{
-		MaxAttempts: 3,
-		BaseDelay:   time.Millisecond,
-		Sleep: func(_ context.Context, d time.Duration) error {
-			sleeps = append(sleeps, d)
-			return nil
-		},
-	}
-	c, err := New(Config{Secret: testSecret, Model: "jev-latest", BaseURL: "http://a b", Retry: policy})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	_, askErr := c.Ask(context.Background(), "s", Questions{"q": Noul{Instructions: "i"}})
-	if askErr == nil {
-		t.Fatal("expected an error")
-	}
-	if !errors.Is(askErr, llmkit.ErrInvalidRequest) {
-		t.Errorf("err = %v, want ErrInvalidRequest", askErr)
-	}
-	var apiErr *llmkit.APIError
-	if !errors.As(askErr, &apiErr) {
-		t.Fatalf("err = %T, want *llmkit.APIError", askErr)
-	}
-	if apiErr.StatusCode != 0 {
-		t.Errorf("StatusCode = %d, want 0", apiErr.StatusCode)
-	}
-	if len(sleeps) != 0 {
-		t.Errorf("sleeps = %v, want none: a malformed BaseURL must not retry", sleeps)
-	}
-}

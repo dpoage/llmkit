@@ -3,10 +3,12 @@ package embed
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/internal/adapter"
 	"github.com/dpoage/llmkit/retry"
 )
 
@@ -33,20 +35,14 @@ const (
 	BackendOpenAICompatible Backend = "openai-compatible"
 )
 
-// validBackends lists the accepted backend names in ParseBackend's error,
-// which Validate returns for a bad Backend.
-const validBackends = `"ollama" or "openai-compatible"`
-
 // ParseBackend maps a backend name onto a Backend. The error names the
 // bad value and lists every accepted one, so a bad config value is
 // actionable without reading this package.
 func ParseBackend(s string) (Backend, error) {
-	switch b := Backend(s); b {
-	case BackendOllama, BackendOpenAICompatible:
-		return b, nil
-	default:
-		return "", fmt.Errorf("embed: unknown backend %q: expected %s", s, validBackends)
+	if _, err := codecFor(s); err != nil {
+		return "", err
 	}
+	return Backend(s), nil
 }
 
 // Config configures an embedding backend and its retry policy. [New]
@@ -61,8 +57,16 @@ type Config struct {
 	Model string
 
 	// BaseURL is the base URL of the embedding service. Validate requires
-	// a non-empty BaseURL; there is no default. A trailing slash is
-	// dropped, and the backend appends its request path to the rest:
+	// a non-empty http or https URL with a host (the scheme is
+	// case-insensitive) and no '#' anywhere, an empty fragment included;
+	// there is no default. The backend appends its request path to
+	// BaseURL's path, with trailing '/' characters dropped. A query stays after
+	// the joined path: "https://x.example/openai/v1?api-version=2024"
+	// requests "/openai/v1/embeddings?api-version=2024". The path is not
+	// cleaned: "//" and dot segments are not collapsed or resolved.
+	// BaseURL is the API root, not a full endpoint URL: a value that
+	// already ends in "/embeddings" or "/api/embed" gets the path
+	// appended again. Each backend takes one form:
 	//
 	//   - [BackendOllama]: BaseURL is the server root
 	//     ("http://localhost:11434"); the request path is "/api/embed".
@@ -114,36 +118,52 @@ type Config struct {
 
 // Validate reports whether c is internally consistent: Backend is
 // [BackendOllama] or [BackendOpenAICompatible], Model and BaseURL
-// are non-empty, Dimensions and MaxBatch are non-negative, Secret carries no
+// are non-empty, BaseURL is an http or https URL with a host and no
+// '#', Dimensions and MaxBatch are non-negative, Secret carries no
 // leading/trailing whitespace and no byte net/http cannot send in a
-// header value, and Retry.Jitter is in [0, 1]. Every rejection wraps
-// [llmkit.ErrInvalidRequest] and never echoes Secret.
+// header value, and Retry.Jitter is in [0, 1] (NaN is refused). Every
+// rejection wraps [llmkit.ErrInvalidRequest]. No error echoes Secret or
+// any part of BaseURL.
 func (c Config) Validate() error {
-	if _, err := ParseBackend(string(c.Backend)); err != nil {
-		return fmt.Errorf("%w: %w", err, llmkit.ErrInvalidRequest)
+	_, _, err := c.validate()
+	return err
+}
+
+// validate is Validate that also returns what New builds from a valid
+// Config: the codec of c.Backend and the parsed BaseURL. New takes both
+// from here, so no Config New accepts is a Config Validate refuses and
+// no accepted Backend lacks a codec.
+func (c Config) validate() (wireCodec, *url.URL, error) {
+	codec, err := codecFor(string(c.Backend))
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %w", err, llmkit.ErrInvalidRequest)
 	}
 	if c.Model == "" {
-		return fmt.Errorf("embedding model name is required: %w", llmkit.ErrInvalidRequest)
+		return nil, nil, fmt.Errorf("embedding model name is required: %w", llmkit.ErrInvalidRequest)
 	}
 	if c.BaseURL == "" {
-		return fmt.Errorf("embed: BaseURL is required: %w", llmkit.ErrInvalidRequest)
+		return nil, nil, fmt.Errorf("embed: BaseURL is required: %w", llmkit.ErrInvalidRequest)
+	}
+	root, err := adapter.ParseBaseURL("embed: BaseURL", c.BaseURL)
+	if err != nil {
+		return nil, nil, err
 	}
 	if c.Dimensions < 0 {
-		return fmt.Errorf("dimensions must be non-negative, got %d: %w", c.Dimensions, llmkit.ErrInvalidRequest)
+		return nil, nil, fmt.Errorf("dimensions must be non-negative, got %d: %w", c.Dimensions, llmkit.ErrInvalidRequest)
 	}
 	if c.MaxBatch < 0 {
-		return fmt.Errorf("max batch must be non-negative, got %d: %w", c.MaxBatch, llmkit.ErrInvalidRequest)
+		return nil, nil, fmt.Errorf("max batch must be non-negative, got %d: %w", c.MaxBatch, llmkit.ErrInvalidRequest)
 	}
 	if strings.TrimSpace(c.Secret) != c.Secret {
-		return fmt.Errorf("embed: Secret must not have leading or trailing whitespace: %w", llmkit.ErrInvalidRequest)
+		return nil, nil, fmt.Errorf("embed: Secret must not have leading or trailing whitespace: %w", llmkit.ErrInvalidRequest)
 	}
 	if !validHeaderValue(c.Secret) {
-		return fmt.Errorf("embed: Secret must not contain control characters: %w", llmkit.ErrInvalidRequest)
+		return nil, nil, fmt.Errorf("embed: Secret must not contain control characters: %w", llmkit.ErrInvalidRequest)
 	}
-	if c.Retry.Jitter < 0 || c.Retry.Jitter > 1 {
-		return fmt.Errorf("retry jitter must be in [0, 1], got %v: %w", c.Retry.Jitter, llmkit.ErrInvalidRequest)
+	if !(c.Retry.Jitter >= 0 && c.Retry.Jitter <= 1) {
+		return nil, nil, fmt.Errorf("retry jitter must be in [0, 1], got %v: %w", c.Retry.Jitter, llmkit.ErrInvalidRequest)
 	}
-	return nil
+	return codec, root, nil
 }
 
 // validHeaderValue reports whether net/http sends v in a header value:

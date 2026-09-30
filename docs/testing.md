@@ -13,12 +13,15 @@ go vet -tags live ./provider/ ./agent/ ./examples/... ./decide/ # the `live` acc
 go vet -tags integration ./embed/  # the `integration` Ollama test must keep compiling
 go vet -tags integration ./sandbox/ # the sandbox integration test must keep compiling
 go test -race -count=1 ./...
+go test -tags live -count=1 -run 'TestLiveCaseParity' ./provider/ # live case registry parity; needs no credentials
 golangci-lint run ./...            # config: .golangci.yml (v2 schema, conservative set)
 golangci-lint run --build-tags integration,live ./... # the same config, with the integration- and live-tagged files compiled in
+GOOS=darwin golangci-lint run ./...  # the same config, compiling the files behind `!linux` constraints for darwin
+GOOS=windows golangci-lint run ./... # the same config, compiling the files behind `!linux` and `!unix` constraints for windows
 gofmt -l .                         # must print nothing
 ```
 
-The tag-gated `go vet` steps compile the gated suites without running them. CI pins golangci-lint to v2.13.2. It runs golangci-lint twice, in the same job: the plain run does not compile the `integration`- and `live`-tagged files, and the tagged run does.
+The tag-gated `go vet` steps compile the gated suites without running them. The `TestLiveCaseParity` step runs only that one `live`-tagged test: it checks that every live case descriptor has a body and every body has a descriptor, dials no vendor, and needs no credentials. The plain `go test` suite does not run it. CI pins golangci-lint to v2.13.2. It runs golangci-lint four times, in the same job: the plain run does not compile the `integration`- and `live`-tagged files, the tagged run does, the `GOOS=darwin` run compiles the `!linux` sandbox files that the ubuntu runs skip (`clone_other.go`, `bwrap_proc_other.go`), and the `GOOS=windows` run compiles those and the `!unix` file `write_other.go`. The `darwin` target satisfies `unix`, so only the `GOOS=windows` run compiles `write_other.go`. The GOOS runs use plain tags; `go vet` and the tests run on ubuntu only, and nothing runs the tests for darwin or windows.
 
 ## The three suites
 
@@ -130,7 +133,7 @@ The fixture writer is secret-free by construction: it refuses to write any fixtu
 
 Contributor rule: any change to an adapter, the agent loop, or an `llmkit.Capabilities` field must name two things. They are its hermetic test and its live case. The registry in `provider/live_registry_test.go` describes a capability's live case; the case body is in the `live`-tagged `provider/live_test.go`.
 
-`provider/live_registry_test.go` has no build tag. It reflects over `llmkit.Capabilities` and fails the plain `go test ./...` suite when a field has no registered live case. The same happens when a case gates on a nonexistent field, when a case has no doc, or when two cases share a name. The test runs no live case.
+`provider/live_registry_test.go` has no build tag. It reflects over `llmkit.Capabilities` and fails the plain `go test ./...` suite when a field has no registered live case. The same happens when a case gates on a nonexistent field, when a case has no doc, or when two cases share a name. The test runs no live case and does not check bodies. Descriptor-to-body parity is `TestLiveCaseParity` in the `live`-tagged `provider/live_test.go`; the plain suite does not run it, and CI does.
 
 [CONTRIBUTING](../CONTRIBUTING.md) states the rest of the rules for a pull request: the sign-off, the local gate, and what does not get merged.
 

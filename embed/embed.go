@@ -22,13 +22,16 @@
 // posts to <BaseURL>/api/embed on an Ollama server, and
 // [BackendOpenAICompatible] posts to <BaseURL>/embeddings on any
 // OpenAI-compatible API. The two backends take different BaseURL forms;
-// [Config.BaseURL] states them. There is no default backend and no
-// default BaseURL: [Config.Validate] requires a
-// known Backend and a non-empty [Config.BaseURL]. A local Ollama server
-// typically listens on http://localhost:11434. New is the only way to
-// build a backend embedder in this package: both backend types and
-// their constructors are unexported, so a caller always goes through New
-// and the returned [Embedder] interface.
+// [Config.BaseURL] states them. BaseURL is the API root: the backend
+// appends its path to BaseURL's path and keeps a query after it. For
+// [BackendOpenAICompatible], "https://x.example/v1?api-version=2024"
+// requests "/v1/embeddings?api-version=2024". There is no default backend
+// and no default BaseURL: [Config.Validate] requires a known Backend and
+// a non-empty http or https [Config.BaseURL] with a host and no '#'. A
+// local Ollama server typically listens on http://localhost:11434. New is
+// the only way to build a backend embedder in this package: both backend
+// types and their constructors are unexported, so a caller always goes
+// through New and the returned [Embedder] interface.
 //
 // The Ollama wire request always sends "input" as a JSON array, even for
 // a single text ([Embedder.Embed] calls EmbedBatch with a one-element
@@ -63,7 +66,7 @@
 // and a Secret that holds a byte net/http cannot send in a header value
 // (bytes 0x00-0x1F except tab, and 0x7F); the error never echoes Secret,
 // raw or trimmed. Validate rejects negative Dimensions and MaxBatch, and
-// rejects Retry.Jitter outside [0, 1].
+// rejects Retry.Jitter outside [0, 1], NaN included.
 //
 // # Retries
 //
@@ -81,7 +84,7 @@
 //     status is ErrServer.
 //   - Any non-200 status below 400, such as a 204 or a 302 without a
 //     Location header.
-//   - A transport failure.
+//   - A transport failure other than a redirect-policy failure.
 //   - An openai-compatible 200 error object whose type is missing,
 //     unknown, or maps to a retryable Kind.
 //
@@ -110,7 +113,7 @@
 // A caller matches a backend failure with errors.Is against the kit's
 // sentinels ([llmkit.ErrRateLimited], [llmkit.ErrAuth], [llmkit.ErrServer],
 // ...) or errors.As against [llmkit.APIError] for the status code and
-// Retry-After. Three routes produce an APIError:
+// Retry-After. Four routes produce an APIError:
 //
 //   - A non-200 response. StatusCode is the HTTP status, and the Kind
 //     comes from the status. A 400 whose body reports a context-length
@@ -121,13 +124,48 @@
 //   - An openai-compatible 200 whose body carries an error object.
 //     StatusCode is 200, and the Kind comes from the object's type field.
 //     A missing or unknown type is ErrServer.
-//   - A transport failure. StatusCode is 0 and the Kind is ErrServer. The
+//   - A transport failure. StatusCode is 0 and the Kind is ErrServer. When
+//     no redaction happens (below), the underlying error stays reachable
+//     through errors.Is.
+//   - A redirect-policy failure: the HTTP client stopped after 10
+//     redirects, or [Config.HTTPClient]'s CheckRedirect returned an
+//     error. StatusCode is 0 and the Kind is [llmkit.ErrInvalidRequest],
+//     terminal: the call is not retried. When no redaction happens, the
 //     underlying error stays reachable through errors.Is.
 //
-// On the first two routes, Message is the server's text with surrounding
-// whitespace trimmed, capped at 200 bytes plus "..." when the trimmed
-// text is longer. On the transport route, Message is the underlying
-// error's text unchanged: embed neither trims nor caps it.
+// On every route, Message is capped at 200 bytes: text that is longer is
+// cut at the last rune boundary at or before byte 200 and gets "..."
+// appended. On the first two routes the text is the server's, with
+// surrounding whitespace trimmed before the cap. On the transport and
+// redirect routes it is the underlying error's text, untrimmed; the full
+// text stays reachable through the chained error unless a redaction cut
+// the chain (below).
+//
+// When the server or the transport echoes [Config.Secret] or the password
+// of [Config.BaseURL] into an error, as sent, escaped by Go's encoding/json
+// or Go-quoted (%q), a backend masks the echo in the error it returns, in
+// every error under it, and in the [llmkit.EmbedEvent] Err of [Observe].
+// That covers a vendor body or error object, a decode error that quotes a
+// value, a transport error that quotes server bytes, and the last
+// attempt's error in the "(last attempt: ...)" text of a cancelled retry.
+// The mask is "***" when neither credential holds '*'. Credentials are
+// masked as values, so a short Secret or password also masks the same
+// characters elsewhere in the server's and the transport's text. Text
+// llmkit writes itself, such as the "llmkit: ollama error (status 500):"
+// prefix or the context error of a cancelled retry, may still contain
+// text that matches the Secret or the password, for example the
+// characters of a short one. The URL username is not a value: only where
+// it appears as URL userinfo
+// ("scheme://user[:password]@") is it replaced. Redaction happens before
+// the 200-byte cap, and classification reads the unredacted text, so the
+// Kind is the one the vendor's text gives. When a redaction happens the
+// error chain is cut: an [llmkit.APIError] keeps Kind, StatusCode,
+// RetryAfter, HasRetryAfter and Provider, any other error keeps its
+// text and the llmkit sentinels it matched, and errors.Is still matches
+// context.Canceled and context.DeadlineExceeded when they matched; the
+// underlying transport error, net.Error included, is no longer
+// reachable. An error with nothing to redact is returned as it was, chain
+// intact.
 //
 // Every response body embed keeps is at most 64 MiB. If a 200 response
 // body exceeds the limit, the call returns a plain error naming the limit
@@ -141,10 +179,13 @@
 // A cancelled or expired caller context surfaces as the context error
 // (errors.Is(err, context.Canceled) or context.DeadlineExceeded), never
 // an APIError. [Config.Validate] and [New] reject a bad Config — an
-// unknown or zero Backend, an empty Model or BaseURL, a negative Dimensions
-// or MaxBatch, a Secret with leading or trailing whitespace or a byte
-// net/http cannot send in a header value, or an out-of-range Retry.Jitter — with an error
-// wrapping [llmkit.ErrInvalidRequest].
+// unknown or zero Backend, an empty Model or BaseURL, a BaseURL that is
+// not an http or https URL with a host or that contains '#', a negative
+// Dimensions or MaxBatch, a Secret with leading or trailing whitespace
+// or a byte net/http cannot send in a header value, or a Retry.Jitter
+// outside [0, 1] (NaN included) — with an error wrapping
+// [llmkit.ErrInvalidRequest]. No such error echoes Secret or any part of
+// BaseURL.
 // [ErrEmptyVector] and a decode/count/dimension mismatch are plain
 // errors: match the specific error, not the kit vocabulary.
 //
@@ -215,21 +256,14 @@ type Embedder interface {
 // New validates cfg and builds the Embedder for cfg.Backend. New applies
 // no cache: a caller who wants one wraps the result with
 // [NewCachedEmbedder]. Every refusal (a bad Config or an unknown
-// Backend) wraps [llmkit.ErrInvalidRequest] and never echoes cfg.Secret.
+// Backend) wraps [llmkit.ErrInvalidRequest]; no error echoes cfg.Secret
+// or any part of cfg.BaseURL.
 func New(cfg Config) (Embedder, error) {
-	if err := cfg.Validate(); err != nil {
+	codec, root, err := cfg.validate()
+	if err != nil {
 		return nil, err
 	}
-
-	var codec wireCodec
-	switch cfg.Backend { // Validate admitted exactly these two.
-	case BackendOllama:
-		codec = ollamaCodec{}
-	case BackendOpenAICompatible:
-		codec = openaiCodec{}
-	}
-
-	return newBackendEmbedder(cfg, codec), nil
+	return newBackendEmbedder(cfg, codec, root), nil
 }
 
 // batchChunkSize caps remaining at maxBatch when chunking is enabled
