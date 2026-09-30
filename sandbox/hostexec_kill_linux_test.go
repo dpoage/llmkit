@@ -519,13 +519,22 @@ func TestHostExecKillRestopsRootAfterSIGCONT(t *testing.T) {
 
 // TestHostExecKillRestopEndsTheWalkEarly: a root resumed once by SIGCONT
 // during the kill is stopped again, so the walk ends as soon as the tree
-// is frozen rather than running out its budget with the root running.
+// is frozen rather than running out its budget with the root running. The
+// SIGCONT is sent from the walk's first children read, which is the root's
+// read while it is stopped; a tree member racing the walk to send it loses
+// on some schedulers and leaves the premise unmet.
 func TestHostExecKillRestopEndsTheWalkEarly(t *testing.T) {
 	mark := newKillMark(t)
-	sent := filepath.Join(t.TempDir(), "sent")
-	script := "r=$$; " +
-		"( while :; do read -r _ _ s _ < /proc/$r/stat; if [ \"$s\" = T ]; then kill -CONT $r; : > " + sent + "; exit; fi; done ) & " +
-		"i=0; while [ $i -lt 20 ]; do sleep 30 >/dev/null 2>&1 & i=$((i+1)); done; wait"
+	var resumed atomic.Bool
+	var once sync.Once
+	withProcOps(t, func(o *procOps) {
+		o.children = func(pid int) ([]int, error) {
+			kids, err := readProcChildren(pid)
+			once.Do(func() { resumed.Store(unix.Kill(pid, unix.SIGCONT) == nil) })
+			return kids, err
+		}
+	})
+	script := "i=0; while [ $i -lt 20 ]; do sleep 30 >/dev/null 2>&1 & i=$((i+1)); done; wait"
 	var res Result
 	var since time.Duration
 	var err error
@@ -535,8 +544,8 @@ func TestHostExecKillRestopEndsTheWalkEarly(t *testing.T) {
 	if err != nil || !res.TimedOut {
 		t.Fatalf("res = %+v err = %v, want a timeout", res, err)
 	}
-	if _, serr := os.Stat(sent); serr != nil {
-		t.Fatalf("the root was never resumed: %v", serr)
+	if !resumed.Load() {
+		t.Fatal("the root was never resumed during the kill")
 	}
 	t.Logf("returned %v after the kill", since)
 	if left := markedProcs(mark); len(left) != 0 {
