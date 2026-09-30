@@ -49,6 +49,12 @@ type bwrapParams struct {
 	// positive: the constructor refuses a <= 0 WithScratchSizeMB override,
 	// so buildBwrapArgs applies no fallback here.
 	scratchSizeBytes int64
+	// statusFD: the child-side file descriptor number bwrap writes its
+	// --json-status-fd records to; 0 omits the flag. bwrap reports
+	// {"exit-code":N} only when the sandboxed command has exited, so the
+	// record's absence after a non-zero bwrap exit means bwrap failed
+	// before the command started (see Bwrap.Exec).
+	statusFD int
 }
 
 // fixedROAllowlist is the minimal, hardcoded set of host directories bound
@@ -175,6 +181,10 @@ func buildBwrapArgs(p bwrapParams) []string {
 		"--setenv", "LOGNAME", "sandbox",
 	}
 
+	if p.statusFD > 0 {
+		args = append(args, "--json-status-fd", strconv.Itoa(p.statusFD))
+	}
+
 	// Network defaults to unshared (set by --unshare-all above). Only an
 	// explicitly enabling network mode restores it — "none" (the default)
 	// and the empty string both stay unshared.
@@ -276,12 +286,11 @@ func buildBwrapArgs(p bwrapParams) []string {
 		args = append(args, "--setenv", key, value)
 	}
 
-	// The command ALWAYS execs through /bin/sh with a setup script; with no
-	// SetupCmds the script is exactly `exec "$@"`, so the wrapper is
-	// behavior-neutral for a runnable command — but it is what turns a
-	// MISSING or NON-EXECUTABLE Spec.Cmd into the shell's exit 127/126
-	// instead of bwrap's own execvp failure (which exits 1), matching the
-	// container backend's launch-failure contract.
+	// The command always runs through /bin/sh with a setup script (see
+	// buildSetupScript). The wrapper is what turns a MISSING or
+	// NON-EXECUTABLE Spec.Cmd into the shell's exit 127/126 instead of
+	// bwrap's own execvp failure (which exits 1), matching the container
+	// backend's launch-failure contract.
 	script := buildSetupScript(p.setupCmds)
 	args = append(args, "/bin/sh", "-c", script, "sh")
 	args = append(args, p.cmd...)

@@ -165,7 +165,7 @@ func TestCLIPrepareWorkspaceCachesAcrossCalls(t *testing.T) {
 }
 
 // TestCloneTreePreservesContentPermsAndSymlinks proves cloneTree (the
-// reflink-first fast path) produces output identical to copyTree for content,
+// reflink-first fast path) produces output identical to copyWorkspace for content,
 // permission bits, and symlink targets — the fast path must be behaviorally
 // transparent, not just faster.
 func TestCloneTreePreservesContentPermsAndSymlinks(t *testing.T) {
@@ -179,8 +179,8 @@ func TestCloneTreePreservesContentPermsAndSymlinks(t *testing.T) {
 	}
 
 	copyDst := t.TempDir()
-	if err := copyTree(src, copyDst); err != nil {
-		t.Fatalf("copyTree: %v", err)
+	if err := copyWorkspace(src, copyDst); err != nil {
+		t.Fatalf("copyWorkspace: %v", err)
 	}
 	cloneDst := t.TempDir()
 	if err := cloneTree(src, cloneDst); err != nil {
@@ -190,18 +190,18 @@ func TestCloneTreePreservesContentPermsAndSymlinks(t *testing.T) {
 	for _, rel := range []string{"exec.sh", "plain.txt", "sub/nested.txt"} {
 		copyInfo, err := os.Stat(filepath.Join(copyDst, rel))
 		if err != nil {
-			t.Fatalf("stat copyTree output %s: %v", rel, err)
+			t.Fatalf("stat copyWorkspace output %s: %v", rel, err)
 		}
 		cloneInfo, err := os.Stat(filepath.Join(cloneDst, rel))
 		if err != nil {
 			t.Fatalf("stat cloneTree output %s: %v", rel, err)
 		}
 		if copyInfo.Mode().Perm() != cloneInfo.Mode().Perm() {
-			t.Errorf("%s: perm = %v, want %v (copyTree's)", rel, cloneInfo.Mode().Perm(), copyInfo.Mode().Perm())
+			t.Errorf("%s: perm = %v, want %v (copyWorkspace's)", rel, cloneInfo.Mode().Perm(), copyInfo.Mode().Perm())
 		}
 		copyContent, err := os.ReadFile(filepath.Join(copyDst, rel))
 		if err != nil {
-			t.Fatalf("read copyTree output %s: %v", rel, err)
+			t.Fatalf("read copyWorkspace output %s: %v", rel, err)
 		}
 		cloneContent, err := os.ReadFile(filepath.Join(cloneDst, rel))
 		if err != nil {

@@ -80,7 +80,7 @@ func (m *Mock) EnqueueResponse(r MockResponse) *Mock {
 // still recorded (the caller DID attempt it), but nothing is consumed — the
 // queue keeps its next response and ResponseFunc is not consulted.
 func (m *Mock) Exec(ctx context.Context, spec Spec) (Result, error) {
-	if err := validateSpec(backendMock, spec); err != nil {
+	if err := validateSpec(backendMock, spec, nil); err != nil {
 		return Result{}, err
 	}
 

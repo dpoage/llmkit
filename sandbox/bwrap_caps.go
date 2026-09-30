@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -188,17 +189,31 @@ var systemdRunUserAvailable = func(ctx context.Context) bool {
 // cgroupV2Root is the standard cgroup v2 mount point.
 const cgroupV2Root = "/sys/fs/cgroup"
 
+// selfCgroupFile is the file delegatedCgroupV2Dir reads the calling
+// process's cgroup membership from. Test seam: integration tests point it at
+// a file naming a delegated ancestor, so Exec's detection runs against a
+// cgroup this process may create children in.
+var selfCgroupFile = "/proc/self/cgroup"
+
 // delegatedCgroupV2Dir returns the directory of the calling process's own
 // cgroup v2 membership, if the host mounts cgroup v2 (cgroup.controllers
-// present at cgroupV2Root) AND that directory is writable by this process —
-// the signal that the cgroup was delegated to the (possibly unprivileged)
-// user. A subdirectory created there inherits delegation and can set
-// memory.max/cpu.max/pids.max for its own descendants.
+// present at cgroupV2Root) AND a child cgroup created there accepts the
+// memory, cpu and pids limits Exec writes (see cgroupLimitsWritable). A
+// directory this process can merely mkdir in is not enough: a child gets a
+// controller's interface files only when the parent enables that controller
+// in cgroup.subtree_control, so a writable but undelegated scope would pass
+// a mkdir-only check and then fail every run at the first limit write.
 func delegatedCgroupV2Dir() (string, bool) {
-	if _, err := os.Stat(cgroupV2Root + "/cgroup.controllers"); err != nil {
+	return delegatedCgroupV2DirAt(cgroupV2Root, selfCgroupFile)
+}
+
+// delegatedCgroupV2DirAt is delegatedCgroupV2Dir over an injectable cgroup
+// mount root and self-cgroup file.
+func delegatedCgroupV2DirAt(root, selfCgroupFile string) (string, bool) {
+	if _, err := os.Stat(root + "/cgroup.controllers"); err != nil {
 		return "", false
 	}
-	self, err := os.ReadFile("/proc/self/cgroup")
+	self, err := os.ReadFile(selfCgroupFile)
 	if err != nil {
 		return "", false
 	}
@@ -208,16 +223,51 @@ func delegatedCgroupV2Dir() (string, bool) {
 	if len(parts) != 3 {
 		return "", false
 	}
-	dir := cgroupV2Root + parts[2]
-	// Writability is the actual delegation signal: probe with a throwaway
-	// subdirectory rather than trusting ownership bits, since ACLs/systemd
-	// delegation can grant write access without matching Unix ownership.
-	probe := dir + "/.llmkit-cgroup-probe"
+	dir := root + parts[2]
+	// Probe with a throwaway child rather than trusting ownership bits or
+	// subtree_control text: ACLs/systemd delegation can grant write access
+	// without matching Unix ownership, and the child is exactly what Exec
+	// creates. The name is new on every call: concurrent callers (Execs on
+	// one Bwrap) each get their own child, and a child left by a prober
+	// killed before its remove does not block a later call's mkdir.
+	probe := dir + "/.llmkit-cgroup-probe-" + randToken()
 	if err := os.Mkdir(probe, 0o755); err != nil {
 		return "", false
 	}
-	_ = os.Remove(probe)
+	defer func() { _ = os.Remove(probe) }()
+	if !cgroupLimitsWritable(probe) {
+		return "", false
+	}
 	return dir, true
+}
+
+// cgroupLimitFiles are the interface files a run's resource limits are
+// written to (writeCgroupLimits), each with a neutral "no limit" value:
+// writing it to an empty throwaway child proves the file exists and this
+// process may write it, without constraining anything.
+var cgroupLimitFiles = []struct{ name, unlimited string }{
+	{"memory.max", "max"},
+	{"cpu.max", "max 100000"},
+	{"pids.max", "max"},
+}
+
+// cgroupLimitsWritable reports whether every file in cgroupLimitFiles
+// exists in dir and accepts a write. The files are opened without O_CREATE:
+// a controller the parent did not delegate has no file, and creating a
+// regular one in its place would prove nothing.
+func cgroupLimitsWritable(dir string) bool {
+	for _, f := range cgroupLimitFiles {
+		h, err := os.OpenFile(filepath.Join(dir, f.name), os.O_WRONLY, 0)
+		if err != nil {
+			return false
+		}
+		_, werr := h.WriteString(f.unlimited)
+		cerr := h.Close()
+		if werr != nil || cerr != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // ErrBwrapNoCapMethod is returned (possibly wrapped) by Bwrap.Exec when
@@ -245,9 +295,7 @@ func systemdRunWrapArgs(bwrapPath string, bwrapArgs []string, cpus float64, memo
 		args = append(args, "-p", fmt.Sprintf("MemoryMax=%dM", memoryMB))
 	}
 	if cpus > 0 {
-		// CPUQuota is a percentage of one core; 1.5 cores -> "150%".
-		pct := cpus * 100
-		args = append(args, "-p", fmt.Sprintf("CPUQuota=%s%%", strconv.FormatFloat(pct, 'f', -1, 64)))
+		args = append(args, "-p", "CPUQuota="+cpuQuotaPercent(cpus))
 	}
 	if pidsLimit > 0 {
 		args = append(args, "-p", fmt.Sprintf("TasksMax=%d", pidsLimit))
@@ -257,10 +305,27 @@ func systemdRunWrapArgs(bwrapPath string, bwrapArgs []string, cpus float64, memo
 	return args
 }
 
+// cpuQuotaPercent renders cpus as a systemd CPUQuota= percentage: integer
+// permyriad of a core (cpuPermyriad) printed with at most two decimals of
+// percent and trailing zeros trimmed (1.5 -> "150%", 0.333 -> "33.3%"),
+// because systemd rejects a CPUQuota with more than two decimals and the
+// shortest-float rendering (110.00000000000001% for 1.1) is exactly that.
+// cpus must be within [minCPUs, maxCPUs], which checkNumericOptions
+// guarantees for every value a constructor admits.
+func cpuQuotaPercent(cpus float64) string {
+	p := cpuPermyriad(cpus)
+	s := strconv.FormatInt(p/100, 10)
+	if frac := p % 100; frac != 0 {
+		s += strings.TrimSuffix(fmt.Sprintf(".%02d", frac), "0")
+	}
+	return s + "%"
+}
+
 // cgroupV2Limits renders the raw file contents for a delegated cgroup v2
 // subtree's memory.max, cpu.max, and pids.max controllers. cpu.max's format
 // is "<quota> <period>" in microseconds; a 100000us (100ms) period with
-// quota = cpus*period gives the same fractional-core semantics as the
+// quota = cpus*period (rounded to the nearest microsecond) gives the same
+// fractional-core semantics as the
 // container backend's --cpus. Zero/negative inputs are reported as omit=true
 // so the caller writes nothing for that controller (leaving it at the
 // parent's inherited limit, mirroring "omit when unset" elsewhere).
@@ -271,8 +336,7 @@ func cgroupV2Limits(cpus float64, memoryMB, pidsLimit int) (memory, cpuMax, pids
 	}
 	if cpus > 0 {
 		const periodUS = 100000
-		quota := int64(cpus * float64(periodUS))
-		cpuMax = fmt.Sprintf("%d %d", quota, periodUS)
+		cpuMax = fmt.Sprintf("%d %d", cpuQuotaMicros(cpus, periodUS), periodUS)
 		cpuOK = true
 	}
 	if pidsLimit > 0 {

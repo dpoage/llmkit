@@ -68,12 +68,14 @@ func TestBuildBwrapArgsSecurityFlags(t *testing.T) {
 	}
 
 	// Command tail must be the ALWAYS-ON sh exec wrapper followed by the
-	// spec command, byte-exact: with no SetupCmds the script is exactly
-	// `exec "$@"`, so a missing/non-executable command surfaces as sh's
-	// 127/126 instead of bwrap's execvp exit 1. Wrapping only when
-	// setupCmds exist would break both this shape and that contract.
+	// spec command, byte-exact: with no SetupCmds the script is the
+	// '-'-leading-Cmd[0] guard line plus `exec "$@"`, so a
+	// missing/non-executable command surfaces as sh's 127/126 instead of
+	// bwrap's execvp exit 1. Wrapping only when setupCmds exist would break
+	// both this shape and that contract.
 	tail := args[len(args)-7:]
-	if !slices.Equal(tail, []string{"/bin/sh", "-c", `exec "$@"`, "sh", "sh", "-c", "echo hi"}) {
+	wantScript := "case \"$1\" in -*) \"$@\"; exit $?;; esac\nexec \"$@\""
+	if !slices.Equal(tail, []string{"/bin/sh", "-c", wantScript, "sh", "sh", "-c", "echo hi"}) {
 		t.Errorf("command tail = %q, want the exec wrapper tail", tail)
 	}
 }

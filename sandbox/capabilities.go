@@ -142,18 +142,17 @@ func Probe(ctx context.Context, sb Sandbox, base Spec, probes []ProbeEntry) (Cap
 	return cs, nil
 }
 
-// allFalse returns a modes map with every mode for e set to false. Used when
-// a probe fails at the infrastructure level. The false map is built by
-// running Interpret on a synthetic non-zero-exit result so the mode set
-// stays consistent with the entry's own declaration; an Interpret that
-// returns nil there yields an empty map.
+// allFalse returns a fresh modes map with every mode for e set to false.
+// Used when a probe fails at the infrastructure level. The mode set is taken
+// from running Interpret on a synthetic non-zero-exit result so it stays
+// consistent with the entry's own declaration; the map Interpret returned
+// is only read, never written (an Interpret may hand out a shared map), and
+// an Interpret that returns nil there yields an empty map.
 func allFalse(e ProbeEntry) map[string]bool {
 	modes := e.Interpret(ProbeResult{ExitCode: 1})
-	if modes == nil {
-		return map[string]bool{}
-	}
+	falseModes := make(map[string]bool, len(modes))
 	for k := range modes {
-		modes[k] = false
+		falseModes[k] = false
 	}
-	return modes
+	return falseModes
 }

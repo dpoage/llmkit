@@ -271,3 +271,37 @@ func TestRunSupervisedCallerCtxEndingDuringAdmission(t *testing.T) {
 		})
 	}
 }
+
+// TestRunSupervisedCallerCtxEndingDuringAdmissionAdmitsNil is the admit-nil
+// half of the row above: under CapBestEffort a "none" cap method is
+// ADMITTED (admit returns nil, as on a real cgroup-v2 host whose probes
+// died with the ctx), so the caller's end is caught only by the re-check
+// that follows admission whether or not admit failed. Nothing may land in
+// the caller's Workspace.
+func TestRunSupervisedCallerCtxEndingDuringAdmissionAdmitsNil(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	prev := detectCapMethod
+	t.Cleanup(func() { detectCapMethod = prev })
+	detections := 0
+	detectCapMethod = func(context.Context, func(context.Context) bool) bwrapCapMethod {
+		detections++
+		cancel()
+		return bwrapCapNone
+	}
+	ws := t.TempDir()
+	_, err := (&Bwrap{capPolicy: CapBestEffort}).Exec(ctx, Spec{
+		Workspace:  ws,
+		Cmd:        []string{"true"},
+		WriteFiles: map[string][]byte{"marker": []byte("x")},
+	})
+	if detections != 1 {
+		t.Fatalf("cap detection ran %d time(s), want 1: the ctx must end inside admission", detections)
+	}
+	if err == nil || !errors.Is(err, context.Canceled) || !strings.HasPrefix(err.Error(), "sandbox: execution cancelled") {
+		t.Errorf("err = %v, want the cancelled error wrapping context.Canceled", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(ws, "marker")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("marker stat = %v, want ENOENT: WriteFiles landed in the caller's Workspace", statErr)
+	}
+}

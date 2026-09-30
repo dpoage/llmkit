@@ -61,7 +61,8 @@
 // Spec fields are honest per backend. A Spec that is malformed for every
 // backend — empty Cmd, neither RepoDir nor Workspace, a relative
 // Workspace, an escaping WriteFiles key or CaptureFiles entry, an
-// empty/relative mount path, a duplicate ContainerPath, or an Env entry
+// empty/relative mount path, a mount at "/" or WorkspaceMount, a duplicate
+// ContainerPath (compared after filepath.Clean), or an Env entry
 // without "=" or with an empty key — is refused at Exec with an
 // InvalidSpecError on EVERY backend, the Mock included. A well-formed Spec
 // field a backend cannot honor is refused at Exec with an

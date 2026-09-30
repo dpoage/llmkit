@@ -106,29 +106,63 @@ func (o *options) checkSupported(backend string, unsupported map[string]bool) er
 	return nil
 }
 
+// Bounds checkNumericOptions applies beyond sign. minCPUs is the smallest
+// WithCPUs both runtimes can enforce: podman's cpu.max quota has a minimum of
+// 1000us in a 100000us period, and a smaller positive value is either
+// silently uncapped (1e-6) or refused by the runtime at Exec (0.001). The
+// ceiling maxCPUs is the largest value systemd-run's CPUQuota= accepts
+// (21474836.47%, the int32 permyriad limit), so a value admitted here
+// always renders. maxMB is the largest MB count whose byte conversion fits
+// an int64 (math.MaxInt64 >> 20): WithMemoryMB, WithScratchSizeMB, and
+// WithWorkspaceGrowthCeilingMB refuse anything above it, since the
+// backends multiply those by 1024*1024.
+const (
+	minCPUs               = 0.01
+	maxCPUPermyriad       = math.MaxInt32
+	maxCPUs               = maxCPUPermyriad / 10000.0
+	maxMB           int64 = math.MaxInt64 >> 20
+)
+
+// cpuPermyriad converts a cores value to integer permyriad (1/10000 of a
+// core, 0.01% of one CPU in systemd's CPUQuota terms), rounded to nearest
+// so float noise (1.1*100 = 110.00000000000001) cannot reach a renderer.
+// cpus must be within [minCPUs, maxCPUs].
+func cpuPermyriad(cpus float64) int64 { return int64(math.Round(cpus * 10000)) }
+
+// cpuQuotaMicros converts a cores value to a cgroup v2 cpu.max quota in
+// microseconds of a periodUS-microsecond period, rounded to nearest.
+// cpus must be within [minCPUs, maxCPUs].
+func cpuQuotaMicros(cpus float64, periodUS int64) int64 {
+	return int64(math.Round(cpus * float64(periodUS)))
+}
+
 // checkNumericOptions refuses an out-of-range numeric option value before
 // any runtime lookup (called from NewCLI/NewBwrap ahead of Detect /
 // DetectBwrap, so the refusal is hermetic). WithMemoryMB, WithTimeout,
-// WithScratchSizeMB, and WithMaxOutputBytes must be > 0, and WithCPUs must
-// be a positive finite number: each names a limit the backend enforces, and
-// a zero, negative, or non-finite value yields no usable limit (neither
-// backend renders a working CPU cap from NaN or ±Inf).
+// WithScratchSizeMB, and WithMaxOutputBytes must be > 0; WithCPUs must be
+// a finite number in [0.01, 214748.3647]: each names a limit the backend
+// enforces, and a zero, negative, non-finite, sub-floor, or
+// over-ceiling value yields no usable limit. WithMemoryMB,
+// WithScratchSizeMB, and WithWorkspaceGrowthCeilingMB must also be at
+// most 8796093022207 MB (2^43-1), the largest count whose byte
+// conversion fits an int64. WithMaxOutputBytes has no upper bound: capture
+// memory grows with the bytes a run writes, not with the cap.
 // WithPidsLimit, WithWorkspaceGrowthCeilingMB, and WithIdleTimeout keep 0
 // as their documented explicit-disable value; only a negative value is
 // refused there. The error names the option (with its refused value) and
 // the backend, matching checkSupported's shape.
 func (o *options) checkNumericOptions(backend string) error {
-	if o.has("WithCPUs") && (!(o.cpus > 0) || math.IsInf(o.cpus, 0)) {
-		return fmt.Errorf("sandbox: option WithCPUs(%v) must be a positive finite number on the %s backend", o.cpus, backend)
+	if o.has("WithCPUs") && !(o.cpus >= minCPUs && o.cpus <= maxCPUs) {
+		return fmt.Errorf("sandbox: option WithCPUs(%v) must be a finite number in [%v, %v] on the %s backend", o.cpus, minCPUs, maxCPUs, backend)
 	}
-	if o.has("WithMemoryMB") && o.memoryMB <= 0 {
-		return fmt.Errorf("sandbox: option WithMemoryMB(%d) must be > 0 on the %s backend", o.memoryMB, backend)
+	if o.has("WithMemoryMB") && (o.memoryMB <= 0 || int64(o.memoryMB) > maxMB) {
+		return fmt.Errorf("sandbox: option WithMemoryMB(%d) must be in [1, %d] on the %s backend", o.memoryMB, maxMB, backend)
 	}
 	if o.has("WithTimeout") && o.timeout <= 0 {
 		return fmt.Errorf("sandbox: option WithTimeout(%v) must be > 0 on the %s backend", o.timeout, backend)
 	}
-	if o.has("WithScratchSizeMB") && o.scratchSizeMB <= 0 {
-		return fmt.Errorf("sandbox: option WithScratchSizeMB(%d) must be > 0 on the %s backend", o.scratchSizeMB, backend)
+	if o.has("WithScratchSizeMB") && (o.scratchSizeMB <= 0 || int64(o.scratchSizeMB) > maxMB) {
+		return fmt.Errorf("sandbox: option WithScratchSizeMB(%d) must be in [1, %d] on the %s backend", o.scratchSizeMB, maxMB, backend)
 	}
 	if o.has("WithMaxOutputBytes") && o.maxOutputBytes <= 0 {
 		return fmt.Errorf("sandbox: option WithMaxOutputBytes(%d) must be > 0 on the %s backend", o.maxOutputBytes, backend)
@@ -136,8 +170,8 @@ func (o *options) checkNumericOptions(backend string) error {
 	if o.has("WithPidsLimit") && o.pidsLimit < 0 {
 		return fmt.Errorf("sandbox: option WithPidsLimit(%d) must be >= 0 on the %s backend", o.pidsLimit, backend)
 	}
-	if o.has("WithWorkspaceGrowthCeilingMB") && o.growthCeilingMB < 0 {
-		return fmt.Errorf("sandbox: option WithWorkspaceGrowthCeilingMB(%d) must be >= 0 on the %s backend", o.growthCeilingMB, backend)
+	if o.has("WithWorkspaceGrowthCeilingMB") && (o.growthCeilingMB < 0 || int64(o.growthCeilingMB) > maxMB) {
+		return fmt.Errorf("sandbox: option WithWorkspaceGrowthCeilingMB(%d) must be in [0, %d] on the %s backend", o.growthCeilingMB, maxMB, backend)
 	}
 	if o.has("WithIdleTimeout") && o.idleTimeout < 0 {
 		return fmt.Errorf("sandbox: option WithIdleTimeout(%v) must be >= 0 on the %s backend", o.idleTimeout, backend)
@@ -263,14 +297,18 @@ func WithImage(image string) Option {
 }
 
 // WithCPUs sets the default CPU limit applied to every run. Accepted by
-// NewCLI and NewBwrap. Default: 2. The value must be a positive finite
-// number: 0, a negative value, NaN, and ±Inf are refused at construction.
+// NewCLI and NewBwrap. Default: 2. The value must be a finite number from
+// 0.01 to 214748.3647: 0, a negative value, NaN, ±Inf, a value below 0.01
+// (the smallest cap podman enforces) and a value above 214748.3647 (the
+// largest CPUQuota systemd accepts) are refused at construction.
 func WithCPUs(c float64) Option {
 	return func(o *options) { o.cpus = c; o.track("WithCPUs") }
 }
 
 // WithMemoryMB sets the default memory limit (MB) applied to every run.
-// Accepted by NewCLI and NewBwrap. Default: 2048 MB.
+// Accepted by NewCLI and NewBwrap. Default: 2048 MB. Must be from 1 to
+// 8796093022207 (the largest count whose byte value fits an int64); a
+// value outside that range is refused at construction.
 func WithMemoryMB(m int) Option {
 	return func(o *options) { o.memoryMB = m; o.track("WithMemoryMB") }
 }
@@ -307,14 +345,18 @@ func WithPidsLimit(n int) Option {
 }
 
 // WithMaxOutputBytes overrides the per-stream output cap. Accepted by
-// NewCLI and NewBwrap. Default: DefaultMaxOutputBytes (1 MiB).
+// NewCLI and NewBwrap. Default: DefaultMaxOutputBytes (1 MiB). Must be > 0
+// (refused at construction). A large cap does not by itself allocate
+// memory: capture grows with the bytes a run writes.
 func WithMaxOutputBytes(n int) Option {
 	return func(o *options) { o.maxOutputBytes = n; o.track("WithMaxOutputBytes") }
 }
 
 // WithScratchSizeMB sets the size (MB) of the writable tmpfs scratch
 // space (/tmp, plus the tmpfs root under bwrap). Accepted by NewCLI and
-// NewBwrap. Default: 512 MB. Must be > 0 (refused at construction).
+// NewBwrap. Default: 512 MB. Must be from 1 to 8796093022207 (the largest
+// count whose byte value fits an int64); a value outside that range is
+// refused at construction.
 func WithScratchSizeMB(mb int) Option {
 	return func(o *options) { o.scratchSizeMB = mb; o.track("WithScratchSizeMB") }
 }
@@ -324,8 +366,9 @@ func WithScratchSizeMB(mb int) Option {
 // idle watchdog enforces independent of idle-stall detection: a run
 // whose workspace grows past this is killed with
 // Result.WorkspaceQuotaExceeded. Accepted by NewCLI and NewBwrap.
-// Default: 2048 MB. 0 disables the ceiling; a negative value is refused
-// at construction.
+// Default: 2048 MB. 0 disables the ceiling; a negative value or one above
+// 8796093022207 (the largest count whose byte value fits an int64) is
+// refused at construction.
 func WithWorkspaceGrowthCeilingMB(mb int) Option {
 	return func(o *options) { o.growthCeilingMB = mb; o.track("WithWorkspaceGrowthCeilingMB") }
 }
@@ -343,7 +386,9 @@ func WithCapPolicy(p CapPolicy) Option {
 // tmpfs root, which has none) that lacks a toolchain can still run it.
 // Accepted by NewCLI and NewBwrap — each backend renders the mounts and
 // composes PATH its own way (see toolchain.go); pass the same
-// ToolchainResolution value to either. Default: none.
+// ToolchainResolution value to either. Each constructor copies the
+// resolution's mounts, so one resolution may be shared by any number of
+// backends, concurrently. Default: none.
 func WithHostToolchains(res ToolchainResolution) Option {
 	return func(o *options) {
 		o.toolchainBinds = res.mounts

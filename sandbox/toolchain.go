@@ -17,21 +17,26 @@ package sandbox
 //
 // # Resolution algorithm
 //
-//  1. Each requested entry is either a bare name (resolved via the HOST's
-//     `command -v <name>`, i.e. Go's exec.LookPath) or an absolute directory
-//     path (used directly, no lookup — lets an operator pin an exact
-//     toolchain install outside PATH, e.g. a specific nix store path).
+//  1. An absolute entry names a directory, used directly with no lookup
+//     (lets an operator pin an exact toolchain install outside PATH, e.g. a
+//     specific nix store path); one whose cleaned path is not an existing
+//     directory is unresolved. Any other entry is resolved to an
+//     executable: a bare name through the HOST's PATH with Go's
+//     exec.LookPath, a relative path containing a slash as
+//     ResolveHostToolchains states.
 //  2. A resolved executable's symlink chain is followed to its final target
 //     (filepath.EvalSymlinks), so nix/asdf/nvm shim layouts resolve to the
 //     real toolchain directory rather than a one-file shim.
-//  3. The mounted root is the resolved target's containing directory, or
-//     that directory's parent when the containing directory is named "bin"
-//     — this pulls in sibling lib/ and share/ the runtime needs, in one
-//     mount. The ascent only fires when the parent is narrow (a
-//     version-manager's own versioned dir, a nix store path); see
-//     isOverbroadToolchainRoot for the guard.
+//  3. For an entry resolved to an executable, the mounted root is the
+//     resolved target's containing directory, or that directory's parent
+//     when the containing directory is named "bin" and the parent is not
+//     one of the directories isOverbroadToolchainRoot refuses; mounting the
+//     parent brings sibling directories (lib/, share/, ...) along in one
+//     mount. An executable entry whose resolved target sits directly in one
+//     of those refused directories is unresolved. An absolute directory entry is
+//     itself the mounted root, after filepath.Clean.
 //  4. A provenance fingerprint (resolved host path + `<name> --version`,
-//     run on the HOST, not in any sandbox) is recorded per toolchain.
+//     run on the HOST, not in any sandbox) is recorded per mount.
 //     Hermeticity is knowingly traded for provisioning correctness; the
 //     fingerprint is what keeps a verdict attributable to the exact host
 //     toolchain build that produced it.
@@ -51,7 +56,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -79,8 +86,8 @@ const toolchainVersionProbeTimeout = 3 * time.Second
 // string. Recorded in run metadata so a verdict can be attributed to the
 // exact host toolchain build that produced it.
 type ToolchainFingerprint struct {
-	// Name is the requested entry, trimmed: a bare name (e.g. "node") or an
-	// explicit directory's absolute path.
+	// Name is the requested entry, trimmed, as written (a bare name such as
+	// "node", a relative path, or an absolute directory).
 	Name string
 	// Path is the resolved host directory that was mounted read-only.
 	Path string
@@ -103,34 +110,44 @@ type ToolchainResolution struct {
 	// PATH inside the container. Empty when no entry resolved to an
 	// executable (e.g. every entry was an explicit non-executable dir).
 	pathPrepend string
-	// Fingerprints records provenance for each successfully resolved
-	// toolchain, in request order. An entry that did not resolve has no
-	// fingerprint; it is listed in Unresolved instead.
+	// Fingerprints records provenance for each toolchain mounted, in
+	// request order. An entry that did not resolve has no fingerprint (it
+	// is listed in Unresolved instead), nor does one dropped as a duplicate
+	// ContainerPath (see ResolveHostToolchains).
 	Fingerprints []ToolchainFingerprint
 	// Unresolved lists, in request order, every trimmed non-empty entry
-	// that did not resolve on this host (not on PATH, a dangling symlink,
-	// or a named directory that does not exist). A blank entry (empty or
-	// whitespace-only) is silently skipped — never resolved, never
-	// unresolved. Nil when every entry resolved.
+	// that did not resolve on this host (see ResolveHostToolchains). A
+	// blank entry (empty or whitespace-only) is silently skipped — never
+	// resolved, never unresolved. Nil when every entry resolved.
 	Unresolved []string
 }
 
-// ResolveHostToolchains resolves each entry in names into a read-only bind
-// mount and a provenance fingerprint, plus an in-container PATH entry when
-// the entry resolved to an executable (a bare name; an explicit directory
-// contributes no PATH entry).
+// ResolveHostToolchains resolves the entries in names into read-only bind
+// mounts, each with a provenance fingerprint, plus an in-container PATH
+// entry for each mount whose entry resolved to an executable (a
+// non-absolute entry; an explicit directory contributes no PATH entry).
 //
-// An entry is either:
+// An entry is one of:
 //   - a bare name (e.g. "node"): resolved via the host's PATH
 //     (exec.LookPath), then its symlink closure is followed to the real
 //     toolchain directory (see the file doc's resolution algorithm).
-//   - an absolute directory path (starts with "/"): used directly as the
-//     mounted root, no PATH lookup or symlink following.
+//   - a relative path containing a slash (e.g. "./node", "bin/node",
+//     "../tools/bin/node"): resolved to the absolute, symlink-free path of
+//     the file the kernel would execute for it from the process's working
+//     directory at the time of the call (exec.LookPath, no PATH search),
+//     then handled like a bare name's executable.
+//   - an absolute directory path (starts with "/"): cleaned
+//     (filepath.Clean), then used directly as the mounted root, no PATH
+//     lookup or symlink following.
 //
-// Resolution is best-effort per entry: a name that cannot be resolved on
-// the host (not on PATH, dangling symlink, or a named directory that does
-// not exist) is skipped and its trimmed name recorded in Unresolved, in
-// request order — never an error return. A misconfigured entry degrades
+// Resolution is best-effort per entry and never returns an error. Each of
+// these entries is skipped and its trimmed name recorded in Unresolved, in
+// request order: a non-absolute entry exec.LookPath does not find (not on
+// PATH, a dangling symlink, a relative path that does not exist); a
+// non-absolute entry whose resolved executable sits directly in /, /usr,
+// /usr/local, /opt, $HOME or $HOME/.local, .config, .cache or .ssh (each
+// compared symlink-resolved); an absolute entry whose cleaned path is not
+// an existing directory. A misconfigured entry degrades
 // (the resulting CapabilitySet probe will report that ecosystem
 // unavailable); it does not abort the run. Duplicate ContainerPaths are
 // de-duplicated; only the first is kept, and a deduplicated entry is NOT
@@ -183,17 +200,25 @@ func ResolveHostToolchains(names []string) ToolchainResolution {
 
 // resolveToolchainRoot resolves name to (mountedRootDir, resolvedExecPath).
 // For an absolute-path entry, execPath is "" (no binary identified; the
-// directory itself is mounted verbatim) and root is name, validated to exist
-// and be a directory. For a bare name, root is the containing directory of
-// the symlink-closure-resolved executable (see the file doc's step 3), and
-// execPath is that resolved executable path.
+// directory itself is mounted verbatim) and root is name after
+// filepath.Clean; that cleaned path is the one checked to exist and be a
+// directory. Any other entry is looked up with exec.LookPath; the result's
+// symlinks are resolved (filepath.EvalSymlinks) before a result that is
+// still relative is joined onto syscall.Getwd, which is how a relative
+// entry reaches the path ResolveHostToolchains states. root is then the
+// containing directory of that resolved executable (see the file doc's
+// step 3), and execPath is the resolved executable path; both are
+// absolute. An entry whose executable sits directly in an
+// overbroad directory (see isOverbroadToolchainRoot) is an error, since no
+// narrower mount exists.
 func resolveToolchainRoot(name string) (root, execPath string, err error) {
 	if filepath.IsAbs(name) {
-		info, statErr := os.Stat(name)
+		root = filepath.Clean(name)
+		info, statErr := os.Stat(root)
 		if statErr != nil || !info.IsDir() {
-			return "", "", fmt.Errorf("sandbox: host toolchain dir %q not found: %w", name, statErr)
+			return "", "", fmt.Errorf("sandbox: host toolchain dir %q not found: %w", root, statErr)
 		}
-		return name, "", nil
+		return root, "", nil
 	}
 
 	found, lookErr := exec.LookPath(name)
@@ -204,7 +229,23 @@ func resolveToolchainRoot(name string) (root, execPath string, err error) {
 	if evalErr != nil {
 		return "", "", fmt.Errorf("sandbox: resolve symlink closure for %q: %w", name, evalErr)
 	}
+	if !filepath.IsAbs(resolved) {
+		// EvalSymlinks walked the relative path from the working directory
+		// as the kernel does; the relative result is symlink-free, with any
+		// ".." only leading, so it is joined onto the kernel's working
+		// directory. Not os.Getwd: that may answer with $PWD, a path
+		// reaching the same directory through a symlink, whose lexical
+		// parent is a different directory.
+		wd, wdErr := syscall.Getwd()
+		if wdErr != nil {
+			return "", "", fmt.Errorf("sandbox: working directory for host toolchain %q: %w", name, wdErr)
+		}
+		resolved = filepath.Join(wd, resolved)
+	}
 	dir := filepath.Dir(resolved)
+	if isOverbroadToolchainRoot(dir) {
+		return "", "", fmt.Errorf("sandbox: host toolchain %q resolves directly into the shared directory %q", name, dir)
+	}
 	root = dir
 	if filepath.Base(dir) == "bin" {
 		// Pull in the toolchain root (sibling lib/, share/, ...) alongside
@@ -222,43 +263,84 @@ func resolveToolchainRoot(name string) (root, execPath string, err error) {
 	return root, resolved, nil
 }
 
+// sharedToolchainRoots are the system-wide directories isOverbroadToolchainRoot
+// refuses as a toolchain root.
+var sharedToolchainRoots = []string{"/", "/usr", "/usr/local", "/opt"}
+
 // isOverbroadToolchainRoot reports whether dir is a shared, multi-purpose
 // directory that must never be RO-mounted wholesale as a "toolchain root":
-// the user's home directory itself, or a broad catch-all subdirectory like
-// ~/.local that holds far more than one toolchain. A $HOME/bin/node or
-// ~/.local/bin/node layout ascends exactly here without this guard.
+// a system-wide root ("/", /usr, /usr/local, /opt), the user's home
+// directory itself, or a broad catch-all subdirectory like ~/.local that
+// holds far more than one toolchain. A $HOME/bin/node or ~/.local/bin/node
+// layout ascends to the latter, /usr/bin/python3 and /usr/local/bin/node to
+// the former, without this guard; the caller then mounts the bin directory
+// alone. dir and every listed directory are compared both as written and
+// symlink-resolved, so a root reached through a symlink (a symlinked
+// $HOME, /usr/local -> /var/usrlocal) is still caught.
 // Narrow, single-purpose version-manager directories
-// (~/.nvm/versions/node/vX, ~/.asdf/installs/..., a nix store path) are NOT
-// caught by this — they are exactly the layout the ascent exists to support.
+// (~/.nvm/versions/node/vX, ~/.asdf/installs/..., /opt/node-vX, a nix store
+// path) are NOT caught by this — they are exactly the layout the ascent
+// exists to support.
 func isOverbroadToolchainRoot(dir string) bool {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return false
+	listed := slices.Clone(sharedToolchainRoots)
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		listed = append(listed, home)
+		for _, broad := range []string{".local", ".config", ".cache", ".ssh"} {
+			listed = append(listed, filepath.Join(home, broad))
+		}
 	}
-	home = filepath.Clean(home)
-	dir = filepath.Clean(dir)
-	if dir == home {
-		return true
-	}
-	for _, broad := range []string{".local", ".config", ".cache", ".ssh"} {
-		if dir == filepath.Join(home, broad) {
-			return true
+	candidates := symlinkForms(dir)
+	for _, l := range listed {
+		for _, form := range symlinkForms(l) {
+			if slices.Contains(candidates, form) {
+				return true
+			}
 		}
 	}
 	return false
 }
 
+// symlinkForms returns p cleaned and, when it resolves, p with every
+// symlink resolved.
+func symlinkForms(p string) []string {
+	forms := []string{filepath.Clean(p)}
+	if resolved, err := filepath.EvalSymlinks(p); err == nil && resolved != forms[0] {
+		forms = append(forms, resolved)
+	}
+	return forms
+}
+
 // sanitizeToolchainSegment reduces name to a single, safe path component
-// for use under hostToolchainMountRoot: the base name only, so an absolute
-// directory entry (e.g. "/nix/store/xxx-nodejs-18") mounts at a flat
-// "/opt/llmkit-toolchains/xxx-nodejs-18" rather than a nested, traversal-prone
-// path. A bare name is used as-is (it is already a single component).
+// for use under hostToolchainMountRoot: the base name of the cleaned entry,
+// so an absolute directory entry (e.g. "/nix/store/xxx-nodejs-18") mounts at
+// a flat "/opt/llmkit-toolchains/xxx-nodejs-18" rather than a nested,
+// traversal-prone path. A bare name is used as-is (it is already a single
+// component). An entry whose cleaned base is not a real name ("/", ".",
+// "..", e.g. "/x/..") mounts at "toolchain", so the result is always a
+// direct child of hostToolchainMountRoot — never the root itself or its
+// parent.
 func sanitizeToolchainSegment(name string) string {
-	base := filepath.Base(name)
-	if base == "" || base == "." || base == "/" || base == string(filepath.Separator) {
+	base := filepath.Base(filepath.Clean(name))
+	if base == "" || base == "." || base == ".." || base == "/" || base == string(filepath.Separator) {
 		base = "toolchain"
 	}
 	return base
+}
+
+// checkCLIToolchainMounts refuses a host-toolchain mount the CLI backend
+// cannot render: a HostPath or ContainerPath the runtime's `-v host:ctr:opts`
+// syntax cannot express (cliPathExpressible) would make the runtime abort
+// every run with an "incorrect volume format" error. Known at construction,
+// so NewCLI refuses it there.
+func checkCLIToolchainMounts(mounts []ROMount) error {
+	for _, m := range mounts {
+		for _, p := range []string{m.HostPath, m.ContainerPath} {
+			if !cliPathExpressible(p) {
+				return fmt.Errorf("sandbox: cli backend cannot render WithHostToolchains mount %q -> %q: %q contains ':', which the container runtime's -v syntax cannot express", m.HostPath, m.ContainerPath, p)
+			}
+		}
+	}
+	return nil
 }
 
 // probeToolchainVersion best-effort runs `<bin> --version` on the HOST —

@@ -423,3 +423,27 @@ func TestProbe_PerEntrySpecShape(t *testing.T) {
 		}()
 	})
 }
+
+// TestProbe_DoesNotWriteIntoInterpretsMap pins that an
+// Interpret that returns one package-level map on every call (a legal
+// shape) sees that map unchanged after a probe fails at the infrastructure
+// level, and the set holds a fresh all-false map for the entry.
+func TestProbe_DoesNotWriteIntoInterpretsMap(t *testing.T) {
+	shared := map[string]bool{"one": true, "two": true}
+	entry := ProbeEntry{
+		Name:      "shared",
+		Probe:     []string{"/bin/sh", "-c", "exit 0"},
+		Interpret: func(ProbeResult) map[string]bool { return shared },
+	}
+	mock := NewMock(MockResponse{Err: errProbeSim})
+	cs, err := Probe(context.Background(), mock, Spec{RepoDir: "/repo"}, []ProbeEntry{entry})
+	if err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+	if !reflect.DeepEqual(shared, map[string]bool{"one": true, "two": true}) {
+		t.Errorf("Interpret's map was rewritten: %v", shared)
+	}
+	if !reflect.DeepEqual(cs["shared"], map[string]bool{"one": false, "two": false}) {
+		t.Errorf("failed-probe modes = %v, want every mode false", cs["shared"])
+	}
+}

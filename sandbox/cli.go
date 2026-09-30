@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -47,8 +49,10 @@ type CLI struct {
 // docker; WithRuntime overrides the auto-detect order). WithImage is
 // required. The bwrap-only options (WithCapPolicy) are refused here with an
 // error naming the option, a numeric option out of range is refused before
-// any runtime lookup, and a WithNetwork mode the runtime could never honor
-// fails at construction.
+// any runtime lookup, a WithNetwork mode the runtime could never honor
+// fails at construction, and so does a WithHostToolchains mount whose
+// HostPath or ContainerPath contains ':' (the runtime's -v syntax cannot
+// express it).
 func NewCLI(opts ...Option) (*CLI, error) {
 	o := newOptions(opts)
 	if err := o.checkSupported(backendCLI, bwrapOnlyOptions); err != nil {
@@ -59,6 +63,11 @@ func NewCLI(opts ...Option) (*CLI, error) {
 	}
 	if err := validateNetworkDefault(backendCLI, o.network, cliNetworks); err != nil {
 		return nil, err
+	}
+	if o.has("WithHostToolchains") {
+		if err := checkCLIToolchainMounts(o.toolchainBinds); err != nil {
+			return nil, err
+		}
 	}
 
 	runtime := o.runtime
@@ -83,7 +92,7 @@ func NewCLI(opts ...Option) (*CLI, error) {
 	s.defaults = baseDefaults()
 	o.applyDefaults(&s.defaults)
 	if o.has("WithHostToolchains") {
-		s.toolchainBinds = o.toolchainBinds
+		s.toolchainBinds = slices.Clone(o.toolchainBinds)
 		s.toolchainPathPrepend = o.toolchainPathPrepend
 	}
 	// Best-effort hygiene: purge any workspace-cache parent dirs a previous,
@@ -175,7 +184,7 @@ func (s *CLI) resolveParams(spec Spec) (runParams, error) {
 // "sandbox: execution cancelled" error), or an infrastructure failure; a
 // non-zero exit code is reported in Result.ExitCode.
 func (s *CLI) Exec(ctx context.Context, spec Spec) (Result, error) {
-	if err := validateSpec(backendCLI, spec); err != nil {
+	if err := validateSpec(backendCLI, spec, s.toolchainBinds); err != nil {
 		return Result{}, err
 	}
 	timeout := spec.Timeout
@@ -213,11 +222,21 @@ func (s *CLI) Exec(ctx context.Context, spec Spec) (Result, error) {
 }
 
 // forceRemove best-effort removes a container by name, used to guarantee
-// cleanup of a container that outran its timeout.
+// cleanup of a container that outran its timeout. The removal kills the
+// container at once (see removeArgs); the runtime is identified by the
+// basename of its resolved path, so a docker-named symlink to podman
+// removes as podman does.
 func (s *CLI) forceRemove(name string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, s.runtime, removeArgs(name)...)
+	rt := s.runtime
+	if p, err := exec.LookPath(rt); err == nil {
+		rt = p
+		if real, err := filepath.EvalSymlinks(p); err == nil {
+			rt = real
+		}
+	}
+	cmd := exec.CommandContext(ctx, s.runtime, removeArgs(rt, name)...)
 	_ = cmd.Run()
 }
 

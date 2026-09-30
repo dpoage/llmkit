@@ -1,15 +1,20 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -160,7 +165,7 @@ func NewBwrap(opts ...Option) (*Bwrap, error) {
 		s.capPolicy = o.capPolicy
 	}
 	if o.has("WithHostToolchains") {
-		s.toolchainBinds = o.toolchainBinds
+		s.toolchainBinds = slices.Clone(o.toolchainBinds)
 		s.toolchainPathPrepend = o.toolchainPathPrepend
 	}
 
@@ -324,15 +329,21 @@ func (s *Bwrap) resolveBwrapParams(spec Spec) (bwrapParams, error) {
 // an error only for a refused Spec (InvalidSpecError, UnsupportedSpecError),
 // a caller ctx that ended (the "sandbox: execution cancelled" error), or an
 // infrastructure failure (ErrBwrapNoCapMethod among them); a non-zero exit
-// code is reported in Result.ExitCode. Process supervision (deadline,
-// watchdog, growth ceiling, outcome precedence, reap discipline) lives in
-// run.go's runSupervised; this body keeps only the bwrap-specific pieces:
-// Spec admission, cap-method resolution (after the Workspace checks, before
-// any write), and the resource-cap wrapper (with --die-with-parent + a
-// process-group kill replacing container rm — bwrap has no daemon-tracked
-// object for a "docker rm -f" equivalent to reap).
+// code is reported in Result.ExitCode. A run that failed inside bwrap before
+// the command started (a missing ROMount/RWMount HostPath, a chdir or setenv
+// failure) reports ExitCode 125 with a nil error — the code the CLI backend
+// reports for a missing mount HostPath — with bwrap's message in
+// Result.Stderr; a command that ran keeps its own exit code, including a 1
+// whose stderr carries a "bwrap:" prefix. Process supervision
+// (deadline, watchdog, growth ceiling, outcome precedence, reap discipline)
+// lives in run.go's runSupervised; this body keeps only the bwrap-specific
+// pieces: Spec admission, cap-method resolution (after the Workspace
+// checks, before any write), the setup-failure attribution, and the
+// resource-cap wrapper (with --die-with-parent + a process-group kill
+// replacing container rm — bwrap has no daemon-tracked object for a
+// "docker rm -f" equivalent to reap).
 func (s *Bwrap) Exec(ctx context.Context, spec Spec) (Result, error) {
-	if err := validateSpec(backendBwrap, spec); err != nil {
+	if err := validateSpec(backendBwrap, spec, s.toolchainBinds); err != nil {
 		return Result{}, err
 	}
 	// resolveBwrapParams is the "Spec + defaults -> argv inputs" stage;
@@ -369,7 +380,25 @@ func (s *Bwrap) Exec(ctx context.Context, spec Spec) (Result, error) {
 	// pidForCPU feeds the watchdog's /proc-tree CPU probe; stored right
 	// after Start.
 	var pidForCPU atomic.Int64
-	return runSupervised(ctx, runSpec{
+
+	// statusR/statusW are bwrap's --json-status-fd pipe (see bwrapStatusFD).
+	// The parent's copy of statusW closes right after Start so that the
+	// record read below sees EOF once bwrap exits; closeStatusW also runs
+	// on every path where Start never happened.
+	var statusR, statusW *os.File
+	closeStatusW := sync.OnceFunc(func() {
+		if statusW != nil {
+			_ = statusW.Close()
+		}
+	})
+	defer func() {
+		closeStatusW()
+		if statusR != nil {
+			_ = statusR.Close()
+		}
+	}()
+
+	res, err := runSupervised(ctx, runSpec{
 		spec:           spec,
 		timeout:        timeout,
 		idleTimeout:    s.defaultIdleTimeout,
@@ -388,16 +417,24 @@ func (s *Bwrap) Exec(ctx context.Context, spec Spec) (Result, error) {
 			},
 			buildCmd: func(ws string, runCtx context.Context) (*exec.Cmd, error) {
 				p.workspace = ws
+				p.statusFD = bwrapStatusFD
+				var pipeErr error
+				statusR, statusW, pipeErr = os.Pipe()
+				if pipeErr != nil {
+					return nil, fmt.Errorf("sandbox: create bwrap status pipe: %w", pipeErr)
+				}
 				w, err := s.newResourceCapWrap(capMethod, buildBwrapArgs(p), cpus, memoryMB, s.pidsLimit)
 				if err != nil {
 					return nil, err
 				}
 				wrap = w
 				cmd := exec.CommandContext(runCtx, w.name, w.args...)
+				cmd.ExtraFiles = []*os.File{statusW}
 				setBwrapProcAttr(cmd)
 				return cmd, nil
 			},
 			afterStart: func(cmd *exec.Cmd) error {
+				closeStatusW()
 				if cmd.Process != nil {
 					pidForCPU.Store(int64(cmd.Process.Pid))
 					if joinErr := wrap.joinCgroup(cmd.Process.Pid); joinErr != nil {
@@ -416,6 +453,51 @@ func (s *Bwrap) Exec(ctx context.Context, spec Spec) (Result, error) {
 			reap: func(cmd *exec.Cmd) { killBwrapProcessGroup(cmd) },
 		},
 	})
+	// bwrap's own failure before the command started is not the command's
+	// verdict. Timeout, quota, and cancel outcomes were classified by
+	// runSupervised and keep that classification.
+	if err == nil && !res.TimedOut && !res.WorkspaceQuotaExceeded && res.ExitCode != 0 &&
+		statusR != nil && !bwrapCommandRan(statusR) {
+		res.ExitCode = bwrapSetupFailureExit
+	}
+	return res, err
+}
+
+// bwrapStatusFD is the child-side descriptor number of the --json-status-fd
+// pipe: exec.Cmd numbers ExtraFiles from 3, and the pipe's write end is the
+// only entry.
+const bwrapStatusFD = 3
+
+// bwrapSetupFailureExit is the exit code of a run that failed inside bwrap
+// before the command started: the runtime-failure code the CLI backend
+// reports for a missing mount HostPath.
+const bwrapSetupFailureExit = 125
+
+// bwrapStatusReadWait caps how long bwrapCommandRan waits for the status
+// pipe to reach EOF; bwrap has already exited by then, so EOF is immediate
+// unless some other process still holds the write end.
+const bwrapStatusReadWait = 500 * time.Millisecond
+
+// bwrapCommandRan reports whether bwrap's --json-status-fd stream, read
+// after bwrap exited, carries the {"exit-code":N} record bwrap writes when
+// the sandboxed command finishes. A missing bind source, a chdir failure, a
+// setenv failure, and an execvp failure (measured on bubblewrap 0.13) write
+// no such record.
+func bwrapCommandRan(status *os.File) bool {
+	_ = status.SetReadDeadline(time.Now().Add(bwrapStatusReadWait))
+	data, _ := io.ReadAll(status)
+	dec := json.NewDecoder(bytes.NewReader(data))
+	for {
+		var rec struct {
+			ExitCode *int `json:"exit-code"`
+		}
+		if dec.Decode(&rec) != nil {
+			return false
+		}
+		if rec.ExitCode != nil {
+			return true
+		}
+	}
 }
 
 // resourceCapWrap is the resolved (binary, args) to exec for a run's cap

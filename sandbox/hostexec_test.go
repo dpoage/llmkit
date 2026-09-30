@@ -96,7 +96,7 @@ func TestHostExec_LaunchFailureIsExitCode(t *testing.T) {
 }
 
 // TestHostExec_LaunchFailureShapes pins the 127/126 mapping table on the
-// other observed launch-error shapes (premortem E9): an absolute missing
+// other observed launch-error shapes: an absolute missing
 // path is 127; a found-but-not-executable file is 126.
 func TestHostExec_LaunchFailureShapes(t *testing.T) {
 	repoDir := newHostExecRepoDir(t)
@@ -432,5 +432,25 @@ func TestHostExec_CaptureFilesReadBack(t *testing.T) {
 	}
 	if _, ok := res.Captured["never-written.txt"]; ok {
 		t.Errorf("a file the command never wrote must be absent from Captured, got %v", res.Captured)
+	}
+}
+
+// TestHostExec_GenuineExitStillWaitsForLateOutput pins that a command that
+// exits by itself is not cut short: output a background child writes after
+// the command's own exit, while the run has no kill pending, is still
+// captured, with a clean exit and no error.
+func TestHostExec_GenuineExitStillWaitsForLateOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-based test assumes POSIX /bin/sh")
+	}
+	res, err := NewHostExec().Exec(context.Background(), Spec{
+		RepoDir: newHostExecRepoDir(t),
+		Cmd:     []string{"/bin/sh", "-c", "(sleep 1; echo late) & echo early"},
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if res.Stdout != "early\nlate\n" || res.ExitCode != 0 || res.TimedOut {
+		t.Errorf("res = %+v, want Stdout %q, exit 0, not timed out", res, "early\nlate\n")
 	}
 }

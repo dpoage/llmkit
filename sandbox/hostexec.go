@@ -63,10 +63,36 @@ func NewHostExec() *HostExec { return &HostExec{} }
 // only bound is the caller's context). Workspace must be absolute (like every
 // backend — validateSpec) and is checked to exist as a directory this
 // process can enter before the run.
+//
+// KILLING. When Spec.Timeout expires or the caller's context ends, HostExec
+// kills the command and, on Linux, walks the command's tree — its children,
+// their children, and so on — and kills those too, so the descendants it
+// reaches are dead, and no longer writing Result.Stdout, when Exec returns.
+// The command stays in the caller's own process group: a terminal signal
+// sent to that group (Ctrl-C) still reaches it. The walk reads /proc from
+// the command's pid. Each process is held by pidfd and sent SIGSTOP —
+// again, if something resumed it with SIGCONT — before its children are
+// read; a child is accepted only if it is a child of a process of the tree
+// the walk already holds, and every signal to a descendant goes through a
+// pidfd, which names one process for its whole life, rather than by pid.
+// The walk and the wait for the killed processes are each bounded (about a
+// second). Outside the guarantee: a descendant that called setsid and was
+// orphaned (a daemon), one created with CLONE_PARENT, and one that
+// switched user ids; and the tree of a command in which a descendant sends
+// SIGCONT to tree members continuously. If the calling process itself dies
+// mid-kill, the frozen tree can stay stopped; a command that exhausts a
+// task limit it shares with the calling process (such as the pids limit of
+// a cgroup both run in) can cause exactly that, since the Go runtime
+// aborts the calling process when it cannot create a thread. A tree that
+// cannot be walked (no pidfd support, a failing pidfd_send_signal, no
+// /proc/<pid>/task/<tid>/children) degrades to killing the command alone.
+// On other operating systems only the command itself is killed.
 func (h *HostExec) Exec(ctx context.Context, spec Spec) (Result, error) {
-	if err := validateSpec(backendHost, spec); err != nil {
+	if err := validateSpec(backendHost, spec, nil); err != nil {
 		return Result{}, err
 	}
+	killer := newHostKiller()
+	defer killer.close()
 	return runSupervised(ctx, runSpec{
 		spec:           spec,
 		timeout:        spec.Timeout,
@@ -82,8 +108,10 @@ func (h *HostExec) Exec(ctx context.Context, spec Spec) (Result, error) {
 				if len(spec.Env) > 0 {
 					cmd.Env = append(os.Environ(), spec.Env...)
 				}
+				killer.install(cmd)
 				return cmd, nil
 			},
+			afterStart:  killer.afterStart,
 			commandExit: hostCommandExit,
 		},
 	})

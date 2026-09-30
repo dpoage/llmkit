@@ -264,19 +264,19 @@ func TestRefusedSpecHasNoFilesystemEffect(t *testing.T) {
 func TestValidateSpecPure(t *testing.T) {
 	// Universal wins over backend-specific: empty Cmd on bwrap with an
 	// Image set reports Cmd.
-	err := validateSpec(backendBwrap, Spec{Image: "img"})
+	err := validateSpec(backendBwrap, Spec{Image: "img"}, nil)
 	var inv *InvalidSpecError
 	if !errors.As(err, &inv) || inv.Field != "Cmd" {
 		t.Fatalf("err = %v, want InvalidSpecError{Cmd}", err)
 	}
 
 	// The validator never touches the filesystem: RepoDir need not exist.
-	if err := validateSpec(backendCLI, baseValidSpec()); err != nil {
+	if err := validateSpec(backendCLI, baseValidSpec(), nil); err != nil {
 		t.Fatalf("validateSpec(valid) = %v, want nil", err)
 	}
 
 	// Backend-specific: bwrap fixed-bind collision, network sets.
-	err = validateSpec(backendBwrap, Spec{Cmd: []string{"true"}, RepoDir: "/repo", ROMounts: []ROMount{{HostPath: "/host", ContainerPath: "/usr"}}})
+	err = validateSpec(backendBwrap, Spec{Cmd: []string{"true"}, RepoDir: "/repo", ROMounts: []ROMount{{HostPath: "/host", ContainerPath: "/usr"}}}, nil)
 	var uns *UnsupportedSpecError
 	if !errors.As(err, &uns) || uns.Backend != backendBwrap {
 		t.Fatalf("err = %v, want bwrap UnsupportedSpecError for the fixed-bind collision", err)
@@ -284,12 +284,12 @@ func TestValidateSpecPure(t *testing.T) {
 
 	// The Mock has no backend-specific refusals: everything well-formed
 	// records.
-	if err := validateSpec(backendMock, Spec{Cmd: []string{"true"}, RepoDir: "/repo", Image: "img", ROMounts: []ROMount{{HostPath: "/h", ContainerPath: "/c"}}, SetupCmds: [][]string{{"npm"}}, Network: NetworkBridge, Env: []string{"A=B"}}); err != nil {
+	if err := validateSpec(backendMock, Spec{Cmd: []string{"true"}, RepoDir: "/repo", Image: "img", ROMounts: []ROMount{{HostPath: "/h", ContainerPath: "/c"}}, SetupCmds: [][]string{{"npm"}}, Network: NetworkBridge, Env: []string{"A=B"}}, nil); err != nil {
 		t.Fatalf("validateSpec(mock, well-formed) = %v, want nil", err)
 	}
 
 	// Error text shape: "sandbox: invalid Spec.<Field>: <Reason>".
-	err = validateSpec(backendMock, Spec{})
+	err = validateSpec(backendMock, Spec{}, nil)
 	if got := err.Error(); !strings.HasPrefix(got, "sandbox: invalid Spec.") {
 		t.Fatalf("Error() = %q, want the sandbox: invalid Spec.<Field> shape", got)
 	}
@@ -497,7 +497,7 @@ func TestHonorMatrixMatchesDocs(t *testing.T) {
 			spec := cell.value(baseValidSpec())
 			switch want {
 			case "honored", "recorded":
-				if err := validateSpec(backend, spec); err != nil {
+				if err := validateSpec(backend, spec, nil); err != nil {
 					t.Errorf("validateSpec(%s, %s) = %v, want nil (docs says %q)", backend, cell.field, err, want)
 				}
 			case "refused":

@@ -15,6 +15,8 @@ const headBytes = 256 * 1024 // 256 KB
 // (max-headBytes) bytes of the stream, joined by a gap marker noting how many
 // bytes were elided. Once the head window is full, subsequent bytes are written
 // into a circular ring buffer that always holds the most-recent tail content.
+// The ring is allocated lazily as bytes arrive, so a stream's memory is
+// proportional to the bytes it wrote (up to the cap), not to the cap itself.
 //
 // This dual-window approach keeps early build errors (which land in stderr
 // before any test output) AND late test-runner summaries (--- FAIL, FAILED,
@@ -31,9 +33,10 @@ type cappedBuffer struct {
 
 	mu        sync.Mutex
 	headBuf   bytes.Buffer // retains the first `head` bytes
-	ring      []byte       // circular tail buffer, size = max - head
-	ringWrite int          // next write position in ring
-	ringFull  bool         // ring has wrapped at least once
+	tailSize  int          // tail window capacity = max - head
+	ring      []byte       // circular tail buffer; len grows with bytes written until it reaches tailSize
+	ringWrite int          // next write position in ring once it has reached tailSize
+	ringFull  bool         // ring reached tailSize (it is then written circularly)
 	truncated bool         // at least one byte was overwritten in the ring
 	total     int64        // total bytes ever written, including discarded
 }
@@ -46,12 +49,30 @@ func newCappedBuffer(max int) *cappedBuffer {
 			h = max // entire budget goes to head; no ring needed
 		}
 		c.head = h
-		tailSize := max - h
-		if tailSize > 0 {
-			c.ring = make([]byte, tailSize)
-		}
+		c.tailSize = max - h
 	}
 	return c
+}
+
+// growRing extends ring by n bytes, allocating capacity geometrically but
+// never past tailSize, so memory tracks the bytes actually written rather
+// than the configured cap. The caller guarantees len(ring)+n <= tailSize.
+func (c *cappedBuffer) growRing(n int) {
+	need := len(c.ring) + n
+	if need <= cap(c.ring) {
+		c.ring = c.ring[:need]
+		return
+	}
+	newCap := 2 * cap(c.ring)
+	if newCap < need {
+		newCap = need
+	}
+	if newCap > c.tailSize || newCap < 0 {
+		newCap = c.tailSize
+	}
+	grown := make([]byte, need, newCap)
+	copy(grown, c.ring)
+	c.ring = grown
 }
 
 // Write implements io.Writer, retaining the first head bytes and the last
@@ -83,16 +104,36 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 		}
 
 		// Phase 2: head window is full; route remaining bytes into the ring.
-		if len(c.ring) == 0 {
+		if c.tailSize == 0 {
 			// No tail budget: discard everything past head. The remainder of p
 			// is consumed either way, so written needs no further tracking.
 			c.truncated = true
 			break
 		}
 
-		// Write chunk into ring with wrap-around, in up to two copies.
 		remaining := chunk
 		for len(remaining) > 0 {
+			if !c.ringFull {
+				// Fill phase: the ring has not yet reached tailSize, so it
+				// grows to hold exactly the bytes that arrive.
+				take := remaining
+				if room := c.tailSize - len(c.ring); len(take) > room {
+					take = remaining[:room]
+				}
+				at := len(c.ring)
+				c.growRing(len(take))
+				copy(c.ring[at:], take)
+				remaining = remaining[len(take):]
+				if len(c.ring) == c.tailSize {
+					c.ringWrite = 0
+					c.ringFull = true
+					c.truncated = true
+				}
+				continue
+			}
+
+			// Wrap phase: the ring is at tailSize; overwrite the oldest
+			// bytes, in up to two copies.
 			space := len(c.ring) - c.ringWrite
 			take := remaining
 			if len(take) > space {
@@ -102,7 +143,6 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 			c.ringWrite += len(take)
 			if c.ringWrite >= len(c.ring) {
 				c.ringWrite = 0
-				c.ringFull = true
 				c.truncated = true
 			}
 			remaining = remaining[len(take):]
@@ -141,8 +181,8 @@ func (c *cappedBuffer) result() (string, bool) {
 			copy(tail, c.ring[c.ringWrite:])
 			copy(tail[len(c.ring)-c.ringWrite:], c.ring[:c.ringWrite])
 		} else {
-			// Ring has not wrapped: live content is ring[0:ringWrite].
-			tail = c.ring[:c.ringWrite]
+			// Ring has not reached tailSize: every byte in it is live.
+			tail = c.ring
 		}
 	}
 

@@ -722,6 +722,64 @@ entry below is marked.
   If that ctx carries no span, the nested emitter mints its own span. A
   nested agent `Runner` mints its own span (llmkit-bk8.9.15,
   llmkit-bk8.3.4).
+- **Breaking:** `sandbox` refuses more mount `Spec`s at `Exec`
+  (llmkit-bk8.1.25, llmkit-bk8.7.10). Mount `ContainerPath`s are compared
+  after `filepath.Clean`, so `/opt/a` and `/opt/a/` are a duplicate; a
+  `ContainerPath` of `/` or `/workspace` is refused with
+  `InvalidSpecError` on every backend, the Mock included (Bwrap refused
+  `/workspace` with `UnsupportedSpecError` before). The CLI and Bwrap
+  backends also refuse, with `UnsupportedSpecError`, a `Spec` mount whose
+  cleaned `ContainerPath` is in that backend's set of reserved
+  destinations (for example `/tmp`), or the `ContainerPath` of one of
+  its `WithHostToolchains` mounts. The per-backend sets are in the
+  `Spec.ROMounts` reference. The check compares exact paths: a mount
+  nested under one of them is not covered. The CLI backend also refuses a
+  `:` in an absolute `Workspace` and in a mount path with
+  `UnsupportedSpecError`, and `NewCLI` refuses a `WithHostToolchains`
+  mount whose path contains `:` with a plain error.
+- **Breaking:** `sandbox.ResolveHostToolchains` never resolves a bare name
+  or relative path to a mount of a shared root (llmkit-bk8.7.4,
+  llmkit-bk8.1.47): `/`, `/usr`, `/usr/local`, or `/opt`, plus, when
+  `$HOME` is an absolute path, `$HOME`, `$HOME/.local`, `$HOME/.config`,
+  `$HOME/.cache`, or `$HOME/.ssh`; each is compared after symlinks
+  resolve. An executable in `/usr/bin` now mounts
+  `/usr/bin` where it mounted the whole host `/usr`, and an executable
+  sitting directly in one of those directories is reported in
+  `Unresolved` where the directory used to be mounted (an executable
+  directly in `$HOME` mounted `$HOME`). An absolute entry is cleaned with
+  `filepath.Clean` before it is checked and mounted, and
+  `ToolchainFingerprint.Path` reports the cleaned path; an absolute entry
+  that ends in `..`, such as `/usr/..`, now mounts at
+  `/opt/llmkit-toolchains/toolchain` where it mounted over `/opt`. A
+  relative entry that contains a slash resolves to the absolute,
+  symlink-free path of the file the kernel would execute from the
+  process's working directory at the time of the call.
+- **Breaking:** `sandbox.NewCLI` and `sandbox.NewBwrap` refuse numeric
+  options that overflow a conversion or name no enforceable CPU cap, at
+  construction and naming the option (llmkit-bk8.1.48,
+  llmkit-bk8.1.45). `WithMemoryMB`, `WithScratchSizeMB`, and
+  `WithWorkspaceGrowthCeilingMB` refuse a value above 8796093022207 (the
+  largest count whose byte value fits an `int64`); before, for example,
+  `WithScratchSizeMB(math.MaxInt64)` reached bwrap as `--size -1048576`.
+  `WithCPUs` refuses a value below 0.01 (podman's smallest cap: below it
+  the CLI backend ran uncapped or the runtime failed the run with exit
+  126) and a value above 214748.3647 (the largest `CPUQuota` systemd-run
+  accepts). The error text for `WithMemoryMB` and `WithScratchSizeMB`
+  now reads `must be in [1, 8796093022207]`.
+- **Breaking:** `sandbox.Bwrap.Exec` reports a run that failed inside
+  bwrap before the command started, such as a missing mount `HostPath`,
+  as `ExitCode` 125 with a nil error and bwrap's message in
+  `Result.Stderr`, the code the CLI backend reports for a missing mount
+  path (llmkit-bk8.1.24). Before, it reported exit 1, which reads as the
+  command's own verdict. A command that ran keeps its own exit code,
+  including a 1 whose stderr starts with `bwrap:`.
+- **Breaking:** Bwrap reports a delegated cgroup v2 subtree as a
+  resource-cap method only when a child cgroup there accepts writes to
+  `memory.max`, `cpu.max`, and `pids.max`, even under `WithPidsLimit(0)`
+  (llmkit-bk8.1.19). A subtree that delegates only the memory and cpu
+  controllers used to run `WithPidsLimit(0)` with memory and CPU limits
+  and no pids limit; now `Exec` returns `ErrBwrapNoCapMethod` unless
+  systemd-run works or `WithCapPolicy(CapBestEffort)` is set.
 - Provider adapters (llmkit-bk8.2.6): anthropic and openai now copy the
   passed `*http.Client` at `New`; mutations to it after `New` are not
   observed (google already behaved this way).
@@ -883,25 +941,27 @@ entry below is marked.
   divergence in the run's final tool turn (the llmkit-lew entry covers a
   recorded call left unserved there).
   `NewReplayClientFromResponses` is documented as the scripted test double.
-- `llmkit/sandbox` (llmkit-bk8.1.8): a command that cannot be launched now
-  reports through the shell's exit-code convention on every real backend —
-  `127` when the command is missing, `126` when it is not executable —
-  instead of an infrastructure error or a bare exit 1. Bwrap always execs
-  the command through `/bin/sh` (with no `SetupCmds` the wrapper script is
-  exactly `exec "$@"`), so bwrap's own execvp failure (exit 1) no longer
-  masks the cause. HostExec maps the launch failure to the exit code and
-  returns a nil error. A caller-owned `Workspace` the process cannot enter
-  (no search permission) is refused before the run with
-  `InvalidSpecError{Field: "Workspace"}` on every real backend, instead of
-  reading as a non-executable command (126) on HostExec. HostExec also no
-  longer reports a caller cancellation as `Result{ExitCode: -1}` with a nil
-  error — a caller whose context is cancelled or past its deadline gets the
-  shared `sandbox: execution cancelled` error, while `Spec.Timeout` expiry
-  still reports the timeout shape. A context that has already ended when
-  `Exec` is called, or that ends during Bwrap's admission (while it
-  resolves the resource-cap method), gets that same error on every real
-  backend before anything is written or launched; Bwrap used to report it
-  as `ErrBwrapNoCapMethod`, or as a cgroup write failure after writing
+- `llmkit/sandbox` (llmkit-bk8.1.8): a missing command now exits `127` on
+  every real backend, and a command file without execute permission exits
+  `126`, instead of an infrastructure error or a bare exit 1. Two cases
+  exit `127` for a file without execute permission: on HostExec, a bare
+  name that reaches the file through `PATH`; under dash, a `Cmd[0]` that
+  starts with `-` and reaches the file through `PATH`. Bwrap always runs
+  the command through a `/bin/sh` wrapper, so bwrap's own execvp failure
+  (exit 1) no longer masks the cause. HostExec maps the launch failure to
+  the exit code and returns a nil error. A caller-owned `Workspace` the
+  process cannot enter (no search permission) is refused before the run
+  with `InvalidSpecError{Field: "Workspace"}` on every real backend,
+  instead of reading as a non-executable command (126) on HostExec.
+  HostExec also no longer reports a caller cancellation as
+  `Result{ExitCode: -1}` with a nil error — a caller whose context is
+  cancelled or past its deadline gets the shared
+  `sandbox: execution cancelled` error, while `Spec.Timeout` expiry still
+  reports the timeout shape. A context that has already ended when `Exec`
+  is called, or that ends during Bwrap's admission (while it resolves the
+  resource-cap method), gets that same error on every real backend before
+  anything is written or launched; Bwrap used to report it as
+  `ErrBwrapNoCapMethod`, or as a cgroup write failure after writing
   `WriteFiles` into a caller-owned `Workspace`.
 - `llmkit/sandbox` (security): an `Env` entry without `=` is refused with
   `InvalidSpecError{Field: "Env"}` on every backend. The CLI backend used to
@@ -1239,6 +1299,60 @@ entry below is marked.
   `docs/agent-loop.md`, now say `Complete` checks tool-result structure only
   when the record holds tool runs after the previous completion and before
   the response it serves (llmkit-8ey).
+- `llmkit/sandbox` (llmkit-bk8.1.44, llmkit-bk8.1.30): on Linux, HostExec
+  kills the run's process tree when `Spec.Timeout` expires, the caller's
+  deadline passes, or the caller cancels, and the descendants it reaches
+  are dead, and no longer writing `Result.Stdout`, when `Exec` returns.
+  Before, it killed only the direct child: a `sleep 300` started by the
+  command kept `Exec` blocked past a 2s `Timeout` until it was killed by
+  hand. The command stays in the caller's process group. Outside the
+  guarantee: a descendant that called `setsid` and was orphaned, one
+  created with `CLONE_PARENT`, one that switched user ids, and a tree in
+  which a descendant continuously sends `SIGCONT` to tree members; a
+  caller that dies mid-kill can leave the frozen tree stopped. A command
+  that exhausts a task limit it shares with the caller (such as the pids
+  limit of a cgroup both run in) can abort the caller mid-kill and leave
+  the tree stopped. Other operating systems keep the direct-child kill.
+- `llmkit/sandbox` (llmkit-bk8.1.27, llmkit-bk8.7.6): the CLI backend
+  removes a container it kills at once (`podman rm -f --time 0`, `docker
+  rm -f`). Before, podman's `rm -f` waited 10s for the container's stop
+  signal, so `Exec` returned about 12.1s after a 2s `Spec.Timeout` for a
+  command that ignores `SIGTERM`; it now returns after about 2.1s.
+- `llmkit/sandbox` (llmkit-bk8.1.17): the workspace copy leaves out its
+  own destination directory, matched by directory identity, so a `TMPDIR`
+  inside `RepoDir` no longer copies the workspace into itself.
+- `llmkit/sandbox` (llmkit-bk8.1.31): the `/bin/sh` wrapper of `SetupCmds`
+  (CLI and Bwrap) and of every Bwrap run runs a `Cmd[0]` that starts with
+  `-` as a command name. Before, `exec` read it as an option: on Bwrap
+  `["-a", "true"]` ran `true` and exited 0, and `["-nosuch"]` exited 2
+  with `exec: -n: invalid option`; both now exit 127 like a missing
+  command. On dash, a `-`-leading name with no slash that names a
+  non-executable file found through `PATH` exits 127 where bash exits
+  126.
+- `llmkit/sandbox` (llmkit-bk8.1.19): `DescribeBwrapCapMethod` and `Exec`
+  use one cgroup v2 check. Before, a cgroup this process could only
+  `mkdir` in was reported as delegated, and every `Exec` then failed at
+  its first limit write instead of returning `ErrBwrapNoCapMethod`.
+- `llmkit/sandbox` (llmkit-bk8.1.20, llmkit-bk8.1.45): output capture
+  memory grows with the bytes a run writes, not with the cap:
+  `WithMaxOutputBytes(1<<40)` no longer allocates the cap for each stream
+  on every `Exec`. Bwrap renders `WithCPUs` as a `CPUQuota` that
+  systemd-run accepts: `WithCPUs(1.1)` used to render
+  `110.00000000000001%`, which systemd-run rejects.
+- `llmkit/sandbox` (llmkit-bk8.1.46, llmkit-bk8.7.9): `NewBwrap` and
+  `NewCLI` no longer write into memory the caller passed in, so one
+  `ToolchainResolution` may be shared by any number of backends,
+  concurrently. `Probe` no longer rewrites the map an entry's `Interpret`
+  returned when that entry's `Exec` fails.
+- `llmkit/sandbox` docs (llmkit-bk8.7.7, llmkit-bk8.1.18):
+  `docs/sandbox.md` now states that a `SetupCmds` entry that execs or
+  exits ends the wrapper, so `Spec.Cmd` never runs and that entry's exit
+  code is the run's, and that shell builtin state (`cd`, `export`) from
+  `SetupCmds` carries into `Spec.Cmd`. It states that the CLI backend,
+  when `Cmd` is not wrapped, reports the runtime's code for a
+  found-but-unloadable executable (crun: exit 1, `missing dynamic
+  library?`); that claim is settled as documented behavior, not a pending
+  fix.
 - `decide`, `embed` (llmkit-bk8.1.38): when the server or the transport echoes
   `Config.Secret` or the password of `Config.BaseURL` into an error, as sent,
   escaped by Go's `encoding/json` or Go-quoted (`%q`), `Ask`, `Embed` and

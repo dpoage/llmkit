@@ -130,3 +130,38 @@ func TestIntegrationCLISetupCmdsOnDash(t *testing.T) {
 		t.Errorf("res = {ExitCode:%d Stdout:%q Stderr:%q}, want exit 0 and stdout \"hi\\n\"", res.ExitCode, res.Stdout, res.Stderr)
 	}
 }
+
+// dashLeadingCmd starts with '-': read as exec options, `-a true`
+// runs /bin/false under bash (exit 1) and busybox (exit 0); as a command
+// name, "-a" is not found (127) on every shell.
+var dashLeadingCmd = []string{"-a", "true", "/bin/false"}
+
+// TestIntegrationWrapperRunsDashLeadingCmdAsName pins that the always-on
+// Bwrap wrapper and the CLI SetupCmds wrapper run a '-'-leading Cmd[0] as a
+// command name — 127, like HostExec and the container backend without the
+// wrapper — on the /bin/sh of the CLI test image (busybox on alpine) and of
+// a Debian image (dash).
+func TestIntegrationWrapperRunsDashLeadingCmdAsName(t *testing.T) {
+	check := func(t *testing.T, sb Sandbox, setup [][]string) {
+		t.Helper()
+		res, err := sb.Exec(context.Background(), Spec{RepoDir: t.TempDir(), SetupCmds: setup, Cmd: dashLeadingCmd})
+		if err != nil {
+			t.Fatalf("Exec: %v", err)
+		}
+		if res.ExitCode != 127 {
+			t.Errorf("res = {ExitCode:%d Stdout:%q Stderr:%q}, want exit 127", res.ExitCode, res.Stdout, res.Stderr)
+		}
+	}
+	t.Run("bwrap", func(t *testing.T) {
+		check(t, newConformanceBwrap(t), nil)
+		check(t, newConformanceBwrap(t), [][]string{{"true"}})
+	})
+	t.Run("cli-busybox", func(t *testing.T) {
+		check(t, newConformanceCLI(t), [][]string{{"true"}})
+	})
+	t.Run("cli-dash", func(t *testing.T) {
+		s := newTestCLI(t, WithImage("docker.io/library/debian:bookworm-slim"))
+		t.Cleanup(func() { _ = s.Close() })
+		check(t, s, [][]string{{"true"}})
+	})
+}

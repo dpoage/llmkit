@@ -1,6 +1,11 @@
 package sandbox
 
 import (
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -282,6 +287,15 @@ func TestValidateMounts(t *testing.T) {
 		{"relative ctr", []ROMount{{HostPath: "/h", ContainerPath: "rel"}}, nil, true},
 		{"dup within ro", []ROMount{{HostPath: "/a", ContainerPath: "/c"}, {HostPath: "/b", ContainerPath: "/c"}}, nil, true},
 		{"dup across ro/rw", []ROMount{{HostPath: "/a", ContainerPath: "/c"}}, []ROMount{{HostPath: "/b", ContainerPath: "/c"}}, true},
+		{"dup by trailing slash", []ROMount{{HostPath: "/a", ContainerPath: "/opt/a"}}, []ROMount{{HostPath: "/b", ContainerPath: "/opt/a/"}}, true},
+		{"dup by dot element", []ROMount{{HostPath: "/a", ContainerPath: "/opt/a"}, {HostPath: "/b", ContainerPath: "/opt/./a"}}, nil, true},
+		{"dup by double slash and dotdot", []ROMount{{HostPath: "/a", ContainerPath: "/opt//a"}, {HostPath: "/b", ContainerPath: "/opt/x/../a"}}, nil, true},
+		{"container root", []ROMount{{HostPath: "/h", ContainerPath: "/"}}, nil, true},
+		{"container root by dotdot", nil, []ROMount{{HostPath: "/h", ContainerPath: "/opt/.."}}, true},
+		{"workspace", []ROMount{{HostPath: "/h", ContainerPath: WorkspaceMount}}, nil, true},
+		{"workspace with trailing slash", nil, []ROMount{{HostPath: "/h", ContainerPath: WorkspaceMount + "/"}}, true},
+		{"distinct siblings", []ROMount{{HostPath: "/a", ContainerPath: "/opt/a"}}, []ROMount{{HostPath: "/b", ContainerPath: "/opt/ab"}}, false},
+		{"path nested under workspace is a different path", []ROMount{{HostPath: "/h", ContainerPath: WorkspaceMount + "/sub"}}, nil, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -293,9 +307,23 @@ func TestValidateMounts(t *testing.T) {
 	}
 }
 
+// TestRemoveArgs pins the removal argv per runtime: podman needs `--time 0`
+// to kill at once (its `rm -f` otherwise waits its 10s stop timeout), and
+// docker has no such flag on `rm` (exit 125, unknown flag).
 func TestRemoveArgs(t *testing.T) {
-	if got := removeArgs("llmkit-x"); !slices.Equal(got, []string{"rm", "-f", "llmkit-x"}) {
-		t.Errorf("removeArgs = %q", got)
+	tests := []struct {
+		runtime string
+		want    []string
+	}{
+		{"podman", []string{"rm", "-f", "--time", "0", "llmkit-x"}},
+		{"/usr/bin/podman", []string{"rm", "-f", "--time", "0", "llmkit-x"}},
+		{"docker", []string{"rm", "-f", "llmkit-x"}},
+		{"/usr/local/bin/docker", []string{"rm", "-f", "llmkit-x"}},
+	}
+	for _, tc := range tests {
+		if got := removeArgs(tc.runtime, "llmkit-x"); !slices.Equal(got, tc.want) {
+			t.Errorf("removeArgs(%q) = %q, want %q", tc.runtime, got, tc.want)
+		}
 	}
 }
 
@@ -371,6 +399,114 @@ func TestBuildSetupScript(t *testing.T) {
 	}
 	if !strings.Contains(withEmpty, "'true' || exit 125") {
 		t.Errorf("non-empty argv after an empty one must still render, got %q", withEmpty)
+	}
+}
+
+// setupScriptShells returns the POSIX shells found on this host that can run
+// the rendered wrapper: argv prefixes that take `-c <script> sh <cmd...>`.
+// An absent shell is skipped, so a host without dash or busybox runs the rest.
+func setupScriptShells(t *testing.T) map[string][]string {
+	t.Helper()
+	shells := map[string][]string{}
+	for _, name := range []string{"bash", "dash", "sh"} {
+		if p, err := exec.LookPath(name); err == nil {
+			shells[name] = []string{p}
+		}
+	}
+	if p, err := exec.LookPath("busybox"); err == nil {
+		shells["busybox"] = []string{p, "sh"}
+	}
+	if len(shells) == 0 {
+		t.Skip("no POSIX shell on PATH")
+	}
+	return shells
+}
+
+// runSetupScript runs the rendered wrapper the way both backends do —
+// `<shell> -c <script> sh <cmd...>` — with PATH set to pathDir plus the
+// system dirs, and returns stdout and the shell's exit code (-1: killed by a
+// signal).
+func runSetupScript(t *testing.T, shell []string, setup [][]string, pathDir string, cmd ...string) (string, int) {
+	t.Helper()
+	argv := append(slices.Clone(shell[1:]), "-c", buildSetupScript(setup), "sh")
+	c := exec.Command(shell[0], append(argv, cmd...)...)
+	c.Env = []string{"PATH=" + pathDir + ":/usr/bin:/bin"}
+	out, err := c.Output()
+	if err != nil {
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) {
+			t.Fatalf("run %v: %v", shell, err)
+		}
+		return string(out), ee.ExitCode()
+	}
+	return string(out), 0
+}
+
+// TestBuildSetupScriptRunsCmdAsName pins that the wrapper runs Spec.Cmd[0]
+// as a command name under every shell on the host, never as an exec option
+// (`exec -a true /bin/false` runs /bin/false under bash), while a Cmd[0]
+// that does not start with '-' still gets exec's exit code and signal
+// disposition.
+func TestBuildSetupScriptRunsCmdAsName(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX sh wrapper")
+	}
+	// A command literally named "-dash-cmd" that reports its arguments.
+	bin := t.TempDir()
+	dashCmd := filepath.Join(bin, "-dash-cmd")
+	if err := os.WriteFile(dashCmd, []byte("#!/bin/sh\nprintf '<%s>' \"$@\"\nexit 7\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sigCmd := filepath.Join(bin, "-sig-cmd")
+	if err := os.WriteFile(sigCmd, []byte("#!/bin/sh\nkill -TERM $$\nsleep 5\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, shell := range setupScriptShells(t) {
+		t.Run(name, func(t *testing.T) {
+			for _, setup := range [][][]string{nil, {{"true"}}} {
+				// -a would be an exec option, "true" the exec'd
+				// name, /bin/false its argument. As a command name, "-a" is
+				// not found.
+				if _, code := runSetupScript(t, shell, setup, bin, "-a", "true", "/bin/false"); code != 127 {
+					t.Errorf("setup=%v Cmd [-a true /bin/false]: exit %d, want 127", setup, code)
+				}
+				for _, opt := range []string{"-c", "-l", "-", "--", "-x/y"} {
+					if _, code := runSetupScript(t, shell, setup, bin, opt, "true"); code != 127 {
+						t.Errorf("setup=%v Cmd [%s true]: exit %d, want 127", setup, opt, code)
+					}
+				}
+				// A command that really is named with a leading '-' runs, its
+				// arguments intact and its exit code forwarded.
+				out, code := runSetupScript(t, shell, setup, bin, "-dash-cmd", "a b", "-c")
+				if out != "<a b><-c>" || code != 7 {
+					t.Errorf("setup=%v Cmd [-dash-cmd]: out %q exit %d, want <a b><-c> and 7", setup, out, code)
+				}
+				// A '-' command killed by signal N is reported as exit 128+N.
+				if _, code := runSetupScript(t, shell, setup, bin, "-sig-cmd"); code != 128+15 {
+					t.Errorf("setup=%v Cmd [-sig-cmd]: exit %d, want 143", setup, code)
+				}
+				// Any other command keeps exec semantics: its exit code, and
+				// its own signal death (the wrapper is replaced, not a
+				// parent that turns the signal into an exit code).
+				if _, code := runSetupScript(t, shell, setup, bin, "sh", "-c", "exit 3"); code != 3 {
+					t.Errorf("setup=%v Cmd [sh -c exit 3]: exit %d, want 3", setup, code)
+				}
+				if _, code := runSetupScript(t, shell, setup, bin, "sh", "-c", "kill -TERM $$"); code != -1 {
+					t.Errorf("setup=%v Cmd [sh -c kill]: exit %d, want -1 (signal death)", setup, code)
+				}
+				if _, code := runSetupScript(t, shell, setup, bin, "no-such-cmd-xyz"); code != 127 {
+					t.Errorf("setup=%v Cmd [no-such-cmd-xyz]: exit %d, want 127", setup, code)
+				}
+			}
+			// A failing setup command still ends the wrapper with 125,
+			// whichever kind of Cmd[0] follows.
+			for _, cmd := range []string{"-a", "true"} {
+				if _, code := runSetupScript(t, shell, [][]string{{"false"}}, bin, cmd, "true"); code != 125 {
+					t.Errorf("failing setup, Cmd[0] %q: exit %d, want 125", cmd, code)
+				}
+			}
+		})
 	}
 }
 

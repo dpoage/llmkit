@@ -174,12 +174,12 @@ func buildRunArgs(p runParams) []string {
 	args = append(args, p.image)
 
 	// When SetupCmds are present, wrap the execution in /bin/sh: the setup
-	// script runs each setup command with "|| exit 125" and then exec's the
-	// original command so it retains its own exit code and signal disposition.
+	// script runs each setup command with "|| exit 125" and then runs the
+	// original command (see buildSetupScript).
 	// The argv shape is:
 	//   /bin/sh -c <script> sh <original cmd...>
 	// where "sh" is $0 (the shell's argv[0]) and the original cmd becomes
-	// $1, $2, ... (positional parameters fed to "exec $@").
+	// $1, $2, ... (the script's positional parameters).
 	// When SetupCmds is empty, the original cmd is appended directly and
 	// /bin/sh is never involved, preserving existing behavior for Go runs.
 	if len(p.setupCmds) > 0 {
@@ -192,10 +192,12 @@ func buildRunArgs(p runParams) []string {
 
 // validateMounts is the UNIVERSAL mount-shape class of validateSpec: every
 // extra bind mount (read-only and writable) must have non-empty absolute
-// HostPath and ContainerPath, and ContainerPaths must be unique across the
-// combined set (two mounts at the same container path is a configuration
-// error and the runtime's behavior would be ambiguous). The workspace mount
-// at /workspace is implicit and not represented here. A violation is
+// HostPath and ContainerPath, and ContainerPaths — compared after
+// filepath.Clean, so "/opt/a", "/opt/a/" and "/opt/./a" are one path — must
+// be unique across the combined set (two mounts at the same container path
+// is a configuration error and the runtime's behavior would be ambiguous).
+// The container root "/" and the workspace mount WorkspaceMount are not
+// available to a Spec mount. A violation is
 // malformed for EVERY backend: *InvalidSpecError naming ROMounts or
 // RWMounts. It returns the first problem found.
 func validateMounts(ro, rw []ROMount) error {
@@ -212,10 +214,16 @@ func validateMounts(ro, rw []ROMount) error {
 			case !filepath.IsAbs(m.ContainerPath):
 				return &InvalidSpecError{Field: field, Reason: fmt.Sprintf("ContainerPath %q must be absolute", m.ContainerPath)}
 			}
-			if seen[m.ContainerPath] {
-				return &InvalidSpecError{Field: field, Reason: fmt.Sprintf("duplicate ContainerPath %q across ROMounts and RWMounts", m.ContainerPath)}
+			cleaned := filepath.Clean(m.ContainerPath)
+			switch {
+			case cleaned == "/":
+				return &InvalidSpecError{Field: field, Reason: fmt.Sprintf("ContainerPath %q is the container root", m.ContainerPath)}
+			case cleaned == WorkspaceMount:
+				return &InvalidSpecError{Field: field, Reason: fmt.Sprintf("ContainerPath %q is the workspace mount %s", m.ContainerPath, WorkspaceMount)}
+			case seen[cleaned]:
+				return &InvalidSpecError{Field: field, Reason: fmt.Sprintf("duplicate ContainerPath %q (%q after cleaning) across ROMounts and RWMounts", m.ContainerPath, cleaned)}
 			}
-			seen[m.ContainerPath] = true
+			seen[cleaned] = true
 		}
 		return nil
 	}
@@ -244,7 +252,7 @@ func shellQuote(arg string) string {
 }
 
 // buildSetupScript constructs a POSIX sh script fragment that runs each setup
-// command in order, aborting with exit 125 on any failure, then exec's the
+// command in order, aborting with exit 125 on any failure, then runs the
 // original command. The result is intended as the -c argument to /bin/sh.
 //
 // Exit 125 is chosen deliberately: a caller's verdict classification
@@ -252,10 +260,17 @@ func shellQuote(arg string) string {
 // failure (e.g. "npm ci --offline" cache miss) never surfaces as a false
 // demonstrated result.
 //
-// The trailing `exec "$@"` passes the original command (from sh's positional
-// parameters $1, $2, ...) with exec so the sh wrapper process is replaced by
-// the actual command — it retains its own exit code and signal disposition
-// rather than going through another sh exit-code forwarding layer.
+// Spec.Cmd arrives as sh's positional parameters $1, $2, ... and is run as
+// the command NAME in every case, never parsed as an option of exec. A
+// Cmd[0] that starts with '-' (exec would read `-a`, `-c`, `-l` as its own
+// options, and dash rejects the portable `exec --`) takes the `case` line
+// instead: it runs as a plain simple command, so an absent one exits 127
+// like HostExec and the container backend, then `exit $?` forwards the
+// status. Any other Cmd[0] reaches the trailing `exec "$@"`, which replaces
+// the sh wrapper with the command: it keeps its own exit code and signal
+// disposition. On the '-' path sh stays the parent, so a command killed by
+// signal N is reported as exit 128+N, and a signal sent to the wrapper is
+// not forwarded to it.
 func buildSetupScript(setupCmds [][]string) string {
 	var b strings.Builder
 	for _, argv := range setupCmds {
@@ -273,12 +288,22 @@ func buildSetupScript(setupCmds [][]string) string {
 		}
 		b.WriteString(" || exit 125\n")
 	}
+	b.WriteString("case \"$1\" in -*) \"$@\"; exit $?;; esac\n")
 	b.WriteString("exec \"$@\"")
 	return b.String()
 }
 
 // removeArgs constructs the argv for forcibly removing a container by name,
-// used to reap a container that outran its timeout.
-func removeArgs(containerName string) []string {
+// used to reap a container that outran its timeout. runtimePath is the
+// resolved path of the container runtime CLI, which identifies the runtime
+// by its basename. Removal must kill the container at once: podman's
+// `rm -f` first sends the container's stop signal and waits 10s for it to
+// exit, so podman gets `--time 0`. docker's `rm -f` already kills at once
+// and docker has no such flag (an unknown flag is exit 125), so every other
+// runtime gets plain `rm -f`.
+func removeArgs(runtimePath, containerName string) []string {
+	if filepath.Base(runtimePath) == "podman" {
+		return []string{"rm", "-f", "--time", "0", containerName}
+	}
 	return []string{"rm", "-f", containerName}
 }

@@ -1,8 +1,14 @@
 package sandbox
 
 import (
+	"context"
+	"fmt"
+	"math"
+	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCappedBufferTruncates(t *testing.T) {
@@ -231,5 +237,113 @@ func TestCappedBufferPartialRing_TailRetained(t *testing.T) {
 	// Full fidelity: exactly head + tail, byte for byte.
 	if len(got) != headBytes+len(tail) {
 		t.Errorf("result length = %d, want %d (head+tail, no loss)", len(got), headBytes+len(tail))
+	}
+}
+
+// TestCappedBufferRingGrowsWithBytesWritten pins that the tail ring's
+// allocation tracks the bytes written, not the configured cap: after 1000
+// bytes land in the tail of a 1 GiB-cap buffer the ring holds about that
+// many, never the cap (llmkit-bk8.1.20).
+func TestCappedBufferRingGrowsWithBytesWritten(t *testing.T) {
+	c := newCappedBuffer(1 << 30)
+	if _, err := c.Write(make([]byte, headBytes+1000)); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.ring) != 1000 {
+		t.Fatalf("len(ring) = %d, want 1000 tail bytes", len(c.ring))
+	}
+	if cap(c.ring) > 2*len(c.ring) {
+		t.Errorf("cap(ring) = %d for %d live bytes; capture memory must be proportional to bytes written, not to the 1 GiB cap", cap(c.ring), len(c.ring))
+	}
+}
+
+// TestCappedBufferChunkingIsInvisible pins that the lazily grown ring
+// retains the same head and tail for any write chunking as the stream it
+// models: first headBytes, then the last tailSize bytes, with the elided
+// count between, across streams that end before the ring fills, exactly as
+// it fills, and long after it wraps.
+func TestCappedBufferChunkingIsInvisible(t *testing.T) {
+	const tailSize = 1000
+	max := headBytes + tailSize
+	for _, total := range []int{
+		headBytes - 1, headBytes, headBytes + 1, headBytes + tailSize - 1,
+		headBytes + tailSize, headBytes + tailSize + 1, headBytes + 2*tailSize + 37, headBytes + 5*tailSize,
+	} {
+		stream := make([]byte, total)
+		for i := range stream {
+			stream[i] = byte(i*31 + i>>8)
+		}
+		var want string
+		var wantTrunc bool
+		switch {
+		case total <= headBytes:
+			want = string(stream)
+		case total == headBytes+tailSize:
+			// The ring filling exactly reports truncated (the pre-lazy behavior).
+			want, wantTrunc = string(stream), true
+		case total < headBytes+tailSize:
+			want = string(stream)
+		default:
+			elided := total - headBytes - tailSize
+			want = string(stream[:headBytes]) + fmt.Sprintf("\n... [%d bytes elided by sandbox] ...\n", elided) + string(stream[total-tailSize:])
+			wantTrunc = true
+		}
+		for _, chunk := range []int{1, 7, 999, 1000, 1001, 4096, headBytes + 3, total} {
+			c := newCappedBuffer(max)
+			for off := 0; off < total; off += chunk {
+				end := off + chunk
+				if end > total {
+					end = total
+				}
+				if _, err := c.Write(stream[off:end]); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, trunc := c.result()
+			if got != want || trunc != wantTrunc {
+				t.Errorf("total=%d chunk=%d: result differs from the stream model (len got=%d want=%d, truncated got=%v want=%v)", total, chunk, len(got), len(want), trunc, wantTrunc)
+			}
+		}
+	}
+}
+
+// TestExecCaptureAllocationIsIndependentOfCap pins bead llmkit-bk8.1.20:
+// one supervised run that writes 10 bytes under a 1 GiB per-stream cap
+// allocates a few MiB at most, and a math.MaxInt cap neither panics nor
+// changes the captured bytes. TotalAlloc is the measure: an allocation
+// counter sees the eager make([]byte, cap) that AllocsPerRun cannot.
+func TestExecCaptureAllocationIsIndependentOfCap(t *testing.T) {
+	run := func(maxOutput int) Result {
+		res, err := runSupervised(context.Background(), runSpec{
+			spec:           Spec{Workspace: t.TempDir(), Cmd: []string{"sh", "-c", "printf 0123456789; printf abcdefghij >&2"}},
+			timeout:        30 * time.Second,
+			maxOutputBytes: maxOutput,
+			hooks: runHooks{
+				buildCmd: func(_ string, runCtx context.Context) (*exec.Cmd, error) {
+					return exec.CommandContext(runCtx, "sh", "-c", "printf 0123456789; printf abcdefghij >&2"), nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("runSupervised(maxOutput=%d): %v", maxOutput, err)
+		}
+		return res
+	}
+
+	run(1 << 30) // warm one-time allocations out of the measured window
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	res := run(1 << 30)
+	runtime.ReadMemStats(&after)
+	if grew := after.TotalAlloc - before.TotalAlloc; grew >= 16<<20 {
+		t.Errorf("TotalAlloc grew %d bytes for a 10-byte run under WithMaxOutputBytes(1<<30); want < 16 MiB", grew)
+	}
+	if res.Stdout != "0123456789" || res.Stderr != "abcdefghij" {
+		t.Errorf("captured (%q, %q), want the 10 bytes written to each stream", res.Stdout, res.Stderr)
+	}
+
+	huge := run(math.MaxInt)
+	if huge.Stdout != "0123456789" || huge.Stderr != "abcdefghij" || huge.StdoutTruncated || huge.StderrTruncated {
+		t.Errorf("MaxInt cap captured (%q, %q) truncated=%v/%v, want the 10 bytes untruncated", huge.Stdout, huge.Stderr, huge.StdoutTruncated, huge.StderrTruncated)
 	}
 }

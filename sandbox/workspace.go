@@ -152,7 +152,15 @@ func (c *wsCache) clone(repoDir, key string) (ws string, hit bool, err error) {
 			c.mu.Unlock()
 			return "", false, fmt.Errorf("sandbox: create pristine workspace dir: %w", mkErr)
 		}
-		if cpErr := copyWorkspace(repoDir, pristine); cpErr != nil {
+		// Leave out the cache dir, not only the pristine inside it: when
+		// TMPDIR lies inside a submodule or untracked nested repo, whose
+		// working tree is copied in full, the cache dir would otherwise land
+		// in the pristine as an empty directory.
+		dirInfo, cpErr := os.Stat(c.dir)
+		if cpErr == nil {
+			cpErr = copyWorkspaceSkipping(repoDir, pristine, dirInfo)
+		}
+		if cpErr != nil {
 			_ = os.RemoveAll(pristine)
 			c.key, c.pristine = "", ""
 			c.mu.Unlock()
@@ -244,27 +252,28 @@ func workspaceCacheKey(repoDir string) (key string, isRepo bool, err error) {
 	return hex.EncodeToString(h.Sum(nil)), true, nil
 }
 
-// copyTree recursively copies the directory tree rooted at src into dst, which
-// must already exist. Regular files and directories are copied with their
-// permission bits; symlinks are recreated as symlinks (their targets are not
-// followed, which avoids copying outside the tree and preserves repo layout).
-func copyTree(src, dst string) error {
-	return copyTreeWith(src, dst, copyFile)
-}
-
-// cloneTree is copyTree's fast path for cloning a pristine cache entry
-// (the backends' wsCache) into a fresh per-run workspace: it copies
-// regular files via reflinkOrCopy, which prefers a copy-on-write reflink over
-// a full byte copy where the filesystem supports it.
+// cloneTree copies a pristine cache entry (the backends' wsCache) into a fresh
+// per-run workspace: it copies regular files via reflinkOrCopy, which prefers
+// a copy-on-write reflink over a full byte copy where the filesystem supports
+// it.
 func cloneTree(src, dst string) error {
-	return copyTreeWith(src, dst, reflinkOrCopy)
+	return copyTreeWith(src, dst, nil, reflinkOrCopy)
 }
 
-// copyTreeWith is copyTree parameterized over the regular-file copy strategy,
-// shared by copyTree (always a full byte copy) and cloneTree (reflink-first).
-// Directory/symlink handling — the parts that must always be exact, never
-// content-copied — stays identical between the two callers.
-func copyTreeWith(src, dst string, copyRegular func(src, dst string, perm fs.FileMode) error) error {
+// copyTreeWith recursively copies the directory tree rooted at src into dst,
+// which must already exist. A directory or regular file it creates below dst
+// gets its source permission bits as the requested mode; regular files
+// are written by copyRegular: copyFile for copyWorkspaceSkipping and
+// copyFileListSkipping, reflinkOrCopy for cloneTree. Symlinks are recreated
+// as symlinks (their targets are not followed, which avoids copying outside
+// the tree and preserves repo layout).
+//
+// skip is the identity of the directory to leave out, or nil to leave out
+// nothing: a directory under src that os.SameFile reports as skip is not
+// entered. The match is by device and inode (os.SameFile), not by path, so
+// it holds when the skipped directory was named through a symlink. The root
+// of src itself is never excluded.
+func copyTreeWith(src, dst string, skip fs.FileInfo, copyRegular func(src, dst string, perm fs.FileMode) error) error {
 	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -298,6 +307,9 @@ func copyTreeWith(src, dst string, copyRegular func(src, dst string, perm fs.Fil
 				// dst already exists; align its mode with the source root.
 				return os.Chmod(dst, info.Mode().Perm())
 			}
+			if os.SameFile(skip, info) {
+				return filepath.SkipDir
+			}
 			return os.MkdirAll(target, info.Mode().Perm())
 
 		case d.Type()&fs.ModeSymlink != 0:
@@ -330,8 +342,21 @@ func copyTreeWith(src, dst string, copyRegular func(src, dst string, perm fs.Fil
 // CMake's build/ whose CMakeCache.txt is pinned to a host-absolute path, which
 // otherwise poisons an in-sandbox rebuild), the .git directory, and built
 // vendor caches. When src is not a git repo (or git is unavailable) it falls
-// back to a full recursive copy so non-git checkouts still work.
+// back to a full recursive copy so non-git checkouts still work. The
+// recursive copies do not enter a directory with dst's identity (see
+// copyTreeWith).
 func copyWorkspace(src, dst string) error {
+	skip, err := os.Stat(dst)
+	if err != nil {
+		return err
+	}
+	return copyWorkspaceSkipping(src, dst, skip)
+}
+
+// copyWorkspaceSkipping is copyWorkspace with the directory to leave out
+// given as skip (see copyTreeWith). wsCache passes its cache directory, which
+// holds the pristine being materialized.
+func copyWorkspaceSkipping(src, dst string, skip fs.FileInfo) error {
 	files, isRepo, err := GitWorktreeFiles(src)
 	if err != nil {
 		// src IS a git work tree but listing failed. Falling back to a full copy
@@ -341,9 +366,9 @@ func copyWorkspace(src, dst string) error {
 		return err
 	}
 	if isRepo {
-		return copyFileList(src, dst, files)
+		return copyFileListSkipping(src, dst, files, skip)
 	}
-	return copyTree(src, dst)
+	return copyTreeWith(src, dst, skip, copyFile)
 }
 
 // GitWorktreeFiles returns the repo-relative paths git considers part of the
@@ -390,15 +415,16 @@ func gitStderr(err error) string {
 	return ""
 }
 
-// copyFileList copies the given repo-relative entries from src into dst,
-// creating parent directories as needed. Regular files preserve their
-// permission bits; symlinks are recreated (targets not followed). A directory
-// entry is a git submodule gitlink (ls-files emits the submodule path, which
-// resolves on disk to its checked-out working tree) and is recursively copied
-// so vendored-as-submodule dependencies reach the sandbox, matching the old
-// full-copy behavior. A listed path missing on disk (e.g. a tracked-but-deleted
-// file) is skipped rather than aborting the copy.
-func copyFileList(src, dst string, files []string) error {
+// copyFileListSkipping copies the given repo-relative entries from src into
+// dst, creating parent directories as needed. A regular file is created with
+// its source permission bits as the requested mode; symlinks are recreated
+// (targets not followed). A directory entry (ls-files emits a submodule by its
+// gitlink path, which resolves on disk to its checked-out working tree) is
+// recursively copied so vendored-as-submodule dependencies reach the sandbox.
+// A listed path missing on disk (e.g. a tracked-but-deleted file) is skipped
+// rather than aborting the copy. The recursive copy of a directory entry
+// leaves out skip (see copyTreeWith).
+func copyFileListSkipping(src, dst string, files []string, skip fs.FileInfo) error {
 	for _, rel := range files {
 		srcPath := filepath.Join(src, rel)
 		info, err := os.Lstat(srcPath)
@@ -425,13 +451,13 @@ func copyFileList(src, dst string, files []string) error {
 				return err
 			}
 		case info.IsDir():
-			// Submodule gitlink: copy its working tree (copyTree skips the
-			// submodule's own .git). MkdirAll the target first so copyTree's
-			// root-dir chmod has a directory to act on.
+			// Submodule gitlink: copy its working tree (copyTreeWith skips the
+			// submodule's own .git). MkdirAll the target first so
+			// copyTreeWith's root-dir chmod has a directory to act on.
 			if err := os.MkdirAll(target, 0o755); err != nil {
 				return err
 			}
-			if err := copyTree(srcPath, target); err != nil {
+			if err := copyTreeWith(srcPath, target, skip, copyFile); err != nil {
 				return err
 			}
 		case info.Mode().IsRegular():

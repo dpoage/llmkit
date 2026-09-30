@@ -5,7 +5,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -32,6 +34,113 @@ func TestSystemdRunWrapArgs(t *testing.T) {
 	tail := args[len(args)-2:]
 	if !slices.Equal(tail, []string{"--unshare-all", "true"}) {
 		t.Errorf("bwrap argv not preserved at tail: %q", tail)
+	}
+}
+
+// systemdCPUQuotaPattern is systemd's measured CPUQuota= grammar on this
+// lane's reference host (systemd 262): a percentage with at most two
+// decimals ("33.3%" and "7.25%" parse; "0.333%" and "7.125%" are Invalid
+// argument). systemdMaxCPUQuotaPercent is the measured ceiling
+// (21474836.47% accepted, 21474836.48% "Numerical result out of range").
+var systemdCPUQuotaPattern = regexp.MustCompile(`^[0-9]+(\.[0-9]{1,2})?%$`)
+
+const systemdMaxCPUQuotaPercent = 21474836.47
+
+// renderedCPUQuota returns the CPUQuota= property systemdRunWrapArgs
+// renders for cpus.
+func renderedCPUQuota(t *testing.T, cpus float64) string {
+	t.Helper()
+	args := systemdRunWrapArgs("/usr/bin/bwrap", []string{"true"}, cpus, 0, 0)
+	for i, a := range args {
+		if a == "-p" && i+1 < len(args) && strings.HasPrefix(args[i+1], "CPUQuota=") {
+			return strings.TrimPrefix(args[i+1], "CPUQuota=")
+		}
+	}
+	t.Fatalf("no CPUQuota property rendered for cpus=%v: %q", cpus, args)
+	return ""
+}
+
+// TestSystemdRunWrapArgsRendersAcceptedCPUQuota (llmkit-bk8.1.45): every
+// WithCPUs value a constructor admits renders a CPUQuota systemd accepts.
+// The rows are float noise (1.1*100 = 110.00000000000001) and more than
+// two decimals (0.333), plus the floor and the ceiling. The strings are
+// asserted directly because CI has no systemd user session; the
+// integration row runs them for real.
+func TestSystemdRunWrapArgsRendersAcceptedCPUQuota(t *testing.T) {
+	rows := []struct {
+		cpus float64
+		want string
+	}{
+		{minCPUs, "1%"},
+		{0.07, "7%"},
+		{0.29, "29%"},
+		{0.333, "33.3%"},
+		{0.0123, "1.23%"},
+		{1.1, "110%"},
+		{1.5, "150%"},
+		{2.3, "230%"},
+		{maxCPUs, "21474836.47%"},
+	}
+	for _, r := range rows {
+		got := renderedCPUQuota(t, r.cpus)
+		if got != r.want {
+			t.Errorf("WithCPUs(%v) renders CPUQuota=%s, want %s", r.cpus, got, r.want)
+		}
+	}
+}
+
+// TestSystemdRunWrapArgsCPUQuotaProperty sweeps admitted values and checks
+// the two rendered-string rules the measured systemd enforces plus the
+// rounding contract: the rendered cap is within one render step
+// (0.0001 CPU) of the request, so it is never looser than asked by more
+// than that.
+func TestSystemdRunWrapArgsCPUQuotaProperty(t *testing.T) {
+	var values []float64
+	for k := 10; k <= 5000; k++ { // 0.010 .. 5.000 in 0.001 steps
+		values = append(values, float64(k)/1000)
+	}
+	values = append(values, 0.0101, 0.0149, 0.0151, 1.00005, 1.00004, 99.9999, 1e3, 1e5, maxCPUs)
+	for _, cpus := range values {
+		got := renderedCPUQuota(t, cpus)
+		if !systemdCPUQuotaPattern.MatchString(got) {
+			t.Errorf("WithCPUs(%v) renders CPUQuota=%s, which systemd rejects (more than two decimals of percent)", cpus, got)
+			continue
+		}
+		pct, err := strconv.ParseFloat(strings.TrimSuffix(got, "%"), 64)
+		if err != nil {
+			t.Fatalf("parse %q: %v", got, err)
+		}
+		if pct > systemdMaxCPUQuotaPercent {
+			t.Errorf("WithCPUs(%v) renders CPUQuota=%s, above systemd's %v%% maximum", cpus, got, systemdMaxCPUQuotaPercent)
+		}
+		if diff := pct/100 - cpus; diff > 0.0001 || diff < -0.0001 {
+			t.Errorf("WithCPUs(%v) renders %s: %v CPUs, off by %v (more than one 0.0001 step)", cpus, got, pct/100, diff)
+		}
+	}
+}
+
+// TestCgroupV2LimitsRendersRequestedCPUQuota pins the cgroup v2 render of
+// the same values: cpu.max quota is the request rounded to nearest
+// microsecond of the 100000us period, not truncated (0.29*100000 is
+// 28999.999999999996 in float64, which truncation would take to 28999).
+func TestCgroupV2LimitsRendersRequestedCPUQuota(t *testing.T) {
+	rows := []struct {
+		cpus float64
+		want string
+	}{
+		{minCPUs, "1000 100000"},
+		{0.07, "7000 100000"},
+		{0.29, "29000 100000"},
+		{0.333, "33300 100000"},
+		{1.1, "110000 100000"},
+		{2.3, "230000 100000"},
+		{maxCPUs, "21474836470 100000"},
+	}
+	for _, r := range rows {
+		_, got, _, _, cpuOK, _ := cgroupV2Limits(r.cpus, 0, 0)
+		if !cpuOK || got != r.want {
+			t.Errorf("cgroupV2Limits(%v) cpu.max = %q (ok=%v), want %q", r.cpus, got, cpuOK, r.want)
+		}
 	}
 }
 
@@ -228,5 +337,33 @@ func TestBwrapExec_NoCapMethod_IsSentinel(t *testing.T) {
 	_, err = s.Exec(context.Background(), Spec{RepoDir: repo, Cmd: []string{"true"}})
 	if errors.Is(err, ErrBwrapNoCapMethod) {
 		t.Fatalf("with allow-uncapped, Exec must not return ErrBwrapNoCapMethod; got %v", err)
+	}
+}
+
+// TestDelegatedCgroupV2DirRefusesWritableScopeWithoutLimitFiles pins bead
+// llmkit-bk8.1.19: a scope this process can mkdir in is not a delegation. A
+// child of a scope whose parent enables no controllers has no memory.max /
+// cpu.max / pids.max, so reporting the scope would make Describe say
+// "enforced" while every Exec died at its first limit write. The fake root
+// is a plain writable directory tree — exactly the "mkdir succeeds, no limit
+// files appear" shape of an undelegated scope.
+func TestDelegatedCgroupV2DirRefusesWritableScopeWithoutLimitFiles(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "cgroup.controllers"), []byte("memory pids\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "scope"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	self := filepath.Join(t.TempDir(), "cgroup")
+	if err := os.WriteFile(self, []byte("0::/scope\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if dir, ok := delegatedCgroupV2DirAt(root, self); ok {
+		t.Fatalf("delegatedCgroupV2DirAt = (%q, true) for a writable scope whose children get no limit files; want false", dir)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(root, "scope")); len(entries) != 0 {
+		t.Errorf("the probe left %d entries in the scope, want none", len(entries))
 	}
 }

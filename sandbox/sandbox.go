@@ -53,7 +53,8 @@ func (e *UnsupportedSpecError) Error() string {
 // included — when the Spec itself is malformed and no backend could run
 // it: an empty Cmd, neither RepoDir nor Workspace, a relative Workspace,
 // a WriteFiles key or CaptureFiles entry escaping the workspace, an
-// empty/relative mount path, a duplicate ContainerPath, or an Env entry
+// empty/relative mount path, a mount at "/" or WorkspaceMount, a duplicate
+// ContainerPath, or an Env entry
 // without "=" or with an empty key. The three real backends also refuse
 // a Workspace that does not exist, is not a directory, or cannot be
 // entered. Match with errors.As; Field names the offending Spec field.
@@ -68,9 +69,10 @@ type InvalidSpecError struct {
 	//   - "WriteFiles": a key escapes the workspace.
 	//   - "CaptureFiles": an entry escapes the workspace.
 	//   - "ROMounts" or "RWMounts": the list holding a mount with an empty
-	//     or relative HostPath/ContainerPath, or — for a duplicate
-	//     ContainerPath — the list holding the SECOND occurrence (ROMounts
-	//     are checked before RWMounts).
+	//     or relative HostPath/ContainerPath, a ContainerPath that is "/" or
+	//     WorkspaceMount after filepath.Clean, or — for a duplicate
+	//     ContainerPath, compared after filepath.Clean — the list holding
+	//     the SECOND occurrence (ROMounts are checked before RWMounts).
 	//   - "Env": an entry has no "=" or an empty key.
 	Field string
 	// Reason is the human-readable explanation of what is wrong.
@@ -122,7 +124,9 @@ type Spec struct {
 	// repeated Execs against the same Workspace accumulate and overwrite
 	// files exactly like repeated writes to a real working tree. The
 	// container backends require an absolute path; HostExec uses the path
-	// verbatim as the working directory.
+	// verbatim as the working directory. The CLI backend refuses an
+	// absolute path containing ':' with an UnsupportedSpecError (its
+	// `-v host:ctr:opts` syntax cannot express it).
 	//
 	// TRUST: only pass a directory the harness itself created (e.g. via
 	// MaterializeWorkspace). Exec does no provenance check, so an arbitrary
@@ -147,7 +151,8 @@ type Spec struct {
 	// Timeout bounds the execution wall-clock time as a HARD ceiling.
 	// When <= 0 the backend's default timeout is used (CLI and Bwrap
 	// default to 10m; HostExec has no default, so only the caller's
-	// context can cancel). On expiry the backend kills the command and
+	// context can cancel). On expiry the backend kills the command (HostExec
+	// on Linux also kills the command's descendants; see HostExec) and
 	// sets Result.TimedOut.
 	Timeout time.Duration
 
@@ -172,10 +177,31 @@ type Spec struct {
 	// The CLI and Bwrap backends honor them; HostExec refuses a non-empty
 	// ROMounts with an UnsupportedSpecError.
 	//
-	// A mount is NEVER writable. Both paths must be absolute; empty paths
-	// and duplicate ContainerPaths across ROMounts and RWMounts are
-	// rejected as an error by Exec. On the CLI backend each mount renders
-	// as `-v host:ctr:ro,Z` unless ROMount.Shared is true.
+	// A mount is NEVER writable. Both paths must be absolute; an empty path,
+	// a ContainerPath of "/" or WorkspaceMount, and a duplicate
+	// ContainerPath across ROMounts and RWMounts (compared after
+	// filepath.Clean, so "/opt/a" and "/opt/a/" are one path) are rejected
+	// as an InvalidSpecError by Exec. The CLI and Bwrap backends also
+	// refuse with an UnsupportedSpecError a ContainerPath that, after
+	// filepath.Clean, equals a destination the backend or its runtime
+	// provides itself:
+	//
+	//   - both: a WithHostToolchains mount's ContainerPath.
+	//   - Bwrap: a POSIX-baseline bind's ContainerPath, a fixed-allowlist
+	//     path, /proc, /dev, /dev/null, /dev/zero, /dev/full, /dev/random,
+	//     /dev/urandom, /dev/tty, /dev/pts, /tmp, /etc/resolv.conf.
+	//   - CLI: /tmp, /run, /var/tmp, /run/.containerenv, /etc/hostname,
+	//     /etc/hosts, /etc/resolv.conf, /dev, /dev/shm, /dev/pts,
+	//     /dev/mqueue, /dev/null, /dev/zero, /dev/full, /dev/tty,
+	//     /dev/random, /dev/urandom, /proc, /sys, /sys/fs/cgroup,
+	//     /proc/acpi, /proc/scsi, /proc/kcore, /proc/keys,
+	//     /proc/timer_list, /proc/interrupts, /proc/asound, /proc/bus,
+	//     /proc/fs, /proc/irq, /proc/sys, /proc/sysrq-trigger,
+	//     /sys/devices/virtual/powercap, /sys/firmware.
+	//
+	// The CLI also refuses a ':' in either path, which its
+	// `-v host:ctr:opts` syntax cannot express. On the CLI backend each
+	// mount renders as `-v host:ctr:ro,Z` unless ROMount.Shared is true.
 	//
 	// SECURITY: a read-only mount exposes host content to untrusted,
 	// model-driven code. Callers must only mount public/cache content and
@@ -209,7 +235,8 @@ type Spec struct {
 	// backend Shared=true suppresses the SELinux :Z relabel, exactly like
 	// ROMounts: host-owned trees the host also manages must keep their
 	// context. Absolute-path and uniqueness validation match ROMounts, and
-	// ContainerPaths must be unique across ROMounts and RWMounts combined.
+	// ContainerPaths must be unique across ROMounts and RWMounts combined
+	// (see ROMounts for the refusals).
 	RWMounts []ROMount
 
 	// SetupCmds are optional ordered commands executed inside the sandbox,
@@ -230,8 +257,8 @@ type Spec struct {
 	// intentional: verdict classification treats container exit 125/126/127
 	// as an environment error, NOT a demonstrated result — a failed
 	// "npm ci --offline" must never be misread as a successful repro. The
-	// original Cmd is exec'd (via sh's exec builtin), so it retains its own
-	// exit code and signal mask.
+	// original Cmd runs after the setup commands and its exit code is the
+	// run's exit code.
 	//
 	// Requires /bin/sh in the container image (or in the bwrap allowlist).
 	// Go-only images set no SetupCmds, so existing images and behavior are

@@ -1,12 +1,16 @@
 package sandbox
 
 import (
+	"context"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestPrepareWorkspaceCopiesTreeAndAppliesWriteFiles(t *testing.T) {
@@ -381,18 +385,22 @@ func TestCopyWorkspaceRecreatesSymlink(t *testing.T) {
 
 // TestCopyFileList_RecursesSubmoduleDir covers the submodule path: git ls-files
 // emits a submodule by its gitlink path, which resolves on disk to a directory.
-// copyFileList must recurse-copy that working tree (so vendored-as-submodule
+// copyFileListSkipping must recurse-copy that working tree (so vendored-as-submodule
 // deps reach the sandbox) while skipping the submodule's own .git gitfile.
 func TestCopyFileList_RecursesSubmoduleDir(t *testing.T) {
 	src := t.TempDir()
 	mustMkdir(t, filepath.Join(src, "vendor", "gtest"))
 	mustWrite(t, filepath.Join(src, "vendor", "gtest", "gtest.h"), "#pragma once\n", 0o644)
-	// Submodules carry a .git FILE (a gitfile); copyTree must skip it.
+	// Submodules carry a .git FILE (a gitfile); copyTreeWith must skip it.
 	mustWrite(t, filepath.Join(src, "vendor", "gtest", ".git"), "gitdir: ../../.git/modules/vendor/gtest\n", 0o644)
 	dst := t.TempDir()
 
-	if err := copyFileList(src, dst, []string{filepath.Join("vendor", "gtest")}); err != nil {
-		t.Fatalf("copyFileList: %v", err)
+	dstInfo, err := os.Stat(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := copyFileListSkipping(src, dst, []string{filepath.Join("vendor", "gtest")}, dstInfo); err != nil {
+		t.Fatalf("copyFileListSkipping: %v", err)
 	}
 	assertFileContent(t, filepath.Join(dst, "vendor", "gtest", "gtest.h"), "#pragma once\n")
 	if _, err := os.Stat(filepath.Join(dst, "vendor", "gtest", ".git")); !os.IsNotExist(err) {
@@ -404,7 +412,7 @@ func TestCopyFileList_RecursesSubmoduleDir(t *testing.T) {
 // src): a nested .git directory must be skipped so stale metadata never reaches
 // the workspace even when the git-aware path is not taken.
 func TestCopyTreeSkipsNestedGitInFallback(t *testing.T) {
-	src := t.TempDir() // no top-level .git -> copyWorkspace falls back to copyTree
+	src := t.TempDir() // no top-level .git -> copyWorkspace falls back to copyTreeWith
 	mustWrite(t, filepath.Join(src, "main.go"), "package main\n", 0o644)
 	mustMkdir(t, filepath.Join(src, "sub", ".git"))
 	mustWrite(t, filepath.Join(src, "sub", ".git", "config"), "x\n", 0o644)
@@ -594,4 +602,289 @@ func TestCaptureWorkspaceFiles_SymlinkEscapeRejected(t *testing.T) {
 			t.Fatalf("in-workspace symlink target must be captured normally, got %q", got["report.xml"])
 		}
 	})
+}
+
+// treeListing returns a sorted "<kind> <rel>" line per entry under root (d, f
+// or l for directory, regular file or symlink), skipping any entry named .git
+// because the workspace copy never carries VCS metadata.
+func treeListing(root string) ([]string, error) {
+	var out []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == root {
+			return nil
+		}
+		if d.Name() == ".git" {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		kind := "f"
+		switch {
+		case d.IsDir():
+			kind = "d"
+		case d.Type()&fs.ModeSymlink != 0:
+			kind = "l"
+		}
+		out = append(out, kind+" "+filepath.ToSlash(rel))
+		return nil
+	})
+	sort.Strings(out)
+	return out, err
+}
+
+// TestSelfCopyHelperProcess is the child half of runSelfCopyChild: it runs one
+// workspace preparation with TMPDIR pointing into the repo being copied and
+// prints the resulting workspace listing. It is skipped unless the parent set
+// the mode variable, so the ordinary suite never runs it directly.
+func TestSelfCopyHelperProcess(t *testing.T) {
+	mode := os.Getenv("LLMKIT_SELFCOPY_MODE")
+	if mode == "" {
+		t.Skip("child half of runSelfCopyChild")
+	}
+	repo := os.Getenv("LLMKIT_SELFCOPY_REPO")
+	var (
+		ws       string
+		listRoot string
+		err      error
+	)
+	switch mode {
+	case "prepare":
+		ws, err = prepareWorkspace(repo, nil)
+	case "cached":
+		var c wsCache
+		defer func() { _ = c.close() }()
+		ws, _, err = prepareWorkspaceCached(&c, repo, nil)
+	case "gitlink":
+		// The destination sits inside a gitlink directory entry that
+		// copyFileListSkipping copies recursively.
+		if ws, err = os.MkdirTemp("", "llmkit-sandbox-"); err == nil {
+			var wsInfo fs.FileInfo
+			if wsInfo, err = os.Stat(ws); err == nil {
+				err = copyFileListSkipping(repo, ws, []string{filepath.Join("vendor", "gtest")}, wsInfo)
+			}
+			listRoot = filepath.Join(ws, "vendor", "gtest")
+		}
+	default:
+		t.Fatalf("unknown mode %q", mode)
+	}
+	if err != nil {
+		if ws != "" {
+			_ = os.RemoveAll(ws)
+		}
+		t.Fatalf("%s: %v", mode, err)
+	}
+	if listRoot == "" {
+		listRoot = ws
+	}
+	lines, lerr := treeListing(listRoot)
+	_ = os.RemoveAll(ws)
+	if lerr != nil {
+		t.Fatalf("list workspace: %v", lerr)
+	}
+	for _, l := range lines {
+		_, _ = os.Stdout.WriteString("SELFCOPY " + l + "\n")
+	}
+}
+
+// runSelfCopyChild re-executes the test binary as TestSelfCopyHelperProcess
+// with TMPDIR=tmpdir and returns the workspace listing it printed. The child
+// runs under a wall-clock bound: a copy that recurses into its own destination
+// is killed rather than allowed to grow disk without limit.
+func runSelfCopyChild(t *testing.T, mode, repo, tmpdir string) []string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSelfCopyHelperProcess$", "-test.count=1")
+	cmd.Env = append(os.Environ(),
+		"LLMKIT_SELFCOPY_MODE="+mode,
+		"LLMKIT_SELFCOPY_REPO="+repo,
+		"TMPDIR="+tmpdir,
+	)
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("child %s did not terminate within 30s", mode)
+	}
+	if err != nil {
+		t.Fatalf("child %s failed: %v\n%s", mode, err, out)
+	}
+	var got []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if rest, ok := strings.CutPrefix(line, "SELFCOPY "); ok {
+			got = append(got, rest)
+		}
+	}
+	sort.Strings(got)
+	return got
+}
+
+func diffListings(t *testing.T, got, want []string) {
+	t.Helper()
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("workspace file set != repo file set\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// TestPrepareWorkspaceNeverCopiesItself pins that a workspace created inside
+// the repo it copies (TMPDIR under RepoDir, directly or through a symlinked
+// alias) contains exactly the repo's file set: no copy of itself, and no
+// omission of a legitimate entry that merely shares the workspace name prefix.
+// Covered on the non-git full-copy path, the git file-list path and the
+// wsCache materialization path.
+func TestPrepareWorkspaceNeverCopiesItself(t *testing.T) {
+	type entry struct{ shape, mode string }
+	entries := []entry{{"nongit", "prepare"}, {"git", "prepare"}, {"git", "cached"}}
+	for _, e := range entries {
+		for _, tmpKind := range []string{"inside", "alias"} {
+			t.Run(e.shape+"/"+e.mode+"/"+tmpKind, func(t *testing.T) {
+				if e.shape == "git" {
+					if _, err := exec.LookPath("git"); err != nil {
+						t.Skip("git not on PATH")
+					}
+				}
+				if tmpKind == "alias" && runtime.GOOS == "windows" {
+					t.Skip("symlink alias needs unix symlinks")
+				}
+				repo := t.TempDir()
+				mustWrite(t, filepath.Join(repo, "go.mod"), "module example\n", 0o644)
+				mustMkdir(t, filepath.Join(repo, "pkg"))
+				mustWrite(t, filepath.Join(repo, "pkg", "main.go"), "package pkg\n", 0o644)
+				mustMkdir(t, filepath.Join(repo, "tmp"))
+				mustWrite(t, filepath.Join(repo, "tmp", "keep.txt"), "keep\n", 0o644)
+				// Named like the workspace prefix but a real repo entry.
+				mustMkdir(t, filepath.Join(repo, "llmkit-sandbox-notes"))
+				mustWrite(t, filepath.Join(repo, "llmkit-sandbox-notes", "x.txt"), "notes\n", 0o644)
+				if e.shape == "git" {
+					gitInit(t, repo)
+				}
+				want, err := treeListing(repo)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				tmpdir := filepath.Join(repo, "tmp")
+				if tmpKind == "alias" {
+					tmpdir = filepath.Join(t.TempDir(), "alias")
+					if err := os.Symlink(filepath.Join(repo, "tmp"), tmpdir); err != nil {
+						t.Fatal(err)
+					}
+				}
+				got := runSelfCopyChild(t, e.mode, repo, tmpdir)
+				diffListings(t, got, want)
+			})
+		}
+	}
+}
+
+// TestCopyFileListNeverCopiesGitlinkDestination pins the recursive gitlink
+// copy: a destination inside a submodule working tree that copyFileListSkipping
+// recurses into is left out of the copy.
+func TestCopyFileListNeverCopiesGitlinkDestination(t *testing.T) {
+	for _, tmpKind := range []string{"inside", "alias"} {
+		t.Run(tmpKind, func(t *testing.T) {
+			if tmpKind == "alias" && runtime.GOOS == "windows" {
+				t.Skip("symlink alias needs unix symlinks")
+			}
+			repo := t.TempDir()
+			gt := filepath.Join(repo, "vendor", "gtest")
+			mustMkdir(t, filepath.Join(gt, "src"))
+			mustMkdir(t, filepath.Join(gt, "tmp"))
+			mustWrite(t, filepath.Join(gt, "CMakeLists.txt"), "project(gtest)\n", 0o644)
+			mustWrite(t, filepath.Join(gt, ".git"), "gitdir: ../../.git/modules/gtest\n", 0o644)
+			mustWrite(t, filepath.Join(gt, "src", "a.cc"), "int a;\n", 0o644)
+			mustWrite(t, filepath.Join(gt, "tmp", "keep.txt"), "keep\n", 0o644)
+			want, err := treeListing(gt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tmpdir := filepath.Join(gt, "tmp")
+			if tmpKind == "alias" {
+				tmpdir = filepath.Join(t.TempDir(), "alias")
+				if err := os.Symlink(filepath.Join(gt, "tmp"), tmpdir); err != nil {
+					t.Fatal(err)
+				}
+			}
+			diffListings(t, runSelfCopyChild(t, "gitlink", repo, tmpdir), want)
+		})
+	}
+}
+
+// TestPrepareWorkspaceCachedNeverCopiesCacheDir pins the wsCache path when
+// TMPDIR lies inside a directory the git copy takes as a whole working tree (a
+// submodule, or an untracked nested repo): the workspace holds exactly the
+// repo's file set from before the call, so neither the cache directory nor the
+// pristine it holds appears in it.
+func TestPrepareWorkspaceCachedNeverCopiesCacheDir(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	for _, shape := range []string{"submodule", "nestedrepo"} {
+		for _, tmpKind := range []string{"inside", "alias"} {
+			t.Run(shape+"/"+tmpKind, func(t *testing.T) {
+				if tmpKind == "alias" && runtime.GOOS == "windows" {
+					t.Skip("symlink alias needs unix symlinks")
+				}
+				repo := t.TempDir()
+				mustWrite(t, filepath.Join(repo, "go.mod"), "module example\n", 0o644)
+				mustMkdir(t, filepath.Join(repo, "llmkit-sandbox-notes"))
+				mustWrite(t, filepath.Join(repo, "llmkit-sandbox-notes", "x.txt"), "notes\n", 0o644)
+				gitInit(t, repo)
+				var inner string
+				switch shape {
+				case "submodule":
+					up := t.TempDir()
+					mustWrite(t, filepath.Join(up, "lib.c"), "int lib;\n", 0o644)
+					gitInit(t, up)
+					gitRun(t, repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", up, "vendor/up")
+					gitRun(t, repo, "commit", "-q", "-m", "add submodule")
+					inner = filepath.Join(repo, "vendor", "up")
+				case "nestedrepo":
+					// Created after the outer commit, so the outer repo lists it
+					// as one untracked directory.
+					inner = filepath.Join(repo, "nested")
+					mustMkdir(t, inner)
+					mustWrite(t, filepath.Join(inner, "n.txt"), "n\n", 0o644)
+					gitInit(t, inner)
+				}
+				mustMkdir(t, filepath.Join(inner, "tmp"))
+				mustWrite(t, filepath.Join(inner, "tmp", "keep.txt"), "keep\n", 0o644)
+				want, err := treeListing(repo)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				tmpdir := filepath.Join(inner, "tmp")
+				if tmpKind == "alias" {
+					tmpdir = filepath.Join(t.TempDir(), "alias")
+					if err := os.Symlink(filepath.Join(inner, "tmp"), tmpdir); err != nil {
+						t.Fatal(err)
+					}
+				}
+				diffListings(t, runSelfCopyChild(t, "cached", repo, tmpdir), want)
+			})
+		}
+	}
+}
+
+// gitRun runs one git command in dir with the same config isolation as
+// gitInit.
+func gitRun(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_SYSTEM=/dev/null",
+		"GIT_TERMINAL_PROMPT=0",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
 }
