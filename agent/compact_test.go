@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -39,7 +40,7 @@ func TestCompactHistory_PrunesOldKeepsRecentK(t *testing.T) {
 	msgs, names := sampleHistory(6) // 6 tool results
 	recentK := 4
 
-	out, pruned := compactHistory(msgs, recentK, names)
+	out, pruned := compactHistory(msgs, msgs, recentK, names)
 	if pruned != 2 {
 		t.Fatalf("pruned = %d, want 2 (the (6-4) oldest results)", pruned)
 	}
@@ -65,7 +66,7 @@ func TestCompactHistory_PreservesPairingAndStructure(t *testing.T) {
 	msgs, names := sampleHistory(5)
 	orig := append([]llmkit.Message(nil), msgs...)
 
-	out, pruned := compactHistory(msgs, 1, names)
+	out, pruned := compactHistory(msgs, msgs, 1, names)
 	if pruned != 4 {
 		t.Fatalf("pruned = %d, want 4 (5 results minus the recent-1 window)", pruned)
 	}
@@ -113,7 +114,7 @@ func TestCompactHistory_StubFormat(t *testing.T) {
 	}
 	names := map[string]string{"c1": "read_file", "c2": "grep", "c3": "list_dir"}
 
-	out, pruned := compactHistory(msgs, 1, names) // keep only the last result (c3)
+	out, pruned := compactHistory(msgs, msgs, 1, names) // keep only the last result (c3)
 	if pruned != 2 {
 		t.Fatalf("pruned = %d, want 2 (c1 and the errored c2; c3 is recent)", pruned)
 	}
@@ -132,7 +133,7 @@ func TestCompactHistory_StubFormat(t *testing.T) {
 func TestCompactHistory_NothingToPruneWhenAllRecent(t *testing.T) {
 	msgs, names := sampleHistory(3)
 	// recentK >= number of results: nothing falls outside the window.
-	out, pruned := compactHistory(msgs, 3, names)
+	out, pruned := compactHistory(msgs, msgs, 3, names)
 	if pruned != 0 {
 		t.Errorf("pruned = %d, want 0 when all results are within recent-K", pruned)
 	}
@@ -157,7 +158,7 @@ func TestCompactHistory_SkipsAlreadyStubbed(t *testing.T) {
 	}
 	names := map[string]string{"c1": "read_file", "c2": "read_file", "c3": "read_file"}
 
-	out, pruned := compactHistory(msgs, 1, names)
+	out, pruned := compactHistory(msgs, msgs, 1, names)
 	if pruned != 1 {
 		t.Fatalf("pruned = %d, want 1 (the large c2 result; tiny c1 is skipped, c3 is recent)", pruned)
 	}
@@ -272,7 +273,7 @@ func TestCompactHistory_StubsCaptionedImage(t *testing.T) {
 		add(id, toolResultWith(id, llmkit.Text("cap"), bigImg))
 	}
 
-	out, pruned := compactHistory(msgs, compactRecentToolResults, names)
+	out, pruned := compactHistory(msgs, msgs, compactRecentToolResults, names)
 	if pruned != 1 {
 		t.Fatalf("pruned = %d, want 1 (the old captioned image; the small one is under stub size; the last %d are recent)", pruned, compactRecentToolResults)
 	}
@@ -308,7 +309,7 @@ func TestCompactHistory_SpillStubNamesRef(t *testing.T) {
 		{Role: llmkit.RoleAssistant, ToolCalls: []llmkit.ToolCall{{ID: "c2", Name: "dump"}}},
 		bigToolResult("c2", strings.Repeat("y", 4000)),
 	}
-	out, pruned := compactHistory(msgs, 1, map[string]string{"c1": "dump", "c2": "dump"})
+	out, pruned := compactHistory(msgs, msgs, 1, map[string]string{"c1": "dump", "c2": "dump"})
 	if pruned != 1 {
 		t.Fatalf("pruned = %d, want 1", pruned)
 	}
@@ -384,4 +385,144 @@ func TestMaybeCompact_EstimatesRequestCopy(t *testing.T) {
 			t.Errorf("one image estimates %d on a ToolResultMedia client, want %d", got, imageEstimateTokens)
 		}
 	})
+}
+
+// compactHarness is a history under construction plus a maybeCompact call on a
+// client with the given ToolResultMedia capability.
+type compactHarness struct {
+	media bool
+	msgs  []llmkit.Message
+	names map[string]string
+}
+
+func newCompactHarness(media bool, proseBytes int) *compactHarness {
+	return &compactHarness{media: media, names: map[string]string{}, msgs: []llmkit.Message{
+		llmkit.TextMessage(llmkit.RoleUser, "task"),
+		llmkit.TextMessage(llmkit.RoleAssistant, strings.Repeat("p", proseBytes)),
+	}}
+}
+
+func (h *compactHarness) add(tool string, blocks ...llmkit.Block) string {
+	id := "c" + string(rune('a'+len(h.names)))
+	h.names[id] = tool
+	h.msgs = append(h.msgs,
+		llmkit.Message{Role: llmkit.RoleAssistant, ToolCalls: []llmkit.ToolCall{{ID: id, Name: tool}}},
+		toolResultWith(id, blocks...))
+	return id
+}
+
+func (h *compactHarness) compact(threshold int64) (out []llmkit.Message, next int64, events []llmkit.CompactionEvent) {
+	fc := newFakeClient()
+	fc.caps.ToolResultMedia = h.media
+	r := NewRunner(fc, nil, "sys", WithLimits(Limits{HistoryTokenBudget: threshold}))
+	em := runEmitter{tr: NewTranscript(), obs: llmkit.ObserverFunc(func(_ context.Context, ev llmkit.Event) {
+		if ev.Compaction != nil {
+			events = append(events, *ev.Compaction)
+		}
+	})}
+	out, next = r.maybeCompact(context.Background(), em, h.msgs, threshold, h.names, 1)
+	return out, next, events
+}
+
+func resultByID(msgs []llmkit.Message, id string) llmkit.Message {
+	for _, m := range msgs {
+		if m.Role == llmkit.RoleToolResult && m.ToolCallID == id {
+			return m
+		}
+	}
+	return llmkit.Message{}
+}
+
+func TestMaybeCompact_DegradedMediaDoesNotRatchet(t *testing.T) {
+	const budget = 5000
+	h := newCompactHarness(false, 24_000)
+	var shots []string
+	for range 4 {
+		shots = append(shots, h.add("browser_take_screenshot", llmkit.Image("image/png", make([]byte, 1<<20))))
+	}
+	for range 4 {
+		h.add("read_file", llmkit.Text("ok"))
+	}
+
+	out, threshold, events := h.compact(budget)
+	if len(events) != 0 || threshold != budget || &out[0] != &h.msgs[0] {
+		t.Fatalf("step 1: degraded screenshots compacted: threshold %d, events %+v", threshold, events)
+	}
+
+	dump := h.add("read_file", llmkit.Text(strings.Repeat("d", 12_000)))
+	for range 4 {
+		h.add("read_file", llmkit.Text("ok"))
+	}
+	out, threshold, events = h.compact(threshold)
+	if len(events) != 1 || threshold != budget*compactRearmFactor {
+		t.Fatalf("step 2: the aged-out dump did not compact under the original budget: threshold %d, events %+v", threshold, events)
+	}
+	if ev := events[0]; ev.Pruned != 1 || ev.AfterTokens >= ev.BeforeTokens {
+		t.Errorf("step 2 event = %+v, want 1 pruned and a smaller estimate", ev)
+	}
+	if got, want := resultByID(out, dump).Text(), "[tool result pruned to save context: read_file, 12000 bytes]"; got != want {
+		t.Errorf("dump stub = %q, want %q", got, want)
+	}
+	for _, id := range shots {
+		if c := resultByID(out, id).Content; len(c) != 1 || c[0].Kind != llmkit.BlockImage {
+			t.Errorf("screenshot %s was stubbed: %+v", id, c)
+		}
+	}
+}
+
+func TestMaybeCompact_StubSizesRequestCopy(t *testing.T) {
+	caption := strings.Repeat("c", 1000)
+	img := make([]byte, 2<<20)
+	for _, c := range []struct {
+		media bool
+		bytes int
+	}{
+		{true, len(caption) + len(img)},
+		{false, len(caption) + len(imageOmitted)},
+	} {
+		h := newCompactHarness(c.media, 24_000)
+		old := h.add("snap", llmkit.Text(caption), llmkit.Image("image/png", img))
+		for range compactRecentToolResults {
+			h.add("snap", llmkit.Text("cap"), llmkit.Image("image/png", img))
+		}
+		out, _, events := h.compact(5000)
+		if len(events) != 1 || events[0].Pruned != 1 {
+			t.Fatalf("media=%v: events %+v, want one pass pruning the old captioned image", c.media, events)
+		}
+		want := "[tool result pruned to save context: snap, " + strconv.Itoa(c.bytes) + " bytes]"
+		if got := resultByID(out, old).Text(); got != want {
+			t.Errorf("media=%v: stub = %q, want %q", c.media, got, want)
+		}
+	}
+}
+
+func TestMaybeCompact_NoGainNotCounted(t *testing.T) {
+	// The old result is one byte longer than its stub, so stubbing saves 1 byte.
+	size := 0
+	for n := 1; n < 200 && size == 0; n++ {
+		if len(compactStub("read_file", n, false, "")) == n-1 {
+			size = n
+		}
+	}
+	if size == 0 {
+		t.Fatal("no result size one byte over its stub")
+	}
+	const budget = 1000
+	for pad := range 4 {
+		h := newCompactHarness(false, 8000+pad)
+		h.add("read_file", llmkit.Text(strings.Repeat("x", size)))
+		for range compactRecentToolResults {
+			h.add("read_file", llmkit.Text("ok"))
+		}
+		stubbed, pruned := compactHistory(h.msgs, h.msgs, compactRecentToolResults, h.names)
+		if pruned != 1 || estimateTokens(stubbed) != estimateTokens(h.msgs) {
+			continue
+		}
+		out, threshold, events := h.compact(budget)
+		if len(events) != 0 || threshold != budget || &out[0] != &h.msgs[0] {
+			t.Errorf("a pass that does not shrink the estimate was kept: threshold %d, events %+v", threshold, events)
+		}
+		return
+	}
+	t.Fatal("no padding makes the 1-byte saving round away")
 }

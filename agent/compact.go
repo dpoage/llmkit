@@ -93,13 +93,13 @@ func messageBytes(m llmkit.Message) int64 {
 	return b
 }
 
-// mediaBytes is the size of m's image and document blocks: inline data plus
-// URL bytes. compactHistory counts it, with the text, toward a result's size.
-func mediaBytes(m llmkit.Message) int {
+// sentBytes is m's text plus its image and document bytes (inline data and
+// URL); compactHistory sizes a result by it on the request copy.
+func sentBytes(m llmkit.Message) int {
 	n := 0
 	for _, blk := range m.Content {
-		if isMedia(blk) {
-			n += len(blk.Data) + len(blk.URL)
+		if blk.Kind == llmkit.BlockText || isMedia(blk) {
+			n += len(blk.Text) + len(blk.Data) + len(blk.URL)
 		}
 	}
 	return n
@@ -154,8 +154,9 @@ func compactStub(toolName string, origBytes int, isErr bool, spillRef string) st
 //     text Content shrinks (a stubbed message's Content becomes a single text
 //     block; non-text blocks on a pruned result are dropped with the dump).
 //
-// A tool result is a candidate by its total size, text plus image and document
-// bytes; the stub reports that total.
+// sent is the request copy of msgs, index-aligned (see [Runner.wireMessages]).
+// A result is a candidate, and its stub reports, its sentBytes in sent, so
+// media the client degrades counts as its marker text.
 //
 // toolNameFor maps a tool-result's ToolCallID back to the tool name recorded
 // when the call was issued, so the stub can name the tool; an empty/missing
@@ -164,7 +165,7 @@ func compactStub(toolName string, origBytes int, isErr bool, spillRef string) st
 // The returned slice is always a fresh allocation when pruning occurs (the
 // caller must swap it in so the prior, longer prefix is not aliased), and the
 // original is returned unchanged when there is nothing to prune.
-func compactHistory(msgs []llmkit.Message, recentK int, toolNameFor map[string]string) ([]llmkit.Message, int) {
+func compactHistory(msgs, sent []llmkit.Message, recentK int, toolNameFor map[string]string) ([]llmkit.Message, int) {
 	if recentK < 0 {
 		recentK = 0
 	}
@@ -200,17 +201,14 @@ func compactHistory(msgs []llmkit.Message, recentK int, toolNameFor map[string]s
 		if isCompactStub(content) {
 			continue
 		}
-		// A result's size is its text plus its media bytes, so a captioned image
-		// (a short text block beside megabytes of image) is pruned like a large
-		// text dump instead of being kept for its short text.
-		media := mediaBytes(m)
-		origBytes, spillRef := len(content)+media, ""
-		if ref, size, ok := parseSpillMarker(content); ok {
-			origBytes, spillRef = size, ref
+		size := sentBytes(sent[idx])
+		origBytes, spillRef := size, ""
+		if ref, spilled, ok := parseSpillMarker(content); ok {
+			origBytes, spillRef = spilled, ref
 		}
 		stub := compactStub(toolNameFor[m.ToolCallID], origBytes, m.IsError, spillRef)
 		// Skip results already smaller than their stub: stubbing would grow them.
-		if len(content)+media <= len(stub) {
+		if size <= len(stub) {
 			continue
 		}
 		m.Content = []llmkit.Block{{Kind: llmkit.BlockText, Text: stub}}

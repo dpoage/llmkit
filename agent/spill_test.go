@@ -249,7 +249,7 @@ func TestSpill_SP6_CompactionStubKeepsRef(t *testing.T) {
 		sr := runSpill(t, llmkit.Capabilities{}, []llmkit.Block{llmkit.Text(big)}, WithToolOutputLimit(16<<10, &recSink{ref: ref}))
 		msgs := []llmkit.Message{sr.msg, llmkit.ToolResult("c2", "x"), llmkit.ToolResult("c3", "x")}
 		msgs[0].ToolCallID = "c1"
-		out, pruned := compactHistory(msgs, 2, map[string]string{"c1": "big"})
+		out, pruned := compactHistory(msgs, msgs, 2, map[string]string{"c1": "big"})
 		if pruned != 1 {
 			t.Fatalf("pruned = %d, want 1", pruned)
 		}
