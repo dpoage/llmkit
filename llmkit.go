@@ -641,10 +641,10 @@ type Response struct {
 	Usage Usage `json:"usage"`
 	// StopReason is the normalized stop reason.
 	StopReason StopReason `json:"stop_reason,omitempty"`
-	// Served names the backend that produced this response. provider.Fallback
-	// fills it with the member that served; the zero Identity means the
-	// client did not report one. A Fallback hidden behind another wrapper
-	// whose serving member is anonymous reports the wrapper's Identity.
+	// Served names the backend that produced this response; the zero Identity
+	// means the client reported none. provider.Fallback sets it to the member
+	// that served. Observe and the agent Runner tag a successful Completion
+	// with it.
 	Served Identity `json:"served,omitzero"`
 }
 

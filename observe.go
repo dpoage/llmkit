@@ -265,11 +265,10 @@ type CompletionEvent struct {
 	// Err is the failure, as text; empty on success.
 	Err string `json:"err,omitempty"`
 	// Provider is the provider tag ("anthropic", "openai", ...) or the
-	// caller's own config name: Response.Served's on success when set,
-	// else the client's [IdentityOf].Provider.
+	// caller's own config name. On success, a non-zero Response.Served
+	// supplies both Provider and Model; otherwise the client's [IdentityOf].
 	Provider string `json:"provider,omitempty"`
-	// Model is the model identifier: Response.Served's on success when
-	// set, else the client's [IdentityOf].Model.
+	// Model is the model identifier, from the same source as Provider.
 	Model string `json:"model,omitempty"`
 }
 

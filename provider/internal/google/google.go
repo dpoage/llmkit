@@ -442,12 +442,14 @@ func functionCallKey(id, name string) string {
 	return id + "\x00" + name
 }
 
-// foreignCallSignature is Google's documented bypass for function calls the API did not generate:
-// https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures (FAQ 1).
+// foreignCallSignature is Google's documented bypass for a function call the
+// API did not generate (thought-signatures guide, FAQ 1).
 const foreignCallSignature = "skip_thought_signature_validator"
 
-// signForeignCalls gives the first unsigned functionCall of each model step in the current turn the bypass.
-// genai's []byte field puts it on the wire base64-encoded (go-genai #711); Google accepting that form is unverified.
+// signForeignCalls sets the bypass on the first functionCall, when unsigned, of each model step
+// in the current turn; other calls get none. The SDK's []byte field sends it base64-encoded
+// (go-genai #711), unverified: langchain-google #1570/#1972 report Vertex rejecting that form,
+// pydantic-ai reports it working on the Gemini API (llmkit-ws9).
 func signForeignCalls(contents []*genai.Content) {
 	turn := -1
 	for i, c := range contents {
@@ -753,10 +755,9 @@ func isGemini3(model string) bool {
 	return inSeries(model, "gemini-3")
 }
 
-// requiresThoughtSignatures reports whether Google's thought-signature rule applies:
-// "When using Gemini 4 and Gemini 3 models, you must pass back thought signatures"
-// (https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures).
-// It gates only the foreign-call bypass; thinking_level mapping stays on isGemini3.
+// requiresThoughtSignatures reports whether the model is Gemini 3 or 4, the
+// series Google's thought-signature rule covers. It gates only the bypass;
+// thinking-level mapping stays on isGemini3.
 func requiresThoughtSignatures(model string) bool {
 	return inSeries(model, "gemini-3") || inSeries(model, "gemini-4")
 }

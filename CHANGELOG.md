@@ -62,13 +62,10 @@ entry below is marked.
   blocks pass to a member with the same provider tag and drop for a different
   one. See `docs/providers.md`.
 - `llmkit`: `Response.Served`, the `Identity` of the backend that produced the
-  response, set by `provider.Fallback` when the serving member left it empty
-  (JSON key `served`, omitted when zero). `Identity` gains the JSON keys
-  `provider` and `model` (llmkit-rli.1.6).
-- `llmkit`, `agent`: `llmkit.Observe` and the agent `Runner` tag a successful
-  call's `Completion` event with `Response.Served` when it is set, instead of
-  the client's `IdentityOf`. A failed call and a zero `Served` keep the
-  client's identity (llmkit-rli.1.6).
+  response (JSON key `served`, omitted when zero). `provider.Fallback` sets it
+  to the serving member's identity when the response left it empty, except for
+  a member that is itself a `Fallback`. `Identity`, which was not serialized
+  before, gains the JSON keys `provider` and `model` (llmkit-rli.1.6).
 
 ### Changed
 
@@ -92,17 +89,32 @@ entry below is marked.
   `BudgetTokens` and no `Effort`, or with a negative `BudgetTokens`, is now
   refused pre-wire with an error wrapping `ErrInvalidRequest`. Before, the
   OpenAI adapters dropped every `ThinkingConfig`.
+- `llmkit`, `agent`: when a successful response sets `Response.Served`, the
+  `Completion` event from `llmkit.Observe` and from the agent `Runner` takes
+  `Provider` and `Model` from it instead of from the client's `IdentityOf`;
+  `Options.Provider` does not override it. A failed call and a zero `Served`
+  keep the client's identity, so only responses that set `Served` (today, those
+  of `provider.Fallback`) change. Replaying a record whose responses carry
+  `served` through `agent.ReplayClient` now names the served member on each
+  replayed `Completion`; before, replayed `Completion` events had empty
+  `Provider` and `Model`, and a record without `served` still replays that way
+  (llmkit-rli.1.6).
 
 ### Fixed
 
 - `provider`: a history that did not come from Gemini (an Anthropic or OpenAI
-  tool loop, for example) no longer fails on `gemini-3` models with a 400
-  "missing a thought_signature". The Google adapter sets Google's documented
-  bypass `skip_thought_signature_validator` on the first function call of each
-  assistant step in the current turn that has no Gemini signature. Signatures
-  Gemini produced and other Gemini models are unchanged. The SDK sends the
-  bypass base64-encoded; acceptance of that form is unverified without a key
-  (llmkit-rli.1.6).
+  tool loop, for example) no longer fails on `gemini-3` and `gemini-4` models
+  with a 400 "missing a thought_signature". On a model named `gemini-3` or
+  `gemini-4`, alone or followed by `-` or `.`, the Google adapter sets Google's
+  documented bypass `skip_thought_signature_validator` on the first function
+  call of each assistant step in the current turn when that call has no
+  signature; later calls in the step get none. Signatures Gemini produced are
+  unchanged, as are models outside the two series. Reasoning effort
+  (`thinkingLevel`) stays `gemini-3` only. The SDK sends the bypass
+  base64-encoded, and no hermetic test can show that Google accepts that form:
+  langchain-google #1570 and #1972 report Vertex rejecting it, while
+  pydantic-ai reports it working on the Gemini API. llmkit-ws9 tracks a live
+  check (llmkit-rli.1.6).
 - `provider`: OpenAI-compatible reasoning now round-trips (llmkit-rli.1.1).
   `reasoning_content` and OpenRouter-style `reasoning_details` in a response,
   from `Complete` or `Stream` (with or without a callback), surface as one
