@@ -12,21 +12,24 @@ import (
 // advertises every tool's [llmkit.ToolDef] to the model and dispatches matching
 // tool calls to [Tool.Run].
 //
-// Run receives the raw JSON arguments the model produced (validate/unmarshal
-// them yourself) and returns the result as content blocks. A text-only tool
-// returns []llmkit.Block{llmkit.Text(s)}; a tool whose result is richer (a
-// screenshot, a document) returns those blocks beside its text. The returned
-// blocks become the content of the tool-result message verbatim, never
-// flattened or re-ordered. The text the harness hands to hooks, events, and
-// error rendering is the concatenation of the BlockText blocks in order. A nil
-// or empty result is the empty text result: the message carries one empty
-// text block, exactly as a tool returning "" would. Whether a wire accepts a
-// non-text block in a tool result is the adapter's call; one that cannot
-// carry it refuses the request with [llmkit.ErrInvalidRequest]. An error returned from Run is
-// *not* a loop failure: the harness wraps it as an "ERROR:"-prefixed
-// tool-result message and lets the model decide how to recover. Reserve errors
-// for tool-level problems (bad arguments, file not found); never use them to
-// signal that the loop should abort.
+// Run receives the model's raw JSON arguments (decode them yourself) and
+// returns the result as content blocks: []llmkit.Block{llmkit.Text(s)} for
+// text, with image or document blocks beside it for a richer result. The
+// Runner keeps the returned slice, which [Outcome.Messages] may hold itself;
+// do not modify it after returning. A nil or empty result is one empty text
+// block.
+//
+// The tool-result content is the returned blocks, except that a media block
+// the client's profile cannot carry ([llmkit.Capabilities.ToolResultMedia])
+// becomes a text marker and, under [WithToolOutputLimit], an oversized result
+// becomes a spill or truncation stand-in. Hooks and events receive the text
+// blocks in order, with a size marker at each media block sent and an
+// omission marker at each one degraded.
+//
+// An error from Run is not a loop failure: the harness renders "ERROR: <err>"
+// from the error alone, discarding any blocks returned beside it, and the
+// model decides how to recover. Reserve errors for tool-level problems; never
+// use them to abort the loop.
 //
 // A panic from Run is treated the same way in both dispatch modes
 // (sequential and [WithParallelTools]): the harness recovers it and renders

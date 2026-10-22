@@ -230,11 +230,12 @@ type Spec struct {
 	// when the override replaces the whole profile.
 	//
 	// Each Type has a ceiling naming the wire-gated fields it can
-	// actually send (StructuredOutput, Thinking, ToolChoice,
-	// StopSequences, TopP, TopK, Seed): anthropic can send everything but
-	// Seed (the Messages API has no seed parameter); openai and
-	// openai-compatible can send everything but Thinking and TopK (the
-	// Chat Completions API has neither); google can send all seven. An
+	// actually send (StructuredOutput, Thinking, ReasoningEffort,
+	// ToolChoice, StopSequences, TopP, TopK, Seed, ToolResultMedia):
+	// anthropic can send everything but Seed and ReasoningEffort; openai
+	// and openai-compatible can send everything but Thinking, TopK and
+	// ToolResultMedia (Chat Completions has no thinking or top_k, and its
+	// tool messages are text); google can send all nine. An
 	// effective profile that reports true for a field above its Type's
 	// ceiling makes New refuse with an error wrapping
 	// llmkit.ErrInvalidRequest naming the field and the Type — the

@@ -69,9 +69,8 @@ type Schema struct {
 // caps.StructuredOutput is false, and refuses an explicit ToolChoice mode
 // other than auto pre-wire when caps.ToolChoice is false. It also refuses a
 // tool-result message carrying an image or document block pre-wire when
-// caps.ToolResultMedia is false. Every refusal is
-// an error wrapping llmkit.ErrInvalidRequest with Provider = provider and
-// StatusCode 0,
+// caps.ToolResultMedia is false. Every refusal is an error wrapping
+// llmkit.ErrInvalidRequest with Provider = provider and StatusCode 0,
 // returned before any wire call. A tool Parameters or ResponseSchema that
 // is zero-length or the JSON literal null counts as "not supplied" (Schema
 // nil / ResponseSchema nil); any other non-object JSON (array, string,
@@ -324,9 +323,9 @@ func wireGates(ceiling, effective llmkit.Capabilities) []wireGate {
 // field (StructuredOutput, Thinking, ReasoningEffort, ToolChoice,
 // StopSequences, TopP, TopK, Seed, ToolResultMedia) the adapter can put on
 // the wire; an effective profile that reports true for a wire-gated field
-// whose ceiling is false is refused. Advisory and decorator fields (ContextWindow,
-// ParallelToolCalls, PromptCaching, Images, Documents) are never
-// ceiling-checked.
+// whose ceiling is false is refused. Advisory and decorator fields
+// (ContextWindow, ParallelToolCalls, PromptCaching, Images, Documents) are
+// never ceiling-checked.
 func ApplyOverride(provider string, ceiling, table llmkit.Capabilities, override func(llmkit.Capabilities) llmkit.Capabilities) (llmkit.Capabilities, error) {
 	effective := table
 	if override != nil {

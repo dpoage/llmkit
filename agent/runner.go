@@ -55,8 +55,7 @@ type Runner struct {
 	// toolPolicy, when non-nil, gates every model-requested tool call (see
 	// WithToolPolicy); nil allows all calls.
 	toolPolicy ToolPolicy
-	// outputLimit bounds each tool result entering history (see
-	// WithToolOutputLimit); a zero max is off.
+	// outputLimit is off when its max is zero (see WithToolOutputLimit).
 	outputLimit outputLimit
 }
 

@@ -11,25 +11,27 @@ import (
 )
 
 // SpillSink stores a tool result too large for the conversation and returns a
-// reference the model is shown instead. full is read-only. Under
+// reference the model is shown instead. full holds the result's blocks after
+// media degradation, not the tool's raw output, and is read-only. Under
 // [WithParallelTools] Spill is called concurrently. A non-empty ref without a
-// line break is required; anything else counts as a sink failure.
+// line break is required; anything else counts as a sink failure. A panic in
+// Spill is not recovered: it unwinds out of Run like a hook panic.
 type SpillSink interface {
 	Spill(ctx context.Context, call llmkit.ToolCall, full []llmkit.Block) (ref string, err error)
 }
 
 // WithToolOutputLimit bounds each successful tool result entering history to
-// maxBytes: the sum of its blocks' Text, Data and URL lengths. A larger result
-// goes whole to sink and the model sees
-// "[tool output spilled: <ref>, <size> bytes]", a newline and a head preview of
-// the text; the stand-in is at most maxBytes, except that the marker alone is
-// always sent. With a nil sink, or when the sink fails, the text is
-// head-truncated to fit and ends with
+// maxBytes: the sum of its blocks' Text, Data and URL lengths after media
+// degradation. A larger result goes whole to sink and the model sees
+// "[tool output spilled: <ref>, <size> bytes]" and, when the head preview of
+// the text is not empty, a newline and that preview. With a nil sink, or when
+// the sink fails, the text is head-truncated and ends with
 // "[tool output truncated: <shown> of <size> bytes shown]"; media blocks are
-// dropped and counted in size. A sink failure is recorded as
-// [llmkit.ToolRunEvent].SpillError. maxBytes <= 0 disables the limit, the
-// default. Errors, denials and timeouts are not limited, and a [ReplayClient]
-// serves recorded results unchanged.
+// dropped and counted in size. Either stand-in fits in maxBytes, except that a
+// limit smaller than its marker still sends the marker alone. A sink failure
+// is recorded as [llmkit.ToolRunEvent].SpillError. maxBytes <= 0 disables the
+// limit, the default. Errors, denials and timeouts are not limited, and a
+// [ReplayClient] serves recorded results unchanged.
 func WithToolOutputLimit(maxBytes int, sink SpillSink) Option {
 	return func(r *Runner) { r.outputLimit = outputLimit{max: maxBytes, sink: sink} }
 }
