@@ -264,12 +264,19 @@ type CompletionEvent struct {
 	Response Response `json:"response"`
 	// Err is the failure, as text; empty on success.
 	Err string `json:"err,omitempty"`
+	// ErrKind is [ErrKindContextTooLong] when Err wraps [ErrContextTooLong];
+	// empty otherwise. Open string: tolerate values you do not know.
+	ErrKind string `json:"err_kind,omitempty"`
 	// Provider is the provider tag ("anthropic", "openai", ...) or the
 	// caller's own config name — the client's [IdentityOf].Provider.
 	Provider string `json:"provider,omitempty"`
 	// Model is the model identifier — the client's [IdentityOf].Model.
 	Model string `json:"model,omitempty"`
 }
+
+// ErrKindContextTooLong is the [CompletionEvent.ErrKind] of a completion that
+// failed with an error wrapping [ErrContextTooLong].
+const ErrKindContextTooLong = "context_too_long"
 
 // AttemptEvent records one provider attempt ([KindAttempt]) from inside the
 // retry stage: the same request, the attempt's own response or error, and
@@ -360,7 +367,14 @@ type CompactionEvent struct {
 	BeforeTokens int64 `json:"before_tokens"`
 	AfterTokens  int64 `json:"after_tokens"`
 	Pruned       int   `json:"pruned"`
+	// Reason is [CompactionReasonOverflow] for a pass that answered an
+	// [ErrContextTooLong]; empty for the threshold-triggered pass. Open string.
+	Reason string `json:"reason,omitempty"`
 }
+
+// CompactionReasonOverflow is the [CompactionEvent.Reason] of a compaction
+// that recovered a completion the provider refused with [ErrContextTooLong].
+const CompactionReasonOverflow = "overflow"
 
 // SteerEvent records one steering message injected into a running turn
 // ([KindSteer]). Message is what the user sent; FollowUp marks that the

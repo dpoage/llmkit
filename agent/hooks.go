@@ -28,7 +28,9 @@ import (
 //     only: mutating req here is undefined,
 //     and request shaping (messages, sampling, tool choice) belongs to
 //     [RequestPolicy]. AfterCompletion receives resp == nil together with
-//     a non-nil err when the completion failed.
+//     a non-nil err when the completion failed. A context-overflow retry
+//     (see [Limits.HistoryTokenBudget]) fires them, and the policy, again
+//     for the same step.
 //   - Delta, when set, fires once per incremental fragment of every
 //     completion: the Runner issues the completion via [llmkit.Stream] —
 //     the client's native stream when it implements

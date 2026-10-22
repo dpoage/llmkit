@@ -157,12 +157,24 @@ func (r *Runner) toolNames() []string {
 // history, and the token totals come from the bytes/4 estimate the compaction
 // trigger uses.
 func (r *Runner) recordCompaction(ctx context.Context, em runEmitter, step int, before, after int64, pruned int) {
+	r.emitCompaction(ctx, em, step, before, after, pruned, "")
+}
+
+// recordOverflowCompaction reports the prune that answered a provider
+// [llmkit.ErrContextTooLong] as a Compaction event whose Reason is
+// [llmkit.CompactionReasonOverflow]. step is the completion the retry serves.
+func (r *Runner) recordOverflowCompaction(ctx context.Context, em runEmitter, step int, before, after int64, pruned int) {
+	r.emitCompaction(ctx, em, step, before, after, pruned, llmkit.CompactionReasonOverflow)
+}
+
+func (r *Runner) emitCompaction(ctx context.Context, em runEmitter, step int, before, after int64, pruned int, reason string) {
 	ev := llmkit.NewEvent(ctx, llmkit.KindCompaction)
 	ev.Step = step
 	ev.Compaction = &llmkit.CompactionEvent{
 		BeforeTokens: before,
 		AfterTokens:  after,
 		Pruned:       pruned,
+		Reason:       reason,
 	}
 	em.emit(ctx, ev)
 }
@@ -180,6 +192,9 @@ func (r *Runner) emitCompletion(ctx context.Context, em runEmitter, step int, st
 	ce := &llmkit.CompletionEvent{Request: req, Response: resp, Provider: identity.Provider, Model: identity.Model}
 	if err != nil {
 		ce.Err = err.Error()
+		if errors.Is(err, llmkit.ErrContextTooLong) {
+			ce.ErrKind = llmkit.ErrKindContextTooLong
+		}
 		ce.Response = llmkit.Response{}
 	}
 	ev.Completion = ce

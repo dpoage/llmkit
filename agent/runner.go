@@ -3,8 +3,10 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/dpoage/llmkit"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -422,7 +424,7 @@ func (r *Runner) run(ctx context.Context, em runEmitter, seed []llmkit.Message, 
 		// subsequent turn (see compactRearmFactor).
 		s.messages, s.compactThreshold = r.maybeCompact(ctx, em, s.messages, s.compactThreshold, s.toolNameByID, outcome.Iterations+1)
 
-		resp, err := r.completeOnce(ctx, em, &s.messages, outcome, responseSchema, false)
+		resp, err := r.completeOnce(ctx, em, &s.messages, s.toolNameByID, outcome, responseSchema, false)
 		if err != nil {
 			return outcome, err
 		}
@@ -616,7 +618,7 @@ func (r *Runner) finalizeAndTruncate(ctx context.Context, em runEmitter, s *runS
 	// emit the answer, not every earlier file dump. The re-armed threshold is
 	// discarded: this is the run's final turn, so no later compaction can fire.
 	s.messages, _ = r.maybeCompact(ctx, em, s.messages, s.compactThreshold, s.toolNameByID, s.outcome.Iterations+1)
-	if _, cerr := r.completeOnce(ctx, em, &s.messages, s.outcome, s.responseSchema, true); cerr != nil {
+	if _, cerr := r.completeOnce(ctx, em, &s.messages, s.toolNameByID, s.outcome, s.responseSchema, true); cerr != nil {
 		return cerr
 	}
 	return nil
@@ -681,7 +683,7 @@ func (r *Runner) maybeCompact(ctx context.Context, em runEmitter, messages []llm
 func (r *Runner) repair(ctx context.Context, em runEmitter, prompt string, responseSchema json.RawMessage, baseIter int) (*Outcome, error) {
 	outcome := &Outcome{Transcript: em.tr, Iterations: baseIter, RunID: llmkit.RunFromContext(ctx)}
 	messages := []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, prompt)}
-	if _, err := r.completeOnce(ctx, em, &messages, outcome, responseSchema, true); err != nil {
+	if _, err := r.completeOnce(ctx, em, &messages, nil, outcome, responseSchema, true); err != nil {
 		return outcome, err
 	}
 	return outcome, nil
@@ -703,8 +705,8 @@ func (r *Runner) repair(ctx context.Context, em runEmitter, prompt string, respo
 // nudge — so a JSON answer cut off mid-object has a chance to be completed
 // rather than failing to parse. The outcome's LastStopReason reflects the
 // final completion served here.
-func (r *Runner) completeOnce(ctx context.Context, em runEmitter, messages *[]llmkit.Message, outcome *Outcome, responseSchema json.RawMessage, final bool) (llmkit.Response, error) {
-	resp, err := r.complete(ctx, em, *messages, outcome, responseSchema, final)
+func (r *Runner) completeOnce(ctx context.Context, em runEmitter, messages *[]llmkit.Message, toolNames map[string]string, outcome *Outcome, responseSchema json.RawMessage, final bool) (llmkit.Response, error) {
+	resp, err := r.completeRecovering(ctx, em, messages, toolNames, outcome, responseSchema, final)
 	if err != nil {
 		return llmkit.Response{}, err
 	}
@@ -716,7 +718,7 @@ func (r *Runner) completeOnce(ctx context.Context, em runEmitter, messages *[]ll
 	if resp.StopReason == llmkit.StopMaxTokens && len(resp.ToolCalls) == 0 {
 		*messages = append(*messages, llmkit.TextMessage(llmkit.RoleUser,
 			"Your previous message was cut off at the output token limit. Continue from exactly where you stopped and output ONLY the remaining text needed to complete the answer — no preamble, no repetition."))
-		cont, cerr := r.complete(ctx, em, *messages, outcome, responseSchema, final)
+		cont, cerr := r.completeRecovering(ctx, em, messages, toolNames, outcome, responseSchema, final)
 		if cerr != nil {
 			return llmkit.Response{}, cerr
 		}
@@ -736,6 +738,25 @@ func (r *Runner) completeOnce(ctx context.Context, em runEmitter, messages *[]ll
 		resp.Blocks = stitchBlocks(resp.Blocks, cont.Blocks, joined)
 	}
 	return resp, nil
+}
+
+// completeRecovering is complete plus one compact-and-retry on ErrContextTooLong
+// when HistoryTokenBudget enables compaction; the policy and hooks fire per attempt.
+func (r *Runner) completeRecovering(ctx context.Context, em runEmitter, messages *[]llmkit.Message, toolNames map[string]string, outcome *Outcome, responseSchema json.RawMessage, final bool) (llmkit.Response, error) {
+	resp, err := r.complete(ctx, em, *messages, outcome, responseSchema, final)
+	if err == nil || r.limits.HistoryTokenBudget <= 0 || !errors.Is(err, llmkit.ErrContextTooLong) {
+		return resp, err
+	}
+	compacted, pruned := compactHistory(*messages, compactRecentToolResults, toolNames)
+	before, _ := r.wireMessages(*messages)
+	after, _ := r.wireMessages(compacted)
+	if reflect.DeepEqual(before, after) {
+		return resp, err
+	}
+	step := outcome.Iterations + 1
+	r.recordOverflowCompaction(llmkit.WithStep(ctx, step), em, step, estimateTokens(*messages), estimateTokens(compacted), pruned)
+	*messages = compacted
+	return r.complete(ctx, em, *messages, outcome, responseSchema, final)
 }
 
 // maxStitchOverlap bounds how far back stitchContinuation scans for a repeated

@@ -129,16 +129,26 @@ type ReplayClient struct {
 
 type replayStep struct {
 	resp          llmkit.Response
+	err           error
 	expectToolIDs []string
 }
+
+// replayedOverflow is a recorded overflow failure: its recorded text,
+// wrapping [llmkit.ErrContextTooLong].
+type replayedOverflow string
+
+func (e replayedOverflow) Error() string { return string(e) }
+func (e replayedOverflow) Unwrap() error { return llmkit.ErrContextTooLong }
 
 // NewReplayClient builds a ReplayClient from src's record of run. It replays
 // the run's COMPLETION events only ([llmkit.KindCompletion], never Attempts,
 // per the observability emission rule): each successful completion's Response
 // is served in order, paired with the tool-call ids recorded since the
 // previous completion, so replay can drive the same tool round-trips
-// deterministically. Failed completions (Completion with Err set) are
-// skipped — a run that aborted at one therefore diverges there with the
+// deterministically. A failed completion is skipped, except one recorded with
+// ErrKind context_too_long, which is served at its position as an error
+// wrapping [llmkit.ErrContextTooLong] so the replaying Runner recompacts.
+// A run that aborted at a skipped failure therefore diverges there with the
 // replay-exhausted error. If the client has served at least one completion
 // and recorded no divergence, [ReplayClient.Err] reports the first
 // successful completion the replay never served.
@@ -178,6 +188,12 @@ func NewReplayClient(src llmkit.Source, run llmkit.RunID, caps llmkit.Capabiliti
 		case ev.Kind == llmkit.KindCompletion && ev.Completion != nil && ev.Completion.Err == "":
 			rc.responses = append(rc.responses, replayStep{
 				resp:          ev.Completion.Response,
+				expectToolIDs: pending,
+			})
+			pending = nil
+		case ev.Kind == llmkit.KindCompletion && ev.Completion != nil && ev.Completion.ErrKind == llmkit.ErrKindContextTooLong:
+			rc.responses = append(rc.responses, replayStep{
+				err:           replayedOverflow(ev.Completion.Err),
 				expectToolIDs: pending,
 			})
 			pending = nil
@@ -247,6 +263,9 @@ func (rc *ReplayClient) Complete(ctx context.Context, req llmkit.Request) (llmki
 		}
 	}
 	rc.idx++
+	if step.err != nil {
+		return llmkit.Response{}, step.err
+	}
 	return step.resp, nil
 }
 

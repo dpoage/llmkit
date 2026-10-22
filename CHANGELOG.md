@@ -121,9 +121,31 @@ entry below is marked.
   `Content` replays its `Result` as before. A reader built before this change
   ignores `content` and `degraded` and replays `Result` as text only.
   `EventSchemaVersion` stays 3.
+- `agent`: overflow recovery. With `Limits.HistoryTokenBudget` above zero, a
+  completion that fails with an error wrapping `llmkit.ErrContextTooLong`
+  (main turn, max-tokens continuation, finalization, repair) compacts the
+  history once and is retried once. The pass emits a `compaction` event with
+  the new `reason` `overflow` (`CompactionEvent.Reason`,
+  `llmkit.CompactionReasonOverflow`); the threshold pass leaves `reason`
+  omitted. A history the compaction leaves unchanged returns the original
+  error with no event and no retry, and a second refusal is returned
+  unchanged, with no finalization turn. `WithRequestPolicy` and the
+  completion hooks fire for each attempt. `CompletionEvent.ErrKind`
+  (`err_kind`, `llmkit.ErrKindContextTooLong`) marks a failed completion that
+  wraps `ErrContextTooLong`; both new fields are omitted when empty, so
+  existing records are unchanged and `EventSchemaVersion` stays 3.
+  `ReplayClient` serves a recorded completion with that `err_kind` at its
+  position as an error wrapping `ErrContextTooLong`, so the replaying Runner
+  recompacts and its events equal the recorded ones.
 
 ### Changed
 
+- `agent`: with `Limits.HistoryTokenBudget` above zero, a provider
+  context-overflow refusal no longer ends the run on the first occurrence
+  when the history has prunable tool results. With the budget zero or
+  negative, nothing changes. A replay of a record holding a failed completion
+  with `err_kind` `context_too_long` now serves that error instead of
+  skipping it.
 - `llmkit`: the per-role block rule now lets `RoleToolResult` carry text,
   image and document blocks (it was text only), gated by
   `Capabilities.ToolResultMedia`. `RoleSystem` stays text only. Before, any

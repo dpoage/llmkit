@@ -45,7 +45,8 @@
 // reports a run that ends with one the same way.
 // [Limits.HistoryTokenBudget] enables threshold-triggered history
 // compaction, which replaces old tool results with short stubs and re-arms
-// its threshold so the cache cost stays bounded.
+// its threshold so the cache cost stays bounded, and recovers once from a
+// provider context-overflow refusal.
 //
 // # Policies
 //
@@ -202,8 +203,14 @@ type Limits struct {
 	// over the remaining turns exceed that one-time miss. Size the budget
 	// well above a typical short run; the re-arm stops repeated firings.
 	//
-	// Zero disables compaction (pure append-only history). A negative value also
-	// disables it.
+	// A positive value also enables overflow recovery: a completion the
+	// provider refuses with [llmkit.ErrContextTooLong] compacts the history
+	// once, emits a Compaction event with Reason "overflow", and retries
+	// that completion once. Nothing prunable, or a second refusal, returns
+	// the error. The RequestPolicy and hooks fire for each attempt.
+	//
+	// Zero disables compaction and overflow recovery (pure append-only
+	// history). A negative value also disables both.
 	HistoryTokenBudget int64
 }
 
