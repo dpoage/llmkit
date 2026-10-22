@@ -8,6 +8,27 @@ entry below is marked.
 
 ## [Unreleased]
 
+### Added
+
+- `decide`: `Decider`, the backend-neutral interface
+  `Ask(ctx, state, qs Questions) (Response, error)`; `*Client` satisfies it.
+  A backend's errors wrap a root `llmkit` sentinel or chain `ctx.Err()`.
+- `decide`: `Check(qs, resp)` reports whether a `Response` answers a
+  `Questions` set exactly, and `Response.Noul`, `Choice`, and `Score`
+  return an answer by id or an error wrapping the new `decide.ErrNotAsked`
+  for an id that was not asked as that kind. The answer maps and
+  `ScoreAnswer.Levels` stay.
+- `decide`: `ChoiceAnswer` and `ScoreAnswer` document that a backend that
+  reports no distribution leaves `Probabilities` (and `Levels`) nil and
+  `Confidence` 0, and must not fabricate them. The System One client still
+  requires the legend and probabilities.
+
+### Fixed
+
+- `decide`: `Ask` accepted a `Choice` answer whose option was outside the
+  asked set. It now returns `ErrServer` with `StatusCode` 200 and retries
+  it like any `ErrServer`.
+
 ## [0.6.0] - 2026-09-30
 
 ### Added
