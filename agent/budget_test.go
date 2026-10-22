@@ -44,7 +44,9 @@ type noopTool struct{}
 func (noopTool) Def() llmkit.ToolDef {
 	return llmkit.ToolDef{Name: "noop", Description: "noop", Parameters: []byte(`{"type":"object"}`)}
 }
-func (noopTool) Run(ctx context.Context, args json.RawMessage) (string, error) { return "ok", nil }
+func (noopTool) Run(ctx context.Context, args json.RawMessage) ([]llmkit.Block, error) {
+	return textBlocks("ok"), nil
+}
 
 // TestBudgetPool_OvershootBound is the acceptance test for shared-pool budget
 // enforcement: with a pool of B tokens, P concurrent runners that each report a

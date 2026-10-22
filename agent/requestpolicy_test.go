@@ -18,8 +18,8 @@ func (t rpTool) Def() llmkit.ToolDef {
 	return llmkit.ToolDef{Name: t.name, Description: "echoes ok"}
 }
 
-func (t rpTool) Run(_ context.Context, _ json.RawMessage) (string, error) {
-	return "ok", nil
+func (t rpTool) Run(_ context.Context, _ json.RawMessage) ([]llmkit.Block, error) {
+	return textBlocks("ok"), nil
 }
 
 // rpRecorder collects the step numbers PrepareRequest fires with, in order.
