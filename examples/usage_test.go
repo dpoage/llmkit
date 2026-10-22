@@ -24,6 +24,7 @@ func TestExamplesUsageExitWithoutEnv(t *testing.T) {
 		{"agent", "LLMKIT_PROVIDER"},
 		{"structured", "LLMKIT_PROVIDER"},
 		{"chat", "LLMKIT_PROVIDER"},
+		{"agent-guardrail", "LLMKIT_PROVIDER"},
 		{"replay", "<record-dir> <run-id>"},
 	} {
 		ex := ex
@@ -42,5 +43,24 @@ func TestExamplesUsageExitWithoutEnv(t *testing.T) {
 				t.Errorf("usage message does not name %q:\n%s", ex.want, combined)
 			}
 		})
+	}
+}
+
+func TestGuardrailUsageNamesMissingSystemOneVars(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: skips the example builds")
+	}
+	bin := buildExample(t, moduleRoot(t), t.TempDir(), "agent-guardrail")
+	code, stdout, stderr := runExample(t, bin, nil, map[string]string{
+		"LLMKIT_PROVIDER": "openai-compatible",
+		"LLMKIT_MODEL":    "m",
+		"LLMKIT_API_KEY":  "k",
+		"LLMKIT_BASE_URL": "http://127.0.0.1:1/v1",
+	})
+	if code != 1 {
+		t.Fatalf("exit %d, want 1\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if combined := stdout + stderr; !strings.Contains(combined, "LLMKIT_SYSTEMONE_API_KEY") {
+		t.Errorf("usage message does not name LLMKIT_SYSTEMONE_API_KEY:\n%s", combined)
 	}
 }

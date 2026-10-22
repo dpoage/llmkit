@@ -29,8 +29,9 @@ export LLMKIT_API_KEY=ollama                       # any non-empty placeholder
 The programs under `examples/` are the runnable counterparts of the first
 two snippets; run them once the variables are set.
 
-Decisions are a separate, non-chat surface. The `decide` package asks
-TypeSafe Jev questions about a state. See [decide](docs/decide.md).
+Decisions are a separate, non-chat surface. The `decide` package defines the
+questions and answers, and `decide/systemone` asks a System One host (TypeSafe
+Jev by default) questions about a state. See [decide](docs/decide.md).
 
 ### Complete a request
 
@@ -117,23 +118,25 @@ answer arrives in `DeltaText` fragments, so the callback prints it.
 | [`sandbox`](https://pkg.go.dev/github.com/dpoage/llmkit/sandbox) | Isolated execution of untrusted commands: Bubblewrap, container CLIs, `HostExec`, `Mock`. | [sandbox](docs/sandbox.md) |
 | [`fsroot`](https://pkg.go.dev/github.com/dpoage/llmkit/fsroot) | Path containment for agent file tools. | [sandbox](docs/sandbox.md) |
 | [`embed`](https://pkg.go.dev/github.com/dpoage/llmkit/embed) | Embeddings: Ollama and OpenAI-compatible backends, batching, retry, least-recently-used (LRU) cache. | [reference](https://pkg.go.dev/github.com/dpoage/llmkit/embed) |
-| [`decide`](https://pkg.go.dev/github.com/dpoage/llmkit/decide) | Decisions with TypeSafe's Jev model: `noul`, `choice`, and `score` questions over a state; calibrated probabilities and confidence. | [decide](docs/decide.md) |
+| [`decide`](https://pkg.go.dev/github.com/dpoage/llmkit/decide) | The decision vocabulary: `noul`, `choice`, and `score` questions over a state, the `Decider` interface, and answer checks. | [decide](docs/decide.md) |
+| [`decide/systemone`](https://pkg.go.dev/github.com/dpoage/llmkit/decide/systemone) | The System One wire backend for `decide`: TypeSafe's Jev model by default, other hosts through `BaseURL`; calibrated probabilities and confidence where the host reports them. | [decide](docs/decide.md) |
 
 ## Examples
 
-Six runnable programs live under `examples/`:
+Seven runnable programs live under `examples/`:
 
 - `examples/basic` — one completion, with capability gating; with `--image`, its user turn is built with `llmkit.UserMessage(llmkit.Text(…), llmkit.Image(…))`.
 - `examples/agent` — the agent loop with hooks, a tool policy, and optional parallel dispatch. Its provider client sets `Options.Retry` and an `Options.Observer` that logs each attempt. With `--record <dir>`, it persists the run as `<dir>/<run id>.jsonl` through `agent.JSONL` and prints the run id.
 - `examples/replay` — replays such a record offline through `agent.NewReplayClient` and prints the replayed final text. It exits 1 when the replayed run returns an error or the replay client reports a divergence.
 - `examples/structured` — schema-constrained output with `RunJSONAs`.
 - `examples/chat` — a multi-turn read–eval–print loop (REPL) with mid-run steering.
-- `examples/decide` — one mixed `Ask` (noul, choice, score) against TypeSafe Jev.
+- `examples/decide` — one mixed `Ask` (noul, choice, score) against a System One host (TypeSafe Jev by default).
+- `examples/agent-guardrail` — an `agent.Runner` whose tool and request policies ask a `decide.Decider`. The decider's tokens count against the run's shared `agent.BudgetPool`. It reads the `LLMKIT_*` variables plus `LLMKIT_SYSTEMONE_API_KEY` and `LLMKIT_SYSTEMONE_MODEL`, and prints its usage and exits 1 without them.
 
 `basic`, `agent`, `structured`, and `chat` read `LLMKIT_PROVIDER`, `LLMKIT_MODEL`,
 and `LLMKIT_API_KEY`. `LLMKIT_BASE_URL` is required for `openai-compatible` and
-optional otherwise. `examples/decide` reads `LLMKIT_TYPESAFE_API_KEY` and
-`LLMKIT_TYPESAFE_MODEL`. `LLMKIT_TYPESAFE_BASE_URL` is optional. If a required
+optional otherwise. `examples/decide` reads `LLMKIT_SYSTEMONE_API_KEY` and
+`LLMKIT_SYSTEMONE_MODEL`. `LLMKIT_SYSTEMONE_BASE_URL` is optional. If a required
 variable is unset, these five print their usage and exit 1 without touching the
 network. `examples/replay` reads no environment variables and needs no network:
 it takes a record directory and a run id, and with any other argument count it
@@ -156,7 +159,7 @@ go run ./examples/decide
 - [docs/capabilities.md](docs/capabilities.md) — what `Capabilities` reports and enforces.
 - [docs/agent-loop.md](docs/agent-loop.md) — the `agent.Runner` loop, policies, hooks, steering.
 - [docs/sandbox.md](docs/sandbox.md) — sandbox backends, threat model, and `fsroot`.
-- [docs/decide.md](docs/decide.md) — the `decide` package: TypeSafe Jev decisions, vendor limits, and the live lane.
+- [docs/decide.md](docs/decide.md) — the `decide` and `decide/systemone` packages: decisions, System One hosts, TypeSafe limits, and the live lane.
 - [docs/testing.md](docs/testing.md) — the test suites and how to run them.
 
 ## Testing

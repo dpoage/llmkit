@@ -36,6 +36,7 @@ import (
 
 	"github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/decide"
+	"github.com/dpoage/llmkit/decide/systemone"
 	"github.com/dpoage/llmkit/provider"
 )
 
@@ -54,10 +55,10 @@ type Lane struct {
 	Name      string
 	EnvPrefix string
 	// Type is the provider.Type the lane's clients build through
-	// provider.New. It is empty for lanes that construct a different
-	// client kind (DecideLane): Jev is not an llmkit.Client, so its lane
-	// is resolved by ResolveDecide and its clients built by
-	// Session.DecideClient.
+	// provider.New. It is empty for the decision lanes (DecideLane,
+	// KevLane): a decide.Decider is not an llmkit.Client, so
+	// ResolveDecide and ResolveDecideKev resolve them and
+	// Session.DecideClient builds their clients.
 	Type provider.Type
 	// DefaultModel fills Model when <prefix>_MODEL is unset. Empty means the
 	// model is required (the compat lane: an arbitrary endpoint has no
@@ -67,6 +68,12 @@ type Lane struct {
 	// override (the typesafe lane can target a gateway) rather than a
 	// requirement (the compat lane).
 	OptionalBaseURL bool
+	// RequireBaseURL makes <prefix>_BASE_URL required for a lane that is
+	// not the compat chat lane (the kev lane: a local server has no default).
+	RequireBaseURL bool
+	// DefaultKey fills Key when <prefix>_API_KEY is unset, making the key
+	// optional (a local server needs no auth).
+	DefaultKey string
 }
 
 var lanes = []Lane{
@@ -85,6 +92,17 @@ var DecideLane = Lane{
 	EnvPrefix:       "LLMKIT_LIVE_TYPESAFE",
 	DefaultModel:    "jev-latest",
 	OptionalBaseURL: true,
+}
+
+// KevLane is the local Kev decision lane (the System One wire without
+// TypeSafe). Like DecideLane it stays out of lanes and goes through
+// ResolveDecideKev and Session.DecideClient.
+var KevLane = Lane{
+	Name:           "kev",
+	EnvPrefix:      "LLMKIT_LIVE_KEV",
+	DefaultModel:   "kev-latest",
+	DefaultKey:     "local",
+	RequireBaseURL: true,
 }
 
 // All returns every lane in stable declaration order.
@@ -106,8 +124,8 @@ type Session struct {
 	Model string
 	Key   string
 	// BaseURL is an explicit endpoint override: required for the compat
-	// lane (an arbitrary endpoint has no default), optional for lanes with
-	// OptionalBaseURL, empty for the rest.
+	// lane (an arbitrary endpoint has no default) and the kev lane,
+	// optional for lanes with OptionalBaseURL, empty for the rest.
 	BaseURL string
 }
 
@@ -117,6 +135,9 @@ func (l Lane) resolve() (Session, []string) {
 	var missing []string
 	s := Session{Lane: l}
 	s.Key = os.Getenv(l.EnvPrefix + "_API_KEY")
+	if s.Key == "" {
+		s.Key = l.DefaultKey
+	}
 	if s.Key == "" {
 		missing = append(missing, l.EnvPrefix+"_API_KEY")
 	}
@@ -128,7 +149,7 @@ func (l Lane) resolve() (Session, []string) {
 			s.Model = l.DefaultModel
 		}
 	}
-	if l.Type == provider.TypeOpenAICompatible {
+	if l.Type == provider.TypeOpenAICompatible || l.RequireBaseURL {
 		s.BaseURL = os.Getenv(l.EnvPrefix + "_BASE_URL")
 		if s.BaseURL == "" {
 			missing = append(missing, l.EnvPrefix+"_BASE_URL")
@@ -164,6 +185,17 @@ func ResolveDecide(t testing.TB) *Session {
 	s, missing := DecideLane.resolve()
 	if len(missing) > 0 {
 		t.Skipf("live lane %s: skipping — missing %s", DecideLane.Name, strings.Join(missing, ", "))
+		return nil
+	}
+	return &s
+}
+
+// ResolveDecideKev resolves KevLane from the environment, skipping the test
+// naming each missing variable. Only LLMKIT_LIVE_KEV_BASE_URL can be missing.
+func ResolveDecideKev(t testing.TB) *Session {
+	s, missing := KevLane.resolve()
+	if len(missing) > 0 {
+		t.Skipf("live lane %s: skipping — missing %s", KevLane.Name, strings.Join(missing, ", "))
 		return nil
 	}
 	return &s
@@ -289,27 +321,26 @@ func (s *Session) Client(ctx context.Context, t testing.TB, tr *Transport, mutat
 	return cl
 }
 
-// DecideClient builds the typesafe lane's decide client through
-// decide.New, with the recording transport injected via Config.HTTPClient
-// and the run-wide token tally as Config.Observer. mutate, when non-nil,
-// adjusts the Config last.
-func (s *Session) DecideClient(ctx context.Context, t testing.TB, tr *Transport, mutate func(*decide.Config)) *decide.Client {
-	cfg := decide.Config{
+// DecideClient builds a decision lane's client (typesafe or kev) through
+// systemone.New, with the recording transport injected via Config.HTTPClient,
+// and wraps it in decide.Observe with the run-wide token tally as the
+// observer. mutate, when non-nil, adjusts the Config last.
+func (s *Session) DecideClient(ctx context.Context, t testing.TB, tr *Transport, mutate func(*systemone.Config)) decide.Decider {
+	cfg := systemone.Config{
 		Secret:     s.Key,
 		Model:      s.Model,
 		BaseURL:    s.BaseURL,
 		HTTPClient: &http.Client{Transport: tr},
-		Observer:   DefaultTally(),
 	}
 	if mutate != nil {
 		mutate(&cfg)
 	}
-	cl, err := decide.New(cfg)
+	cl, err := systemone.New(cfg)
 	if err != nil {
-		t.Fatalf("livetest: decide.New for lane %s: %v", s.Lane.Name, err)
+		t.Fatalf("livetest: systemone.New for lane %s: %v", s.Lane.Name, err)
 		return nil
 	}
-	return cl
+	return decide.Observe(cl, DefaultTally())
 }
 
 // Ctx returns a context with a bounded deadline, so a hung vendor fails the
@@ -343,7 +374,8 @@ func (s *Session) Logf(t testing.TB, format string, args ...any) {
 
 // Tally is the run-wide token accumulator. It implements llmkit.Observer
 // and is wired into every client livetest builds (Options.Observer,
-// Config.Observer, agent.WithObserver on every live Runner), so a whole
+// decide.Observe on the decide lane, agent.WithObserver on every live
+// Runner), so a whole
 // test binary's spend is reported by one line at exit. It sums
 // Completion.Response.Usage and DecisionEvent.Usage with [llmkit.Usage.Add]
 // on success — Completion and Decision are the spend ledger; Attempt and

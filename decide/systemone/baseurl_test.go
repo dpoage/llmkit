@@ -1,4 +1,4 @@
-package decide
+package systemone
 
 import (
 	"context"
@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/decide"
 	"github.com/dpoage/llmkit/retry"
 )
 
@@ -83,7 +84,7 @@ func TestNew_RefusesBadBaseURL(t *testing.T) {
 			hits.Store(0)
 			c, err := New(Config{Secret: testSecret, Model: "jev-latest", BaseURL: raw, Retry: fastRetry})
 			if err == nil {
-				_, askErr := c.Ask(context.Background(), "s", Questions{"q": Noul{Instructions: "i"}})
+				_, askErr := c.Ask(context.Background(), "s", decide.Questions{"q": decide.Noul{Instructions: "i"}})
 				t.Fatalf("New(BaseURL %q) succeeded; Ask then made %d wire attempts (err %v)", raw, hits.Load(), askErr)
 			}
 			if !errors.Is(err, llmkit.ErrInvalidRequest) {
@@ -121,7 +122,7 @@ func TestNew_AcceptsBaseURLForms(t *testing.T) {
 		if err != nil {
 			t.Fatalf("New(%q): %v", raw, err)
 		}
-		_, _ = c.Ask(context.Background(), "s", Questions{"q": Noul{Instructions: "i"}})
+		_, _ = c.Ask(context.Background(), "s", decide.Questions{"q": decide.Noul{Instructions: "i"}})
 		if uri, _ := got.Load("uri"); uri != "/v1/v1/systemone" {
 			t.Errorf("BaseURL %q: server saw %v, want /v1/v1/systemone", raw, uri)
 		}
@@ -147,7 +148,7 @@ func wireURI(t *testing.T, base func(host string) string) (uri, auth string) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	_, _ = c.Ask(context.Background(), "s", Questions{"q": Noul{Instructions: "i"}})
+	_, _ = c.Ask(context.Background(), "s", decide.Questions{"q": decide.Noul{Instructions: "i"}})
 	mu.Lock()
 	defer mu.Unlock()
 	return uri, auth
@@ -204,7 +205,7 @@ func TestAsk_UnbuildableJoinedURLDoesNotEchoPassword(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	_, askErr := c.Ask(context.Background(), "s", Questions{"q": Noul{Instructions: "i"}})
+	_, askErr := c.Ask(context.Background(), "s", decide.Questions{"q": decide.Noul{Instructions: "i"}})
 	if askErr == nil {
 		t.Fatal("Ask succeeded against an undialable host")
 	}

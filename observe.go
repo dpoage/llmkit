@@ -147,8 +147,10 @@ const (
 	// KindDecision records one decision-model call: the judged state, the
 	// questions asked and the answers returned (or the error). The payload
 	// mirrors the decide package's vocabulary in root-owned structs so the
-	// root package never imports decide. Payload: [DecisionEvent]. Step is the
-	// enclosing turn when emitted inside a Runner turn, else 0.
+	// root package never imports decide. Emitted by the decide.Observe
+	// decorator, one per Ask that passes validation; decide.Replay answers from
+	// these events. Payload: [DecisionEvent]. Step is the enclosing turn when
+	// emitted inside a Runner turn, else 0.
 	KindDecision EventKind = "decision"
 	// KindEmbed records one embedding call: model, input count, resulting
 	// dimensions, cache hits, usage, or the error. Payload: [EmbedEvent]. Step
@@ -474,8 +476,8 @@ type FinalizeEvent struct {
 // Questions and Answers are each sorted by ID (decide.Questions is a map;
 // the conversion layer sorts), and an answer matches its question by ID.
 type DecisionEvent struct {
-	// Backend names the decision backend (e.g. "typesafe"); Model its model
-	// identifier.
+	// Backend names the decision backend (e.g. "systemone"), from the
+	// decider's Identity().Provider; Model its model identifier.
 	Backend string `json:"backend,omitempty"`
 	Model   string `json:"model,omitempty"`
 	// State is the state the Ask judged, as raw JSON (string, object, or
