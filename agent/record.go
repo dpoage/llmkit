@@ -131,6 +131,8 @@ func toolRunEvent(ctx context.Context, call llmkit.ToolCall, res toolResult, ste
 		tre.DenyReason = res.denyReason
 	} else {
 		tre.Result = res.result
+		tre.Content = res.eventContent()
+		tre.Degraded = res.degraded
 		tre.IsError = res.isErr
 	}
 	ev.ToolRun = tre
@@ -241,10 +243,10 @@ func (r *Runner) fireToolStart(ctx context.Context, step int, call llmkit.ToolCa
 
 // fireToolEnd fires every registered [Hooks.ToolEnd], in registration order,
 // with the result exactly as fed to the model.
-func (r *Runner) fireToolEnd(ctx context.Context, step int, call llmkit.ToolCall, result string, isErr bool, d time.Duration) {
+func (r *Runner) fireToolEnd(ctx context.Context, step int, call llmkit.ToolCall, res toolResult, d time.Duration) {
 	for _, h := range r.hooks {
 		if h.ToolEnd != nil {
-			h.ToolEnd(ctx, ToolEvent{Step: step, Call: call, Result: result, IsError: isErr, Duration: d})
+			h.ToolEnd(ctx, ToolEvent{Step: step, Call: call, Result: res.result, Content: res.eventContent(), Degraded: res.degraded, IsError: res.isErr, Duration: d})
 		}
 	}
 }

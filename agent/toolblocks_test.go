@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -17,7 +15,6 @@ import (
 	"time"
 
 	"github.com/dpoage/llmkit"
-	"github.com/dpoage/llmkit/provider"
 )
 
 // textBlocks wraps s as the single-text-block result a text-only test fake's
@@ -143,12 +140,19 @@ func (b blocksTool) Def() llmkit.ToolDef {
 
 func (b blocksTool) Run(context.Context, json.RawMessage) ([]llmkit.Block, error) { return b.out, nil }
 
-// toolRunText runs one call of a blocksTool and returns the tool-result
-// message fed to the second request, the ToolEnd hook result, and the ToolRun
-// event result.
+// toolRunText is toolRunTextCaps on a client whose profile has no capability set.
 func toolRunText(t *testing.T, out []llmkit.Block) (msg llmkit.Message, hook string, event string, transcript []byte) {
 	t.Helper()
+	return toolRunTextCaps(t, llmkit.Capabilities{}, out)
+}
+
+// toolRunTextCaps runs one call of a blocksTool on a client reporting caps and
+// returns the tool-result message fed to the second request, the ToolEnd hook
+// result, and the ToolRun event result.
+func toolRunTextCaps(t *testing.T, caps llmkit.Capabilities, out []llmkit.Block) (msg llmkit.Message, hook string, event string, transcript []byte) {
+	t.Helper()
 	fc := newFakeClient(toolResp("c1", "t", `{}`, 1, 1), textResp("done", 1, 1))
+	fc.caps = caps
 	var hookResult string
 	r := NewRunner(fc, []Tool{blocksTool{"t", out}}, "sys", WithHooks(Hooks{ToolEnd: func(_ context.Context, ev ToolEvent) {
 		hookResult = ev.Result
@@ -212,59 +216,23 @@ func TestToolResult_EmptyResultIsTheEmptyTextResult(t *testing.T) {
 	}
 }
 
-// TestToolResult_BlocksPassVerbatim pins P3a: the blocks a tool returns are
-// the tool-result message's Content exactly — same count, kinds, order —
-// as the outgoing request carries them, while hooks and the ToolRun event see
-// the concatenated BlockText texts.
+// TestToolResult_BlocksPassVerbatim pins P3a: on a profile that carries tool
+// media, the blocks a tool returns are the tool-result message's Content
+// exactly — same count, kinds, order — while hooks and the ToolRun event see
+// the text blocks with a size marker where the image sits.
 func TestToolResult_BlocksPassVerbatim(t *testing.T) {
 	png := []byte("\x89PNG\r\n\x1a\nfake")
 	out := []llmkit.Block{llmkit.Text("cap"), llmkit.Image("image/png", png), llmkit.Text("tion")}
-	msg, hook, event, _ := toolRunText(t, out)
+	msg, hook, event, _ := toolRunTextCaps(t, llmkit.Capabilities{ToolResultMedia: true}, out)
 	if msg.ToolCallID != "c1" || msg.IsError {
 		t.Fatalf("message = %+v, want a successful result for c1", msg)
 	}
 	if !reflect.DeepEqual(msg.Content, out) {
 		t.Fatalf("Content = %+v, want the returned blocks verbatim: %+v", msg.Content, out)
 	}
-	if hook != "caption" || event != "caption" {
-		t.Errorf("ToolEnd Result = %q, ToolRun Result = %q, want the concatenated text %q", hook, event, "caption")
-	}
-}
-
-// TestToolResult_MediaRefusedPreWireOnProviderClient pins P3b: at this tip a
-// real provider client's per-role block rule refuses a tool result that
-// carries an image BEFORE any wire call, and the run ends with an error
-// wrapping llmkit.ErrInvalidRequest — typed, not silent, and no second
-// request reaches the server.
-func TestToolResult_MediaRefusedPreWireOnProviderClient(t *testing.T) {
-	var mu sync.Mutex
-	var requests int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		requests++
-		n := requests
-		mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		if n > 1 {
-			t.Errorf("request %d reached the wire; the media tool result must be refused pre-wire", n)
-		}
-		turn := reasoningTurn{reasoning: "r", details: `[]`, toolArgs: `{}`, finish: "tool_calls"}
-		_, _ = w.Write([]byte(turn.complete()))
-	}))
-	t.Cleanup(srv.Close)
-	client, err := provider.New(context.Background(), provider.Spec{
-		Type: provider.TypeOpenAICompatible, Model: "m", BaseURL: srv.URL, Secret: "k",
-	}, provider.Options{})
-	if err != nil {
-		t.Fatalf("provider.New: %v", err)
-	}
-	shot := blocksTool{"echo", []llmkit.Block{llmkit.Text("cap"), llmkit.Image("image/png", []byte("png"))}}
-	_, err = NewRunner(client, []Tool{shot}, "sys").Run(context.Background(), "task")
-	if !errors.Is(err, llmkit.ErrInvalidRequest) {
-		t.Fatalf("Run error = %v, want one wrapping ErrInvalidRequest", err)
-	}
-	if requests != 1 {
-		t.Errorf("wire requests = %d, want 1 (the tool turn only)", requests)
+	want := "cap[image: image/png, 12 bytes]tion"
+	if hook != want || event != want {
+		t.Errorf("ToolEnd Result = %q, ToolRun Result = %q, want %q", hook, event, want)
 	}
 }
 

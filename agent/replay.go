@@ -79,6 +79,12 @@ var ErrReplayDiverged = errors.New("agent: replay diverged")
 // Tools other than [ReplayClient.Tools] execute live, and their results are
 // never compared with the record.
 //
+// A recorded tool result that carries Content (media, or omission markers)
+// is served block for block; a record without Content serves its Result as
+// one text block. The replaying Runner then places those blocks under this
+// client's caps like any tool result, so a profile that cannot carry the
+// recorded media degrades it again.
+//
 // Replaying under a [ToolPolicy] that rewrote arguments in the recorded run
 // works only if each rewrite produces valid JSON and is deterministic: the
 // replay policy must hand each tool arguments that match the record's
@@ -276,6 +282,7 @@ func matchToolIDs(step int, want, got []string) error {
 type replayedToolCall struct {
 	call    llmkit.ToolCall
 	result  string
+	content []llmkit.Block // the recorded Content; nil for a record without it
 	isError bool
 	step    int
 	// args is what Tool.Run received in the recorded run: the record's
@@ -398,6 +405,7 @@ func (ts *replayToolSet) add(step, resp int, tre llmkit.ToolRunEvent, unregister
 	rec := replayedToolCall{
 		call:    tre.Call,
 		result:  tre.Result,
+		content: tre.Content,
 		isError: tre.IsError,
 		step:    step,
 		args:    tre.Call.Arguments,
@@ -609,11 +617,7 @@ func (t replayTool) Def() llmkit.ToolDef {
 // divergence: the returned error wraps [ErrReplayDiverged] naming the
 // recorded step, and the harness renders it as this call's ERROR result.
 func (t replayTool) Run(ctx context.Context, args json.RawMessage) ([]llmkit.Block, error) {
-	out, err := t.rc.serveCall(t.name, callIDFrom(ctx), args)
-	if err != nil {
-		return nil, err
-	}
-	return []llmkit.Block{llmkit.Text(out)}, nil
+	return t.rc.serveCall(t.name, callIDFrom(ctx), args)
 }
 
 // serveCall serves and consumes one recorded call, or records the
@@ -623,7 +627,7 @@ func (t replayTool) Run(ctx context.Context, args json.RawMessage) ([]llmkit.Blo
 // may repeat call IDs from turn to turn. Among the turn's unconsumed calls
 // with that ID, the first whose name and recorded Tool.Run arguments fit is
 // served; when none fits, the first is the one reported as diverged.
-func (rc *ReplayClient) serveCall(name, id string, args json.RawMessage) (string, error) {
+func (rc *ReplayClient) serveCall(name, id string, args json.RawMessage) ([]llmkit.Block, error) {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 	set := rc.set
@@ -660,9 +664,9 @@ func (rc *ReplayClient) serveCall(name, id string, args json.RawMessage) (string
 				err := fmt.Errorf("%w at step %d: call %q was recorded for tool %q, replayed for tool %q",
 					ErrReplayDiverged, rec.step, id, rec.call.Name, name)
 				rc.recordDiverged(err)
-				return "", err
+				return nil, err
 			case !rec.ranWith(args):
-				return "", rc.argsDiverged(rec, name, args)
+				return nil, rc.argsDiverged(rec, name, args)
 			}
 			rec.used = true
 			return serveRecorded(rec)
@@ -678,7 +682,7 @@ func (rc *ReplayClient) serveCall(name, id string, args json.RawMessage) (string
 			}
 		}
 		if unconsumed >= 0 {
-			return "", rc.argsDiverged(&g.calls[unconsumed], name, args)
+			return nil, rc.argsDiverged(&g.calls[unconsumed], name, args)
 		}
 		set.gi++
 	}
@@ -688,7 +692,7 @@ func (rc *ReplayClient) serveCall(name, id string, args json.RawMessage) (string
 	}
 	err := fmt.Errorf("%w at step %d: extra tool call to %q with arguments %s; every recorded call is served", ErrReplayDiverged, lastStep, name, argsString(args))
 	rc.recordDiverged(err)
-	return "", err
+	return nil, err
 }
 
 // argsDiverged records, and returns, the divergence where a tool was called
@@ -704,13 +708,17 @@ func (rc *ReplayClient) argsDiverged(rec *replayedToolCall, name string, args js
 // serveRecorded renders one recorded call's outcome the way the original run
 // fed it to the model: an error strips the "ERROR: " prefix so the Runner's
 // renderer re-adds it (the fed-back result is byte-identical and the history
-// keeps the is_error mark); a success returns the recorded result verbatim.
+// keeps the is_error mark); a success returns the recorded Content verbatim,
+// or the recorded Result as one text block when the record has no Content.
 // Denied calls never reach here: they are not among the served calls.
-func serveRecorded(rec *replayedToolCall) (string, error) {
+func serveRecorded(rec *replayedToolCall) ([]llmkit.Block, error) {
 	if rec.isError {
-		return "", errors.New(strings.TrimPrefix(rec.result, "ERROR: "))
+		return nil, errors.New(strings.TrimPrefix(rec.result, "ERROR: "))
 	}
-	return rec.result, nil
+	if rec.content != nil {
+		return rec.content, nil
+	}
+	return []llmkit.Block{llmkit.Text(rec.result)}, nil
 }
 
 func argsString(args json.RawMessage) string {

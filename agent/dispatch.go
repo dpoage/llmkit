@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -160,10 +162,10 @@ func (r *Runner) authorizeCalls(ctx context.Context, calls []llmkit.ToolCall, re
 //
 // Hooks fire from the goroutine executing the call — concurrently under
 // WithParallelTools.
-func (r *Runner) runTool(ctx context.Context, call llmkit.ToolCall, step int) (result string, content []llmkit.Block, isErr bool) {
+func (r *Runner) runTool(ctx context.Context, call llmkit.ToolCall, step int) toolResult {
 	tool, ok := r.tools.lookup(call.Name)
 	if !ok {
-		return renderUnknownTool(call.Name), nil, true
+		return toolResult{result: renderUnknownTool(call.Name), isErr: true}
 	}
 	runCtx := ctx
 	if r.toolTimeout > 0 {
@@ -181,40 +183,106 @@ func (r *Runner) runTool(ctx context.Context, call llmkit.ToolCall, step int) (r
 	if panicVal != nil {
 		// A panicking Tool.Run is model-recoverable data: render it as this
 		// call's error result and keep the loop going.
-		result = renderToolPanic(call.Name, panicVal)
-		r.fireToolEnd(ctx, step, call, result, true, duration)
-		return result, nil, true
+		res := toolResult{result: renderToolPanic(call.Name, panicVal), isErr: true}
+		r.fireToolEnd(ctx, step, call, res, duration)
+		return res
 	}
 	if err != nil {
 		// Deadline expiry: report the timeout as the tool result, leaving the
 		// run's own context untouched. The parent-ctx guard keeps a genuine
 		// run cancellation from being misreported as a tool timeout.
 		if r.toolTimeout > 0 && ctx.Err() == nil && runCtx.Err() == context.DeadlineExceeded {
-			timeoutResult := renderToolTimeout(call.Name, r.toolTimeout)
-			r.fireToolEnd(ctx, step, call, timeoutResult, true, duration)
-			return timeoutResult, nil, true
+			res := toolResult{result: renderToolTimeout(call.Name, r.toolTimeout), isErr: true}
+			r.fireToolEnd(ctx, step, call, res, duration)
+			return res
 		}
 		// Record a tool-health signal only for a genuine *ToolHealthError AND
 		// only when ctx is not already cancelled: a failure caused by run
 		// teardown/cancellation must never be counted as a tool-health problem.
 		r.fireToolHealth(ctx, call.Name, err)
-		result = toolError(err)
-		r.fireToolEnd(ctx, step, call, result, true, duration)
-		return result, nil, true
+		res := toolResult{result: toolError(err), isErr: true}
+		r.fireToolEnd(ctx, step, call, res, duration)
+		return res
 	}
-	result = blocksText(out)
-	if len(out) > 0 {
-		content = out
-	}
-	r.fireToolEnd(ctx, step, call, result, false, duration)
-	return result, content, false
+	res := r.placeToolBlocks(out)
+	r.fireToolEnd(ctx, step, call, res, duration)
+	return res
 }
 
-// blocksText is the text view of a tool's result blocks: the BlockText texts
-// concatenated in order, the string the hooks, the ToolRun event, and error
-// rendering carry. Non-text blocks contribute nothing.
+// Markers that replace a media block the model's profile cannot take in a
+// tool result.
+const (
+	imageOmitted    = "[image omitted: this model does not accept images in tool results]"
+	documentOmitted = "[document omitted: this model does not accept documents in tool results]"
+)
+
+// portableToolMedia is the media types every ToolResultMedia wire carries.
+var portableToolMedia = map[string]bool{
+	"image/png":       true,
+	"image/jpeg":      true,
+	"image/webp":      true,
+	"application/pdf": true,
+}
+
+func isMedia(b llmkit.Block) bool {
+	return b.Kind == llmkit.BlockImage || b.Kind == llmkit.BlockDocument
+}
+
+// placeToolBlocks builds the outcome of a successful Tool.Run: the blocks the
+// model sees, with each media block the client's profile cannot carry in a
+// tool result replaced by its omission marker, and the model-visible text.
+// Capabilities is read only when a media block is present.
+func (r *Runner) placeToolBlocks(out []llmkit.Block) toolResult {
+	if !slices.ContainsFunc(out, isMedia) {
+		return toolResult{result: blocksText(out), content: nonEmptyBlocks(out)}
+	}
+	accepts := r.client.Capabilities().ToolResultMedia
+	var placed []llmkit.Block
+	degraded := 0
+	for i, b := range out {
+		if !isMedia(b) || (accepts && portableToolMedia[b.MediaType]) {
+			if placed != nil {
+				placed = append(placed, b)
+			}
+			continue
+		}
+		if placed == nil {
+			placed = append(make([]llmkit.Block, 0, len(out)), out[:i]...)
+		}
+		marker := imageOmitted
+		if b.Kind == llmkit.BlockDocument {
+			marker = documentOmitted
+		}
+		placed = append(placed, llmkit.Text(marker))
+		degraded++
+	}
+	if placed == nil {
+		placed = out
+	}
+	return toolResult{result: blocksText(placed), content: placed, degraded: degraded}
+}
+
+func nonEmptyBlocks(blocks []llmkit.Block) []llmkit.Block {
+	if len(blocks) == 0 {
+		return nil
+	}
+	return blocks
+}
+
+// blocksText is the model-visible text of placed blocks: text blocks
+// concatenated in order, with a size marker in the position of each media
+// block that was sent.
 func blocksText(blocks []llmkit.Block) string {
-	return llmkit.Message{Content: blocks}.Text()
+	var b strings.Builder
+	for _, blk := range blocks {
+		switch blk.Kind {
+		case llmkit.BlockText:
+			b.WriteString(blk.Text)
+		case llmkit.BlockImage, llmkit.BlockDocument:
+			fmt.Fprintf(&b, "[%s: %s, %d bytes]", blk.Kind, blk.MediaType, len(blk.Data))
+		}
+	}
+	return b.String()
 }
 
 // invokeTool invokes Tool.Run once, converting a panic into a non-nil
@@ -241,15 +309,26 @@ func invokeTool(ctx context.Context, tool Tool, args json.RawMessage) (out []llm
 // [llmkit.ToolRunEvent].DispatchedArguments).
 type toolResult struct {
 	result string
-	// content is the blocks the tool returned, fed to the model verbatim as
-	// the tool-result message's content. Nil for every outcome the harness
-	// renders itself (errors, denials, timeouts) and for a tool that returned
-	// no blocks: the message then carries result as a single text block.
-	content        []llmkit.Block
+	// content is the blocks fed to the model as the tool-result message's
+	// content. Nil for harness-rendered outcomes (errors, denials, timeouts)
+	// and for a tool that returned no blocks: the message then carries result.
+	content []llmkit.Block
+	// degraded counts the media blocks in content replaced by omission markers.
+	degraded       int
 	isErr          bool
 	denied         bool
 	denyReason     string
 	dispatchedArgs json.RawMessage
+}
+
+// eventContent is the Content the ToolRun event and ToolEvent carry: the
+// placed blocks when they hold media or a degradation marker, else nil, so a
+// text-only result serializes as before.
+func (res toolResult) eventContent() []llmkit.Block {
+	if res.degraded > 0 || slices.ContainsFunc(res.content, isMedia) {
+		return res.content
+	}
+	return nil
 }
 
 // callIDKey keys the ID of the call a Tool.Run serves in its context.
@@ -340,7 +419,9 @@ func (r *Runner) executeTools(ctx context.Context, outcome *Outcome, calls []llm
 			if err := ctx.Err(); err != nil {
 				return results[:i]
 			}
-			results[i].result, results[i].content, results[i].isErr = r.runTool(ctx, call, outcome.Iterations)
+			out := r.runTool(ctx, call, outcome.Iterations)
+			out.dispatchedArgs = results[i].dispatchedArgs
+			results[i] = out
 		}
 		return results
 	}
@@ -368,7 +449,9 @@ func (r *Runner) executeTools(ctx context.Context, outcome *Outcome, calls []llm
 			if denied != nil && denied[i] {
 				return // deny already rendered into results[i]
 			}
-			results[i].result, results[i].content, results[i].isErr = r.runTool(ctx, call, outcome.Iterations)
+			out := r.runTool(ctx, call, outcome.Iterations)
+			out.dispatchedArgs = results[i].dispatchedArgs
+			results[i] = out
 		}(i, call)
 	}
 	wg.Wait()
