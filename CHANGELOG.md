@@ -173,6 +173,18 @@ entry below is marked.
   recorded usage, so a replay's `Outcome.Usage` and `BudgetPool` charge match
   the record and a run that stopped on a budget stops at the same iteration;
   a replay never serves a completion with a `purpose` as an answer.
+- `agent`: `Limits.ContextReserve` compacts before a completion when the
+  estimated request exceeds the client's `ContextWindow` minus the reserve,
+  instead of after a provider refusal. Zero, the default, disables it, and a
+  client that reports no window never fires it. A positive value also enables
+  compaction, so overflow recovery runs. After a compaction that leaves the
+  history past the trigger point, and always after a paid pass (one that
+  reported usage), including after a refusal, the trigger waits until the
+  estimate has grown by the reserve; after an overflow recovery by a free
+  pass it fires from the refused size minus the reserve, so a window the
+  client overstates costs one refusal rather than one per turn when a turn
+  grows the history by less than the reserve. It combines with
+  `HistoryTokenBudget`, which doubles as before.
 
 ### Changed
 
@@ -206,6 +218,18 @@ entry below is marked.
   request, now get a non-nil `rc.Err` wrapping `ErrReplayDiverged`; `Run`'s
   result is unchanged. Replaying under the recording configuration is still
   clean.
+- `agent`: a run that stops on `TokenBudget` or a `BudgetPool` and takes the
+  RunJSON finalization turn now compacts before that turn, and recovers from
+  an overflow of it, with the default stubber even when a `Compactor` is
+  installed, so the stop never pays for a summary. A stop at `MaxIterations`
+  keeps the installed compactor.
+- `agent`: a compaction pass whose `CompactOutput.Usage` is non-zero (a paid
+  pass) re-arms the triggers as if it had compacted, even when the history
+  came back unchanged or the summary was discarded: `HistoryTokenBudget`
+  doubles and `ContextReserve` waits for growth by the reserve, also after
+  a provider refusal. A pass with no usage and no
+  gain is still not counted and not re-armed, so it is tried again the next
+  turn.
 - `llmkit`: the per-role block rule now lets `RoleToolResult` carry text,
   image and document blocks (it was text only), gated by
   `Capabilities.ToolResultMedia`. `RoleSystem` stays text only. Before, any

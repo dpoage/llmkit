@@ -4,7 +4,8 @@
 // through provider.New. Covers the Func tool loop, RunJSONAs's prompt-embedded
 // schema path, multi-turn continuation, WithMaxTokens continuation, the
 // RequestPolicy seam, Attach, ToolPolicy, RepetitionPolicy, tool-output
-// spilling, Steering, and inline <think> preservation.
+// spilling, Steering, inline <think> preservation, and proactive summary
+// compaction against a small forced ContextWindow.
 //
 // Live-model flakes are handled, not hidden: where an assertion depends on
 // the model producing VISIBLE text or calling mandatory tools, the test
@@ -41,6 +42,7 @@ import (
 	llmkit "github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/agent"
 	"github.com/dpoage/llmkit/internal/livetest"
+	"github.com/dpoage/llmkit/provider"
 )
 
 func TestMain(m *testing.M) {
@@ -1061,6 +1063,97 @@ func runLiveToolOutputSpill(ctx context.Context, t *testing.T, cl llmkit.Client,
 		// The run completed past the spill.
 		if out.FinalText == "" {
 			t.Fatalf("no final text after the spill; outcome=%+v", out)
+		}
+		return
+	}
+}
+
+// TestLiveAgentProactiveSummaryCompaction pins that ContextReserve with a
+// summarizing compactor, against a window forced small by a code-level
+// Spec.Capabilities override, compacts before the window fills: the run
+// records a Compaction event with a summary, the summarizer's call as a
+// Purpose=compaction Completion, a Completion ledger that sums to
+// Outcome.Usage, and still completes.
+func TestLiveAgentProactiveSummaryCompaction(t *testing.T) {
+	const window, reserve, chunkBytes, chunks = 6000, 2000, 1500, 12
+	sess := livetest.Resolve(t, "compat")
+	ctx, _ := livetest.Ctx(t)
+	cl := sess.Client(ctx, t, livetest.NewTransport(sess.Key), func(spec *provider.Spec) {
+		prev := spec.Capabilities
+		spec.Capabilities = func(c llmkit.Capabilities) llmkit.Capabilities {
+			if prev != nil {
+				c = prev(c)
+			}
+			c.ContextWindow = window
+			return c
+		}
+	})
+	if got := cl.Capabilities().ContextWindow; got != window {
+		t.Fatalf("client reports ContextWindow %d, want the %d override", got, window)
+	}
+
+	var fetched atomic.Int64
+	fetch := agent.Func("fetch_chunk", "returns chunk n of a long log (1 to 12)",
+		func(_ context.Context, p struct {
+			N int `json:"n"`
+		}) (string, error) {
+			fetched.Add(1)
+			line := fmt.Sprintf("chunk %d: the quick brown fox jumps over the lazy dog. ", p.N)
+			return strings.Repeat(line, chunkBytes/len(line)+1)[:chunkBytes], nil
+		})
+	system := "You are a careful log reader. Fetch every chunk with the `fetch_chunk` tool, one call per turn, in order. Never skip a chunk."
+	tasks := []string{
+		"Fetch chunks 1 through 12 with `fetch_chunk`, one call at a time and in order. After chunk 12, reply with one sentence saying how many chunks you fetched.",
+		"Use `fetch_chunk` for n=1, then n=2, and so on up to n=12, one call per turn. When all twelve are fetched, answer in one sentence with the number of chunks you read.",
+		"Read the log: call `fetch_chunk` once for each n from 1 to 12 in order, then state in one sentence how many chunks you read.",
+	}
+
+	for attempt := 1; attempt <= 3; attempt++ {
+		fetched.Store(0)
+		runner := agent.NewRunner(cl, []agent.Tool{fetch}, system,
+			agent.WithLimits(agent.Limits{MaxIterations: 30, ContextReserve: reserve}),
+			agent.WithCompactor(agent.SummarizingCompactor(cl)),
+			agent.WithMaxTokens(2048), agent.WithObserver(livetest.DefaultTally()))
+		out, err := runner.Run(ctx, tasks[attempt-1])
+		if err != nil {
+			if !isModelFlake(err) {
+				t.Fatalf("run (attempt %d): %v", attempt, err)
+			}
+			if attempt == 3 {
+				t.Fatalf("after 3 differently-phrased attempts the run still ended without an answer: %v", err)
+			}
+			t.Logf("attempt %d: run ended without an answer (%v); retrying with different phrasing", attempt, err)
+			continue
+		}
+
+		var summaries, purposeCalls int
+		var ledger llmkit.Usage
+		for _, ev := range out.Transcript.Record {
+			switch {
+			case ev.Kind == llmkit.KindCompaction && ev.Compaction != nil && ev.Compaction.Summary != "":
+				summaries++
+			case ev.Kind == llmkit.KindCompletion && ev.Completion != nil:
+				ledger = ledger.Add(ev.Completion.Response.Usage)
+				if ev.Completion.Purpose == llmkit.CompletionPurposeCompaction {
+					purposeCalls++
+				}
+			}
+		}
+		if summaries == 0 {
+			if attempt == 3 {
+				t.Fatalf("after 3 attempts no compaction carried a summary (%d chunks fetched, %d iterations)", fetched.Load(), out.Iterations)
+			}
+			t.Logf("attempt %d: no summary (%d chunks fetched in %d iterations); retrying with different phrasing", attempt, fetched.Load(), out.Iterations)
+			continue
+		}
+		if purposeCalls == 0 {
+			t.Errorf("a summary was recorded but no Completion event has Purpose %q", llmkit.CompletionPurposeCompaction)
+		}
+		if ledger != out.Usage {
+			t.Errorf("sum of Completion usage %+v != Outcome.Usage %+v", ledger, out.Usage)
+		}
+		if out.FinalText == "" {
+			t.Fatalf("no final text after the compaction; outcome=%+v", out)
 		}
 		return
 	}

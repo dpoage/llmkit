@@ -322,10 +322,10 @@ const maxTokensContinuePrompt = "Your previous message was cut off at the output
 
 func (r *Runner) run(ctx context.Context, em runEmitter, seed []llmkit.Message, task string, attach []llmkit.Block, finalizePrompt string, responseSchema json.RawMessage, steering *Steering) (*Outcome, error) {
 	s := &runState{
-		outcome:          &Outcome{Transcript: em.tr, RunID: em.tr.RunID},
-		finalizePrompt:   finalizePrompt,
-		responseSchema:   responseSchema,
-		compactThreshold: r.limits.HistoryTokenBudget,
+		outcome:        &Outcome{Transcript: em.tr, RunID: em.tr.RunID},
+		finalizePrompt: finalizePrompt,
+		responseSchema: responseSchema,
+		compact:        r.newCompactState(),
 	}
 	outcome := s.outcome
 	// Bind before any work so a second concurrent run on the same handle
@@ -410,18 +410,16 @@ func (r *Runner) run(ctx context.Context, em runEmitter, seed []llmkit.Message, 
 			}
 		}
 
-		// Threshold-triggered, one-shot-per-crossing history compaction. Done at
-		// the turn boundary BEFORE the completion so the smaller history is what
-		// gets billed this turn. Re-arming the threshold upward after a firing
-		// keeps compaction bounded and avoids re-paying a prefix cache miss every
-		// subsequent turn (see compactRearmFactor).
-		compacted, threshold, cerr := r.maybeCompact(ctx, em, outcome, s.messages, s.compactThreshold, outcome.Iterations+1)
+		// Trigger-based history compaction at the turn boundary, BEFORE the
+		// completion so the smaller history is what gets billed this turn;
+		// re-arming (see compactState.rearm) bounds the prefix cache misses.
+		compacted, cerr := r.maybeCompact(ctx, em, outcome, s.messages, s.compact, outcome.Iterations+1)
 		if cerr != nil {
 			return outcome, cerr
 		}
-		s.messages, s.compactThreshold = compacted, threshold
+		s.messages = compacted
 
-		resp, err := r.completeOnce(ctx, em, &s.messages, outcome, responseSchema, false)
+		resp, err := r.completeOnce(ctx, em, &s.messages, outcome, responseSchema, false, s.compact)
 		if err != nil {
 			return outcome, err
 		}
@@ -518,9 +516,6 @@ type runState struct {
 	// messages is the conversation history, reassigned as the loop appends and
 	// compacts; run snapshots it into Outcome.Messages on every return path.
 	messages []llmkit.Message
-	// compactThreshold is the history-token threshold currently in force,
-	// re-armed upward after each real prune (see [Runner.maybeCompact]).
-	compactThreshold int64
 	// emptyTurnNudges counts empty/think-only turns already nudged this run
 	// (see [maxEmptyTurnNudges]).
 	emptyTurnNudges int
@@ -530,8 +525,78 @@ type runState struct {
 	// responseSchema, when non-nil, rides every completion of the run
 	// (capability-gated; see [Runner.complete]).
 	responseSchema json.RawMessage
+	// compact is the compaction trigger state (see [Runner.maybeCompact]).
+	compact *compactState
 	// outcome accumulates the run's result and is what run returns.
 	outcome *Outcome
+}
+
+// compactState is one run's compaction trigger state.
+type compactState struct {
+	// budget is the HistoryTokenBudget threshold in force; <= 0 is off.
+	budget int64
+	// proactive enables the reserve trigger: it fires above limit, once the
+	// estimate has reached floor. reserve is Limits.ContextReserve.
+	proactive bool
+	reserve   int64
+	limit     int64
+	floor     int64
+	// refused is set once the provider refused a request this run.
+	refused bool
+	// stubOnly restricts compaction to the default stubber (finalization
+	// after a budget stop must not pay for a summary).
+	stubOnly bool
+}
+
+// newCompactState arms the triggers for a run. The reserve trigger needs a
+// known (positive) context window.
+func (r *Runner) newCompactState() *compactState {
+	cs := &compactState{budget: r.limits.HistoryTokenBudget}
+	if res := r.limits.ContextReserve; res > 0 {
+		if w := int64(r.client.Capabilities().ContextWindow); w > 0 {
+			cs.proactive, cs.reserve, cs.limit = true, res, w-res
+		}
+	}
+	return cs
+}
+
+// due reports which triggers fire for a request-copy estimate.
+func (cs *compactState) due(est int64) (byBudget, byReserve bool) {
+	byBudget = cs.budget > 0 && est > cs.budget
+	byReserve = cs.proactive && est > cs.limit && est >= cs.floor
+	return byBudget, byReserve
+}
+
+// rearm records a counted or paid pass that left the history at post. The
+// budget threshold doubles only when the budget trigger fired. A paid pass
+// always makes the reserve trigger wait for growth by the reserve; a free
+// one does so only before a refusal, when post is already past the trigger point.
+func (cs *compactState) rearm(byBudget bool, post int64, paid bool) {
+	if byBudget {
+		cs.budget *= compactRearmFactor
+	}
+	cs.floor = 0
+	if cs.proactive && (paid || !cs.refused && post >= cs.limit) {
+		cs.floor = post + cs.reserve
+	}
+}
+
+// refusal records that the provider refused a request of the given estimate
+// and that the recovery pass left the history at post. A turn grows the
+// history by less than the reserve, so a request at or below refused-reserve
+// stays under the provider's real limit. A paid recovery waits for growth by
+// the reserve; a free one may fire again at once.
+func (cs *compactState) refusal(refused, post int64, paid bool) {
+	if !cs.proactive {
+		return
+	}
+	cs.refused, cs.floor = true, 0
+	if paid {
+		cs.floor = post + cs.reserve
+	}
+	if l := refused - cs.reserve; l > 0 && l < cs.limit {
+		cs.limit = l
+	}
 }
 
 // stop marks the run as truncated: reason, the stop condition that fired (not
@@ -608,69 +673,66 @@ func (r *Runner) finalizeAndTruncate(ctx context.Context, em runEmitter, s *runS
 	s.outcome.Finalized = true
 	// Compact before the finalization turn: it is often the largest history of
 	// the run, and the model needs only its own reasoning chain (preserved) to
-	// emit the answer, not every earlier file dump. The re-armed threshold is
-	// discarded: this is the run's final turn, so no later compaction can fire.
-	compacted, _, cerr := r.maybeCompact(ctx, em, s.outcome, s.messages, s.compactThreshold, s.outcome.Iterations+1)
+	// emit the answer, not every earlier file dump. A budget stop means no
+	// more spend: only the default stubber runs, never a summarizing compactor.
+	s.compact.stubOnly = reason == TruncTokenBudget || reason == TruncBudgetPool
+	compacted, cerr := r.maybeCompact(ctx, em, s.outcome, s.messages, s.compact, s.outcome.Iterations+1)
 	if cerr != nil {
 		return cerr
 	}
 	s.messages = compacted
-	if _, cerr := r.completeOnce(ctx, em, &s.messages, s.outcome, s.responseSchema, true); cerr != nil {
+	if _, cerr := r.completeOnce(ctx, em, &s.messages, s.outcome, s.responseSchema, true, s.compact); cerr != nil {
 		return cerr
 	}
 	return nil
 }
 
-// maybeCompact applies threshold-triggered history compaction. When the
-// threshold is positive and the estimated history size exceeds it, the
-// Compactor compacts the history and the threshold re-arms higher, so the
-// next firing only happens once history has grown materially again. When
-// disabled or under threshold, or when the compactor changed nothing, it
-// returns the messages and threshold unchanged, so a normal run pays no
-// allocation and the append-only prefix (and its cache) is preserved.
+// maybeCompact applies the history-compaction triggers. The budget trigger
+// fires when the request-copy estimate exceeds cs.budget; the reserve trigger
+// when it exceeds cs.limit and has grown to cs.floor. With neither due, it
+// returns the messages unchanged, so a normal run pays no allocation and the
+// append-only prefix (and its cache) is preserved.
+//
+// A pass that shrinks the estimate is applied and counted. A paid pass (the
+// compactor reported usage) is counted even when discarded or without gain.
+// Both re-arm the triggers; a free pass that changes nothing re-arms nothing,
+// so the next turn tries again once a result ages out of the recent window.
 //
 // step is the completion that will consume the (possibly) compacted history;
 // it is stamped on the Compaction event, which is emitted only when the
 // history changed. A compactor error is returned wrapped.
-func (r *Runner) maybeCompact(ctx context.Context, em runEmitter, outcome *Outcome, messages []llmkit.Message, threshold int64, step int) ([]llmkit.Message, int64, error) {
-	if threshold <= 0 {
-		return messages, threshold, nil
+func (r *Runner) maybeCompact(ctx context.Context, em runEmitter, outcome *Outcome, messages []llmkit.Message, cs *compactState, step int) ([]llmkit.Message, error) {
+	if cs.budget <= 0 && !cs.proactive {
+		return messages, nil
 	}
 	// Estimate the request copy, not the raw history: media the client
-	// degrades is sent as its marker text and must not trip the threshold.
+	// degrades is sent as its marker text and must not trip a trigger.
 	wired, _ := r.wireMessages(messages)
 	before := estimateTokens(wired)
-	if before <= threshold {
-		return messages, threshold, nil
+	byBudget, byReserve := cs.due(before)
+	if !byBudget && !byReserve {
+		return messages, nil
 	}
 	// The pruned history's consuming turn rides the context the event
 	// sees, matching the Step it reports.
 	ctx = llmkit.WithStep(ctx, step)
-	out, err := r.compact(ctx, em, outcome, CompactInput{Messages: messages, Sent: wired})
+	out, err := r.compact(ctx, em, outcome, CompactInput{Messages: messages, Sent: wired}, cs.stubOnly)
 	if err != nil {
-		return messages, threshold, fmt.Errorf("agent: compaction before iteration %d: %w", step, err)
+		return messages, fmt.Errorf("agent: compaction before iteration %d: %w", step, err)
 	}
-	if compactionUnchanged(out.Messages, messages) {
-		// Over threshold but nothing prunable yet: either history is dominated by
-		// assistant reasoning, or every prunable result is already a stub, or there
-		// simply aren't more than compactRecentToolResults tool results so far. Leave the
-		// threshold UNCHANGED so the check fires again next turn once a result ages out of
-		// the recent window — re-arming here would starve real compaction by ratcheting
-		// the threshold above the history before anything was ever reclaimed.
-		return messages, threshold, nil
+	kept, after := messages, before
+	if !compactionUnchanged(out.Messages, messages) {
+		wiredCompacted, _ := r.wireMessages(out.Messages)
+		if a := estimateTokens(wiredCompacted); a < before {
+			r.recordCompaction(ctx, em, step, before, a, out, "")
+			kept, after = out.Messages, a
+		}
 	}
-	wiredCompacted, _ := r.wireMessages(out.Messages)
-	after := estimateTokens(wiredCompacted)
-	// A pass that does not shrink the estimate is dropped: counting or re-arming
-	// it would pay a cache miss for nothing and starve a later real prune.
-	if after >= before {
-		return messages, threshold, nil
+	if after == before && out.Usage == (llmkit.Usage{}) {
+		return messages, nil
 	}
-	r.recordCompaction(ctx, em, step, before, after, out, "")
-	// Real pruning happened (one prefix cache miss paid). Re-arm upward so the
-	// next firing only comes after history has grown materially again, bounding
-	// total firings and avoiding turn-over-turn cache thrash.
-	return out.Messages, threshold * compactRearmFactor, nil
+	cs.rearm(byBudget, after, out.Usage != (llmkit.Usage{}))
+	return kept, nil
 }
 
 // repair issues a SINGLE tools-less, schema-bearing completion against the
@@ -691,7 +753,7 @@ func (r *Runner) maybeCompact(ctx context.Context, em runEmitter, outcome *Outco
 func (r *Runner) repair(ctx context.Context, em runEmitter, prompt string, responseSchema json.RawMessage, baseIter int) (*Outcome, error) {
 	outcome := &Outcome{Transcript: em.tr, Iterations: baseIter, RunID: llmkit.RunFromContext(ctx)}
 	messages := []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, prompt)}
-	if _, err := r.completeOnce(ctx, em, &messages, outcome, responseSchema, true); err != nil {
+	if _, err := r.completeOnce(ctx, em, &messages, outcome, responseSchema, true, nil); err != nil {
 		return outcome, err
 	}
 	return outcome, nil
@@ -713,8 +775,8 @@ func (r *Runner) repair(ctx context.Context, em runEmitter, prompt string, respo
 // nudge — so a JSON answer cut off mid-object has a chance to be completed
 // rather than failing to parse. The outcome's LastStopReason reflects the
 // final completion served here.
-func (r *Runner) completeOnce(ctx context.Context, em runEmitter, messages *[]llmkit.Message, outcome *Outcome, responseSchema json.RawMessage, final bool) (llmkit.Response, error) {
-	resp, err := r.completeRecovering(ctx, em, messages, outcome, responseSchema, final)
+func (r *Runner) completeOnce(ctx context.Context, em runEmitter, messages *[]llmkit.Message, outcome *Outcome, responseSchema json.RawMessage, final bool, cs *compactState) (llmkit.Response, error) {
+	resp, err := r.completeRecovering(ctx, em, messages, outcome, responseSchema, final, cs)
 	if err != nil {
 		return llmkit.Response{}, err
 	}
@@ -725,7 +787,7 @@ func (r *Runner) completeOnce(ctx context.Context, em runEmitter, messages *[]ll
 	// Guarded so it fires at most once per completeOnce call.
 	if resp.StopReason == llmkit.StopMaxTokens && len(resp.ToolCalls) == 0 {
 		*messages = append(*messages, llmkit.TextMessage(llmkit.RoleUser, maxTokensContinuePrompt))
-		cont, cerr := r.completeRecovering(ctx, em, messages, outcome, responseSchema, final)
+		cont, cerr := r.completeRecovering(ctx, em, messages, outcome, responseSchema, final, cs)
 		if cerr != nil {
 			return llmkit.Response{}, cerr
 		}
@@ -748,8 +810,10 @@ func (r *Runner) completeOnce(ctx context.Context, em runEmitter, messages *[]ll
 }
 
 // completeRecovering is complete plus one compact-and-retry on ErrContextTooLong
-// when compaction is enabled; the policy and hooks fire per attempt.
-func (r *Runner) completeRecovering(ctx context.Context, em runEmitter, messages *[]llmkit.Message, outcome *Outcome, responseSchema json.RawMessage, final bool) (llmkit.Response, error) {
+// when compaction is enabled; the policy and hooks fire per attempt. A recovery
+// that changes the request tells cs the provider's window is below the size it
+// refused.
+func (r *Runner) completeRecovering(ctx context.Context, em runEmitter, messages *[]llmkit.Message, outcome *Outcome, responseSchema json.RawMessage, final bool, cs *compactState) (llmkit.Response, error) {
 	resp, err := r.complete(ctx, em, *messages, outcome, responseSchema, final)
 	if err == nil || !r.compactionEnabled() || !errors.Is(err, llmkit.ErrContextTooLong) {
 		return resp, err
@@ -757,7 +821,7 @@ func (r *Runner) completeRecovering(ctx context.Context, em runEmitter, messages
 	step := outcome.Iterations + 1
 	cctx := llmkit.WithStep(ctx, step)
 	before, _ := r.wireMessages(*messages)
-	out, cerr := r.compact(cctx, em, outcome, CompactInput{Messages: *messages, Sent: before, Reason: llmkit.CompactionReasonOverflow})
+	out, cerr := r.compact(cctx, em, outcome, CompactInput{Messages: *messages, Sent: before, Reason: llmkit.CompactionReasonOverflow}, cs != nil && cs.stubOnly)
 	if cerr != nil {
 		return llmkit.Response{}, fmt.Errorf("agent: compaction after context overflow at iteration %d: %w", step, cerr)
 	}
@@ -768,7 +832,11 @@ func (r *Runner) completeRecovering(ctx context.Context, em runEmitter, messages
 	if reflect.DeepEqual(before, after) {
 		return resp, err
 	}
+	post := estimateTokens(after)
 	r.recordCompaction(cctx, em, step, estimateTokens(*messages), estimateTokens(out.Messages), out, llmkit.CompactionReasonOverflow)
+	if cs != nil {
+		cs.refusal(estimateTokens(before), post, out.Usage != (llmkit.Usage{}))
+	}
 	*messages = out.Messages
 	return r.complete(ctx, em, *messages, outcome, responseSchema, final)
 }

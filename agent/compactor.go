@@ -89,14 +89,15 @@ func (stubCompactor) Compact(_ context.Context, in CompactInput) (CompactOutput,
 
 // compactionEnabled reports whether overflow recovery runs.
 func (r *Runner) compactionEnabled() bool {
-	return r.limits.HistoryTokenBudget > 0 || r.compactor != nil
+	return r.limits.HistoryTokenBudget > 0 || r.limits.ContextReserve > 0 || r.compactor != nil
 }
 
-// compact runs the Compactor, then records the model calls it made and
-// charges their usage to outcome and the budget pool, whether or not it erred.
-func (r *Runner) compact(ctx context.Context, em runEmitter, outcome *Outcome, in CompactInput) (CompactOutput, error) {
+// compact runs the Compactor, or the default stubber when stubOnly, then
+// records the model calls it made and charges their usage to outcome and the
+// budget pool, whether or not it erred.
+func (r *Runner) compact(ctx context.Context, em runEmitter, outcome *Outcome, in CompactInput, stubOnly bool) (CompactOutput, error) {
 	var c Compactor = stubCompactor{}
-	if r.compactor != nil {
+	if r.compactor != nil && !stubOnly {
 		c = r.compactor
 	}
 	out, err := c.Compact(ctx, in)

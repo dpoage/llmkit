@@ -47,7 +47,7 @@
 // compaction, which replaces old tool results with short stubs (or runs the
 // [Compactor] from [WithCompactor]) and re-arms its threshold so the cache
 // cost stays bounded, and recovers once from a provider context-overflow
-// refusal.
+// refusal. [Limits.ContextReserve] compacts before the context window fills.
 //
 // # Policies
 //
@@ -204,17 +204,33 @@ type Limits struct {
 	// over the remaining turns exceed that one-time miss. Size the budget
 	// well above a typical short run; the re-arm stops repeated firings.
 	//
-	// Compaction is enabled by a positive value or by [WithCompactor]. Enabled
-	// compaction also runs overflow recovery: a completion the provider
+	// Compaction is enabled by a positive value, a positive
+	// [Limits.ContextReserve] or by [WithCompactor]. Enabled compaction also
+	// runs overflow recovery: a completion the provider
 	// refuses with [llmkit.ErrContextTooLong] compacts the history once,
 	// emits a Compaction event with Reason "overflow", and retries that
 	// completion once. Nothing changed, or a second refusal, returns the
 	// error. The RequestPolicy and hooks fire for each attempt.
 	//
-	// Only a positive value triggers threshold compaction. Zero or negative
-	// with no [WithCompactor] disables compaction and overflow recovery (pure
-	// append-only history); with one, only overflow recovery runs.
+	// Only a positive value triggers threshold compaction. Without a
+	// [WithCompactor] or ContextReserve, zero or negative disables compaction
+	// and overflow recovery (pure append-only history); with either, no
+	// threshold compaction runs, but overflow recovery does.
 	HistoryTokenBudget int64
+
+	// ContextReserve compacts before a completion when the estimated request
+	// exceeds the client's ContextWindow minus this many tokens. Zero disables
+	// it, and an unknown (zero) window never fires it. A positive value also
+	// enables overflow recovery.
+	//
+	// After a compaction the trigger waits for the estimate to grow by
+	// ContextReserve when the compacted size is already past the trigger
+	// point, and always after a paid pass (CompactOutput.Usage non-zero),
+	// also following a refusal. After an overflow recovery by a free pass it
+	// fires from the refused size minus ContextReserve, so a window the
+	// client overstates costs one refusal when a turn grows the history by
+	// less than ContextReserve.
+	ContextReserve int64
 }
 
 // resolve returns the effective limits, substituting defaults for zero values.
