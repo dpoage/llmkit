@@ -79,6 +79,8 @@ When to use: give the model capabilities it cannot have on its own — read file
 
 A tool may return image and document blocks beside text, such as a screenshot. Where the client's `Capabilities.ToolResultMedia` is true (Anthropic, Gemini 3) an `image/png`, `image/jpeg`, `image/webp` or `application/pdf` block reaches the model. Any other block, or any media block on a profile without the capability, is replaced in history by a text marker, and `ToolEvent.Degraded` and the `tool_run` event's `degraded` count the replacements. A replay serves a recorded `content` verbatim.
 
+`WithToolOutputLimit(maxBytes, sink)` bounds each successful tool result entering history; it is off by default. A result is measured as the bytes of its text, media data and URLs. A larger one goes whole to the `SpillSink`, and the model sees `[tool output spilled: <ref>, <size> bytes]`, a newline and a head preview of the text (2048 bytes, cut on a UTF-8 boundary), all within `maxBytes`; a limit smaller than the marker still sends the marker. With a nil sink, or when the sink fails, the text is head-truncated to fit and ends with `[tool output truncated: <shown> of <size> bytes shown]`, and media blocks are dropped but counted in the size. The `tool_run` event records `original_bytes`, `spill_ref` and, for a failed sink, `spill_error`; its `result` stays the exact text the model saw. The limit applies after media degradation and not to errors, denials or timeouts. A replay serves the recorded result as it was, never calling the sink. When compaction prunes a spilled result, the stub keeps the reference.
+
 ## Limits and outcomes
 
 `WithLimits(agent.Limits{...})` bounds a run. The zero value resolves to the package defaults.
@@ -267,7 +269,7 @@ Decorator-emitted kinds this table does not list — a provider `attempt`, and t
 |---|---|---|
 | `start` | 0 | the task text and the tool names offered; `parent_run_id` rides here on continued runs |
 | `completion` | turn | the full request–response round-trip (post-policy request, response, usage) or the failure as `err`; one per model turn, span-joined to any provider attempts |
-| `tool_run` | turn | the model's call, the result as the model sees it as text (media blocks sent appear as `[image: <mediatype>, <N> bytes]` markers); `content` (the blocks as placed in history) and `degraded` only when the result held media; `denied` + `deny_reason` for policy denials, `is_error` for failures; `dispatched_arguments` when a `ToolPolicy` rewrote the arguments `Tool.Run` received (the `call` stays the model's) |
+| `tool_run` | turn | the model's call, the result as the model sees it as text (media blocks sent appear as `[image: <mediatype>, <N> bytes]` markers); `content` (the blocks as placed in history) and `degraded` only when the result held media; `original_bytes` and `spill_ref` (or `spill_error`) when the output limit applied; `denied` + `deny_reason` for policy denials, `is_error` for failures; `dispatched_arguments` when a `ToolPolicy` rewrote the arguments `Tool.Run` received (the `call` stays the model's) |
 | `compaction` | next turn | token totals before/after and the prune count; only when something was actually pruned |
 | `steer` | next turn | a delivered steering message; `follow_up` marks follow-up turns |
 | `finalize` | completed turns; 0 when `status` is `panicked` | how the run ended (`status`, `err`); unless `status` is `panicked`, also the truncation reason when there is one (`truncation_reason`), usage, the run's last text (`final_text`, as `Outcome.FinalText`), and whether forced finalization fired, with the completed-turn count as the `step` itself; a failed completion does not advance the step, so a run whose only completion failed reports step 0; a `panicked` run reports step 0 whatever step its context carries, a nested Runner's parent tool phase included |
@@ -381,6 +383,7 @@ Constructor options apply to every run of a Runner; run options apply to a singl
 | `WithHooks(h Hooks)` | appends; no registration: every callback is a no-op |
 | `WithParallelTools()` | sequential dispatch within a turn |
 | `WithToolTimeout(d time.Duration)` | zero: no per-tool deadline |
+| `WithToolOutputLimit(maxBytes int, sink SpillSink)` | no limit: a tool's result enters history whole |
 | `WithBudgetPool(pool *BudgetPool)` | nil pool: unlimited, no check, no charge |
 | `WithRequestPolicy(p RequestPolicy)` | nil policy: the request goes out as built, no clone |
 | `WithToolPolicy(p ToolPolicy)` | nil policy: every call is allowed |

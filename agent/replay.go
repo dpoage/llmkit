@@ -284,6 +284,7 @@ type replayedToolCall struct {
 	result   string
 	content  []llmkit.Block // the recorded Content; nil for a record without it
 	degraded int            // the recorded Degraded
+	limit    recordedLimit  // the recorded output-limit outcome
 	isError  bool
 	step     int
 	// args is what Tool.Run received in the recorded run: the record's
@@ -408,6 +409,7 @@ func (ts *replayToolSet) add(step, resp int, tre llmkit.ToolRunEvent, unregister
 		result:   tre.Result,
 		content:  tre.Content,
 		degraded: tre.Degraded,
+		limit:    recordedLimit{originalBytes: tre.OriginalBytes, spillRef: tre.SpillRef, spillErr: tre.SpillError},
 		isError:  tre.IsError,
 		step:     step,
 		args:     tre.Call.Arguments,
@@ -713,13 +715,15 @@ func (rc *ReplayClient) argsDiverged(rec *replayedToolCall, name string, args js
 // renderer re-adds it (the fed-back result is byte-identical and the history
 // keeps the is_error mark); a success reports the recorded Degraded to the
 // dispatching Runner and returns the recorded Content verbatim, or the
-// recorded Result as one text block when the record has no Content.
+// recorded Result as one text block when the record has no Content. The
+// Runner's output limit is skipped for it: the record is already limited.
 // Denied calls never reach here: they are not among the served calls.
 func serveRecorded(ctx context.Context, rec *replayedToolCall) ([]llmkit.Block, error) {
 	if rec.isError {
 		return nil, errors.New(strings.TrimPrefix(rec.result, "ERROR: "))
 	}
 	reportPriorDegraded(ctx, rec.degraded)
+	reportRecordedLimit(ctx, rec.limit)
 	if rec.content != nil {
 		return rec.content, nil
 	}

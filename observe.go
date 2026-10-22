@@ -333,12 +333,21 @@ type AttemptEvent struct {
 // tool the rewritten bytes, compares them with Call.Arguments, and
 // diverges. A record written before the field existed reads as never
 // rewritten.
+//
+// OriginalBytes is the result's size (text, data and URL bytes of its blocks)
+// when the Runner's output limit applied, else zero; Result and Content are
+// then the model-visible stand-in. SpillRef is the sink's reference when the
+// full result was spilled. SpillError is the sink's failure when the limit
+// fell back to truncation.
 type ToolRunEvent struct {
 	Call                ToolCall        `json:"call"`
 	DispatchedArguments json.RawMessage `json:"dispatched_arguments,omitempty"`
 	Result              string          `json:"result,omitempty"`
 	Content             []Block         `json:"content,omitempty"`
 	Degraded            int             `json:"degraded,omitempty"`
+	OriginalBytes       int             `json:"original_bytes,omitempty"`
+	SpillRef            string          `json:"spill_ref,omitempty"`
+	SpillError          string          `json:"spill_error,omitempty"`
 	IsError             bool            `json:"is_error,omitempty"`
 	Denied              bool            `json:"denied,omitempty"`
 	DenyReason          string          `json:"deny_reason,omitempty"`

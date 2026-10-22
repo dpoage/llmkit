@@ -10,6 +10,17 @@ entry below is marked.
 
 ### Added
 
+- agent: `WithToolOutputLimit(maxBytes, sink)` bounds each successful tool
+  result entering history; off by default, so existing runs are unchanged. A
+  result over the limit (the bytes of its text, media data and URLs) goes whole
+  to the `SpillSink` and the model sees `[tool output spilled: <ref>, <size>
+  bytes]` plus a head preview, within the limit. With a nil sink, or when the
+  sink fails, the text is head-truncated and marked `[tool output truncated:
+  <shown> of <size> bytes shown]`, and media blocks are dropped. `ToolRunEvent`
+  gains `OriginalBytes`, `SpillRef` and `SpillError`, omitted when unset;
+  `Result` stays the text the model saw. A replay serves the recorded result
+  without calling the sink, and a compaction stub of a spilled result names
+  its reference.
 - `llmkit`: `ThinkingConfig.Effort` (`ReasoningEffort`: `EffortLow`,
   `EffortMedium`, `EffortHigh`) and `Capabilities.ReasoningEffort`. OpenAI
   sends `reasoning_effort` and Google sends `thinkingLevel`. The flag is true
