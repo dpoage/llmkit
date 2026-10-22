@@ -36,6 +36,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/draw"
+	"image/png"
 	"io"
 	"net/http"
 	"os"
@@ -734,21 +738,25 @@ func caseToolChoice(t *testing.T, lc *liveClient) {
 	lc.finish(resp, err)
 }
 
+// liveDocNonce is the only text in the caseDocuments PDF. A model that answers
+// it saw the document; a model that never received the document cannot.
+const liveDocNonce = "QUOKKA7319"
+
 func caseImages(t *testing.T, lc *liveClient) {
 	resp, err := lc.complete(llmkit.Request{
 		Messages: []llmkit.Message{{
 			Role: llmkit.RoleUser,
 			Content: []llmkit.Block{
-				{Kind: llmkit.BlockImage, MediaType: "image/png", Data: tinyPNG()},
-				{Kind: llmkit.BlockText, Text: "Reply with the single word OK if you received an image."},
+				{Kind: llmkit.BlockImage, MediaType: "image/png", Data: solidPNG(64, 64, color.RGBA{B: 0xFF, A: 0xFF})},
+				{Kind: llmkit.BlockText, Text: "Which single colour fills the attached image: red, green, blue, yellow, black, or white? Answer with that one colour name only. If no image is attached, answer NO_IMAGE."},
 			},
 		}},
 	})
 	if err != nil {
 		t.Fatalf("image completion: %v", err)
 	}
-	if strings.TrimSpace(llmkit.StripThinkBlocks(resp.Text)) == "" {
-		t.Fatalf("empty answer for image input: %q", resp.Text)
+	if got := strings.ToLower(llmkit.StripThinkBlocks(resp.Text)); !strings.Contains(got, "blue") {
+		t.Fatalf("answer %q does not name the image colour (blue): the model did not see the image", resp.Text)
 	}
 	lc.finish(resp, err)
 }
@@ -758,16 +766,16 @@ func caseDocuments(t *testing.T, lc *liveClient) {
 		Messages: []llmkit.Message{{
 			Role: llmkit.RoleUser,
 			Content: []llmkit.Block{
-				{Kind: llmkit.BlockDocument, MediaType: "application/pdf", Title: "hello.pdf", Data: tinyPDF()},
-				{Kind: llmkit.BlockText, Text: "Reply with the single word OK if you received a document."},
+				{Kind: llmkit.BlockDocument, MediaType: "application/pdf", Title: "nonce.pdf", Data: textPDF(liveDocNonce)},
+				{Kind: llmkit.BlockText, Text: "What is the word written in the attached document? Answer with that word only. If no document is attached, answer NO_DOCUMENT."},
 			},
 		}},
 	})
 	if err != nil {
 		t.Fatalf("document completion: %v", err)
 	}
-	if strings.TrimSpace(llmkit.StripThinkBlocks(resp.Text)) == "" {
-		t.Fatalf("empty answer for document input: %q", resp.Text)
+	if got := strings.ToLower(llmkit.StripThinkBlocks(resp.Text)); !strings.Contains(got, strings.ToLower(liveDocNonce)) {
+		t.Fatalf("answer %q does not contain the document nonce %s: the model did not see the document", resp.Text, liveDocNonce)
 	}
 	lc.finish(resp, err)
 }
@@ -1032,11 +1040,23 @@ func tinyPNG() []byte {
 	return b
 }
 
-// tinyPDF builds a minimal, valid one-page PDF whose text reads "hello
-// llmkit". The xref offsets are computed, so the bytes are deterministic and
-// fixture-stable.
-func tinyPDF() []byte {
-	const stream = "BT /F1 24 Tf 72 720 Td (hello llmkit) Tj ET\n"
+// solidPNG encodes a w x h PNG filled with c. The encoder is deterministic, so
+// the bytes are identical run to run and the recorded fixture stays stable.
+func solidPNG(w, h int, c color.RGBA) []byte {
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	draw.Draw(img, img.Bounds(), image.NewUniform(c), image.Point{}, draw.Src)
+	var b bytes.Buffer
+	if err := png.Encode(&b, img); err != nil {
+		panic("encoding the solid PNG: " + err.Error())
+	}
+	return b.Bytes()
+}
+
+// textPDF builds a minimal, valid one-page PDF whose only text is word, which
+// must not contain PDF string metacharacters. The xref offsets are computed,
+// so the bytes are deterministic and fixture-stable.
+func textPDF(word string) []byte {
+	stream := fmt.Sprintf("BT /F1 36 Tf 72 720 Td (%s) Tj ET\n", word)
 	objects := []string{
 		"<</Type/Catalog/Pages 2 0 R>>",
 		"<</Type/Pages/Kids[3 0 R]/Count 1>>",

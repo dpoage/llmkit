@@ -8,18 +8,19 @@
     "PromptCaching": true,
     "StructuredOutput": false,
     "Thinking": false,
+    "ReasoningEffort": false,
     "ToolChoice": true,
     "Images": true,
     "Documents": true,
     "StopSequences": true,
     "TopP": true,
     "TopK": false,
-    "Seed": true
+    "Seed": true,
+    "ToolResultMedia": false
   },
   "request_check": "strict",
   "inputs": [
     {
-      "system": "",
       "messages": [
         {
           "role": "user",
@@ -27,32 +28,17 @@
             {
               "kind": "image",
               "media_type": "image/png",
-              "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+              "data": "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAZUlEQVR4nOzPUQkAIBTAwIfYv7KG8OMQdgm2PXPmZ0sHvGpAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAuwEAAP//4UcBgvupPHMAAAAASUVORK5CYII="
             },
             {
               "kind": "text",
-              "text": "Reply with the single word OK if you received an image."
+              "text": "Which single colour fills the attached image: red, green, blue, yellow, black, or white? Answer with that one colour name only. If no image is attached, answer NO_IMAGE."
             }
-          ],
-          "tool_calls": null,
-          "tool_call_id": "",
-          "is_error": false
+          ]
         }
       ],
-      "tools": null,
       "max_tokens": 768,
-      "temperature": null,
-      "thinking": null,
-      "tool_choice": {
-        "mode": "",
-        "name": ""
-      },
-      "stop_sequences": null,
-      "top_p": null,
-      "top_k": null,
-      "seed": null,
-      "response_schema": null,
-      "response_schema_name": ""
+      "tool_choice": {}
     }
   ],
   "exchanges": [
@@ -70,40 +56,40 @@
           "x-stainless-package-version": "3.43.0",
           "x-stainless-retry-count": "0",
           "x-stainless-runtime": "go",
-          "x-stainless-runtime-version": "go1.27.1-X:nodwarf5"
+          "x-stainless-runtime-version": "go1.26.7"
         },
-        "body": "{\"messages\":[{\"content\":[{\"image_url\":{\"url\":\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==\"},\"type\":\"image_url\"},{\"text\":\"Reply with the single word OK if you received an image.\",\"type\":\"text\"}],\"role\":\"user\"}],\"model\":\"MiniMax-M3\",\"max_completion_tokens\":768}"
+        "body": "{\"messages\":[{\"content\":[{\"image_url\":{\"url\":\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAZUlEQVR4nOzPUQkAIBTAwIfYv7KG8OMQdgm2PXPmZ0sHvGpAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAuwEAAP//4UcBgvupPHMAAAAASUVORK5CYII=\"},\"type\":\"image_url\"},{\"text\":\"Which single colour fills the attached image: red, green, blue, yellow, black, or white? Answer with that one colour name only. If no image is attached, answer NO_IMAGE.\",\"type\":\"text\"}],\"role\":\"user\"}],\"model\":\"MiniMax-M3\",\"max_completion_tokens\":768}"
       },
       "response": {
         "headers": {
           "access-control-allow-origin": "*",
-          "alb_receive_time": "1789786181.944",
-          "alb_request_id": "3e5f86207c798ec355205d859eebedab68e76e41",
+          "alb_receive_time": "1792708220.927",
+          "alb_request_id": "4f63827e0a37ffb3f32e792475f62993036b75c7",
           "cache-control": "max-age=0, no-cache, no-store",
-          "content-length": "763",
+          "content-length": "813",
           "content-type": "application/json; charset=utf-8",
-          "date": "Sat, 19 Sep 2026 02:49:42 GMT",
-          "expires": "Sat, 19 Sep 2026 02:49:42 GMT",
-          "minimax-request-id": "bcd6089ffece4696cee6ee3ea51a0ba7",
+          "date": "Thu, 22 Oct 2026 22:30:21 GMT",
+          "expires": "Thu, 22 Oct 2026 22:30:21 GMT",
+          "minimax-request-id": "fb49e8539dabccd68b65df5fdecb8ddb",
           "pragma": "no-cache",
-          "trace-id": "06fd2b453a9a2ecf21ef8414e243e98b",
+          "trace-id": "0729c17cbc4fcabffc614fc34ff410e9",
           "x-from": "ak",
-          "x-mm-request-id": "2022431855143301769_1789786181jdj5uw",
-          "x-session-id": "233f06245926c1bbd5aa7d8d9cf4e2f6"
+          "x-mm-request-id": "2022431855143301769_17927082200x9hu0",
+          "x-session-id": "a5506a7a38da310ce2a2d988870bae61"
         },
-        "body": "{\"id\":\"06fd2b453a9a2ecf21ef8414e243e98b\",\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"\u003cthink\u003eThe user has sent an image that appears to be a completely black/dark image. They're asking me to reply with \\\"OK\\\" if I received the image. I should follow their instruction and respond with just \\\"OK\\\".\u003c/think\u003e\\n\\nOK\",\"role\":\"assistant\"}}],\"created\":1789786182,\"model\":\"MiniMax-M3\",\"object\":\"chat.completion\",\"usage\":{\"total_tokens\":254,\"total_characters\":0,\"prompt_tokens\":206,\"completion_tokens\":48,\"prompt_tokens_details\":{\"cached_tokens\":128}},\"input_sensitive\":false,\"output_sensitive\":false,\"input_sensitive_type\":0,\"output_sensitive_type\":0,\"output_sensitive_int\":0,\"service_tier\":\"standard\",\"base_resp\":{\"status_code\":0,\"status_msg\":\"\"}}\n",
+        "body": "{\"id\":\"0729c17cbc4fcabffc614fc34ff410e9\",\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"\u003cthink\u003eWe need answer image color. Need inspect. Attached image appears solid blue? Need distinguish perhaps RGB screenshot. Image 512x128? Looks blue, likely blue. Need answer one color name only. \\\"blue\\\".\u003c/think\u003e\\n\\nblue\",\"role\":\"assistant\"}}],\"created\":1792708221,\"model\":\"MiniMax-M3\",\"object\":\"chat.completion\",\"usage\":{\"total_tokens\":295,\"total_characters\":0,\"prompt_tokens\":248,\"completion_tokens\":47,\"completion_tokens_details\":{\"reasoning_tokens\":43},\"prompt_tokens_details\":{\"cached_tokens\":247}},\"input_sensitive\":false,\"output_sensitive\":false,\"input_sensitive_type\":0,\"output_sensitive_type\":0,\"output_sensitive_int\":0,\"service_tier\":\"standard\",\"base_resp\":{\"status_code\":0,\"status_msg\":\"\"}}\n",
         "status": 200
       }
     }
   ],
   "normalized": {
-    "text": "\u003cthink\u003eThe user has sent an image that appears to be a completely black/dark image. They're asking me to reply with \"OK\" if I received the image. I should follow their instruction and respond with just \"OK\".\u003c/think\u003e\n\nOK",
+    "text": "\u003cthink\u003eWe need answer image color. Need inspect. Attached image appears solid blue? Need distinguish perhaps RGB screenshot. Image 512x128? Looks blue, likely blue. Need answer one color name only. \"blue\".\u003c/think\u003e\n\nblue",
     "stop_reason": "end_turn",
     "usage": {
-      "input_tokens": 206,
-      "output_tokens": 48,
-      "cache_read_input_tokens": 128,
-      "cache_creation_input_tokens": 0
+      "input_tokens": 248,
+      "output_tokens": 47,
+      "cache_read_input_tokens": 247,
+      "reasoning_tokens": 43
     }
   }
 }

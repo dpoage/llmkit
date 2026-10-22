@@ -420,6 +420,12 @@ entry below is marked.
   `LLMKIT_SYSTEMONE_MODEL`, and `LLMKIT_SYSTEMONE_BASE_URL` instead of the
   `LLMKIT_TYPESAFE_*` names. The live lane keeps `LLMKIT_LIVE_TYPESAFE_*`.
 - CI and the live workflow now run `./decide/...` instead of `./decide/`.
+- Live `images` and `documents` cases (test-only): the model must now prove it
+  saw the media. `images` sends a generated 64x64 solid blue PNG and requires
+  "blue" in the answer; `documents` sends a generated one-page PDF whose only
+  text is `QUOKKA7319` and requires that nonce. Both used to pass on any
+  non-empty reply, so a dropped image passed. The compat fixtures
+  `images.json` and `documents.json` are re-recorded. See `docs/testing.md`.
 
 ### Fixed
 
