@@ -507,9 +507,10 @@ func toAnthropicMessages(msgs []llmkit.Message) ([]anthropic.MessageParam, error
 
 // anthropicUserBlocks maps a user message's content blocks onto Anthropic
 // content blocks. The media source rule (adapter.Prepare) already holds;
-// the one constraint left here is vendor-specific: inline document bytes
-// must be application/pdf. A message with no blocks yields one empty text
-// block so an empty user turn still serializes the same wire shape.
+// the constraints left here are vendor-specific: inline image bytes must be
+// one of anthropicImageMIME and inline document bytes application/pdf. A
+// message with no blocks yields one empty text block so an empty user turn
+// still serializes the same wire shape.
 func anthropicUserBlocks(m llmkit.Message) ([]anthropic.ContentBlockParamUnion, error) {
 	blocks := make([]anthropic.ContentBlockParamUnion, 0, len(m.Content))
 	for _, b := range m.Content {
@@ -517,7 +518,11 @@ func anthropicUserBlocks(m llmkit.Message) ([]anthropic.ContentBlockParamUnion, 
 		case llmkit.BlockText:
 			blocks = append(blocks, anthropic.NewTextBlock(b.Text))
 		case llmkit.BlockImage:
-			blocks = append(blocks, anthropic.ContentBlockParamUnion{OfImage: anthropicImageBlock(b)})
+			ib, err := anthropicImageBlock(b)
+			if err != nil {
+				return nil, err
+			}
+			blocks = append(blocks, anthropic.ContentBlockParamUnion{OfImage: ib})
 		case llmkit.BlockDocument:
 			dp, err := anthropicDocumentBlock(b)
 			if err != nil {
@@ -532,19 +537,35 @@ func anthropicUserBlocks(m llmkit.Message) ([]anthropic.ContentBlockParamUnion, 
 	return blocks, nil
 }
 
-// anthropicImageBlock maps an image block (base64 or URL source); shared by
-// user turns and tool results.
-func anthropicImageBlock(b llmkit.Block) *anthropic.ImageBlockParam {
+// anthropicImageMIME is the media types a base64 image source accepts; the
+// comparison is exact bytes (no case folding, no parameters). See
+// https://platform.claude.com/docs/en/build-with-claude/vision . URL sources
+// write no media type and are not checked.
+var anthropicImageMIME = map[string]bool{
+	"image/png":  true,
+	"image/jpeg": true,
+	"image/gif":  true,
+	"image/webp": true,
+}
+
+// anthropicImageBlock maps an image block (base64 or URL source), refusing a
+// base64 media type outside anthropicImageMIME; shared by user turns and tool
+// results.
+func anthropicImageBlock(b llmkit.Block) (*anthropic.ImageBlockParam, error) {
 	src := anthropic.ImageBlockParamSourceUnion{}
 	if b.URL != "" {
 		src.OfURL = &anthropic.URLImageSourceParam{URL: b.URL}
 	} else {
+		if !anthropicImageMIME[b.MediaType] {
+			return nil, adapter.Refuse("anthropic",
+				"image block: media type "+b.MediaType+" is not supported by Anthropic base64 images (image/png, image/jpeg, image/gif, image/webp only)", nil)
+		}
 		src.OfBase64 = &anthropic.Base64ImageSourceParam{
 			Data:      base64.StdEncoding.EncodeToString(b.Data),
 			MediaType: anthropic.Base64ImageSourceMediaType(b.MediaType),
 		}
 	}
-	return &anthropic.ImageBlockParam{Source: src}
+	return &anthropic.ImageBlockParam{Source: src}, nil
 }
 
 // anthropicDocumentBlock maps a document block (base64 PDF or URL source),
@@ -552,7 +573,7 @@ func anthropicImageBlock(b llmkit.Block) *anthropic.ImageBlockParam {
 func anthropicDocumentBlock(b llmkit.Block) (*anthropic.DocumentBlockParam, error) {
 	if len(b.Data) > 0 && b.MediaType != "application/pdf" {
 		return nil, adapter.Refuse("anthropic",
-			"document block: Anthropic base64 documents support application/pdf only", nil)
+			"document block: media type "+b.MediaType+" is not supported by Anthropic base64 documents (application/pdf only)", nil)
 	}
 	src := anthropic.DocumentBlockParamSourceUnion{}
 	if b.URL != "" {
@@ -590,7 +611,11 @@ func anthropicToolResultBlock(m llmkit.Message) (anthropic.ContentBlockParamUnio
 				OfText: &anthropic.TextBlockParam{Text: b.Text},
 			})
 		case llmkit.BlockImage:
-			content = append(content, anthropic.ToolResultBlockParamContentUnion{OfImage: anthropicImageBlock(b)})
+			ib, err := anthropicImageBlock(b)
+			if err != nil {
+				return anthropic.ContentBlockParamUnion{}, err
+			}
+			content = append(content, anthropic.ToolResultBlockParamContentUnion{OfImage: ib})
 		case llmkit.BlockDocument:
 			dp, err := anthropicDocumentBlock(b)
 			if err != nil {

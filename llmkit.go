@@ -200,15 +200,16 @@ type BlockKind string
 const (
 	// BlockText is plain text (the common case).
 	BlockText BlockKind = "text"
-	// BlockImage is an image, carried inline (Data + MediaType) or by
-	// reference (URL). Exactly one of Data and URL must be set; adapters
-	// reject any other combination with an error wrapping ErrInvalidRequest
-	// before any wire call.
+	// BlockImage is an image, carried inline (Data + MediaType) or by reference
+	// (URL); exactly one of Data and URL is required. Adapters refuse any other
+	// combination, or an inline MediaType outside the wire's accepted set
+	// (openai-compatible has none), with ErrInvalidRequest before any wire call;
+	// see docs/capabilities.md, "Accepted media types".
 	BlockImage BlockKind = "image"
 	// BlockDocument is a document (e.g. PDF), carried like BlockImage.
 	// Provider-specific format constraints (Anthropic accepts base64 PDFs
-	// only; the OpenAI file part accepts inline data only) are rejected
-	// with an error wrapping ErrInvalidRequest before any wire call.
+	// only; the OpenAI file part accepts inline data only) are refused the
+	// same way, as is a MediaType outside the wire's accepted set.
 	BlockDocument BlockKind = "document"
 	// BlockThinking is a provider reasoning block. Provider names the adapter
 	// that produced it; Raw is its replay payload, validated before any wire

@@ -365,8 +365,40 @@ func googleToolResultParts(m llmkit.Message) ([]*genai.FunctionResponsePart, err
 	return parts, nil
 }
 
+func mimeSet(types ...string) map[string]bool {
+	set := make(map[string]bool, len(types))
+	for _, t := range types {
+		set[t] = true
+	}
+	return set
+}
+
+// googleInlineMIME is the user-turn inlineData media types (image, document,
+// audio, video; the wire is kind-blind); exact bytes compared. Sources:
+// https://ai.google.dev/gemini-api/docs/{image-understanding,audio,video-understanding,document-processing}
+var googleInlineMIME = mimeSet(
+	"image/png", "image/jpeg", "image/webp", "image/heic", "image/heif",
+	"application/pdf", "text/html", "text/css", "text/plain", "text/xml", "text/csv", "text/rtf",
+	"text/javascript", "application/json",
+	"audio/wav", "audio/mp3", "audio/aiff", "audio/aac", "audio/ogg", "audio/flac", "audio/mpeg",
+	"audio/m4a", "audio/l16", "audio/opus",
+	"video/mp4", "video/mpeg", "video/mov", "video/avi", "video/x-flv", "video/mpg", "video/webm",
+	"video/wmv", "video/3gpp",
+)
+
+// googleURLMIME is the fileData media types for a URL source with a non-empty
+// MediaType (https://ai.google.dev/gemini-api/docs/file-input-methods).
+var googleURLMIME = mimeSet(
+	"text/html", "text/css", "text/plain", "text/xml", "text/csv", "text/rtf",
+	"text/javascript", "application/json", "application/pdf",
+	"image/bmp", "image/jpeg", "image/png", "image/webp",
+	"video/mp4", "video/mpeg", "video/quicktime", "video/avi", "video/x-flv", "video/mpg",
+	"video/webm", "video/wmv", "video/3gpp",
+)
+
 // googleUserParts maps a user message's content blocks onto genai parts.
-// The media source rule (adapter.Prepare) already holds.
+// Beyond adapter.Prepare it refuses a media type outside googleInlineMIME
+// (inline) or googleURLMIME (URL with a MediaType).
 func googleUserParts(m llmkit.Message) ([]*genai.Part, error) {
 	parts := make([]*genai.Part, 0, len(m.Content))
 	for _, b := range m.Content {
@@ -375,11 +407,19 @@ func googleUserParts(m llmkit.Message) ([]*genai.Part, error) {
 			parts = append(parts, &genai.Part{Text: b.Text})
 		case llmkit.BlockImage, llmkit.BlockDocument:
 			if len(b.Data) > 0 {
+				if !googleInlineMIME[b.MediaType] {
+					return nil, adapter.Refuse("google",
+						string(b.Kind)+" block: media type "+b.MediaType+" is not supported by Gemini inlineData (see docs/capabilities.md, Accepted media types)", nil)
+				}
 				parts = append(parts, &genai.Part{InlineData: &genai.Blob{
 					MIMEType: b.MediaType,
 					Data:     b.Data,
 				}})
 			} else {
+				if b.MediaType != "" && !googleURLMIME[b.MediaType] {
+					return nil, adapter.Refuse("google",
+						string(b.Kind)+" block: media type "+b.MediaType+" is not supported by Gemini fileData URLs (see docs/capabilities.md, Accepted media types)", nil)
+				}
 				parts = append(parts, &genai.Part{FileData: &genai.FileData{
 					FileURI:  b.URL,
 					MIMEType: b.MediaType,

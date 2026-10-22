@@ -41,6 +41,23 @@ Every `Capabilities` field belongs to exactly one enforcement class. The class t
 
 The field classes above match each field's doc comment in `llmkit.Capabilities`.
 
+## Accepted media types
+
+Whatever `Capabilities.Images` and `Capabilities.Documents` say, each first-party adapter checks the `MediaType` of an inline image or document block against its wire's accepted set before any network call. A type outside the set returns an `*llmkit.APIError` wrapping `ErrInvalidRequest`, with `StatusCode` 0, whose message names the media type; no request is sent. The comparison is exact bytes: `image/jpg`, `IMAGE/PNG`, and `image/png; x=y` are all refused on every first-party wire.
+
+| Wire | Block and position | Accepted media types |
+|---|---|---|
+| Anthropic | Base64 image, in a user turn or a tool result | `image/png`, `image/jpeg`, `image/gif`, `image/webp` |
+| Anthropic | Base64 document, in a user turn or a tool result | `application/pdf` |
+| OpenAI (`TypeOpenAI`) | Inline image, user turn | `image/png`, `image/jpeg`, `image/gif`, `image/webp` |
+| OpenAI (`TypeOpenAI`) | Inline document, user turn | `application/pdf` |
+| OpenAI-compatible | Any inline image or document | No check: every `MediaType` reaches the wire unchanged, because hosts vary. The host decides whether to reject a type. |
+| Google | Inline bytes, user turn (any block kind: the wire does not tell images, documents, audio, and video apart) | `image/png`, `image/jpeg`, `image/webp`, `image/heic`, `image/heif`, `application/pdf`, `text/html`, `text/css`, `text/plain`, `text/xml`, `text/csv`, `text/rtf`, `text/javascript`, `application/json`, `audio/wav`, `audio/mp3`, `audio/aiff`, `audio/aac`, `audio/ogg`, `audio/flac`, `audio/mpeg`, `audio/m4a`, `audio/l16`, `audio/opus`, `video/mp4`, `video/mpeg`, `video/mov`, `video/avi`, `video/x-flv`, `video/mpg`, `video/webm`, `video/wmv`, `video/3gpp` |
+| Google | URL source with a non-empty `MediaType`, user turn | `text/html`, `text/css`, `text/plain`, `text/xml`, `text/csv`, `text/rtf`, `text/javascript`, `application/json`, `application/pdf`, `image/bmp`, `image/jpeg`, `image/png`, `image/webp`, `video/mp4`, `video/mpeg`, `video/quicktime`, `video/avi`, `video/x-flv`, `video/mpg`, `video/webm`, `video/wmv`, `video/3gpp` |
+| Google | Inline bytes, tool result (a URL source is refused) | `image/png`, `image/jpeg`, `image/webp`, `application/pdf`, `text/plain` |
+
+Not checked: a URL-sourced block on Anthropic or OpenAI (no media type is written to the wire), and a Google URL-sourced block with an empty `MediaType`. The OpenAI adapter refuses URL-sourced documents under a separate rule; the Google and Anthropic adapters accept them. Sources: [Anthropic vision](https://platform.claude.com/docs/en/build-with-claude/vision), [OpenAI images](https://developers.openai.com/api/docs/guides/images-vision), [OpenAI file inputs](https://developers.openai.com/api/docs/guides/file-inputs), and the Gemini [image](https://ai.google.dev/gemini-api/docs/image-understanding), [audio](https://ai.google.dev/gemini-api/docs/audio), [video](https://ai.google.dev/gemini-api/docs/video-understanding), [document](https://ai.google.dev/gemini-api/docs/document-processing), and [file-input](https://ai.google.dev/gemini-api/docs/file-input-methods) guides. `provider/media_type_test.go` pins every row.
+
 ## ContextWindow zero means unknown
 
 Adapters report `ContextWindow: 0` in two cases. The model has no entry in the adapter's per-model table. The endpoint is an arbitrary `openai-compatible` server.
