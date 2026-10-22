@@ -346,17 +346,20 @@ func caseReasoningRoundTrip(t *testing.T, lc *liveClient) {
 		t.Fatalf("turn 1 stop = %q with no tool call; want a lookup request", first.StopReason)
 	}
 
-	// No-tool turn: the request carries no tools, the answer has no tool call.
+	// No-tool-call turn: the request keeps the same Tools (a tool history without
+	// tools is a 400 on some endpoints) and asks for the final answer.
 	req.Messages = append(req.Messages, first.Message(), llmkit.Message{
 		Role:       llmkit.RoleToolResult,
 		ToolCallID: first.ToolCalls[0].ID,
-		Content:    []llmkit.Block{llmkit.Text("Paris")},
+		Content: []llmkit.Block{llmkit.Text(
+			"Paris. You now have the answer: reply with it directly and do not call any tool.")},
 	})
-	noTools := req
-	noTools.Tools = nil
-	second, err := lc.complete(noTools)
+	second, err := lc.complete(req)
 	if err != nil {
-		t.Fatalf("no-tool turn after the tool result: %v", err)
+		t.Fatalf("final-answer turn after the tool result: %v", err)
+	}
+	if len(second.ToolCalls) > 0 {
+		t.Fatalf("turn 2 called tool %q; the case needs a turn without a tool call", second.ToolCalls[0].Name)
 	}
 
 	// Tools request: every earlier assistant turn must replay its reasoning.
