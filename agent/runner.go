@@ -638,7 +638,10 @@ func (r *Runner) maybeCompact(ctx context.Context, em runEmitter, messages []llm
 	if threshold <= 0 {
 		return messages, threshold
 	}
-	if estimateTokens(messages) <= threshold {
+	// Estimate the request copy, not the raw history: media the client
+	// degrades is sent as its marker text and must not trip the threshold.
+	wired, _ := r.wireMessages(messages)
+	if estimateTokens(wired) <= threshold {
 		return messages, threshold
 	}
 	compacted, pruned := compactHistory(messages, compactRecentToolResults, toolNameByID)
@@ -651,8 +654,9 @@ func (r *Runner) maybeCompact(ctx context.Context, em runEmitter, messages []llm
 		// the threshold above the history before anything was ever reclaimed.
 		return messages, threshold
 	}
-	before := estimateTokens(messages)
-	after := estimateTokens(compacted)
+	before := estimateTokens(wired)
+	wiredCompacted, _ := r.wireMessages(compacted)
+	after := estimateTokens(wiredCompacted)
 	// The pruned history's consuming turn rides the context the event
 	// sees, matching the Step it reports.
 	ctx = llmkit.WithStep(ctx, step)
