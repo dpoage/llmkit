@@ -20,6 +20,8 @@ type guardrailBackends struct {
 
 	mu       sync.Mutex
 	llmCalls []guardrailChatRequest
+	chatHits int
+	sysHits  int
 }
 
 type guardrailChatRequest struct {
@@ -65,6 +67,9 @@ func startGuardrailBackends(t *testing.T, topic string) *guardrailBackends {
 	b := &guardrailBackends{}
 
 	chat := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b.mu.Lock()
+		b.chatHits++
+		b.mu.Unlock()
 		if r.URL.Path != "/v1/chat/completions" {
 			http.NotFound(w, r)
 			return
@@ -93,6 +98,9 @@ func startGuardrailBackends(t *testing.T, topic string) *guardrailBackends {
 	t.Cleanup(chat.Close)
 
 	sys := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b.mu.Lock()
+		b.sysHits++
+		b.mu.Unlock()
 		if r.URL.Path != "/v1/systemone" {
 			http.NotFound(w, r)
 			return
@@ -186,5 +194,61 @@ func TestGuardrailAbortsOnInjection(t *testing.T) {
 	defer b.mu.Unlock()
 	if len(b.llmCalls) != 0 {
 		t.Errorf("the chat server saw %d request(s); the request policy must abort before the wire call", len(b.llmCalls))
+	}
+}
+
+// TestGuardrailThresholdRange runs the binary against the scripted backends
+// (rm belief 0.9, read_file 0.1) with each --threshold. A run starts iff the
+// value is in (0, 1]; every other value the flag parser accepts exits 1, names
+// the flag, and sends nothing to either server.
+func TestGuardrailThresholdRange(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: skips the example builds")
+	}
+	bin := buildExample(t, moduleRoot(t), t.TempDir(), "agent-guardrail")
+	for _, tc := range []struct {
+		threshold string
+		accepted  bool
+		rm        string // accepted rows: the policy line for rm
+	}{
+		{threshold: "NaN"},
+		{threshold: "nan"},
+		{threshold: "+Inf"},
+		{threshold: "-Inf"},
+		{threshold: "0"},
+		{threshold: "-0.5"},
+		{threshold: "1.1"},
+		{threshold: "1", accepted: true, rm: "policy: allowed rm"},
+		{threshold: "0.5", accepted: true, rm: "policy: DENIED rm"},
+	} {
+		t.Run(tc.threshold, func(t *testing.T) {
+			b := startGuardrailBackends(t, "on_topic")
+			code, stdout, stderr := runExampleArgs(t, bin, []string{"--threshold", tc.threshold}, b.env)
+			b.mu.Lock()
+			llm, sys := b.chatHits, b.sysHits
+			b.mu.Unlock()
+
+			if tc.accepted {
+				if code != 0 {
+					t.Fatalf("exit %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+				}
+				if !strings.Contains(stdout, tc.rm) {
+					t.Errorf("stdout lacks %q:\n%s", tc.rm, stdout)
+				}
+				if llm == 0 || sys == 0 {
+					t.Errorf("chat server saw %d request(s), System One server %d; an accepted run reaches both", llm, sys)
+				}
+				return
+			}
+			if code != 1 {
+				t.Errorf("exit %d, want 1\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+			}
+			if !strings.Contains(stderr, "--threshold") {
+				t.Errorf("stderr does not name --threshold:\n%s", stderr)
+			}
+			if llm != 0 || sys != 0 {
+				t.Errorf("chat server saw %d request(s), System One server %d; want 0 for a rejected threshold\nstdout:\n%s", llm, sys, stdout)
+			}
+		})
 	}
 }

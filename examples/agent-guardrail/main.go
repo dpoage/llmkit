@@ -65,7 +65,7 @@ func run() error {
 	task := flag.String("task", defaultTask, "the task to give the agent")
 	flag.Parse()
 
-	if *threshold <= 0 || *threshold > 1 {
+	if !(*threshold > 0 && *threshold <= 1) { // positive form: NaN fails every comparison
 		return fmt.Errorf("--threshold must be in (0, 1], got %v", *threshold)
 	}
 	if *budget <= 0 {
