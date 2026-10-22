@@ -81,6 +81,14 @@ entry below is marked.
 
 ### Fixed
 
+- `provider`: a history that did not come from Gemini (an Anthropic or OpenAI
+  tool loop, for example) no longer fails on `gemini-3` models with a 400
+  "missing a thought_signature". The Google adapter sets Google's documented
+  bypass `skip_thought_signature_validator` on the first function call of each
+  assistant step in the current turn that has no Gemini signature. Signatures
+  Gemini produced and other Gemini models are unchanged. The SDK sends the
+  bypass base64-encoded; acceptance of that form is unverified without a key
+  (llmkit-rli.1.6).
 - `provider`: OpenAI-compatible reasoning now round-trips (llmkit-rli.1.1).
   `reasoning_content` and OpenRouter-style `reasoning_details` in a response,
   from `Complete` or `Stream` (with or without a callback), surface as one

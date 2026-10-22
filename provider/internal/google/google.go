@@ -133,6 +133,9 @@ func (g *googleAdapter) buildRequest(req llmkit.Request) ([]*genai.Content, *gen
 	if err != nil {
 		return nil, nil, err
 	}
+	if requiresThoughtSignatures(g.model) {
+		signForeignCalls(contents)
+	}
 	cfg := &genai.GenerateContentConfig{}
 	if p.System != "" {
 		cfg.SystemInstruction = &genai.Content{
@@ -439,6 +442,41 @@ func functionCallKey(id, name string) string {
 	return id + "\x00" + name
 }
 
+// foreignCallSignature is Google's documented bypass for function calls the API did not generate:
+// https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures (FAQ 1).
+const foreignCallSignature = "skip_thought_signature_validator"
+
+// signForeignCalls gives the first unsigned functionCall of each model step in the current turn the bypass.
+// genai's []byte field puts it on the wire base64-encoded (go-genai #711); Google accepting that form is unverified.
+func signForeignCalls(contents []*genai.Content) {
+	turn := -1
+	for i, c := range contents {
+		if c.Role != "user" {
+			continue
+		}
+		for _, p := range c.Parts {
+			if p.FunctionResponse == nil {
+				turn = i
+				break
+			}
+		}
+	}
+	for _, c := range contents[turn+1:] {
+		if c.Role != "model" {
+			continue
+		}
+		for _, p := range c.Parts {
+			if p.FunctionCall == nil {
+				continue
+			}
+			if len(p.ThoughtSignature) == 0 {
+				p.ThoughtSignature = []byte(foreignCallSignature)
+			}
+			break
+		}
+	}
+}
+
 func (g *googleAdapter) toResponse(resp *genai.GenerateContentResponse, wire *adapter.Wire) llmkit.Response {
 	var out llmkit.Response
 	var text string
@@ -712,7 +750,20 @@ func googleCapabilities(model string) llmkit.Capabilities {
 // isGemini3 reports whether model belongs to the Gemini 3 series: the
 // "gemini-3" key followed by end of name, "-" or ".".
 func isGemini3(model string) bool {
-	rest, ok := strings.CutPrefix(model, "gemini-3")
+	return inSeries(model, "gemini-3")
+}
+
+// requiresThoughtSignatures reports whether Google's thought-signature rule applies:
+// "When using Gemini 4 and Gemini 3 models, you must pass back thought signatures"
+// (https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures).
+// It gates only the foreign-call bypass; thinking_level mapping stays on isGemini3.
+func requiresThoughtSignatures(model string) bool {
+	return inSeries(model, "gemini-3") || inSeries(model, "gemini-4")
+}
+
+// inSeries reports whether model is key followed by end of name, "-" or ".".
+func inSeries(model, key string) bool {
+	rest, ok := strings.CutPrefix(model, key)
 	return ok && (rest == "" || rest[0] == '-' || rest[0] == '.')
 }
 
