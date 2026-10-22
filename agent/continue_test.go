@@ -268,7 +268,7 @@ func TestContinue_KeepsCompleteToolTurnSeed(t *testing.T) {
 	}
 }
 
-// TestContinue_CompactionNamesToolFromSeed pins the toolNameByID rebuild:
+// TestContinue_CompactionNamesToolFromSeed pins the tool-name lookup from the seed history:
 // when compaction fires on a continued history, a PRIOR run's tool result must
 // stub with its real tool name, not the generic "tool" fallback — which is
 // what an empty map at first-turn compaction would produce.
@@ -321,7 +321,7 @@ func TestContinue_CompactionNamesToolFromSeed(t *testing.T) {
 		t.Fatalf("t1 result was not stubbed (got %d bytes of raw content) -- compaction never fired, the test is vacuous", len(stubbed))
 	}
 	if !strings.Contains(stubbed, ": big,") {
-		t.Errorf("stub = %q, want it to name the tool %q -- the seed's tool calls were not rebuilt into toolNameByID", stubbed, "big")
+		t.Errorf("stub = %q, want it to name the tool %q -- the seed's tool calls were not read from the history", stubbed, "big")
 	}
 	// And the untouched tail must still be intact.
 	for _, m := range fc.requests[0].Messages {

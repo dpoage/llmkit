@@ -137,6 +137,17 @@ entry below is marked.
   `ReplayClient` serves a recorded completion with that `err_kind` at its
   position as an error wrapping `ErrContextTooLong`, so the replaying Runner
   recompacts and its events equal the recorded ones.
+- `agent`: the `Compactor` interface (`Compact(ctx, CompactInput)
+  (CompactOutput, error)`), `CompactorFunc`, and `WithCompactor` replace
+  history compaction with your own. `CompactInput` carries the history, its
+  index-aligned request copy, and a `Reason` (empty for the threshold,
+  `llmkit.CompactionReasonOverflow` for overflow recovery); `CompactOutput`
+  carries the new history and the pruned count for the `compaction` event. A
+  summary a compactor produces is a user message starting `[conversation
+  summary]`. Without the option the Runner stubs old tool results exactly as
+  before. A compactor makes compaction enabled: overflow recovery runs with a
+  zero `HistoryTokenBudget`, which alone gates threshold compaction. A
+  compactor error ends the run, wrapped, with no retry.
 
 ### Changed
 
@@ -159,6 +170,16 @@ entry below is marked.
   negative, nothing changes. A replay of a record holding a failed completion
   with `err_kind` `context_too_long` now serves that error instead of
   skipping it.
+- `agent`: `ReplayClient.Err` now reports a recorded compaction, threshold or
+  overflow, that the replaying Runner does not reproduce at its position: the
+  first request after the compaction must carry the same compacted messages
+  (pruned tool results, conversation summaries) as the recorded one. Callers
+  of `NewReplayClient` who replay a record that holds compactions with a
+  different `HistoryTokenBudget` or `Compactor` (compaction off, a budget
+  that does not fire at the recorded position, a compactor that changes
+  nothing) now get a non-nil `rc.Err` wrapping `ErrReplayDiverged`; `Run`'s
+  result is unchanged. Replaying under the recording configuration is still
+  clean.
 - `llmkit`: the per-role block rule now lets `RoleToolResult` carry text,
   image and document blocks (it was text only), gated by
   `Capabilities.ToolResultMedia`. `RoleSystem` stays text only. Before, any

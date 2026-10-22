@@ -346,7 +346,7 @@ func TestMaybeCompact_EstimatesRequestCopy(t *testing.T) {
 				events = append(events, *ev.Compaction)
 			}
 		})}
-		out, threshold = r.maybeCompact(context.Background(), em, msgs, budget, names, 7)
+		out, threshold, _ = r.maybeCompact(context.Background(), em, msgs, budget, 7)
 		return estimateTokens(wired), out, threshold, events
 	}
 
@@ -420,7 +420,7 @@ func (h *compactHarness) compact(threshold int64) (out []llmkit.Message, next in
 			events = append(events, *ev.Compaction)
 		}
 	})}
-	out, next = r.maybeCompact(context.Background(), em, h.msgs, threshold, h.names, 1)
+	out, next, _ = r.maybeCompact(context.Background(), em, h.msgs, threshold, 1)
 	return out, next, events
 }
 
