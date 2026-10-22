@@ -45,7 +45,7 @@ func TestQuestion_PrewireValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := Normalize(tt.state, tt.questions)
+			_, err := Normalize(tt.state, tt.questions, ImageSupport{})
 			if err == nil {
 				t.Fatal("expected a pre-wire validation error")
 			}
@@ -67,17 +67,17 @@ func TestQuestion_PrewireValidation(t *testing.T) {
 }
 
 func TestQuestion_ErrorsNameFieldPaths(t *testing.T) {
-	_, err := Normalize("s", Questions{"q": Noul{Instructions: 7}})
+	_, err := Normalize("s", Questions{"q": Noul{Instructions: 7}}, ImageSupport{})
 	if err == nil || !strings.Contains(err.Error(), `questions["q"].instructions`) {
 		t.Errorf("err = %v, want a message naming the instructions path", err)
 	}
 
-	_, err = Normalize("s", Questions{"q": Choice{Instructions: "i", Options: map[string]any{"a": 1}}})
+	_, err = Normalize("s", Questions{"q": Choice{Instructions: "i", Options: map[string]any{"a": 1}}}, ImageSupport{})
 	if err == nil || !strings.Contains(err.Error(), `questions["q"].options["a"]`) {
 		t.Errorf("err = %v, want a message naming the option path", err)
 	}
 
-	_, err = Normalize(42, Questions{"q": Noul{Instructions: "i"}})
+	_, err = Normalize(42, Questions{"q": Noul{Instructions: "i"}}, ImageSupport{})
 	if err == nil || !strings.Contains(err.Error(), "state") {
 		t.Errorf("err = %v, want a message naming state", err)
 	}
@@ -90,7 +90,7 @@ type fakeQuestion struct{}
 func (fakeQuestion) question() {}
 
 func TestQuestion_SealRejectsUnknownImplementation(t *testing.T) {
-	_, err := Normalize("s", Questions{"q": fakeQuestion{}})
+	_, err := Normalize("s", Questions{"q": fakeQuestion{}}, ImageSupport{})
 	if err == nil || !errors.Is(err, llmkit.ErrInvalidRequest) {
 		t.Fatalf("err = %v, want ErrInvalidRequest for an unknown Question implementation", err)
 	}

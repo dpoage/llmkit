@@ -18,7 +18,7 @@ func TestNormalize_RootVocabularySortedByID(t *testing.T) {
 		"alpha": Choice{Instructions: map[string]any{"prompt": "Pick."}, Options: map[string]any{"red": nil, "blue": "the sky"}},
 		"mid":   Score{Instructions: "Rate.", Levels: []any{"bad", nil, "good"}},
 		"bare":  Noul{Instructions: "Bare?"},
-	})
+	}, ImageSupport{})
 	if err != nil {
 		t.Fatalf("Normalize: %v", err)
 	}
@@ -38,7 +38,7 @@ func TestNormalize_RootVocabularySortedByID(t *testing.T) {
 }
 
 func TestNormalize_NullCriterionIsKept(t *testing.T) {
-	req, err := Normalize("s", Questions{"q": Noul{Instructions: "i", True: (*int)(nil)}})
+	req, err := Normalize("s", Questions{"q": Noul{Instructions: "i", True: (*int)(nil)}}, ImageSupport{})
 	got := req.Questions
 	if err != nil {
 		t.Fatalf("Normalize: %v", err)
@@ -51,7 +51,7 @@ func TestNormalize_NullCriterionIsKept(t *testing.T) {
 func TestNormalize_FirstErrorIsDeterministic(t *testing.T) {
 	qs := Questions{"b": Noul{Instructions: 2}, "a": Noul{Instructions: 1}, "c": Noul{}}
 	for i := 0; i < 20; i++ {
-		_, err := Normalize("s", qs)
+		_, err := Normalize("s", qs, ImageSupport{})
 		var apiErr *llmkit.APIError
 		if !errors.As(err, &apiErr) {
 			t.Fatalf("err = %v, want *llmkit.APIError", err)
@@ -83,7 +83,7 @@ func TestNormalize_ErrorMessagePaths(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := Normalize(tt.state, tt.qs)
+			_, err := Normalize(tt.state, tt.qs, ImageSupport{})
 			var apiErr *llmkit.APIError
 			if !errors.As(err, &apiErr) || apiErr.Message != tt.want {
 				t.Errorf("err = %v, want Message %q", err, tt.want)
@@ -93,7 +93,7 @@ func TestNormalize_ErrorMessagePaths(t *testing.T) {
 }
 
 func TestNormalize_UnmarshalableValueNamesPath(t *testing.T) {
-	_, err := Normalize("s", Questions{"q": Noul{Instructions: make(chan int)}})
+	_, err := Normalize("s", Questions{"q": Noul{Instructions: make(chan int)}}, ImageSupport{})
 	if err == nil || !strings.Contains(err.Error(), `questions["q"].instructions: value cannot be marshalled`) {
 		t.Errorf("err = %v, want a marshal failure naming the instructions path", err)
 	}

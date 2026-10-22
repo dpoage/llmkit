@@ -319,6 +319,52 @@ func main() {
 }
 ```
 
+## Images
+
+A state, an `Instructions` value, or a description (`True`, `False`, an
+`Options` value, a `Levels` entry) may hold an image. `decide.Normalize` finds
+it in the JSON that `encoding/json` produces, replaces it with a label, and
+returns it once in `Request.Images`; the backend sends the bytes its own way.
+
+**What counts as an image.** Any JSON object that decodes as an
+`llmkit.Block` of kind `"image"` and uses only `Block`'s member names. Names
+match as `encoding/json` matches them (case-insensitive, escapes decoded; a
+repeated member takes its last value) and `kind` must equal `"image"` exactly.
+It does not matter how the object got there: an `llmkit.Image` block, a
+`Message` whose content holds one, a `json.RawMessage`, or a map. An object
+with any other member (`{"kind":"image","caption":"x"}`) or another kind is
+left as it was. Block-shaped data you did not mean as an image is an image;
+there is no escape. An image is replaced whole; nothing inside it is scanned.
+
+**A valid image** has inline `Data` and a `MediaType` that begins `image/`;
+`URL`, `Text`, `Title`, `Provider` and `Raw` are empty (an empty `"text":""`
+is fine; `"raw":null` is not). An object that is an image by the rule above
+but fails this, including one whose member does not decode, is refused
+naming its path, for example `state["frames"][2]["frame"]: invalid image: no
+inline data`. It is never sent as text. Nothing checks the pixels or sniffs
+the bytes. The same bytes under two media types are refused.
+
+**Labels and order.** `Request.Images` holds the distinct images (deduplicated
+by bytes) in order of first occurrence: the state in document order, then each
+question in sorted id order, instructions before criteria (true, false,
+options by sorted key, levels by index). Each `Image` has `Ref`
+(`<image:` and the first 16 bytes of the SHA-256 in lowercase hex, `>`),
+`SHA256`, `MediaType`, `Data`, and `Placements`, the union of the places it
+occurs in: `PlaceState`, `PlaceInstructions`, `PlaceCriteria`. `Request.State`
+and `Request.Questions` carry each image's label in its place: its `Ref`, or
+`[image N]` (N from 1, the index in `Request.Images`) under `LabelPosition`. A
+string of yours that equals a label is never rewritten.
+
+**What a backend carries.** `decide.ImageSupport{Placements, MediaTypes,
+Label}` is what a backend passes to `Normalize`. The zero value refuses every
+image; empty `MediaTypes` accepts any `image/*`. An image outside the
+placements or media types is refused with `ErrInvalidRequest` and, in
+addition, wraps `decide.ErrImageUnsupported`; an invalid image does not.
+`decide.Observe` and `decide.Replay` normalize with `PlaceAll`. A `Decider`
+declares its support with `ImageSupport() decide.ImageSupport`
+(`decide.ImageSupporter`). `systemone.Client` carries no image yet: its refusal
+names `Config.Images`.
+
 ## Reading the answers
 
 `Response` splits the answers by question kind:
@@ -423,11 +469,13 @@ A refused pre-wire request also returns `ErrInvalidRequest` before any
 network call. `decide.Normalize` rejects: nil state; empty questions; empty
 question id; nil instructions; a `Choice` without options; a `Score`
 with fewer than two levels; a JSON number or boolean where only text
-kinds are accepted.
+kinds are accepted; an invalid image, and an image the backend's
+`ImageSupport` does not carry (see [Images](#images)).
 
-`decide.Normalize(state, qs)` returns a `decide.Request` and an error.
+`decide.Normalize(state, qs, support)` returns a `decide.Request` and an error.
 `Request.State` is the state's marshalled JSON; `Request.Questions` holds
-the questions in the root `llmkit.DecisionQuestion` vocabulary, sorted by id.
+the questions in the root `llmkit.DecisionQuestion` vocabulary, sorted by id;
+`Request.Images` holds the images found in them.
 
 An unknown model arrives as a 400 in the live lane (observed 2026-09-20).
 The vendor's API doc reserves 422 for validation failures. Both map to

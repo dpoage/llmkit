@@ -16,7 +16,10 @@ import (
 	"strings"
 )
 
-var _ decide.Decider = (*Client)(nil)
+var (
+	_ decide.Decider        = (*Client)(nil)
+	_ decide.ImageSupporter = (*Client)(nil)
+)
 
 // wireResponse is the JSON envelope the endpoint returns. Model and Usage
 // are vendor-required; a 200 body missing either is a server contract
@@ -51,7 +54,7 @@ type answerBody struct {
 // retried. The package doc has the status mapping. Ask emits no event; wrap
 // the Client in [decide.Observe] to record it.
 func (c *Client) Ask(ctx context.Context, state any, questions decide.Questions) (decide.Response, error) {
-	req, err := decide.Normalize(state, questions)
+	req, err := decide.Normalize(state, questions, c.ImageSupport())
 	if err != nil {
 		return decide.Response{}, retagProvider(err)
 	}
@@ -77,9 +80,13 @@ func (c *Client) Ask(ctx context.Context, state any, questions decide.Questions)
 	return resp, nil
 }
 
+// ImageSupport reports what the Client sends: no image. A refusal of an
+// image names Config.Images.
+func (c *Client) ImageSupport() decide.ImageSupport { return decide.ImageSupport{} }
+
 // retagProvider returns err with Provider set to this backend when err is
-// the *llmkit.APIError decide.Normalize returns; the caller's value is not
-// mutated.
+// the *llmkit.APIError decide.Normalize returns, naming Config.Images when
+// the refusal is for unsupported images; the caller's value is not mutated.
 func retagProvider(err error) error {
 	var ae *llmkit.APIError
 	if !errors.As(err, &ae) {
@@ -87,6 +94,9 @@ func retagProvider(err error) error {
 	}
 	tagged := *ae
 	tagged.Provider = providerName
+	if errors.Is(err, decide.ErrImageUnsupported) {
+		tagged.Message += "; set Config.Images to send images"
+	}
 	return &tagged
 }
 

@@ -75,7 +75,7 @@ func TestQuestion_NullDescriptionsAllowed(t *testing.T) {
 
 func marshalOne(t *testing.T, id string, q decide.Question) []byte {
 	t.Helper()
-	req, err := decide.Normalize("s", decide.Questions{id: q})
+	req, err := decide.Normalize("s", decide.Questions{id: q}, decide.ImageSupport{})
 	if err != nil {
 		t.Fatalf("Normalize: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestMarshalRequest_BytesMatchLegacyEnvelope(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req, err := decide.Normalize(tt.state, tt.qs)
+			req, err := decide.Normalize(tt.state, tt.qs, decide.ImageSupport{})
 			if err != nil {
 				t.Fatalf("Normalize: %v", err)
 			}

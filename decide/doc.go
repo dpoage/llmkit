@@ -17,12 +17,26 @@
 // that marshals to a JSON object or array. Descriptions and criteria
 // also accept null. JSON numbers and booleans are refused.
 //
-// [Normalize] validates a state and its questions and returns them in the
-// root vocabulary ([llmkit.DecisionQuestion]), sorted by id, as raw JSON.
-// A backend renders its own request from that output. A refusal is an
-// [*llmkit.APIError] with Kind [llmkit.ErrInvalidRequest], StatusCode 0,
-// Provider "decide", and a "<path>: <problem>" message; the backend
-// re-tags Provider to its own name.
+// [Normalize] validates a state and its questions and returns a [Request]:
+// the state and the questions in the root vocabulary
+// ([llmkit.DecisionQuestion]), sorted by id, as raw JSON, and the images
+// found in them. A backend renders its own request from that output. A
+// refusal is an [*llmkit.APIError] with Kind [llmkit.ErrInvalidRequest],
+// StatusCode 0, Provider "decide", and a "<path>: <problem>" message; the
+// backend re-tags Provider to its own name.
+//
+// # Images
+//
+// A state, an instructions value, or a description may hold an image: any
+// JSON object that decodes as an [llmkit.Block] of kind "image" with only
+// Block's member names, such as a block built by [llmkit.Image], a
+// [llmkit.Message] carrying one, or a json.RawMessage or map of the same
+// shape. [Normalize] takes each one out of the JSON, replaces it with a
+// label, and returns it once in [Request.Images]. Block-shaped user data is
+// an image too; there is no escape. What a backend carries is an [ImageSupport] (a Decider declares
+// it with [ImageSupporter]); the zero value refuses every image, and an
+// unsupported placement or media type is refused with [ErrImageUnsupported]
+// before any wire call. The detection rule is on [Normalize].
 //
 // # Answers
 //

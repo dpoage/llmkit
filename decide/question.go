@@ -3,6 +3,10 @@ package decide
 // Question is the sealed set of decision questions: [Noul], [Choice], and
 // [Score]. The unexported method keeps the set closed to code outside this
 // package.
+//
+// Instructions and every description (True, False, an option, a level) may
+// carry an [llmkit.Block] of kind image anywhere in their JSON; [Normalize]
+// finds it and a backend that supports images sends it.
 type Question interface{ question() }
 
 // Noul asks a binary belief question: how strongly the state supports the

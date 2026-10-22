@@ -233,11 +233,27 @@ entry below is marked.
   `Confidence` 0, and must not fabricate them. The System One client
   requires a Score answer's legend and probabilities, and accepts a Choice
   answer without them (nil `Probabilities`, `Confidence` 0).
-- `decide`: `Normalize(state, qs)` validates a state and questions and returns
-  them in the root `llmkit.DecisionQuestion` vocabulary, sorted by id, so a
-  backend renders its own request from one validated form. It validates
-  questions in sorted id order, so the first refusal is the same on every
-  call; the old client used map order.
+- `decide`: `Normalize(state, qs, support)` validates a state and questions
+  and returns a `Request`: `State` (the state's JSON), `Questions` (the
+  questions in the root `llmkit.DecisionQuestion` vocabulary, sorted by id)
+  and `Images`, so a backend renders its own request from one validated form.
+  It validates questions in sorted id order, and the options of a `Choice` in
+  sorted key order, so the first refusal is the same on every call; the old
+  client used map order. An image is any JSON object in the state, an
+  `Instructions` or a description (`True`, `False`, an option, a level) that
+  decodes as an `llmkit.Block` of kind `"image"` using only `Block`'s member
+  names (`encoding/json` matching: case-insensitive, escapes decoded, last
+  duplicate wins), however it was built; Block-shaped user data counts. Each
+  is replaced by its label, `<image:hex>` or `[image N]`
+  (`ImageSupport.Label`), and returned once in `Request.Images` with its
+  `Ref`, `SHA256`, `MediaType`, `Data` and `Placements` (`PlaceState`,
+  `PlaceInstructions`, `PlaceCriteria`). `ImageSupport{Placements,
+  MediaTypes, Label}` is what a backend carries; the zero value refuses every
+  image, and a `Decider` declares its support with `decide.ImageSupporter`.
+  An invalid image, or one the support does not carry, is refused with
+  `ErrInvalidRequest` naming its JSON path; the second case also wraps
+  `decide.ErrImageUnsupported`. `systemone.Client` carries no image yet and
+  its refusal names `Config.Images`.
 - `decide`: `Observe(d Decider, obs llmkit.Observer) Decider` wraps any
   `Decider` and emits one `llmkit.KindDecision` event per `Ask` (RunID and
   Step from the context, sorted questions and answers, usage, duration; a
@@ -420,11 +436,15 @@ entry below is marked.
   `LLMKIT_SYSTEMONE_MODEL`, and `LLMKIT_SYSTEMONE_BASE_URL` instead of the
   `LLMKIT_TYPESAFE_*` names. The live lane keeps `LLMKIT_LIVE_TYPESAFE_*`.
 - CI and the live workflow now run `./decide/...` instead of `./decide/`.
-- **Breaking:** `decide`: `Normalize(state, qs)` now returns
-  `(decide.Request, error)`; `Request.State` and `Request.Questions` carry
-  what the two results carried. Migrate `stateRaw, dqs, err :=
-  decide.Normalize(s, qs)` to `req, err := decide.Normalize(s, qs)`, then use
-  `req.State` and `req.Questions`.
+- **Breaking:** `decide`: an `llmkit.Block` of kind `"image"`, or a `Message`
+  carrying one, in a state, an `Instructions` or a description is now
+  detected as an image. Before, it was sent as base64 text in the state;
+  now `systemone.Client` refuses it with `ErrInvalidRequest` until a dialect
+  carries it.
+- **Breaking:** `decide`: an image Block with `URL`, `Text`, `Title`,
+  `Provider` or `Raw` set, and an image Block with no inline `Data` or a
+  `MediaType` that does not begin `image/`, is refused with `ErrInvalidRequest`
+  naming its path. Before, it was sent as text.
 
 ### Fixed
 

@@ -50,7 +50,7 @@ type observedIdentified struct {
 }
 
 func (o *observed) Ask(ctx context.Context, state any, qs Questions) (Response, error) {
-	req, nerr := Normalize(state, qs)
+	req, nerr := Normalize(state, qs, ImageSupport{Placements: PlaceAll})
 	if nerr != nil {
 		return o.d.Ask(ctx, state, qs)
 	}
