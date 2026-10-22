@@ -501,10 +501,13 @@ func (g *googleAdapter) toResponse(resp *genai.GenerateContentResponse) llmkit.R
 		// convention), matching the normalized Usage semantics directly.
 		// Gemini 2.x caches implicitly server-side; we only surface the hit
 		// count — no explicit CachedContent management in this thin layer.
+		// candidatesTokenCount EXCLUDES thoughtsTokenCount, which is billed
+		// as output: OutputTokens carries both, ReasoningTokens the thoughts.
 		out.Usage = llmkit.Usage{
 			InputTokens:          int64(resp.UsageMetadata.PromptTokenCount),
-			OutputTokens:         int64(resp.UsageMetadata.CandidatesTokenCount),
+			OutputTokens:         int64(resp.UsageMetadata.CandidatesTokenCount) + int64(resp.UsageMetadata.ThoughtsTokenCount),
 			CacheReadInputTokens: int64(resp.UsageMetadata.CachedContentTokenCount),
+			ReasoningTokens:      int64(resp.UsageMetadata.ThoughtsTokenCount),
 		}
 	}
 	out.StopReason = mapGoogleStop(stop, len(out.ToolCalls) > 0)

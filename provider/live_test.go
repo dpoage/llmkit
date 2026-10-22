@@ -669,6 +669,21 @@ func caseReasoningEffort(t *testing.T, lc *liveClient) {
 	if strings.TrimSpace(llmkit.StripThinkBlocks(resp.Text)) == "" {
 		t.Fatalf("empty answer: %q", resp.Text)
 	}
+	var wire struct {
+		Usage struct {
+			Details struct {
+				Reasoning int64 `json:"reasoning_tokens"`
+			} `json:"completion_tokens_details"`
+		} `json:"usage"`
+		Metadata struct {
+			Thoughts int64 `json:"thoughtsTokenCount"`
+		} `json:"usageMetadata"`
+	}
+	exs := lc.tr.Exchanges()
+	_ = json.Unmarshal([]byte(exs[len(exs)-1].Response.Body), &wire)
+	if reported := wire.Usage.Details.Reasoning + wire.Metadata.Thoughts; resp.Usage.ReasoningTokens != reported || resp.Usage.ReasoningTokens > resp.Usage.OutputTokens {
+		t.Fatalf("ReasoningTokens = %d, wire reported %d, OutputTokens %d", resp.Usage.ReasoningTokens, reported, resp.Usage.OutputTokens)
+	}
 	lc.finish(resp, err)
 }
 

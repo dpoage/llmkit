@@ -118,7 +118,10 @@ func NewRunID() RunID { return RunID(newID()) }
 // (Event.SchemaVersion). Bump it when an Event field changes meaning in a
 // way a durable sink must distinguish; additively appended fields do not
 // require a bump.
-const EventSchemaVersion = 2
+//
+// Version 3: google Usage.OutputTokens now includes thoughtsTokenCount
+// (candidatesTokenCount + thoughtsTokenCount); it was candidates only in 2.
+const EventSchemaVersion = 3
 
 // NewEvent returns an Event of the given kind with the shared header
 // fields filled in: Kind, Time (now, UTC, monotonic clock reading stripped
