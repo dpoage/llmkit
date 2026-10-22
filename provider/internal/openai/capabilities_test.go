@@ -29,6 +29,13 @@ func firstPartyWant(window int, parallel, caching, structured, toolChoice bool) 
 	}
 }
 
+// reasoningWant marks an expected first-party profile as accepting
+// reasoning_effort.
+func reasoningWant(c llmkit.Capabilities) llmkit.Capabilities {
+	c.ReasoningEffort = true
+	return c
+}
+
 // TestOpenAICapabilities_PerModel walks the first-party model table: one
 // representative per verified generation, date-suffixed snapshots to pin
 // segment-boundary matching (o1-mini-2024-… must resolve to the o1-mini
@@ -41,8 +48,8 @@ func TestOpenAICapabilities_PerModel(t *testing.T) {
 		want  llmkit.Capabilities
 	}{
 		// gpt-5 family: 400k window, full modern feature set.
-		{"gpt-5", firstPartyWant(400_000, true, true, true, true)},
-		{"gpt-5-mini-2025-08-07", firstPartyWant(400_000, true, true, true, true)},
+		{"gpt-5", reasoningWant(firstPartyWant(400_000, true, true, true, true))},
+		{"gpt-5-mini-2025-08-07", reasoningWant(firstPartyWant(400_000, true, true, true, true))},
 		// gpt-4.1 family: 1,047,576 window.
 		{"gpt-4.1", firstPartyWant(1_047_576, true, true, true, true)},
 		{"gpt-4.1-nano", firstPartyWant(1_047_576, true, true, true, true)},
@@ -78,9 +85,9 @@ func TestOpenAICapabilities_PerModel(t *testing.T) {
 		{"o1-mini-2024-09-12", firstPartyWant(128_000, false, true, false, false)},
 		{"o1-preview", firstPartyWant(128_000, false, true, false, false)},
 		// Reasoning models with the full tool surface.
-		{"o1", firstPartyWant(200_000, true, true, true, true)},
-		{"o3-mini", firstPartyWant(200_000, true, true, true, true)},
-		{"o4-mini", firstPartyWant(200_000, true, true, true, true)},
+		{"o1", reasoningWant(firstPartyWant(200_000, true, true, true, true))},
+		{"o3-mini", reasoningWant(firstPartyWant(200_000, true, true, true, true))},
+		{"o4-mini", reasoningWant(firstPartyWant(200_000, true, true, true, true))},
 
 		// Unknown models: the window is UNKNOWN (0) — the old 128k fallback
 		// overstated gpt-4's 8k window — while the bools keep the API-level

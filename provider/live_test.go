@@ -236,6 +236,7 @@ var liveCaseBodies = map[string]func(t *testing.T, lc *liveClient){
 	"prompt_caching":      casePromptCaching,
 	"structured_output":   caseStructuredOutput,
 	"thinking":            caseThinking,
+	"reasoning_effort":    caseReasoningEffort,
 	"tool_choice":         caseToolChoice,
 	"images":              caseImages,
 	"documents":           caseDocuments,
@@ -597,6 +598,21 @@ func caseThinking(t *testing.T, lc *liveClient) {
 		t.Fatalf("re-sending the thinking turn failed: %v", err)
 	}
 	lc.finish(second, err)
+}
+
+func caseReasoningEffort(t *testing.T, lc *liveClient) {
+	resp, err := lc.complete(llmkit.Request{
+		Messages:  []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "Reply with exactly: OK")},
+		Thinking:  &llmkit.ThinkingConfig{Effort: llmkit.EffortLow},
+		MaxTokens: 2048,
+	})
+	if err != nil {
+		t.Fatalf("Effort low request rejected: %v", err)
+	}
+	if strings.TrimSpace(llmkit.StripThinkBlocks(resp.Text)) == "" {
+		t.Fatalf("empty answer: %q", resp.Text)
+	}
+	lc.finish(resp, err)
 }
 
 func caseToolChoice(t *testing.T, lc *liveClient) {

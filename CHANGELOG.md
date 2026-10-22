@@ -8,6 +8,14 @@ entry below is marked.
 
 ## [Unreleased]
 
+### Added
+
+- `llmkit`: `ThinkingConfig.Effort` (`ReasoningEffort`: `EffortLow`, `EffortMedium`, `EffortHigh`) and `Capabilities.ReasoningEffort`. OpenAI sends `reasoning_effort` and Google sends `thinkingLevel`; the flag is true for OpenAI `gpt-5`, `o1`, `o3` and `o4-mini` entries and Gemini 3 models, false elsewhere. A `ThinkingConfig` is valid with a positive `BudgetTokens` or an `Effort`; an `Effort` outside the set is refused pre-wire on every adapter. Each field the profile reports false is dropped silently, and on Gemini 3 `Effort` wins over `BudgetTokens`. The Anthropic ceiling excludes `ReasoningEffort`.
+
+### Changed
+
+- `llmkit`: the ceiling refusal text now says the adapter "does not map" the field instead of claiming it has no wire field.
+
 ## [0.6.0] - 2026-09-30
 
 ### Added

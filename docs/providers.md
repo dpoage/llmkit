@@ -60,6 +60,7 @@ Because llmkit cannot know what the endpoint supports, this provider uses a cons
 - no caching
 - no structured output
 - no thinking
+- no reasoning effort
 
 Override the profile with `Spec.Capabilities` — see [capabilities](capabilities.md).
 

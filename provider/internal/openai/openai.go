@@ -63,10 +63,12 @@ type Options struct {
 // wire for both the first-party and openai-compatible profiles. The Chat
 // Completions API has no reasoning-budget parameter (Thinking) and no
 // top_k, so an effective profile reporting either true is refused at
-// construction rather than silently mismapped.
+// construction rather than silently mismapped. ReasoningEffort maps to
+// reasoning_effort.
 var openAICeiling = llmkit.Capabilities{
 	StructuredOutput: true,
 	Thinking:         false,
+	ReasoningEffort:  true,
 	ToolChoice:       true,
 	StopSequences:    true,
 	TopP:             true,
@@ -177,10 +179,12 @@ func (o *openaiAdapter) buildParams(req llmkit.Request) (openai.ChatCompletionNe
 	if p.Seed != nil {
 		params.Seed = openai.Int(*p.Seed)
 	}
-	// Prepared.TopK and Prepared.Thinking are always nil here: the Chat
-	// Completions API has no top_k, and reasoning_effort is a coarse dial
-	// rather than a token budget — never mapped. Every openai profile reports
-	// both false, and Prepare drops both.
+	// Prepared.TopK is always nil (no top_k in Chat Completions) and
+	// Prepared.Thinking carries Effort only: the ceiling excludes Thinking,
+	// so no budget survives Prepare.
+	if p.Thinking != nil {
+		params.ReasoningEffort = shared.ReasoningEffort(p.Thinking.Effort)
+	}
 
 	msgs := make([]openai.ChatCompletionMessageParamUnion, 0, len(p.Messages)+1)
 	if p.System != "" {
@@ -547,6 +551,11 @@ func decodeSSEError(data []byte) (typ, msg string) {
 //     support neither structured outputs nor function calling at all
 //     (https://platform.openai.com/docs/models/o1-mini), so their
 //     ToolChoice and ParallelToolCalls are false too.
+//   - https://platform.openai.com/docs/guides/reasoning and
+//     https://developers.openai.com/api/docs/models/gpt-5 — reasoning_effort
+//     (low/medium/high) is accepted by gpt-5, o1, o3 / o3-mini and o4-mini;
+//     o1-mini and o1-preview do not take it, so their ReasoningEffort is
+//     false. gpt-5.x dotted siblings are unknown models (false) until keyed.
 //
 // The table is matched by LONGEST key with a "-" segment boundary
 // (adapter.BestMatchingFamily), so "gpt-4-turbo" and "gpt-4.1" win over the
@@ -574,7 +583,7 @@ func firstPartyCaps(window int, parallel, caching, structured, toolChoice bool) 
 		ParallelToolCalls: parallel,
 		PromptCaching:     caching,
 		StructuredOutput:  structured,
-		Thinking:          false, // reasoning_effort is a coarse dial, not a budget — never mapped
+		Thinking:          false, // Chat Completions has no reasoning budget
 		ToolChoice:        toolChoice,
 		Images:            true,
 		Documents:         true,
@@ -585,8 +594,14 @@ func firstPartyCaps(window int, parallel, caching, structured, toolChoice bool) 
 	}
 }
 
+// reasoningCaps marks a first-party profile as accepting reasoning_effort.
+func reasoningCaps(c llmkit.Capabilities) llmkit.Capabilities {
+	c.ReasoningEffort = true
+	return c
+}
+
 var openAIModelTable = []openAIModelCaps{
-	{"gpt-5", firstPartyCaps(400_000, true, true, true, true)},
+	{"gpt-5", reasoningCaps(firstPartyCaps(400_000, true, true, true, true))},
 	{"gpt-4.1", firstPartyCaps(1_047_576, true, true, true, true)},
 	// gpt-4.5: a dotted sibling of gpt-4 — segment matching can never
 	// inherit the gpt-4 entry, so it carries its own key.
@@ -607,9 +622,9 @@ var openAIModelTable = []openAIModelCaps{
 	{"gpt-3.5-turbo", firstPartyCaps(16_385, true, false, false, true)},
 	{"o1-mini", firstPartyCaps(128_000, false, true, false, false)},
 	{"o1-preview", firstPartyCaps(128_000, false, true, false, false)},
-	{"o1", firstPartyCaps(200_000, true, true, true, true)},
-	{"o3", firstPartyCaps(200_000, true, true, true, true)},
-	{"o4-mini", firstPartyCaps(200_000, true, true, true, true)},
+	{"o1", reasoningCaps(firstPartyCaps(200_000, true, true, true, true))},
+	{"o3", reasoningCaps(firstPartyCaps(200_000, true, true, true, true))},
+	{"o4-mini", reasoningCaps(firstPartyCaps(200_000, true, true, true, true))},
 }
 
 func openAICapabilities(model string) llmkit.Capabilities {
@@ -628,11 +643,12 @@ func openAICapabilities(model string) llmkit.Capabilities {
 // the endpoint reports it (e.g. MiniMax), so cache hits are ledgered even
 // with PromptCaching=false. Callers can override.
 //
-// Thinking is false (this adapter does not map Request.Thinking onto
-// reasoning_effort) and TopK is false (the Chat Completions API has no
-// top_k). Tool choice, images, documents, stop sequences, top_p, and seed
-// are part of the base Chat Completions contract and are sent when
-// requested.
+// Thinking is false (Chat Completions has no reasoning budget),
+// ReasoningEffort is false (the endpoint behind an arbitrary model name may
+// reject reasoning_effort; override to enable) and TopK is false (the Chat
+// Completions API has no top_k). Tool choice, images, documents, stop
+// sequences, top_p, and seed are part of the base Chat Completions contract
+// and are sent when requested.
 //
 // The model parameter is accepted for symmetry with other capability
 // constructors; no per-model lookup is available for arbitrary endpoints,
@@ -644,6 +660,7 @@ func openAICompatibleCapabilities(model string) llmkit.Capabilities {
 		PromptCaching:     false,
 		StructuredOutput:  false,
 		Thinking:          false,
+		ReasoningEffort:   false,
 		ToolChoice:        true,
 		Images:            true,
 		Documents:         true,

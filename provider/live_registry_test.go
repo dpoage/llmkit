@@ -45,6 +45,7 @@ var liveCases = []liveCase{
 	{Name: "prompt_caching", Gate: "PromptCaching", Doc: "a repeated prefix yields CacheReadInputTokens > 0 on the second call"},
 	{Name: "structured_output", Gate: "StructuredOutput", Doc: "ResponseSchema constrains the output to parseable JSON"},
 	{Name: "thinking", Gate: "Thinking", Doc: "Thinking returns BlockThinking and the block re-sends without ErrInvalidRequest"},
+	{Name: "reasoning_effort", Gate: "ReasoningEffort", Doc: "a request with Thinking.Effort low is accepted"},
 	{Name: "tool_choice", Gate: "ToolChoice", Doc: "none forbids calls, required forces one, named forces that name"},
 	{Name: "images", Gate: "Images", Doc: "an inline data-URI image block is accepted"},
 	{Name: "documents", Gate: "Documents", Doc: "an inline PDF block is accepted"},

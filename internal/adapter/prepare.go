@@ -25,9 +25,9 @@ type Prepared struct {
 	// StopSequences is nil when caps.StopSequences is false or the caller
 	// supplied none.
 	StopSequences []string
-	// Thinking is nil when caps.Thinking is false or the caller supplied
-	// none; otherwise BudgetTokens is >= 1 (a non-positive budget while
-	// caps.Thinking is true is refused, never silently dropped).
+	// Thinking is nil when nothing of the caller's ThinkingConfig survives
+	// gating. Otherwise BudgetTokens is set (>= 1) only if caps.Thinking and
+	// Effort only if caps.ReasoningEffort; both may be set.
 	Thinking *llmkit.ThinkingConfig
 	// ToolChoice.Mode is one of the four constants ("" normalized to
 	// auto); Name is non-empty when Mode is ToolChoiceTool. An explicit
@@ -202,18 +202,38 @@ func gateToolChoice(provider string, tc llmkit.ToolChoice, supported bool) error
 	return nil
 }
 
-// prepareThinking gates Request.Thinking on caps.Thinking: false drops the
-// config silently (nil, no error — the documented contract for a false
-// feature), true with a nil config is a no-op, and true with a non-positive
-// BudgetTokens is refused before any wire call.
+// prepareThinking validates and gates Request.Thinking. An Effort outside
+// the closed set is refused on every profile. With neither caps.Thinking nor
+// caps.ReasoningEffort the config is dropped silently; otherwise an invalid
+// one (negative budget, or no budget and no effort) is refused. The result
+// keeps BudgetTokens only if caps.Thinking and Effort only if
+// caps.ReasoningEffort, and is nil when neither survives.
 func prepareThinking(provider string, tc *llmkit.ThinkingConfig, caps llmkit.Capabilities) (*llmkit.ThinkingConfig, error) {
-	if tc == nil || !caps.Thinking {
+	if tc == nil {
 		return nil, nil
 	}
-	if tc.BudgetTokens <= 0 {
-		return nil, Refuse(provider, "Thinking.BudgetTokens must be positive", nil)
+	switch tc.Effort {
+	case "", llmkit.EffortLow, llmkit.EffortMedium, llmkit.EffortHigh:
+	default:
+		return nil, Refuse(provider, fmt.Sprintf("Thinking.Effort %q is not one of low, medium, high", tc.Effort), nil)
 	}
-	return tc, nil
+	if !caps.Thinking && !caps.ReasoningEffort {
+		return nil, nil
+	}
+	if tc.BudgetTokens < 0 || (tc.BudgetTokens == 0 && tc.Effort == "") {
+		return nil, Refuse(provider, "Thinking.BudgetTokens must be positive unless Thinking.Effort is set", nil)
+	}
+	var out llmkit.ThinkingConfig
+	if caps.Thinking {
+		out.BudgetTokens = tc.BudgetTokens
+	}
+	if caps.ReasoningEffort {
+		out.Effort = tc.Effort
+	}
+	if out == (llmkit.ThinkingConfig{}) {
+		return nil, nil
+	}
+	return &out, nil
 }
 
 // decodeSchemaObject decodes a tool's Parameters or a Request's
@@ -285,6 +305,7 @@ func wireGates(ceiling, effective llmkit.Capabilities) []wireGate {
 	return []wireGate{
 		{"StructuredOutput", ceiling.StructuredOutput, effective.StructuredOutput},
 		{"Thinking", ceiling.Thinking, effective.Thinking},
+		{"ReasoningEffort", ceiling.ReasoningEffort, effective.ReasoningEffort},
 		{"ToolChoice", ceiling.ToolChoice, effective.ToolChoice},
 		{"StopSequences", ceiling.StopSequences, effective.StopSequences},
 		{"TopP", ceiling.TopP, effective.TopP},
@@ -296,11 +317,12 @@ func wireGates(ceiling, effective llmkit.Capabilities) []wireGate {
 // ApplyOverride resolves the effective profile: override receives the
 // table-derived profile and its return value becomes effective (nil
 // override keeps the table unchanged). ceiling names every wire-gated
-// field (StructuredOutput, Thinking, ToolChoice, StopSequences, TopP, TopK,
-// Seed) the adapter can put on the wire; an effective profile that reports
-// true for a wire-gated field whose ceiling is false is refused. Advisory
-// and decorator fields (ContextWindow, ParallelToolCalls, PromptCaching,
-// Images, Documents) are never ceiling-checked.
+// field (StructuredOutput, Thinking, ReasoningEffort, ToolChoice,
+// StopSequences, TopP, TopK, Seed) the adapter can put on the wire; an
+// effective profile that reports true for a wire-gated field whose ceiling
+// is false is refused. Advisory and decorator fields (ContextWindow,
+// ParallelToolCalls, PromptCaching, Images, Documents) are never
+// ceiling-checked.
 func ApplyOverride(provider string, ceiling, table llmkit.Capabilities, override func(llmkit.Capabilities) llmkit.Capabilities) (llmkit.Capabilities, error) {
 	effective := table
 	if override != nil {
@@ -309,7 +331,7 @@ func ApplyOverride(provider string, ceiling, table llmkit.Capabilities, override
 	for _, g := range wireGates(ceiling, effective) {
 		if g.effOn && !g.ceilingOn {
 			return llmkit.Capabilities{}, Refuse(provider,
-				fmt.Sprintf("Capabilities.%s=true is above the ceiling for provider %s: the adapter has no wire field for it", g.name, provider),
+				fmt.Sprintf("Capabilities.%s=true is above the ceiling for provider %s: the adapter does not map it", g.name, provider),
 				nil)
 		}
 	}
