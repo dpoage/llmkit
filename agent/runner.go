@@ -57,6 +57,8 @@ type Runner struct {
 	// toolPolicy, when non-nil, gates every model-requested tool call (see
 	// WithToolPolicy); nil allows all calls.
 	toolPolicy ToolPolicy
+	// compactor, when non-nil, replaces the default stubber (see WithCompactor).
+	compactor Compactor
 	// outputLimit is off when its max is zero (see WithToolOutputLimit).
 	outputLimit outputLimit
 }
@@ -348,19 +350,6 @@ func (r *Runner) run(ctx context.Context, em runEmitter, seed []llmkit.Message, 
 	// at return time.
 	defer func() { outcome.Messages = s.messages }()
 
-	// History-compaction state. toolNameByID lets a tool-result stub name the
-	// tool it answered; on a continued run the map starts from the seed's
-	// assistant tool calls, so a PRIOR run's results also stub with their
-	// real tool names instead of the generic fallback (see [compactStub]).
-	s.toolNameByID = map[string]string{}
-	for _, m := range s.messages {
-		if m.Role == llmkit.RoleAssistant {
-			for _, call := range m.ToolCalls {
-				s.toolNameByID[call.ID] = call.Name
-			}
-		}
-	}
-
 	for {
 		// Stop before the next turn if we've hit the iteration cap. The
 		// finalizeAndTruncate helper below gives RunJSON its one reserved
@@ -422,9 +411,13 @@ func (r *Runner) run(ctx context.Context, em runEmitter, seed []llmkit.Message, 
 		// gets billed this turn. Re-arming the threshold upward after a firing
 		// keeps compaction bounded and avoids re-paying a prefix cache miss every
 		// subsequent turn (see compactRearmFactor).
-		s.messages, s.compactThreshold = r.maybeCompact(ctx, em, s.messages, s.compactThreshold, s.toolNameByID, outcome.Iterations+1)
+		compacted, threshold, cerr := r.maybeCompact(ctx, em, s.messages, s.compactThreshold, outcome.Iterations+1)
+		if cerr != nil {
+			return outcome, cerr
+		}
+		s.messages, s.compactThreshold = compacted, threshold
 
-		resp, err := r.completeOnce(ctx, em, &s.messages, s.toolNameByID, outcome, responseSchema, false)
+		resp, err := r.completeOnce(ctx, em, &s.messages, outcome, responseSchema, false)
 		if err != nil {
 			return outcome, err
 		}
@@ -492,7 +485,6 @@ func (r *Runner) run(ctx context.Context, em runEmitter, seed []llmkit.Message, 
 				break
 			}
 			em.emit(ctx, toolRunEvent(ctx, call, executed[i], outcome.Iterations))
-			s.toolNameByID[call.ID] = call.Name
 			s.messages = append(s.messages, executed[i].message(call.ID))
 		}
 		if err := ctx.Err(); err != nil {
@@ -525,9 +517,6 @@ type runState struct {
 	// compactThreshold is the history-token threshold currently in force,
 	// re-armed upward after each real prune (see [Runner.maybeCompact]).
 	compactThreshold int64
-	// toolNameByID names the tool each tool-result answered, for compaction
-	// stubs.
-	toolNameByID map[string]string
 	// emptyTurnNudges counts empty/think-only turns already nudged this run
 	// (see [maxEmptyTurnNudges]).
 	emptyTurnNudges int
@@ -617,61 +606,67 @@ func (r *Runner) finalizeAndTruncate(ctx context.Context, em runEmitter, s *runS
 	// the run, and the model needs only its own reasoning chain (preserved) to
 	// emit the answer, not every earlier file dump. The re-armed threshold is
 	// discarded: this is the run's final turn, so no later compaction can fire.
-	s.messages, _ = r.maybeCompact(ctx, em, s.messages, s.compactThreshold, s.toolNameByID, s.outcome.Iterations+1)
-	if _, cerr := r.completeOnce(ctx, em, &s.messages, s.toolNameByID, s.outcome, s.responseSchema, true); cerr != nil {
+	compacted, _, cerr := r.maybeCompact(ctx, em, s.messages, s.compactThreshold, s.outcome.Iterations+1)
+	if cerr != nil {
+		return cerr
+	}
+	s.messages = compacted
+	if _, cerr := r.completeOnce(ctx, em, &s.messages, s.outcome, s.responseSchema, true); cerr != nil {
 		return cerr
 	}
 	return nil
 }
 
-// maybeCompact applies threshold-triggered history compaction. When compaction
-// is enabled (threshold > 0) and the estimated history size exceeds threshold,
-// it prunes tool-result content older than the most recent few turns to short
-// stubs and returns the compacted history together with a re-armed (higher)
-// threshold so the next firing only happens once history has grown materially
-// again. When disabled or under threshold — or when there is nothing left to
-// prune — it returns the messages and threshold unchanged, so a normal run pays
-// no allocation and the append-only prefix (and its cache) is preserved.
+// maybeCompact applies threshold-triggered history compaction. When the
+// threshold is positive and the estimated history size exceeds it, the
+// Compactor compacts the history and the threshold re-arms higher, so the
+// next firing only happens once history has grown materially again. When
+// disabled or under threshold, or when the compactor changed nothing, it
+// returns the messages and threshold unchanged, so a normal run pays no
+// allocation and the append-only prefix (and its cache) is preserved.
 //
 // step is the completion that will consume the (possibly) compacted history;
-// it is stamped on the Compaction event, which is emitted only when this call
-// actually pruned — a threshold crossing with nothing to reclaim is silent.
-func (r *Runner) maybeCompact(ctx context.Context, em runEmitter, messages []llmkit.Message, threshold int64, toolNameByID map[string]string, step int) ([]llmkit.Message, int64) {
+// it is stamped on the Compaction event, which is emitted only when the
+// history changed. A compactor error is returned wrapped.
+func (r *Runner) maybeCompact(ctx context.Context, em runEmitter, messages []llmkit.Message, threshold int64, step int) ([]llmkit.Message, int64, error) {
 	if threshold <= 0 {
-		return messages, threshold
+		return messages, threshold, nil
 	}
 	// Estimate the request copy, not the raw history: media the client
 	// degrades is sent as its marker text and must not trip the threshold.
 	wired, _ := r.wireMessages(messages)
 	before := estimateTokens(wired)
 	if before <= threshold {
-		return messages, threshold
+		return messages, threshold, nil
 	}
-	compacted, pruned := compactHistory(messages, wired, compactRecentToolResults, toolNameByID)
-	if pruned == 0 {
+	// The pruned history's consuming turn rides the context the event
+	// sees, matching the Step it reports.
+	ctx = llmkit.WithStep(ctx, step)
+	out, err := r.compact(ctx, CompactInput{Messages: messages, Sent: wired})
+	if err != nil {
+		return messages, threshold, fmt.Errorf("agent: compaction before iteration %d: %w", step, err)
+	}
+	if compactionUnchanged(out.Messages, messages) {
 		// Over threshold but nothing prunable yet: either history is dominated by
 		// assistant reasoning, or every prunable result is already a stub, or there
 		// simply aren't more than compactRecentToolResults tool results so far. Leave the
 		// threshold UNCHANGED so the check fires again next turn once a result ages out of
 		// the recent window — re-arming here would starve real compaction by ratcheting
 		// the threshold above the history before anything was ever reclaimed.
-		return messages, threshold
+		return messages, threshold, nil
 	}
-	wiredCompacted, _ := r.wireMessages(compacted)
+	wiredCompacted, _ := r.wireMessages(out.Messages)
 	after := estimateTokens(wiredCompacted)
 	// A pass that does not shrink the estimate is dropped: counting or re-arming
 	// it would pay a cache miss for nothing and starve a later real prune.
 	if after >= before {
-		return messages, threshold
+		return messages, threshold, nil
 	}
-	// The pruned history's consuming turn rides the context the event
-	// sees, matching the Step it reports.
-	ctx = llmkit.WithStep(ctx, step)
-	r.recordCompaction(ctx, em, step, before, after, pruned, "")
+	r.recordCompaction(ctx, em, step, before, after, out.Pruned, "")
 	// Real pruning happened (one prefix cache miss paid). Re-arm upward so the
 	// next firing only comes after history has grown materially again, bounding
 	// total firings and avoiding turn-over-turn cache thrash.
-	return compacted, threshold * compactRearmFactor
+	return out.Messages, threshold * compactRearmFactor, nil
 }
 
 // repair issues a SINGLE tools-less, schema-bearing completion against the
@@ -692,7 +687,7 @@ func (r *Runner) maybeCompact(ctx context.Context, em runEmitter, messages []llm
 func (r *Runner) repair(ctx context.Context, em runEmitter, prompt string, responseSchema json.RawMessage, baseIter int) (*Outcome, error) {
 	outcome := &Outcome{Transcript: em.tr, Iterations: baseIter, RunID: llmkit.RunFromContext(ctx)}
 	messages := []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, prompt)}
-	if _, err := r.completeOnce(ctx, em, &messages, nil, outcome, responseSchema, true); err != nil {
+	if _, err := r.completeOnce(ctx, em, &messages, outcome, responseSchema, true); err != nil {
 		return outcome, err
 	}
 	return outcome, nil
@@ -714,8 +709,8 @@ func (r *Runner) repair(ctx context.Context, em runEmitter, prompt string, respo
 // nudge — so a JSON answer cut off mid-object has a chance to be completed
 // rather than failing to parse. The outcome's LastStopReason reflects the
 // final completion served here.
-func (r *Runner) completeOnce(ctx context.Context, em runEmitter, messages *[]llmkit.Message, toolNames map[string]string, outcome *Outcome, responseSchema json.RawMessage, final bool) (llmkit.Response, error) {
-	resp, err := r.completeRecovering(ctx, em, messages, toolNames, outcome, responseSchema, final)
+func (r *Runner) completeOnce(ctx context.Context, em runEmitter, messages *[]llmkit.Message, outcome *Outcome, responseSchema json.RawMessage, final bool) (llmkit.Response, error) {
+	resp, err := r.completeRecovering(ctx, em, messages, outcome, responseSchema, final)
 	if err != nil {
 		return llmkit.Response{}, err
 	}
@@ -727,7 +722,7 @@ func (r *Runner) completeOnce(ctx context.Context, em runEmitter, messages *[]ll
 	if resp.StopReason == llmkit.StopMaxTokens && len(resp.ToolCalls) == 0 {
 		*messages = append(*messages, llmkit.TextMessage(llmkit.RoleUser,
 			"Your previous message was cut off at the output token limit. Continue from exactly where you stopped and output ONLY the remaining text needed to complete the answer — no preamble, no repetition."))
-		cont, cerr := r.completeRecovering(ctx, em, messages, toolNames, outcome, responseSchema, final)
+		cont, cerr := r.completeRecovering(ctx, em, messages, outcome, responseSchema, final)
 		if cerr != nil {
 			return llmkit.Response{}, cerr
 		}
@@ -750,21 +745,28 @@ func (r *Runner) completeOnce(ctx context.Context, em runEmitter, messages *[]ll
 }
 
 // completeRecovering is complete plus one compact-and-retry on ErrContextTooLong
-// when HistoryTokenBudget enables compaction; the policy and hooks fire per attempt.
-func (r *Runner) completeRecovering(ctx context.Context, em runEmitter, messages *[]llmkit.Message, toolNames map[string]string, outcome *Outcome, responseSchema json.RawMessage, final bool) (llmkit.Response, error) {
+// when compaction is enabled; the policy and hooks fire per attempt.
+func (r *Runner) completeRecovering(ctx context.Context, em runEmitter, messages *[]llmkit.Message, outcome *Outcome, responseSchema json.RawMessage, final bool) (llmkit.Response, error) {
 	resp, err := r.complete(ctx, em, *messages, outcome, responseSchema, final)
-	if err == nil || r.limits.HistoryTokenBudget <= 0 || !errors.Is(err, llmkit.ErrContextTooLong) {
-		return resp, err
-	}
-	before, _ := r.wireMessages(*messages)
-	compacted, pruned := compactHistory(*messages, before, compactRecentToolResults, toolNames)
-	after, _ := r.wireMessages(compacted)
-	if reflect.DeepEqual(before, after) {
+	if err == nil || !r.compactionEnabled() || !errors.Is(err, llmkit.ErrContextTooLong) {
 		return resp, err
 	}
 	step := outcome.Iterations + 1
-	r.recordCompaction(llmkit.WithStep(ctx, step), em, step, estimateTokens(*messages), estimateTokens(compacted), pruned, llmkit.CompactionReasonOverflow)
-	*messages = compacted
+	cctx := llmkit.WithStep(ctx, step)
+	before, _ := r.wireMessages(*messages)
+	out, cerr := r.compact(cctx, CompactInput{Messages: *messages, Sent: before, Reason: llmkit.CompactionReasonOverflow})
+	if cerr != nil {
+		return llmkit.Response{}, fmt.Errorf("agent: compaction after context overflow at iteration %d: %w", step, cerr)
+	}
+	if compactionUnchanged(out.Messages, *messages) {
+		return resp, err
+	}
+	after, _ := r.wireMessages(out.Messages)
+	if reflect.DeepEqual(before, after) {
+		return resp, err
+	}
+	r.recordCompaction(cctx, em, step, estimateTokens(*messages), estimateTokens(out.Messages), out.Pruned, llmkit.CompactionReasonOverflow)
+	*messages = out.Messages
 	return r.complete(ctx, em, *messages, outcome, responseSchema, final)
 }
 

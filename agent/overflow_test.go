@@ -331,8 +331,9 @@ func TestOverflow_ReplayWithoutErrKindSkipsFailure(t *testing.T) {
 	if n := len(failedCompletions(got.Transcript.Record)); n != 0 {
 		t.Errorf("failed completions = %d, want 0", n)
 	}
-	if e := rc.Err(); e != nil {
-		t.Errorf("rc.Err = %v", e)
+	// The record's overflow compaction is not reproduced once its failure is skipped.
+	if e := rc.Err(); !errors.Is(e, ErrReplayDiverged) || !strings.Contains(e.Error(), "compaction") {
+		t.Errorf("rc.Err = %v, want ErrReplayDiverged naming the unreproduced compaction", e)
 	}
 }
 
