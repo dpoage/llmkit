@@ -40,6 +40,21 @@ entry below is marked.
   `agent.NewReplayClient` with no network. It does not compare the state and
   does not report unconsumed decisions. `decide.ErrReplayDiverged` and
   `decide.ErrReplayedFailure` are the errors it returns.
+- `examples/agent-guardrail`: an `agent.Runner` gated by a `decide.Decider`.
+  A `ToolPolicy` asks a Noul and denies a call at or above `--threshold`; a
+  `RequestPolicy` asks a Choice and aborts the run on `injection`. It reads
+  the `LLMKIT_*` variables plus `LLMKIT_SYSTEMONE_API_KEY`,
+  `LLMKIT_SYSTEMONE_MODEL`, and optionally `LLMKIT_SYSTEMONE_BASE_URL`, and
+  prints usage and exits 1 without them. `docs/decide.md` gains a "Gating an
+  agent" section.
+- `decide`: `Example` functions for `Decider`, `Response.Noul`, `Check`,
+  `Observe`, `Replay`, and `Decider` gating an agent, all network-free.
+- Budget sharing for decision spend: pass one `agent.BudgetPool` to
+  `agent.WithBudgetPool` and charge it from a `decide.Observe` observer with
+  `ev.Decision.Usage.ChargeableTokens(1)`; the run then stops with
+  `agent.TruncBudgetPool` when LLM and decision spend together reach the
+  limit. `agent.Limits.TokenBudget` does not count decision tokens. No API
+  change; the pattern is in `examples/agent-guardrail` and `docs/decide.md`.
 
 ### Changed
 
