@@ -249,10 +249,16 @@ func (r *Runner) placeToolBlocks(out []llmkit.Block) toolResult {
 	if !slices.ContainsFunc(out, isMedia) {
 		return toolResult{result: blocksText(out), content: nonEmptyBlocks(out)}
 	}
-	accepts := r.client.Capabilities().ToolResultMedia
+	placed, degraded := degradeToolMedia(out, r.client.Capabilities().ToolResultMedia)
+	return toolResult{result: blocksText(placed), content: placed, degraded: degraded}
+}
+
+// degradeToolMedia replaces each media block a tool result cannot carry by its
+// omission marker; it returns blocks itself, never modified, when none is.
+func degradeToolMedia(blocks []llmkit.Block, accepts bool) ([]llmkit.Block, int) {
 	var placed []llmkit.Block
 	degraded := 0
-	for i, b := range out {
+	for i, b := range blocks {
 		if !isMedia(b) || (accepts && portableToolMedia(b)) {
 			if placed != nil {
 				placed = append(placed, b)
@@ -260,7 +266,7 @@ func (r *Runner) placeToolBlocks(out []llmkit.Block) toolResult {
 			continue
 		}
 		if placed == nil {
-			placed = append(make([]llmkit.Block, 0, len(out)), out[:i]...)
+			placed = append(make([]llmkit.Block, 0, len(blocks)), blocks[:i]...)
 		}
 		marker := imageOmitted
 		if b.Kind == llmkit.BlockDocument {
@@ -270,9 +276,36 @@ func (r *Runner) placeToolBlocks(out []llmkit.Block) toolResult {
 		degraded++
 	}
 	if placed == nil {
-		placed = out
+		return blocks, 0
 	}
-	return toolResult{result: blocksText(placed), content: placed, degraded: degraded}
+	return placed, degraded
+}
+
+// wireMessages applies degradeToolMedia to every tool-result message of history,
+// so media carried in by Continue from another profile reaches this wire in a
+// form it takes. history is never modified; copied reports a fresh slice.
+func (r *Runner) wireMessages(history []llmkit.Message) (msgs []llmkit.Message, copied bool) {
+	var accepts, read bool
+	for i, m := range history {
+		if m.Role != llmkit.RoleToolResult || !slices.ContainsFunc(m.Content, isMedia) {
+			continue
+		}
+		if !read {
+			accepts, read = r.client.Capabilities().ToolResultMedia, true
+		}
+		content, n := degradeToolMedia(m.Content, accepts)
+		if n == 0 {
+			continue
+		}
+		if msgs == nil {
+			msgs = slices.Clone(history)
+		}
+		msgs[i].Content = content
+	}
+	if msgs == nil {
+		return history, false
+	}
+	return msgs, true
 }
 
 func nonEmptyBlocks(blocks []llmkit.Block) []llmkit.Block {
