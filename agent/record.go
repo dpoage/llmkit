@@ -185,7 +185,8 @@ func (r *Runner) emitCompactionCompletion(ctx context.Context, em runEmitter, ca
 	em.emit(ctx, ev)
 }
 
-// setCompletionErr records a failed completion's error on ce and clears its response.
+// setCompletionErr records a failed completion's error and its ErrKind on ce
+// and clears its response.
 func setCompletionErr(ce *llmkit.CompletionEvent, err error) {
 	if err == nil {
 		return

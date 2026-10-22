@@ -39,10 +39,11 @@ var ErrReplayDiverged = errors.New("agent: replay diverged")
 // so prompt wording can change between record and replay without breaking
 // the replay.
 //
-// Divergence is run state owned by the client, never inferred from
-// conversation text. [ReplayClient.Tools] returns the run's recorded tool
-// set, bound to this client: each tool serves the recorded result of the
-// call it is dispatched for, matched by tool-call ID within the recorded
+// Divergence is run state owned by the client; message text is compared only
+// at a recorded compaction point (below). [ReplayClient.Tools] returns the
+// run's recorded tool set, bound to this client: each tool serves the
+// recorded result of the call it is dispatched for, matched by tool-call ID
+// within the recorded
 // step being replayed. When the calls of a turn carry distinct IDs, replay
 // is therefore deterministic under [WithParallelTools] whatever order the
 // calls dispatch in, even for calls that share a name and arguments. Calls
@@ -80,8 +81,9 @@ var ErrReplayDiverged = errors.New("agent: replay diverged")
 // Runner answers them the same way, byte for byte, and its policy never
 // sees them.
 //
-// Tools other than [ReplayClient.Tools] execute live, and their results are
-// never compared with the record.
+// Tools other than [ReplayClient.Tools] execute live. Outside a recorded
+// compaction point their results are never compared with the record; a live
+// result that changes the request after a compaction diverges there.
 //
 // A recorded result with Content is served block for block; one without it
 // serves its Result as one text block. The replaying Runner places those
@@ -108,9 +110,11 @@ var ErrReplayDiverged = errors.New("agent: replay diverged")
 // ran in the recorded run and no replay tool served. A recorded compaction
 // (threshold or overflow, by any [Compactor]) the replaying Runner does not
 // reproduce at its position is reported the same way: the first request
-// after it must carry messages equal, in their JSON encoding, to the
-// recorded request's. A record that cannot carry a tool's bytes, for example
-// invalid UTF-8 through JSONL, replays its compactions as diverged. Callers
+// after it must carry messages equal, in their JSON encoding (as Go values
+// when a request cannot be JSON-encoded), to the recorded request's. A record
+// that cannot carry a tool's bytes, for example invalid UTF-8 through JSONL,
+// replays its compactions as diverged. Any other difference in that request,
+// such as a steering turn the replay lacks, is reported the same way. Callers
 // MUST assert Err returns nil after a replayed run — a diverged replay is a
 // failed evaluation whatever Run returned.
 //
@@ -376,13 +380,14 @@ func (s recordedSummary) compactCalls(ctx context.Context) []compactCall {
 // Compactor returns a [Compactor] that reproduces the recorded run's
 // summaries without calling a summarizer. It cuts the history where
 // [SummarizingCompactor] does and substitutes the next recorded summary, so
-// install it with [WithCompactor] and the recorded run's HistoryTokenBudget.
+// install it with [WithCompactor] and the recorded run's HistoryTokenBudget,
+// ContextReserve and ContextWindow.
 // With no cut point, or no recorded summary left, it stubs like the default
 // compactor. Each pass also returns its recorded summarizer calls, which the
 // Runner records as Purpose "compaction" Completion events with the recorded
-// request, response and error, so the replayed ledger sums to the replayed
-// Outcome.Usage, the BudgetPool charge matches, and the replay stops on a
-// token budget where the recorded run did.
+// request, response and error. When Err is nil, the replayed ledger sums to
+// the replayed Outcome.Usage, the BudgetPool charge matches, and a token
+// budget stops the replay where it stopped the recorded run.
 func (rc *ReplayClient) Compactor() Compactor {
 	return CompactorFunc(func(ctx context.Context, in CompactInput) (CompactOutput, error) {
 		from, at := summaryCut(in.Messages)
@@ -692,7 +697,8 @@ func (ts *replayToolSet) tools(rc *ReplayClient) []Tool {
 // recorded completion is also unserved, Err names that completion instead.
 //
 // Only these tools are compared with the record. Any other tool a caller
-// passes to the Runner executes live, and its result is never compared.
+// passes to the Runner executes live; its result is not compared, except
+// through the request after a recorded compaction, which it can change.
 func (rc *ReplayClient) Tools() []Tool {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
@@ -765,7 +771,9 @@ func (rc *ReplayClient) recordDiverged(err error) {
 //     counted, since no replay tool serves them.
 //
 // When both kinds of unreached work exist, Err names the unserved
-// completion.
+// completion. If a recorded compaction precedes that completion, the report
+// names the compaction, though the replay may only have ended early, for
+// example without a steering turn the record held.
 //
 // A divergence in the run's final tool turn can end the run before another
 // Complete happens; Err returns it. If the caller took [ReplayClient.Tools],
@@ -776,7 +784,8 @@ func (rc *ReplayClient) recordDiverged(err error) {
 // it applies the checks above to the replay so far. A client from
 // [NewReplayClientFromResponses] reports no unreached work: its Err is nil
 // unless it served past its last response. Results of tools that are not
-// [ReplayClient.Tools] are never compared with the record.
+// [ReplayClient.Tools] are not compared with the record, except through the
+// request after a recorded compaction, which they can change.
 func (rc *ReplayClient) Err() error {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()

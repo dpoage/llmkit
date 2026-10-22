@@ -255,9 +255,11 @@ func WithRunID(id llmkit.RunID) RunOption {
 // send consecutive user messages as-is and the providers accept or coalesce
 // them.
 //
-// Like Run, there is no context-window management: a caller driving a long
-// conversation must bound the history itself, using the client's
-// [llmkit.Capabilities].ContextWindow and [EstimateHistoryTokens].
+// A continued run manages the context window only when compaction is enabled
+// ([Limits.HistoryTokenBudget], [Limits.ContextReserve] or [WithCompactor]).
+// Otherwise a caller driving a long conversation must bound the history
+// itself, using the client's [llmkit.Capabilities].ContextWindow and
+// [EstimateHistoryTokens].
 //
 // When an earlier call returned [StopReasonError] (model refusal/safety
 // stop), the attached err.Outcome may be threaded back in here: the refusal
@@ -568,9 +570,9 @@ func (cs *compactState) due(est int64) (byBudget, byReserve bool) {
 }
 
 // rearm records a counted or paid pass that left the history at post. The
-// budget threshold doubles only when the budget trigger fired. A paid pass
-// always makes the reserve trigger wait for growth by the reserve; a free
-// one does so only before a refusal, when post is already past the trigger point.
+// budget doubles only if the budget trigger fired. The reserve trigger waits
+// for growth by the reserve after a paid pass, or after a free pass with post
+// past the limit before any refusal.
 func (cs *compactState) rearm(byBudget bool, post int64, paid bool) {
 	if byBudget {
 		cs.budget *= compactRearmFactor
@@ -581,11 +583,10 @@ func (cs *compactState) rearm(byBudget bool, post int64, paid bool) {
 	}
 }
 
-// refusal records that the provider refused a request of the given estimate
-// and that the recovery pass left the history at post. A turn grows the
-// history by less than the reserve, so a request at or below refused-reserve
-// stays under the provider's real limit. A paid recovery waits for growth by
-// the reserve; a free one may fire again at once.
+// refusal records a refused request of the given estimate and a recovery pass
+// that left the history at post. If a turn grows the history by less than the
+// reserve, a request at or below refused-reserve stays under the real limit.
+// A paid recovery waits for growth by the reserve; a free one may fire at once.
 func (cs *compactState) refusal(refused, post int64, paid bool) {
 	if !cs.proactive {
 		return
@@ -687,20 +688,17 @@ func (r *Runner) finalizeAndTruncate(ctx context.Context, em runEmitter, s *runS
 	return nil
 }
 
-// maybeCompact applies the history-compaction triggers. The budget trigger
-// fires when the request-copy estimate exceeds cs.budget; the reserve trigger
-// when it exceeds cs.limit and has grown to cs.floor. With neither due, it
-// returns the messages unchanged, so a normal run pays no allocation and the
-// append-only prefix (and its cache) is preserved.
+// maybeCompact applies the compaction triggers: budget when the request-copy
+// estimate exceeds cs.budget, reserve when it exceeds cs.limit and has reached
+// cs.floor. With neither due it returns messages unchanged, keeping the
+// append-only prefix and its cache.
 //
-// A pass that shrinks the estimate is applied and counted. A paid pass (the
-// compactor reported usage) is counted even when discarded or without gain.
-// Both re-arm the triggers; a free pass that changes nothing re-arms nothing,
-// so the next turn tries again once a result ages out of the recent window.
+// A pass that shrinks the estimate is applied and counted; a paid pass is
+// counted even when discarded or without gain. Both re-arm the triggers. A
+// free pass that changes nothing re-arms nothing, so the next turn retries.
 //
-// step is the completion that will consume the (possibly) compacted history;
-// it is stamped on the Compaction event, which is emitted only when the
-// history changed. A compactor error is returned wrapped.
+// step is the completion that consumes the compacted history and stamps the
+// Compaction event, emitted only when the history changed.
 func (r *Runner) maybeCompact(ctx context.Context, em runEmitter, outcome *Outcome, messages []llmkit.Message, cs *compactState, step int) ([]llmkit.Message, error) {
 	if cs.budget <= 0 && !cs.proactive {
 		return messages, nil

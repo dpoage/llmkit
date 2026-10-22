@@ -52,15 +52,12 @@ Files read and files modified, one path per line, with a few words on each.`
 // the run's budgets.
 //
 // The cut is just before the latest assistant message that follows no
-// harness prompt and leaves no earlier tool call without its result. With no
-// such cut it falls back to the default compactor. A summary that would not
-// shrink the history is discarded. The summary is the user message
-// "[conversation summary]\n" plus the summary text, and an earlier summary in
-// the span is fed into the next one. If the summary request overflows the
-// context, the span is summarized in halves and the halves merged, up to
-// three splits deep; a single message too large for the context is an error
-// wrapping [llmkit.ErrContextTooLong]. Request policies and hooks do not fire
-// for the summary calls.
+// harness prompt and leaves no earlier tool call without its result; with no
+// such cut it stubs like the default compactor. A summary that would not
+// shrink the history is discarded. A summary request that overflows the
+// context is split in halves, up to three deep; a single message too large
+// for it is an error wrapping [llmkit.ErrContextTooLong]. Request policies and
+// hooks do not fire for the summary calls.
 func SummarizingCompactor(client llmkit.Client) Compactor {
 	return summarizer{client: client}
 }

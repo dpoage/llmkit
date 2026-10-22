@@ -121,22 +121,33 @@ entry below is marked.
   `Content` replays its `Result` as before. A reader built before this change
   ignores `content` and `degraded` and replays `Result` as text only.
   `EventSchemaVersion` stays 3.
-- `agent`: overflow recovery. With `Limits.HistoryTokenBudget` above zero, a
-  completion that fails with an error wrapping `llmkit.ErrContextTooLong`
-  (main turn, max-tokens continuation, finalization, repair) compacts the
-  history once and is retried once. The pass emits a `compaction` event with
-  the new `reason` `overflow` (`CompactionEvent.Reason`,
-  `llmkit.CompactionReasonOverflow`); the threshold pass leaves `reason`
-  omitted. A history the compaction leaves unchanged returns the original
-  error with no event and no retry, and a second refusal is returned
-  unchanged, with no finalization turn. `WithRequestPolicy` and the
-  completion hooks fire for each attempt. `CompletionEvent.ErrKind`
-  (`err_kind`, `llmkit.ErrKindContextTooLong`) marks a failed completion that
-  wraps `ErrContextTooLong`; both new fields are omitted when empty, so
+- `agent`: overflow recovery. With compaction enabled (a positive
+  `Limits.HistoryTokenBudget` or `Limits.ContextReserve`, or
+  `WithCompactor`), a completion that fails with an error wrapping
+  `llmkit.ErrContextTooLong` (main turn, max-tokens continuation,
+  finalization; the provider's refusal, or an error a `RequestPolicy`
+  returns) compacts the history once and is retried once. The limit is once
+  per completion, not once per run. The repair turn follows the same rule,
+  but its history is the repair prompt alone, which the default and
+  summarizing compactors leave unchanged, so it returns the error. The pass
+  emits a `compaction` event with the new `reason` `overflow`
+  (`CompactionEvent.Reason`, `llmkit.CompactionReasonOverflow`); the
+  threshold pass leaves `reason` omitted. The overflow event's token totals
+  estimate the raw history, where a threshold event estimates the request
+  copy, so media the client degrades counts in full. A history the
+  compaction leaves unchanged returns the original error with no event and
+  no retry, and a second refusal is returned unchanged, with no finalization
+  turn. `WithRequestPolicy` and the completion hooks fire for each attempt.
+  `CompletionEvent.ErrKind` (`err_kind`, `llmkit.ErrKindContextTooLong`)
+  marks a failed completion that wraps `ErrContextTooLong`. Only the
+  `completion` events the agent Runner emits carry it; `llmkit.Observe` and
+  `provider.Wrap` emit it empty. Both new fields are omitted when empty, so
   existing records are unchanged and `EventSchemaVersion` stays 3.
   `ReplayClient` serves a recorded completion with that `err_kind` at its
   position as an error wrapping `ErrContextTooLong`, so the replaying Runner
-  recompacts and its events equal the recorded ones.
+  recompacts and its events equal the recorded ones. A reader built before
+  this change skips the failed completion: an overflow record replays with
+  `rc.Err` nil, and the overflow and its recovery disappear from the replay.
 - `agent`: the `Compactor` interface (`Compact(ctx, CompactInput)
   (CompactOutput, error)`), `CompactorFunc`, and `WithCompactor` replace
   history compaction with your own. `CompactInput` carries the history, its
@@ -170,21 +181,30 @@ entry below is marked.
   `CompactOutput` gains `Summary` and `Usage`, and the `compaction` event
   gains `summary`, all omitted when empty. `ReplayClient.Compactor()` serves
   the recorded summaries without calling a model and reports each pass's
-  recorded usage, so a replay's `Outcome.Usage` and `BudgetPool` charge match
-  the record and a run that stopped on a budget stops at the same iteration;
-  a replay never serves a completion with a `purpose` as an answer.
+  recorded usage. When `rc.Err` is nil, a replay's `Outcome.Usage` and
+  `BudgetPool` charge match the record and a run that stopped on a budget
+  stops at the same iteration; a record of a failed pass diverges, and its
+  replayed usage can differ. A replay never serves a completion with a
+  `purpose` as an answer. A reader built before this change serves a
+  recorded summarizer call as an ordinary answer: it replays a summarized
+  record with the summary text as `FinalText` and `rc.Err` set.
 - `agent`: `Limits.ContextReserve` compacts before a completion when the
   estimated request exceeds the client's `ContextWindow` minus the reserve,
   instead of after a provider refusal. Zero, the default, disables it, and a
-  client that reports no window never fires it. A positive value also enables
-  compaction, so overflow recovery runs. After a compaction that leaves the
-  history past the trigger point, and always after a paid pass (one that
-  reported usage), including after a refusal, the trigger waits until the
-  estimate has grown by the reserve; after an overflow recovery by a free
-  pass it fires from the refused size minus the reserve, so a window the
-  client overstates costs one refusal rather than one per turn when a turn
-  grows the history by less than the reserve. It combines with
-  `HistoryTokenBudget`, which doubles as before.
+  client that reports no window never fires it. The estimate counts the
+  message history only, so the reserve must also cover the system prompt,
+  the tool definitions and `MaxTokens`. A positive value also enables
+  compaction, so overflow recovery runs. Before any refusal, a free pass
+  that leaves the history past the trigger point makes the trigger wait
+  until the estimate has grown by the reserve, and a paid pass (one that
+  reported usage) always does, including after a refusal and even when the
+  wait puts the trigger point above the window minus the reserve. After an
+  overflow recovery by a free pass the trigger fires from the lower of the
+  window minus the reserve and the refused size minus the reserve,
+  so a window the client overstates costs one refusal
+  rather than one per turn, provided each turn grows the history by less
+  than the reserve. It combines with `HistoryTokenBudget`, which doubles
+  only after a pass its own trigger fired.
 
 ### Changed
 
@@ -197,27 +217,39 @@ entry below is marked.
   bytes: an over-estimate for a block another provider tagged, which is not
   sent, and for models that strip earlier thinking. The `Runner` estimates its
   request copy, so media the client degrades counts as its marker text, not
-  as an image. A tool result is a compaction candidate by its total size, text
-  plus media bytes, so a short caption with a large image is pruned like a
-  large text dump. The most recent four tool results are still kept, and the
-  stub of a spilled result still names its reference.
-- `agent`: with `Limits.HistoryTokenBudget` above zero, a provider
-  context-overflow refusal no longer ends the run on the first occurrence
-  when the history has prunable tool results. With the budget zero or
-  negative, nothing changes. A replay of a record holding a failed completion
-  with `err_kind` `context_too_long` now serves that error instead of
-  skipping it.
+  as an image, and `EstimateHistoryTokens` matches the live decision only for
+  the request copy. A tool result is a compaction candidate by its size in the
+  request copy, its text plus the media bytes the client sends, and its stub
+  reports that size. On a client that accepts media in tool results, a short
+  caption with a large image is pruned like a large text dump; on one that
+  degrades the image, only its marker text counts. The most recent four tool
+  results are still kept, and the stub of a spilled result still names its
+  reference.
+- `agent`: with compaction enabled (a positive `HistoryTokenBudget` or
+  `ContextReserve`, or `WithCompactor`), a provider context-overflow refusal
+  no longer ends the run on the first occurrence when the history has
+  prunable tool results. Runs without those settings behave as before, but
+  their records now carry `err_kind` `context_too_long` on the failed
+  completion, and a replay of a record holding such a completion now serves
+  that error instead of skipping it.
 - `agent`: `ReplayClient.Err` now reports a recorded compaction, threshold or
   overflow, that the replaying Runner does not reproduce at its position: the
   first request after the compaction must carry messages equal, in their JSON
-  encoding, to the recorded request's, whichever `Compactor` made it. Callers
+  encoding (as Go values when a request cannot be JSON-encoded), to the
+  recorded request's, whichever `Compactor` made it. Callers
   of `NewReplayClient` who replay a record that holds compactions with a
   different `HistoryTokenBudget` or `Compactor` (compaction off, a budget
   that does not fire at the recorded position, a compactor that changes
   nothing or compacts differently), or with anything else that changes that
   request, now get a non-nil `rc.Err` wrapping `ErrReplayDiverged`; `Run`'s
-  result is unchanged. Replaying under the recording configuration is still
-  clean.
+  result is unchanged. Replaying a record this build wrote under the
+  recording configuration is still clean, except that a record holding a
+  summarizing compaction replays clean only with `rc.Compactor()` installed
+  or a summarizer that reproduces the recorded text. A record written by an
+  earlier llmkit build whose compacted history held thinking blocks or
+  images may report a compaction divergence on replay, even under the
+  recording configuration, because the new estimate moves where compaction
+  fires.
 - `agent`: a run that stops on `TokenBudget` or a `BudgetPool` and takes the
   RunJSON finalization turn now compacts before that turn, and recovers from
   an overflow of it, with the default stubber even when a `Compactor` is

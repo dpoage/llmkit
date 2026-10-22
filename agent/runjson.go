@@ -43,8 +43,8 @@ var ErrUnparseableOutput = errors.New("agent: model output did not parse as JSON
 // dominate real usage. Pass [Continue] to make round N+1's feedback land in
 // the SAME conversation as round N's tool-driven investigation, instead of
 // discarding that investigation and asking the model to re-orient from a
-// truncated summary alone; maybeCompact bounds a continued history exactly as
-// it bounds a single run's — no separate summarizer is introduced.
+// truncated summary alone; compaction, when enabled, bounds a continued
+// history exactly as it bounds a single run's.
 //
 // schema is a JSON Schema (raw JSON) describing the expected shape. It is
 // threaded natively as llmkit.Request.ResponseSchema (capability-gated: when the
