@@ -63,6 +63,8 @@ Because llmkit cannot know what the endpoint supports, this provider uses a cons
 
 Override the profile with `Spec.Capabilities` — see [capabilities](capabilities.md).
 
+Reasoning an endpoint returns (`reasoning_content`, OpenRouter `reasoning_details`) is surfaced as a thinking block tagged `openai-compatible:<host of BaseURL>` and sent back on later requests, as DeepSeek thinking mode requires. Changing the `BaseURL` host drops earlier reasoning from the history; first-party OpenAI blocks are tagged `openai`.
+
 ### Google
 
 ```go

@@ -38,6 +38,7 @@ var liveCases = []liveCase{
 	{Name: "error_bad_model", Doc: "an unknown model normalizes to ErrInvalidRequest"},
 	{Name: "usage_recorded", Doc: "Options.Observer receives the Completion event's Response.Usage on a bare New client, tagged with the lane's model"},
 	{Name: "attempt_events", Doc: "Options.Observer receives one Completion event plus N Attempt events sharing its SpanID (Q1: New's own completion emitter)"},
+	{Name: "reasoning_round_trip", Doc: "a thinking+tools turn, a no-tool turn, then a tools request: every request is accepted with the earlier reasoning replayed"},
 
 	// Capability-keyed cases: one per llmkit.Capabilities field.
 	{Name: "context_window", Gate: "ContextWindow", Doc: "an oversize prompt yields ErrContextTooLong when the window is known"},

@@ -203,15 +203,15 @@ const (
 	// with an error wrapping ErrInvalidRequest before any wire call.
 	BlockDocument BlockKind = "document"
 	// BlockThinking is a provider reasoning block (e.g. Anthropic extended
-	// thinking). Provider names the adapter that produced/signed it (e.g.
-	// "anthropic"); Raw carries the provider's wire block verbatim — opaque
-	// to llmkit's own logic, but validated by the adapter to carry a
+	// thinking, DeepSeek reasoning_content). Provider names the adapter that
+	// produced/signed it; Raw carries the provider's wire block verbatim —
+	// opaque to llmkit's own logic, but validated by the adapter to carry a
 	// replayable payload before any wire call. An adapter re-emits a
-	// thinking block verbatim ONLY
-	// when its Provider matches the adapter — blocks from a foreign
-	// provider are silently dropped on the way out. For anthropic/google
-	// blocks Text additionally carries the thinking payload for readability;
-	// Raw remains authoritative for the round-trip.
+	// thinking block verbatim ONLY when its Provider matches the adapter —
+	// blocks from a foreign provider are silently dropped on the way out.
+	// For anthropic/google/openai blocks Text additionally carries the
+	// thinking payload for readability; Raw remains authoritative for the
+	// round-trip.
 	BlockThinking BlockKind = "thinking"
 )
 
@@ -244,14 +244,17 @@ type Block struct {
 	URL string `json:"url,omitempty"`
 	// Title is an optional document label (BlockDocument only).
 	Title string `json:"title,omitempty"`
-	// Provider names the adapter that produced/signed a BlockThinking block
-	// ("anthropic", "google"). See BlockThinking for the round-trip rule.
+	// Provider names the adapter that produced/signed a BlockThinking block:
+	// "anthropic", "google", "openai" (first-party), or
+	// "openai-compatible:<host of BaseURL>". A compat BaseURL host change
+	// drops earlier reasoning on the way out. See BlockThinking.
 	Provider string `json:"provider,omitempty"`
 	// Raw carries a BlockThinking block's provider wire JSON verbatim: it is
 	// opaque to llmkit's own logic and forwarded as received, but adapters
 	// validate that it carries a replayable payload before any wire call.
 	// When the vendor SDK does not expose the original bytes (google), Raw
-	// is a faithful re-encoding of the parsed block.
+	// is a faithful re-encoding of the parsed block. For openai tags it is a
+	// JSON object with reasoning_content and/or reasoning_details.
 	Raw json.RawMessage `json:"raw,omitempty"`
 }
 
@@ -629,7 +632,8 @@ type Response struct {
 // invariant (Text equals the concatenation of BlockText blocks); the
 // surfaced text is appended so the history always carries what the caller
 // received. Think-only responses (Text == "") stay verbatim — no empty text
-// block is invented.
+// block is invented. The same holds for openai-adapter reasoning blocks:
+// dropping them breaks later turns on endpoints that require the replay.
 func (r Response) Message() Message {
 	msg := Message{Role: RoleAssistant, ToolCalls: r.ToolCalls}
 	switch {
@@ -689,9 +693,10 @@ type Capabilities struct {
 	// enforcement). When true, adapters honor the schema natively
 	// (grammar-constrained decoding / synthetic forced-output tool).
 	StructuredOutput bool
-	// Dropped silently when false: Request.Thinking is omitted from the wire
-	// and no BlockThinking blocks are returned. When true, the adapter
-	// forwards the reasoning budget and thinking blocks round-trip.
+	// Dropped silently when false: Request.Thinking is omitted from the wire.
+	// Reasoning an endpoint returns anyway (OpenAI-compatible
+	// reasoning_content / reasoning_details) is surfaced as BlockThinking and
+	// round-tripped regardless; when true, the adapter also forwards the budget.
 	Thinking bool
 	// Refused pre-wire: any explicit Request.ToolChoice mode other than auto
 	// makes the adapter return an error wrapping ErrInvalidRequest before

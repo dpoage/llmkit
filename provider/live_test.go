@@ -224,25 +224,26 @@ func TestLiveMatrix(t *testing.T) {
 // --- case bodies ------------------------------------------------------------
 
 var liveCaseBodies = map[string]func(t *testing.T, lc *liveClient){
-	"text_usage":          caseTextUsage,
-	"tool_round_trip":     caseToolRoundTrip,
-	"max_tokens":          caseMaxTokens,
-	"error_bad_key":       caseErrorBadKey,
-	"error_bad_model":     caseErrorBadModel,
-	"usage_recorded":      caseUsageRecorded,
-	"attempt_events":      caseAttemptEvents,
-	"context_window":      caseContextWindow,
-	"parallel_tool_calls": caseParallelToolCalls,
-	"prompt_caching":      casePromptCaching,
-	"structured_output":   caseStructuredOutput,
-	"thinking":            caseThinking,
-	"tool_choice":         caseToolChoice,
-	"images":              caseImages,
-	"documents":           caseDocuments,
-	"stop_sequences":      caseStopSequences,
-	"top_p":               caseTopP,
-	"top_k":               caseTopK,
-	"seed":                caseSeed,
+	"text_usage":           caseTextUsage,
+	"tool_round_trip":      caseToolRoundTrip,
+	"reasoning_round_trip": caseReasoningRoundTrip,
+	"max_tokens":           caseMaxTokens,
+	"error_bad_key":        caseErrorBadKey,
+	"error_bad_model":      caseErrorBadModel,
+	"usage_recorded":       caseUsageRecorded,
+	"attempt_events":       caseAttemptEvents,
+	"context_window":       caseContextWindow,
+	"parallel_tool_calls":  caseParallelToolCalls,
+	"prompt_caching":       casePromptCaching,
+	"structured_output":    caseStructuredOutput,
+	"thinking":             caseThinking,
+	"tool_choice":          caseToolChoice,
+	"images":               caseImages,
+	"documents":            caseDocuments,
+	"stop_sequences":       caseStopSequences,
+	"top_p":                caseTopP,
+	"top_k":                caseTopK,
+	"seed":                 caseSeed,
 }
 
 func caseTextUsage(t *testing.T, lc *liveClient) {
@@ -313,6 +314,59 @@ func caseToolRoundTrip(t *testing.T, lc *liveClient) {
 		t.Fatalf("final answer %q does not quote the file's second line", final.Text)
 	}
 	lc.finish(final, err)
+}
+
+// caseReasoningRoundTrip: endpoints enforcing the reasoning replay rule (DeepSeek
+// thinking mode) reject the last request unless every earlier turn replays its reasoning.
+func caseReasoningRoundTrip(t *testing.T, lc *liveClient) {
+	lookup := llmkit.ToolDef{
+		Name:        "lookup",
+		Description: "Looks up a fact by key and returns it.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"key":{"type":"string"}},"required":["key"]}`),
+	}
+	req := llmkit.Request{
+		Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser,
+			"Use the lookup tool with key \"capital_of_france\", then tell me what it returned.")},
+		Tools:     []llmkit.ToolDef{lookup},
+		Thinking:  &llmkit.ThinkingConfig{BudgetTokens: 1024},
+		MaxTokens: 2048,
+	}
+	first, err := lc.complete(req)
+	if err != nil {
+		t.Fatalf("thinking+tools turn: %v", err)
+	}
+	hasThink := false
+	for _, b := range first.Blocks {
+		hasThink = hasThink || b.Kind == llmkit.BlockThinking
+	}
+	if !hasThink {
+		t.Skipf("reasoning_round_trip: turn 1 returned no BlockThinking on %s", lc.sess.Lane.Name)
+	}
+	if len(first.ToolCalls) == 0 {
+		t.Fatalf("turn 1 stop = %q with no tool call; want a lookup request", first.StopReason)
+	}
+
+	// No-tool turn: the request carries no tools, the answer has no tool call.
+	req.Messages = append(req.Messages, first.Message(), llmkit.Message{
+		Role:       llmkit.RoleToolResult,
+		ToolCallID: first.ToolCalls[0].ID,
+		Content:    []llmkit.Block{llmkit.Text("Paris")},
+	})
+	noTools := req
+	noTools.Tools = nil
+	second, err := lc.complete(noTools)
+	if err != nil {
+		t.Fatalf("no-tool turn after the tool result: %v", err)
+	}
+
+	// Tools request: every earlier assistant turn must replay its reasoning.
+	req.Messages = append(req.Messages, second.Message(),
+		llmkit.TextMessage(llmkit.RoleUser, "Now look up key \"capital_of_spain\" with the lookup tool."))
+	third, err := lc.complete(req)
+	if err != nil {
+		t.Fatalf("tools request after the no-tool turn: %v", err)
+	}
+	lc.finish(third, err)
 }
 
 func caseMaxTokens(t *testing.T, lc *liveClient) {
