@@ -58,8 +58,8 @@
 // informational subsets of InputTokens, never additions to it. A caller that
 // ignores the cache fields sees exactly the pre-caching numbers.
 // [Usage.OutputTokens] includes reasoning tokens; [Usage.ReasoningTokens] is
-// an informational subset, except for an endpoint that counts reasoning
-// outside completion_tokens and omits total_tokens (xAI style).
+// an informational subset, except where an endpoint counts reasoning outside
+// completion_tokens and total_tokens is not prompt+completion+reasoning.
 // [Usage.Estimated] marks counts computed because no usage was reported.
 // [Usage.ChargeableTokens] discounts cache reads by a weight for budget math;
 // cache-creation tokens stay at full weight.
@@ -227,10 +227,10 @@ const (
 // {"kind":"text","text":"…"} and a nil Raw never emits "raw":null.
 type Block struct {
 	Kind BlockKind `json:"kind"`
-	// Text holds text for BlockText. For BlockThinking it is the readable
-	// reasoning when there is one and "" otherwise (redacted thinking,
-	// signature-only Gemini blocks, openai tags with only reasoning_details).
-	// Message.Text concatenates BlockText only.
+	// Text holds text for BlockText. For BlockThinking it holds the
+	// reasoning text only where the adapter extracts it (Anthropic thinking,
+	// Gemini thought parts, openai reasoning_content); otherwise "" (redacted
+	// thinking, openai reasoning_details only). Message.Text sums BlockText.
 	Text string `json:"text,omitempty"`
 	// MediaType is the MIME type of Data (image/document only).
 	MediaType string `json:"media_type,omitempty"`
@@ -581,7 +581,8 @@ type Usage struct {
 	// ReasoningTokens is the reasoning share of OutputTokens: OpenAI
 	// reasoning_tokens, Gemini thoughtsTokenCount; 0 on Anthropic. Never add
 	// it to OutputTokens or ChargeableTokens. It can exceed OutputTokens when
-	// an endpoint counts it outside completion_tokens and sends no total_tokens.
+	// an endpoint counts it outside completion_tokens and total_tokens is not
+	// prompt+completion+reasoning (absent, or excluding reasoning).
 	ReasoningTokens int64 `json:"reasoning_tokens,omitempty"`
 	// Estimated is true when the openai, openai-compatible, or google adapter
 	// saw no usage object (absent or null; all-zero counts as reported) and

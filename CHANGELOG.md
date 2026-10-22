@@ -36,8 +36,9 @@ entry below is marked.
   (`Complete` and `Stream`, with or without a callback) and Gemini's
   `thoughtsTokenCount`. Anthropic reports no count, so it stays 0. It is an
   informational subset: `ChargeableTokens` is unchanged and callers must not
-  add it to `OutputTokens`. An xAI-style endpoint that omits `total_tokens`
-  keeps its reasoning out of `OutputTokens`, so the count can exceed it there.
+  add it to `OutputTokens`. If an endpoint counts reasoning outside
+  `completion_tokens` and its `total_tokens` is absent or differs from prompt
+  plus completion plus reasoning, the count can exceed `OutputTokens`.
   `Usage.Add` sums it.
 - `llmkit`: `Usage.Estimated`, true when the endpoint's response carried no
   usage object: a missing or null `usage` on `Complete` and `Stream` for the
@@ -62,7 +63,7 @@ entry below is marked.
   thinking runs on Gemini 2.5 and 3 models at their real size and trip sooner
   than before. Runs with no thinking are unchanged. `EventSchemaVersion` is
   now 3 to mark the meaning change; recorded v2 events still load.
-- `provider`: OpenAI-compatible `Usage.OutputTokens` now includes
+- `provider`: OpenAI and OpenAI-compatible `Usage.OutputTokens` now include
   `completion_tokens_details.reasoning_tokens` for xAI-style usage, where
   `total_tokens` equals prompt plus completion plus reasoning tokens; xAI
   counts reasoning outside `completion_tokens`. OpenAI-style usage and usage

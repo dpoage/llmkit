@@ -120,9 +120,9 @@ func NewRunID() RunID { return RunID(newID()) }
 // require a bump.
 //
 // Version 3: Usage.OutputTokens now includes reasoning tokens: google adds
-// thoughtsTokenCount to candidatesTokenCount, and openai-compatible adds
-// reasoning_tokens for xAI-style usage (total_tokens proves it). Version 2
-// counted neither.
+// thoughtsTokenCount to candidatesTokenCount, and openai and
+// openai-compatible add reasoning_tokens for xAI-style usage (total_tokens
+// proves it). Version 2 counted neither.
 const EventSchemaVersion = 3
 
 // NewEvent returns an Event of the given kind with the shared header
