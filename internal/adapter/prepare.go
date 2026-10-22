@@ -221,7 +221,7 @@ func prepareThinking(provider string, tc *llmkit.ThinkingConfig, caps llmkit.Cap
 		return nil, nil
 	}
 	if tc.BudgetTokens < 0 || (tc.BudgetTokens == 0 && tc.Effort == "") {
-		return nil, Refuse(provider, "Thinking.BudgetTokens must be positive unless Thinking.Effort is set", nil)
+		return nil, Refuse(provider, "Thinking.BudgetTokens must be positive, or zero with Thinking.Effort set", nil)
 	}
 	var out llmkit.ThinkingConfig
 	if caps.Thinking {
