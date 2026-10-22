@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -505,12 +506,8 @@ func toAnthropicMessages(msgs []llmkit.Message) ([]anthropic.MessageParam, error
 	return out, nil
 }
 
-// anthropicUserBlocks maps a user message's content blocks onto Anthropic
-// content blocks. The media source rule (adapter.Prepare) already holds;
-// the constraints left here are vendor-specific: inline image bytes must be
-// one of anthropicImageMIME and inline document bytes application/pdf. A
-// message with no blocks yields one empty text block so an empty user turn
-// still serializes the same wire shape.
+// anthropicUserBlocks maps a user message's blocks; an empty message yields one
+// empty text block so an empty user turn keeps the same wire shape.
 func anthropicUserBlocks(m llmkit.Message) ([]anthropic.ContentBlockParamUnion, error) {
 	blocks := make([]anthropic.ContentBlockParamUnion, 0, len(m.Content))
 	for _, b := range m.Content {
@@ -537,10 +534,8 @@ func anthropicUserBlocks(m llmkit.Message) ([]anthropic.ContentBlockParamUnion, 
 	return blocks, nil
 }
 
-// anthropicImageMIME is the media types a base64 image source accepts; the
-// comparison is exact bytes (no case folding, no parameters). See
-// https://platform.claude.com/docs/en/build-with-claude/vision . URL sources
-// write no media type and are not checked.
+// anthropicImageMIME is the image media types Anthropic accepts, inline or as a
+// data: URL; exact bytes. https://platform.claude.com/docs/en/build-with-claude/vision
 var anthropicImageMIME = map[string]bool{
 	"image/png":  true,
 	"image/jpeg": true,
@@ -548,12 +543,15 @@ var anthropicImageMIME = map[string]bool{
 	"image/webp": true,
 }
 
-// anthropicImageBlock maps an image block (base64 or URL source), refusing a
-// base64 media type outside anthropicImageMIME; shared by user turns and tool
-// results.
+// anthropicImageBlock maps an image block, refusing an inline or data: URL media
+// type outside anthropicImageMIME; shared by user turns and tool results.
 func anthropicImageBlock(b llmkit.Block) (*anthropic.ImageBlockParam, error) {
 	src := anthropic.ImageBlockParamSourceUnion{}
 	if b.URL != "" {
+		if m, ok := adapter.DataURLMediaType(b.URL); ok && !anthropicImageMIME[m] {
+			return nil, adapter.Refuse("anthropic",
+				"image block: data: URL media type "+strconv.Quote(m)+" is not supported by Anthropic images (image/png, image/jpeg, image/gif, image/webp only)", nil)
+		}
 		src.OfURL = &anthropic.URLImageSourceParam{URL: b.URL}
 	} else {
 		if !anthropicImageMIME[b.MediaType] {
@@ -568,12 +566,16 @@ func anthropicImageBlock(b llmkit.Block) (*anthropic.ImageBlockParam, error) {
 	return &anthropic.ImageBlockParam{Source: src}, nil
 }
 
-// anthropicDocumentBlock maps a document block (base64 PDF or URL source),
-// refusing inline non-PDF bytes; shared by user turns and tool results.
+// anthropicDocumentBlock maps a document block, refusing inline bytes or a data:
+// URL that is not application/pdf; shared by user turns and tool results.
 func anthropicDocumentBlock(b llmkit.Block) (*anthropic.DocumentBlockParam, error) {
 	if len(b.Data) > 0 && b.MediaType != "application/pdf" {
 		return nil, adapter.Refuse("anthropic",
 			"document block: media type "+b.MediaType+" is not supported by Anthropic base64 documents (application/pdf only)", nil)
+	}
+	if m, ok := adapter.DataURLMediaType(b.URL); ok && m != "application/pdf" {
+		return nil, adapter.Refuse("anthropic",
+			"document block: data: URL media type "+strconv.Quote(m)+" is not supported by Anthropic documents (application/pdf only)", nil)
 	}
 	src := anthropic.DocumentBlockParamSourceUnion{}
 	if b.URL != "" {

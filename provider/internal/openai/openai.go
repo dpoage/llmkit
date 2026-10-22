@@ -10,6 +10,7 @@ import (
 	"errors"
 	"maps"
 	"net/http"
+	"strconv"
 
 	"github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/internal/adapter"
@@ -39,7 +40,7 @@ type openaiAdapter struct {
 	// which accepts the subschema form in lenient mode. See
 	// coerceBoolAdditionalProperties.
 	requireBoolAdditionalProps bool
-	// checkMIME refuses inline media outside the first-party accepted sets;
+	// checkMIME refuses inline or data: URL media outside the first-party sets;
 	// off for openai-compatible, where hosts vary and the host's 400 is the check.
 	checkMIME bool
 }
@@ -360,8 +361,8 @@ func dataURI(mediaType string, data []byte) string {
 	return "data:" + mediaType + ";base64," + base64.StdEncoding.EncodeToString(data)
 }
 
-// openAIImageMIME is the first-party image_url data-URL media types; exact
-// bytes compared. https://developers.openai.com/api/docs/guides/images-vision
+// openAIImageMIME is the first-party image_url media types, inline or as a
+// data: URL; exact bytes. https://developers.openai.com/api/docs/guides/images-vision
 var openAIImageMIME = map[string]bool{
 	"image/png":  true,
 	"image/jpeg": true,
@@ -369,10 +370,9 @@ var openAIImageMIME = map[string]bool{
 	"image/webp": true,
 }
 
-// openAIUserParts maps a user message's content blocks onto Chat Completions
-// parts (image → image_url, document → file). Beyond adapter.Prepare it refuses
-// URL documents and, with checkMIME, inline media outside openAIImageMIME and
-// application/pdf (https://developers.openai.com/api/docs/guides/file-inputs).
+// openAIUserParts maps a user message's blocks (image → image_url, document →
+// file), refusing URL documents and, with checkMIME, media outside openAIImageMIME
+// or application/pdf (https://developers.openai.com/api/docs/guides/file-inputs).
 func openAIUserParts(provider string, checkMIME bool, m llmkit.Message) ([]openai.ChatCompletionContentPartUnionParam, error) {
 	parts := make([]openai.ChatCompletionContentPartUnionParam, 0, len(m.Content))
 	for _, b := range m.Content {
@@ -389,6 +389,9 @@ func openAIUserParts(provider string, checkMIME bool, m llmkit.Message) ([]opena
 						"image block: media type "+b.MediaType+" is not supported by the OpenAI image_url part (image/png, image/jpeg, image/gif, image/webp only)", nil)
 				}
 				url = dataURI(b.MediaType, b.Data)
+			} else if dm, ok := adapter.DataURLMediaType(url); checkMIME && ok && !openAIImageMIME[dm] {
+				return nil, adapter.Refuse(provider,
+					"image block: data: URL media type "+strconv.Quote(dm)+" is not supported by the OpenAI image_url part (image/png, image/jpeg, image/gif, image/webp only)", nil)
 			}
 			parts = append(parts, openai.ChatCompletionContentPartUnionParam{
 				OfImageURL: &openai.ChatCompletionContentPartImageParam{

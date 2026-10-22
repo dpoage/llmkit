@@ -22,27 +22,43 @@ var (
 		"application/pdf", "text/html", "text/css", "text/plain", "text/xml", "text/csv", "text/rtf",
 		"text/javascript", "application/json",
 		"audio/wav", "audio/mp3", "audio/aiff", "audio/aac", "audio/ogg", "audio/flac", "audio/mpeg",
-		"audio/m4a", "audio/l16", "audio/opus",
+		"audio/m4a", "audio/l16", "audio/opus", "audio/alaw", "audio/mulaw", "audio/webm",
 		"video/mp4", "video/mpeg", "video/mov", "video/avi", "video/x-flv", "video/mpg", "video/webm",
 		"video/wmv", "video/3gpp",
 	}
-	mtGoogleURL = []string{
-		"text/html", "text/css", "text/plain", "text/xml", "text/csv", "text/rtf",
-		"text/javascript", "application/json", "application/pdf",
-		"image/bmp", "image/jpeg", "image/png", "image/webp",
-		"video/mp4", "video/mpeg", "video/quicktime", "video/avi", "video/x-flv", "video/mpg",
-		"video/webm", "video/wmv", "video/3gpp",
-	}
 	mtGoogleToolSet = []string{"image/png", "image/jpeg", "image/webp", "application/pdf", "text/plain"}
 
-	// mtProbeExtras joins every wire's accepted set in the probe: near
-	// misses, other families, and spellings that differ from a member only
-	// in case or parameters.
+	// mtProbeExtras are near misses, other families, and spellings differing
+	// from a member only in case or parameters.
 	mtProbeExtras = []string{
-		"image/bmp", "image/tiff", "image/svg+xml", "image/heic", "image/gif", "application/pdf",
-		"text/plain", "image/jpg", "IMAGE/PNG", "image/png; x=y", "audio/wav",
+		"image/bmp", "image/tiff", "image/svg+xml", "image/jpg", "IMAGE/PNG", "image/png; x=y",
+		"video/quicktime", "audio/x-wav",
 	}
+
+	mtHTTPSURL   = "https://example.test/media"
+	mtFilesURI   = "https://generativelanguage.googleapis.com/v1beta/files/abc123"
+	mtGCSURI     = "gs://bucket/clip.wav"
+	mtBytesB64   = "Ynl0ZXM=" // base64("bytes")
+	mtAnthSpec   = Spec{Type: TypeAnthropic, Model: "claude-opus-4-5"}
+	mtOpenAISpec = Spec{Type: TypeOpenAI, Model: "gpt-4o"}
+	mtCompatSpec = Spec{Type: TypeOpenAICompatible, Model: "llama3"}
+	mtGoogleSpec = Spec{Type: TypeGoogle, Model: "gemini-3-flash-preview"}
 )
+
+// mtProbeSet is every wire's accepted set plus the extras, deduplicated.
+func mtProbeSet() []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, set := range [][]string{mtImageSet, mtPDFSet, mtGoogleInline, mtGoogleToolSet, mtProbeExtras} {
+		for _, m := range set {
+			if !seen[m] {
+				seen[m] = true
+				out = append(out, m)
+			}
+		}
+	}
+	return out
+}
 
 type mtRecorder struct {
 	mu   sync.Mutex
@@ -62,7 +78,31 @@ func (r *mtRecorder) snapshot() (int, map[string]any) {
 	return r.hits, r.body
 }
 
-// mtList returns body[key] as a slice of objects.
+// mtClient builds a client for spec against a recording fake server.
+func mtClient(t *testing.T, spec Spec) (llmkit.Client, *mtRecorder) {
+	t.Helper()
+	isolateEnv(t, baseURLEnvSources...)
+	rec := &mtRecorder{}
+	base := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var body map[string]any
+		_ = json.Unmarshal(raw, &body)
+		rec.mu.Lock()
+		rec.hits++
+		rec.body = body
+		rec.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(okBody(string(spec.Type))))
+	})
+	spec.BaseURL, spec.Secret = base, "k"
+	client, err := New(context.Background(), spec, Options{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return client, rec
+}
+
+// mtList returns v as a slice of objects.
 func mtList(t *testing.T, v any, what string) []map[string]any {
 	t.Helper()
 	raw, _ := v.([]any)
@@ -100,85 +140,81 @@ func mtToolResultRequest(b llmkit.Block) llmkit.Request {
 	}
 }
 
-// mtBlock builds the block under test: inline bytes, or a URL source.
-func mtBlock(kind llmkit.BlockKind, url bool, m string) llmkit.Block {
-	if url {
-		return llmkit.Block{Kind: kind, MediaType: m, URL: "https://example.test/media"}
-	}
-	return llmkit.Block{Kind: kind, MediaType: m, Data: []byte("bytes")}
-}
+func mtDataURL(m string) string { return "data:" + m + ";base64," + mtBytesB64 }
 
-// mtForwardedData returns the media type of a data: URL.
-func mtForwardedData(url string) string {
-	rest, ok := strings.CutPrefix(url, "data:")
-	if !ok {
-		return "<not a data URL: " + url + ">"
+// mtDataType is the media type of mtDataURL(m): m up to its first ';' or ','.
+func mtDataType(m string) string {
+	if i := strings.IndexAny(m, ";,"); i >= 0 {
+		return m[:i]
 	}
-	m, _, _ := strings.Cut(rest, ";base64,")
 	return m
 }
 
-// mtForwarded extractors return the string a wire wrote into its media-type
-// slot for the one media block of the request.
-func mtAnthropicUser(t *testing.T, body map[string]any) string {
-	t.Helper()
-	msgs := mtList(t, body["messages"], "messages")
-	for _, b := range mtList(t, msgs[len(msgs)-1]["content"], "content") {
-		if b["type"] == "image" || b["type"] == "document" {
-			s, _ := mtObj(b["source"])["media_type"].(string)
-			return s
+// Extractors return what the wire wrote for the request's one media block.
+func mtAnthropic(toolRes bool, field string) func(*testing.T, map[string]any) string {
+	return func(t *testing.T, body map[string]any) string {
+		t.Helper()
+		msgs := mtList(t, body["messages"], "messages")
+		blocks := mtList(t, msgs[len(msgs)-1]["content"], "content")
+		if toolRes {
+			blocks = mtList(t, blocks[0]["content"], "tool_result content")
 		}
+		for _, b := range blocks {
+			if b["type"] == "image" || b["type"] == "document" {
+				s, _ := mtObj(b["source"])[field].(string)
+				return s
+			}
+		}
+		t.Fatalf("no media block in %v", body)
+		return ""
 	}
-	t.Fatalf("no media block in %v", body)
-	return ""
 }
 
-func mtAnthropicToolResult(t *testing.T, body map[string]any) string {
-	t.Helper()
-	msgs := mtList(t, body["messages"], "messages")
-	tr := mtList(t, msgs[len(msgs)-1]["content"], "content")[0]
-	for _, b := range mtList(t, tr["content"], "tool_result content") {
-		if b["type"] == "image" || b["type"] == "document" {
-			s, _ := mtObj(b["source"])["media_type"].(string)
-			return s
-		}
-	}
-	t.Fatalf("no media block in %v", body)
-	return ""
-}
-
-func mtOpenAI(field string) func(*testing.T, map[string]any) string {
+func mtOpenAI(part, field string) func(*testing.T, map[string]any) string {
 	return func(t *testing.T, body map[string]any) string {
 		t.Helper()
 		msgs := mtList(t, body["messages"], "messages")
 		for _, p := range mtList(t, msgs[len(msgs)-1]["content"], "content") {
-			switch {
-			case field == "image_url" && p["type"] == "image_url":
-				s, _ := mtObj(p["image_url"])["url"].(string)
-				return mtForwardedData(s)
-			case field == "file" && p["type"] == "file":
-				s, _ := mtObj(p["file"])["file_data"].(string)
-				return mtForwardedData(s)
+			if p["type"] == part {
+				s, _ := mtObj(p[part])[field].(string)
+				return s
 			}
 		}
-		t.Fatalf("no %s part in %v", field, body)
+		t.Fatalf("no %s part in %v", part, body)
 		return ""
 	}
 }
 
-func mtGoogleUser(field string) func(*testing.T, map[string]any) string {
-	return func(t *testing.T, body map[string]any) string {
-		t.Helper()
-		contents := mtList(t, body["contents"], "contents")
-		for _, p := range mtList(t, contents[len(contents)-1]["parts"], "parts") {
-			if d := mtObj(p[field]); d != nil {
-				s, _ := d["mimeType"].(string)
-				return s
-			}
+func mtGoogleUserParts(t *testing.T, body map[string]any) []map[string]any {
+	t.Helper()
+	contents := mtList(t, body["contents"], "contents")
+	return mtList(t, contents[len(contents)-1]["parts"], "parts")
+}
+
+func mtGoogleInlineData(t *testing.T, body map[string]any) string {
+	t.Helper()
+	for _, p := range mtGoogleUserParts(t, body) {
+		if d := mtObj(p["inlineData"]); d != nil {
+			s, _ := d["mimeType"].(string)
+			return s
 		}
-		t.Fatalf("no %s part in %v", field, body)
-		return ""
 	}
+	t.Fatalf("no inlineData part in %v", body)
+	return ""
+}
+
+// mtGoogleFileData returns "fileUri|mimeType".
+func mtGoogleFileData(t *testing.T, body map[string]any) string {
+	t.Helper()
+	for _, p := range mtGoogleUserParts(t, body) {
+		if d := mtObj(p["fileData"]); d != nil {
+			uri, _ := d["fileUri"].(string)
+			mt, _ := d["mimeType"].(string)
+			return uri + "|" + mt
+		}
+	}
+	t.Fatalf("no fileData part in %v", body)
+	return ""
 }
 
 func mtGoogleToolResult(t *testing.T, body map[string]any) string {
@@ -190,120 +226,213 @@ func mtGoogleToolResult(t *testing.T, body map[string]any) string {
 	return s
 }
 
+func mtWantMediaType(b llmkit.Block) string { return b.MediaType }
+func mtWantPDF(llmkit.Block) string         { return "application/pdf" } // the SDK fixes a base64 PDF's media_type
+func mtWantURL(b llmkit.Block) string       { return b.URL }
+func mtWantDataURI(b llmkit.Block) string   { return mtDataURL(b.MediaType) }
+func mtWantFileData(b llmkit.Block) string  { return b.URL + "|" + b.MediaType }
+
+type mtSource int
+
+const (
+	mtInline    mtSource = iota // Data + MediaType m
+	mtData                      // URL mtDataURL(m), no MediaType
+	mtDataTyped                 // URL mtDataURL(m) and MediaType m
+	mtRemote                    // URL mtCase.url, MediaType m
+)
+
 type mtCase struct {
 	name string
 	spec Spec
-	// accepted is the wire's set; nil means the wire does no check and every
-	// probed type must reach the server.
-	accepted  []string
-	kind      llmkit.BlockKind
-	url       bool
-	toolRes   bool
-	forwarded func(*testing.T, map[string]any) string
+	kind llmkit.BlockKind
+	src  mtSource
+	url  string
+	req  func(llmkit.Block) llmkit.Request
+	// accepted is the set the wire checks against; nil means every probe passes.
+	accepted []string
+	extract  func(*testing.T, map[string]any) string
+	want     func(llmkit.Block) string
+}
+
+func (c mtCase) block(m string) llmkit.Block {
+	switch c.src {
+	case mtInline:
+		return llmkit.Block{Kind: c.kind, MediaType: m, Data: []byte("bytes")}
+	case mtData:
+		return llmkit.Block{Kind: c.kind, URL: mtDataURL(m)}
+	case mtDataTyped:
+		return llmkit.Block{Kind: c.kind, MediaType: m, URL: mtDataURL(m)}
+	default:
+		return llmkit.Block{Kind: c.kind, MediaType: m, URL: c.url}
+	}
+}
+
+// refused returns the type the wire must refuse and name for probe m, or
+// ok=false when m must reach the server.
+func (c mtCase) refused(accepted map[string]bool, m string) (string, bool) {
+	if c.accepted == nil {
+		return "", false
+	}
+	switch c.src {
+	case mtInline:
+		return m, !accepted[m]
+	case mtData, mtDataTyped:
+		if dt := mtDataType(m); !accepted[dt] {
+			return dt, true
+		}
+		return m, c.src == mtDataTyped && !accepted[m]
+	}
+	return "", false
 }
 
 func mtCases() []mtCase {
-	anth := Spec{Type: TypeAnthropic, Model: "claude-opus-4-5"}
-	oai := Spec{Type: TypeOpenAI, Model: "gpt-4o"}
-	compat := Spec{Type: TypeOpenAICompatible, Model: "llama3"}
-	goog := Spec{Type: TypeGoogle, Model: "gemini-3-flash-preview"}
 	img, doc := llmkit.BlockImage, llmkit.BlockDocument
-	return []mtCase{
-		{name: "anthropic/image/user", spec: anth, accepted: mtImageSet, kind: img, forwarded: mtAnthropicUser},
-		{name: "anthropic/document/user", spec: anth, accepted: mtPDFSet, kind: doc, forwarded: mtAnthropicUser},
-		{name: "anthropic/image/tool-result", spec: anth, accepted: mtImageSet, kind: img, toolRes: true, forwarded: mtAnthropicToolResult},
-		{name: "anthropic/document/tool-result", spec: anth, accepted: mtPDFSet, kind: doc, toolRes: true, forwarded: mtAnthropicToolResult},
-		{name: "openai/image/user", spec: oai, accepted: mtImageSet, kind: img, forwarded: mtOpenAI("image_url")},
-		{name: "openai/document/user", spec: oai, accepted: mtPDFSet, kind: doc, forwarded: mtOpenAI("file")},
-		{name: "openai-compatible/image/user", spec: compat, kind: img, forwarded: mtOpenAI("image_url")},
-		{name: "openai-compatible/document/user", spec: compat, kind: doc, forwarded: mtOpenAI("file")},
-		{name: "google/image/user-inline", spec: goog, accepted: mtGoogleInline, kind: img, forwarded: mtGoogleUser("inlineData")},
-		{name: "google/document/user-inline", spec: goog, accepted: mtGoogleInline, kind: doc, forwarded: mtGoogleUser("inlineData")},
-		{name: "google/image/user-url", spec: goog, accepted: mtGoogleURL, kind: img, url: true, forwarded: mtGoogleUser("fileData")},
-		{name: "google/document/user-url", spec: goog, accepted: mtGoogleURL, kind: doc, url: true, forwarded: mtGoogleUser("fileData")},
-		{name: "google/image/tool-result", spec: goog, accepted: mtGoogleToolSet, kind: img, toolRes: true, forwarded: mtGoogleToolResult},
-		{name: "google/document/tool-result", spec: goog, accepted: mtGoogleToolSet, kind: doc, toolRes: true, forwarded: mtGoogleToolResult},
-	}
-}
-
-// mtProbe is accepted plus the shared extras, deduplicated, in order. A wire
-// without a check probes the first-party sets so the test still names the
-// types a first-party check would refuse.
-func mtProbe(c mtCase) []string {
-	base := c.accepted
-	if base == nil {
-		base = append(append([]string{}, mtImageSet...), mtPDFSet...)
-	}
-	seen := make(map[string]bool)
-	var out []string
-	for _, m := range append(append([]string{}, base...), mtProbeExtras...) {
-		if !seen[m] {
-			seen[m] = true
-			out = append(out, m)
+	var cs []mtCase
+	for _, pos := range []struct {
+		name    string
+		req     func(llmkit.Block) llmkit.Request
+		toolRes bool
+	}{{"user", mtUserRequest, false}, {"tool-result", mtToolResultRequest, true}} {
+		for _, k := range []struct {
+			kind   llmkit.BlockKind
+			set    []string
+			inline func(llmkit.Block) string
+		}{{img, mtImageSet, mtWantMediaType}, {doc, mtPDFSet, mtWantPDF}} {
+			n := "anthropic/" + string(k.kind) + "/" + pos.name
+			mt, url := mtAnthropic(pos.toolRes, "media_type"), mtAnthropic(pos.toolRes, "url")
+			cs = append(cs,
+				mtCase{name: n + "/inline", spec: mtAnthSpec, kind: k.kind, src: mtInline, req: pos.req, accepted: k.set, extract: mt, want: k.inline},
+				mtCase{name: n + "/data-url", spec: mtAnthSpec, kind: k.kind, src: mtData, req: pos.req, accepted: k.set, extract: url, want: mtWantURL},
+				mtCase{name: n + "/https-url", spec: mtAnthSpec, kind: k.kind, src: mtRemote, url: mtHTTPSURL, req: pos.req, extract: url, want: mtWantURL},
+			)
 		}
 	}
-	return out
+	for _, w := range []struct {
+		name string
+		spec Spec
+		img  []string
+		pdf  []string
+	}{{"openai", mtOpenAISpec, mtImageSet, mtPDFSet}, {"openai-compatible", mtCompatSpec, nil, nil}} {
+		imgURL := mtOpenAI("image_url", "url")
+		cs = append(cs,
+			mtCase{name: w.name + "/image/user/inline", spec: w.spec, kind: img, src: mtInline, req: mtUserRequest, accepted: w.img, extract: imgURL, want: mtWantDataURI},
+			mtCase{name: w.name + "/image/user/data-url", spec: w.spec, kind: img, src: mtData, req: mtUserRequest, accepted: w.img, extract: imgURL, want: mtWantURL},
+			mtCase{name: w.name + "/image/user/https-url", spec: w.spec, kind: img, src: mtRemote, url: mtHTTPSURL, req: mtUserRequest, extract: imgURL, want: mtWantURL},
+			mtCase{name: w.name + "/document/user/inline", spec: w.spec, kind: doc, src: mtInline, req: mtUserRequest, accepted: w.pdf, extract: mtOpenAI("file", "file_data"), want: mtWantDataURI},
+		)
+	}
+	for _, kind := range []llmkit.BlockKind{img, doc} {
+		n := "google/" + string(kind)
+		cs = append(cs,
+			mtCase{name: n + "/user/inline", spec: mtGoogleSpec, kind: kind, src: mtInline, req: mtUserRequest, accepted: mtGoogleInline, extract: mtGoogleInlineData, want: mtWantMediaType},
+			mtCase{name: n + "/user/data-url", spec: mtGoogleSpec, kind: kind, src: mtData, req: mtUserRequest, accepted: mtGoogleInline, extract: mtGoogleFileData, want: mtWantFileData},
+			mtCase{name: n + "/user/data-url-typed", spec: mtGoogleSpec, kind: kind, src: mtDataTyped, req: mtUserRequest, accepted: mtGoogleInline, extract: mtGoogleFileData, want: mtWantFileData},
+			mtCase{name: n + "/user/https-url", spec: mtGoogleSpec, kind: kind, src: mtRemote, url: mtHTTPSURL, req: mtUserRequest, extract: mtGoogleFileData, want: mtWantFileData},
+			mtCase{name: n + "/user/files-api-uri", spec: mtGoogleSpec, kind: kind, src: mtRemote, url: mtFilesURI, req: mtUserRequest, extract: mtGoogleFileData, want: mtWantFileData},
+			mtCase{name: n + "/user/gs-uri", spec: mtGoogleSpec, kind: kind, src: mtRemote, url: mtGCSURI, req: mtUserRequest, extract: mtGoogleFileData, want: mtWantFileData},
+			mtCase{name: n + "/tool-result/inline", spec: mtGoogleSpec, kind: kind, src: mtInline, req: mtToolResultRequest, accepted: mtGoogleToolSet, extract: mtGoogleToolResult, want: mtWantMediaType},
+		)
+	}
+	return cs
+}
+
+// mtCheckRefusal reports why err/hits is not a pre-wire refusal naming named.
+func mtCheckRefusal(err error, hits int, named string) string {
+	var apiErr *llmkit.APIError
+	switch {
+	case hits != 0:
+		return "requests reached the server, want 0"
+	case !errors.Is(err, llmkit.ErrInvalidRequest) || !errors.As(err, &apiErr):
+		return "err is not an APIError wrapping ErrInvalidRequest"
+	case apiErr.StatusCode != 0:
+		return "StatusCode != 0 (not refused before the wire)"
+	case !strings.Contains(err.Error(), named):
+		return "error does not name the media type " + named
+	}
+	return ""
 }
 
 func TestMediaTypeAcceptedSetsPerWire(t *testing.T) {
+	probe := mtProbeSet()
 	for _, c := range mtCases() {
 		t.Run(c.name, func(t *testing.T) {
-			isolateEnv(t, baseURLEnvSources...)
-			rec := &mtRecorder{}
-			base := newServer(t, func(w http.ResponseWriter, r *http.Request) {
-				raw, _ := io.ReadAll(r.Body)
-				var body map[string]any
-				_ = json.Unmarshal(raw, &body)
-				rec.mu.Lock()
-				rec.hits++
-				rec.body = body
-				rec.mu.Unlock()
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(okBody(string(c.spec.Type))))
-			})
-			spec := c.spec
-			spec.BaseURL, spec.Secret = base, "k"
-			client, err := New(context.Background(), spec, Options{})
-			if err != nil {
-				t.Fatalf("New: %v", err)
-			}
+			client, rec := mtClient(t, c.spec)
 			accepted := make(map[string]bool, len(c.accepted))
 			for _, m := range c.accepted {
 				accepted[m] = true
 			}
-			for _, m := range mtProbe(c) {
+			for _, m := range probe {
 				rec.reset()
-				req := mtUserRequest(mtBlock(c.kind, c.url, m))
-				if c.toolRes {
-					req = mtToolResultRequest(mtBlock(c.kind, c.url, m))
-				}
-				_, err := client.Complete(context.Background(), req)
+				b := c.block(m)
+				_, err := client.Complete(context.Background(), c.req(b))
 				hits, body := rec.snapshot()
-				if c.accepted == nil || accepted[m] {
-					if err != nil || hits != 1 {
-						t.Errorf("%q: err = %v, hits = %d, want a request on the wire", m, err, hits)
-						continue
-					}
-					want := m
-					if c.name == "anthropic/document/user" || c.name == "anthropic/document/tool-result" {
-						want = "application/pdf" // the SDK's base64 PDF source fixes its own media_type
-					}
-					if got := c.forwarded(t, body); got != want {
-						t.Errorf("%q: forwarded media type = %q, want %q", m, got, want)
+				if named, refused := c.refused(accepted, m); refused {
+					if why := mtCheckRefusal(err, hits, named); why != "" {
+						t.Errorf("%q: %s (err = %v, hits = %d)", m, why, err, hits)
 					}
 					continue
 				}
-				var apiErr *llmkit.APIError
-				switch {
-				case hits != 0:
-					t.Errorf("%q: %d requests reached the server, want 0", m, hits)
-				case !errors.Is(err, llmkit.ErrInvalidRequest) || !errors.As(err, &apiErr):
-					t.Errorf("%q: err = %v, want an APIError wrapping ErrInvalidRequest", m, err)
-				case apiErr.StatusCode != 0:
-					t.Errorf("%q: StatusCode = %d, want 0 (refused before the wire)", m, apiErr.StatusCode)
-				case !strings.Contains(err.Error(), m):
-					t.Errorf("%q: error %q does not name the media type", m, err)
+				if err != nil || hits != 1 {
+					t.Errorf("%q: err = %v, hits = %d, want a request on the wire", m, err, hits)
+					continue
 				}
+				if got, want := c.extract(t, body), c.want(b); got != want {
+					t.Errorf("%q: wire wrote %q, want %q", m, got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestMediaTypeDataURLRows(t *testing.T) {
+	img := func(url string) llmkit.Block { return llmkit.ImageURL(url) }
+	doc := func(url, m string) llmkit.Block {
+		return llmkit.Block{Kind: llmkit.BlockDocument, URL: url, MediaType: m}
+	}
+	rows := []struct {
+		name  string
+		spec  Spec
+		req   llmkit.Request
+		named string // refused naming this type; "" means one request reaches the wire
+	}{
+		{"anthropic data:image/bmp refused", mtAnthSpec, mtUserRequest(img("data:image/bmp;base64,Qk0=")), "image/bmp"},
+		{"anthropic tool-result data:image/bmp refused", mtAnthSpec, mtToolResultRequest(img("data:image/bmp;base64,Qk0=")), "image/bmp"},
+		{"anthropic data:image/png passes", mtAnthSpec, mtUserRequest(img("data:image/png;base64,AAAA")), ""},
+		{"anthropic https passes", mtAnthSpec, mtUserRequest(img("https://example.test/a.bmp")), ""},
+		{"anthropic document data:image/png refused", mtAnthSpec, mtUserRequest(doc("data:image/png;base64,AAAA", "")), "image/png"},
+		{"anthropic document data:application/pdf passes", mtAnthSpec, mtUserRequest(doc("data:application/pdf;base64,AAAA", "")), ""},
+		{"anthropic data:,x refused (empty type)", mtAnthSpec, mtUserRequest(img("data:,x")), `""`},
+		{"anthropic data:;base64 refused (empty type)", mtAnthSpec, mtUserRequest(img("data:;base64,AAAA")), `""`},
+		{"openai data:image/bmp refused", mtOpenAISpec, mtUserRequest(img("data:image/bmp;base64,Qk0=")), "image/bmp"},
+		{"openai DATA:image/bmp refused", mtOpenAISpec, mtUserRequest(img("DATA:image/bmp;base64,Qk0=")), "image/bmp"},
+		{"openai data:image/png passes", mtOpenAISpec, mtUserRequest(img("data:image/png;base64,AAAA")), ""},
+		{"openai https passes", mtOpenAISpec, mtUserRequest(img("https://example.test/a.bmp")), ""},
+		{"google data:image/bmp refused", mtGoogleSpec, mtUserRequest(img("data:image/bmp;base64,Qk0=")), "image/bmp"},
+		{"google data:image/heic passes", mtGoogleSpec, mtUserRequest(img("data:image/heic;base64,AAAA")), ""},
+		{"google data:image/png without separator refused", mtGoogleSpec, mtUserRequest(img("data:image/png")), `""`},
+		{"google data:application/pdf with MediaType image/bmp refused", mtGoogleSpec, mtUserRequest(doc("data:application/pdf;base64,AAAA", "image/bmp")), "image/bmp"},
+		{"google Files API URI audio/mp3 passes", mtGoogleSpec, mtUserRequest(doc(mtFilesURI, "audio/mp3")), ""},
+		{"google gs:// audio/wav passes", mtGoogleSpec, mtUserRequest(doc(mtGCSURI, "audio/wav")), ""},
+		{"openai-compatible data:image/bmp passes", mtCompatSpec, mtUserRequest(img("data:image/bmp;base64,Qk0=")), ""},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			client, rec := mtClient(t, r.spec)
+			_, err := client.Complete(context.Background(), r.req)
+			hits, body := rec.snapshot()
+			if r.named != "" {
+				if why := mtCheckRefusal(err, hits, r.named); why != "" {
+					t.Errorf("%s (err = %v, hits = %d)", why, err, hits)
+				}
+				return
+			}
+			if err != nil || hits != 1 {
+				t.Fatalf("err = %v, hits = %d, want one request", err, hits)
+			}
+			raw, _ := json.Marshal(body)
+			b := r.req.Messages[len(r.req.Messages)-1].Content[1]
+			if !strings.Contains(string(raw), b.URL) {
+				t.Errorf("URL %q not on the wire: %s", b.URL, raw)
 			}
 		})
 	}
@@ -312,39 +441,13 @@ func TestMediaTypeAcceptedSetsPerWire(t *testing.T) {
 // TestMediaTypeGoogleURLWithoutMediaType pins that a URL block with no
 // MediaType still reaches the wire with an empty mimeType.
 func TestMediaTypeGoogleURLWithoutMediaType(t *testing.T) {
-	isolateEnv(t, baseURLEnvSources...)
-	rec := &mtRecorder{}
-	base := newServer(t, func(w http.ResponseWriter, r *http.Request) {
-		raw, _ := io.ReadAll(r.Body)
-		var body map[string]any
-		_ = json.Unmarshal(raw, &body)
-		rec.mu.Lock()
-		rec.hits++
-		rec.body = body
-		rec.mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(okBody("google")))
-	})
-	client, err := New(context.Background(), Spec{Type: TypeGoogle, Model: "gemini-3-flash-preview", BaseURL: base, Secret: "k"}, Options{})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	_, err = client.Complete(context.Background(), mtUserRequest(llmkit.ImageURL("https://example.test/a.png")))
+	client, rec := mtClient(t, mtGoogleSpec)
+	_, err := client.Complete(context.Background(), mtUserRequest(llmkit.ImageURL("https://example.test/a.png")))
 	hits, body := rec.snapshot()
 	if err != nil || hits != 1 {
 		t.Fatalf("err = %v, hits = %d, want one request", err, hits)
 	}
-	contents := mtList(t, body["contents"], "contents")
-	var found bool
-	for _, p := range mtList(t, contents[len(contents)-1]["parts"], "parts") {
-		if fd := mtObj(p["fileData"]); fd != nil {
-			found = true
-			if fd["fileUri"] != "https://example.test/a.png" {
-				t.Errorf("fileData = %v, want the URL forwarded", fd)
-			}
-		}
-	}
-	if !found {
-		t.Errorf("no fileData part in %v", body)
+	if got := mtGoogleFileData(t, body); got != "https://example.test/a.png|" {
+		t.Errorf("fileData = %q, want the URL forwarded with an empty mimeType", got)
 	}
 }

@@ -286,20 +286,23 @@ entry below is marked.
 ### Changed
 
 - **Breaking:** `provider`: the Anthropic, OpenAI, and Google adapters now
-  refuse an inline image or document (or a Google URL source that sets a
-  `MediaType`) outside the wire's accepted set, before any request, with an
-  `*llmkit.APIError` that wraps
-  `ErrInvalidRequest`, has `StatusCode` 0, and names the type. Anthropic
-  accepted `image/bmp` and forwarded an image block carrying `application/pdf`
-  until now; both are refused. Anthropic takes `image/png`, `image/jpeg`,
-  `image/gif`, `image/webp` and, for documents, `application/pdf`
-  (user turns and tool results). First-party OpenAI takes the same image set
-  and `application/pdf`. Google takes its inline list for user turns, a
-  separate list for URL sources with a `MediaType`, and its existing
-  tool-result list. The comparison is exact bytes: `image/jpg`, `IMAGE/PNG`,
-  and `image/png; x=y` are refused. `openai-compatible` does no check. The
-  Anthropic non-PDF document refusal now names the media type. See
-  `docs/capabilities.md`, "Accepted media types". (llmkit-d2e)
+  refuse an image or document whose media type is outside the wire's
+  accepted set, before any request, with an `*llmkit.APIError` that wraps
+  `ErrInvalidRequest`, has `StatusCode` 0, and names the type. The check
+  covers an inline block's `MediaType` and the type of a `data:` URL in
+  `Block.URL` (the text up to the first `;` or `,`; an empty type is
+  refused). Anthropic accepted `image/bmp` and forwarded an image block
+  carrying `application/pdf` until now; both are refused. Anthropic takes
+  `image/png`, `image/jpeg`, `image/gif`, `image/webp` and, for documents,
+  `application/pdf` (user turns and tool results). First-party OpenAI takes
+  the same image set and `application/pdf`. Google takes its inline list for
+  user turns (a `data:` URL block's non-empty `MediaType` included) and its
+  existing tool-result list. The comparison is exact bytes: an inline
+  `image/jpg`, `IMAGE/PNG`, or `image/png; x=y` is refused. Other URLs
+  (`https:`, `gs:`, Gemini Files API URIs) are not checked, and
+  `openai-compatible` does no check. The Anthropic non-PDF document refusal
+  now names the media type. See `docs/capabilities.md`, "Accepted media
+  types". (llmkit-d2e)
 - `llmkit`: the ceiling refusal text now says the adapter "does not map" the
   field instead of claiming it has no wire field.
 - **Breaking:** `provider`: Google `Usage.OutputTokens` is now

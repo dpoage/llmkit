@@ -9,6 +9,7 @@ import (
 	"errors"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/dpoage/llmkit"
@@ -373,32 +374,21 @@ func mimeSet(types ...string) map[string]bool {
 	return set
 }
 
-// googleInlineMIME is the user-turn inlineData media types (image, document,
-// audio, video; the wire is kind-blind); exact bytes compared. Sources:
+// googleInlineMIME is the user-turn inlineData media types (the wire is
+// kind-blind), also applied to data: URLs; exact bytes. Sources:
 // https://ai.google.dev/gemini-api/docs/{image-understanding,audio,video-understanding,document-processing}
 var googleInlineMIME = mimeSet(
 	"image/png", "image/jpeg", "image/webp", "image/heic", "image/heif",
 	"application/pdf", "text/html", "text/css", "text/plain", "text/xml", "text/csv", "text/rtf",
 	"text/javascript", "application/json",
 	"audio/wav", "audio/mp3", "audio/aiff", "audio/aac", "audio/ogg", "audio/flac", "audio/mpeg",
-	"audio/m4a", "audio/l16", "audio/opus",
+	"audio/m4a", "audio/l16", "audio/opus", "audio/alaw", "audio/mulaw", "audio/webm",
 	"video/mp4", "video/mpeg", "video/mov", "video/avi", "video/x-flv", "video/mpg", "video/webm",
 	"video/wmv", "video/3gpp",
 )
 
-// googleURLMIME is the fileData media types for a URL source with a non-empty
-// MediaType (https://ai.google.dev/gemini-api/docs/file-input-methods).
-var googleURLMIME = mimeSet(
-	"text/html", "text/css", "text/plain", "text/xml", "text/csv", "text/rtf",
-	"text/javascript", "application/json", "application/pdf",
-	"image/bmp", "image/jpeg", "image/png", "image/webp",
-	"video/mp4", "video/mpeg", "video/quicktime", "video/avi", "video/x-flv", "video/mpg",
-	"video/webm", "video/wmv", "video/3gpp",
-)
-
-// googleUserParts maps a user message's content blocks onto genai parts.
-// Beyond adapter.Prepare it refuses a media type outside googleInlineMIME
-// (inline) or googleURLMIME (URL with a MediaType).
+// googleUserParts maps a user message's blocks onto genai parts, refusing inline
+// or data: URL media outside googleInlineMIME; other URLs pass unchecked.
 func googleUserParts(m llmkit.Message) ([]*genai.Part, error) {
 	parts := make([]*genai.Part, 0, len(m.Content))
 	for _, b := range m.Content {
@@ -416,9 +406,15 @@ func googleUserParts(m llmkit.Message) ([]*genai.Part, error) {
 					Data:     b.Data,
 				}})
 			} else {
-				if b.MediaType != "" && !googleURLMIME[b.MediaType] {
-					return nil, adapter.Refuse("google",
-						string(b.Kind)+" block: media type "+b.MediaType+" is not supported by Gemini fileData URLs (see docs/capabilities.md, Accepted media types)", nil)
+				if dm, ok := adapter.DataURLMediaType(b.URL); ok {
+					if !googleInlineMIME[dm] {
+						return nil, adapter.Refuse("google",
+							string(b.Kind)+" block: data: URL media type "+strconv.Quote(dm)+" is not supported by Gemini (see docs/capabilities.md, Accepted media types)", nil)
+					}
+					if b.MediaType != "" && !googleInlineMIME[b.MediaType] {
+						return nil, adapter.Refuse("google",
+							string(b.Kind)+" block: media type "+b.MediaType+" on a data: URL is not supported by Gemini (see docs/capabilities.md, Accepted media types)", nil)
+					}
 				}
 				parts = append(parts, &genai.Part{FileData: &genai.FileData{
 					FileURI:  b.URL,
