@@ -68,6 +68,31 @@ A keyless lane skips with a message naming the lane and its missing variables. E
 | `openai` | `LLMKIT_LIVE_OPENAI_API_KEY` | `LLMKIT_LIVE_OPENAI_MODEL` | `gpt-4o-mini` |
 | `google` | `LLMKIT_LIVE_GOOGLE_API_KEY` | `LLMKIT_LIVE_GOOGLE_MODEL` | `gemini-2.5-flash-lite` |
 | `typesafe` | `LLMKIT_LIVE_TYPESAFE_API_KEY` | `LLMKIT_LIVE_TYPESAFE_MODEL`, `LLMKIT_LIVE_TYPESAFE_BASE_URL` | `jev-latest` |
+| `kev` | `LLMKIT_LIVE_KEV_BASE_URL` | `LLMKIT_LIVE_KEV_MODEL`, `LLMKIT_LIVE_KEV_API_KEY` | `kev-latest`; key defaults to `local` |
+
+### Kev lane
+
+The `kev` lane runs the `decide/systemone` live cases against a local [Kev](https://github.com/jaredpalmer/kev) server, which speaks the System One wire. It needs no credentials and costs nothing. The key is optional because a local server does not check it; `systemone.New` still needs a non-empty one, so the lane sends `local`.
+
+Start the server (Kev-0.8B runs on a 4 GB GPU):
+
+```bash
+git clone https://github.com/jaredpalmer/kev && cd kev
+uv sync --extra serve
+uv run --extra serve python -m kev.serve --run jaredpalmer/kev-0.8b --port 8009
+```
+
+On NixOS, add `LD_LIBRARY_PATH` to the `uv run` command with the directories of `libstdc++`, `libz`, and the GPU driver, for example `<gcc-lib>/lib:<zlib>/lib:/run/opengl-driver/lib`.
+
+With the server up, run the lane:
+
+```bash
+LLMKIT_LIVE_KEV_BASE_URL=http://127.0.0.1:8009 go test -tags live -count=1 -run TestLiveDecide ./decide/systemone/ -v
+```
+
+The Kev lane runs `mixed_questions`, `structured_state`, and `usage_recorded`. It skips `error_bad_key` because the server has no auth and `error_bad_model` because it serves any model alias. It asserts that the response echoes the requested alias, where the typesafe lane only requires a non-empty model id. A lane without its required variable skips naming it, so `TestLiveDecide/kev` skips when `LLMKIT_LIVE_KEV_BASE_URL` is unset. The lane records no fixtures under `-update`.
+
+CI does not run the Kev lane. `live.yml` sets no `LLMKIT_LIVE_KEV_BASE_URL`, so the lane skips there. `decide/systemone/kev_test.go` is its hermetic counterpart: it serves the README's response body and a body captured from a local Kev-0.8B (`testdata/kev_ticket.json`) to `systemone.Ask` in plain `go test ./...`.
 
 ### CI workflow
 
@@ -158,4 +183,4 @@ go run ./examples/decide
 
 Without credentials, the examples never touch the network.
 
-Two hermetic tests in `examples/` run in plain `go test ./...`, and both skip under `-short` because they build the examples. `TestExamplesUsageExitWithoutEnv` runs `basic`, `agent`, `structured`, `chat`, and `replay` with only `PATH` in the environment and no arguments and checks the exit code and the usage text. `TestExamplesRecordReplay` runs the built `examples/agent --record` against a scripted local openai-compatible server, then runs the built `examples/replay` on the written record with no server and no `LLMKIT_*` variables. It asserts that replay exits 0 and prints a `final:` line equal to the scripted answer, and that replay exits non-zero on three records: a tampered one with its last completion removed, a plain one whose run stopped at the iteration cap, and one that stopped at the iteration cap with the arguments of its last tool run altered, for which replay's output must name the divergence.
+Two hermetic tests in `examples/` run in plain `go test ./...`, and both skip under `-short` because they build the examples. `TestExamplesUsageExitWithoutEnv` runs `basic`, `agent`, `structured`, `chat`, `replay`, and `agent-guardrail` with only `PATH` in the environment and no arguments and checks the exit code and the usage text. `TestExamplesRecordReplay` runs the built `examples/agent --record` against a scripted local openai-compatible server, then runs the built `examples/replay` on the written record with no server and no `LLMKIT_*` variables. It asserts that replay exits 0 and prints a `final:` line equal to the scripted answer, and that replay exits non-zero on three records: a tampered one with its last completion removed, a plain one whose run stopped at the iteration cap, and one that stopped at the iteration cap with the arguments of its last tool run altered, for which replay's output must name the divergence.

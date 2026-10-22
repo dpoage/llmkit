@@ -68,6 +68,12 @@ type Lane struct {
 	// override (the typesafe lane can target a gateway) rather than a
 	// requirement (the compat lane).
 	OptionalBaseURL bool
+	// RequireBaseURL makes <prefix>_BASE_URL required for a lane that is
+	// not the compat chat lane (the kev lane: a local server has no default).
+	RequireBaseURL bool
+	// DefaultKey fills Key when <prefix>_API_KEY is unset, making the key
+	// optional (a local server needs no auth).
+	DefaultKey string
 }
 
 var lanes = []Lane{
@@ -86,6 +92,17 @@ var DecideLane = Lane{
 	EnvPrefix:       "LLMKIT_LIVE_TYPESAFE",
 	DefaultModel:    "jev-latest",
 	OptionalBaseURL: true,
+}
+
+// KevLane is the local Kev decision lane (the System One wire without
+// TypeSafe). Like DecideLane it stays out of lanes and goes through
+// ResolveDecideKev and Session.DecideClient.
+var KevLane = Lane{
+	Name:           "kev",
+	EnvPrefix:      "LLMKIT_LIVE_KEV",
+	DefaultModel:   "kev-latest",
+	DefaultKey:     "local",
+	RequireBaseURL: true,
 }
 
 // All returns every lane in stable declaration order.
@@ -119,6 +136,9 @@ func (l Lane) resolve() (Session, []string) {
 	s := Session{Lane: l}
 	s.Key = os.Getenv(l.EnvPrefix + "_API_KEY")
 	if s.Key == "" {
+		s.Key = l.DefaultKey
+	}
+	if s.Key == "" {
 		missing = append(missing, l.EnvPrefix+"_API_KEY")
 	}
 	s.Model = os.Getenv(l.EnvPrefix + "_MODEL")
@@ -129,7 +149,7 @@ func (l Lane) resolve() (Session, []string) {
 			s.Model = l.DefaultModel
 		}
 	}
-	if l.Type == provider.TypeOpenAICompatible {
+	if l.Type == provider.TypeOpenAICompatible || l.RequireBaseURL {
 		s.BaseURL = os.Getenv(l.EnvPrefix + "_BASE_URL")
 		if s.BaseURL == "" {
 			missing = append(missing, l.EnvPrefix+"_BASE_URL")
@@ -165,6 +185,17 @@ func ResolveDecide(t testing.TB) *Session {
 	s, missing := DecideLane.resolve()
 	if len(missing) > 0 {
 		t.Skipf("live lane %s: skipping — missing %s", DecideLane.Name, strings.Join(missing, ", "))
+		return nil
+	}
+	return &s
+}
+
+// ResolveDecideKev resolves KevLane from the environment, skipping the test
+// naming each missing variable. Only LLMKIT_LIVE_KEV_BASE_URL can be missing.
+func ResolveDecideKev(t testing.TB) *Session {
+	s, missing := KevLane.resolve()
+	if len(missing) > 0 {
+		t.Skipf("live lane %s: skipping — missing %s", KevLane.Name, strings.Join(missing, ", "))
 		return nil
 	}
 	return &s

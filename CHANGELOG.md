@@ -55,6 +55,12 @@ entry below is marked.
   `agent.TruncBudgetPool` when LLM and decision spend together reach the
   limit. `agent.Limits.TokenBudget` does not count decision tokens. No API
   change; the pattern is in `examples/agent-guardrail` and `docs/decide.md`.
+- Live tests: a `kev` lane runs the `decide/systemone` live cases against a
+  local [Kev](https://github.com/jaredpalmer/kev) server with
+  `LLMKIT_LIVE_KEV_BASE_URL` (no credentials; model defaults to `kev-latest`).
+  CI does not run it. `systemone.Ask` also has hermetic tests against Kev's
+  README response and a captured one; the live suite is now
+  `TestLiveDecide/<lane>/<case>`. See `docs/testing.md`.
 
 ### Changed
 
