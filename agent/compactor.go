@@ -42,6 +42,15 @@ type CompactOutput struct {
 	// Pruned is the number of messages the compaction replaced or removed,
 	// reported on the Compaction event.
 	Pruned int
+	// Summary is the summary text, without its header, that replaced the
+	// pruned prefix; the Compaction event reports it.
+	Summary string
+	// Usage is the model spend of the compaction. The Runner adds it to
+	// Outcome.Usage and charges the budget pool, even when Compact also
+	// returns an error or leaves the history unchanged.
+	Usage llmkit.Usage
+	// calls are the model calls the Runner records as Completion events.
+	calls []compactCall
 }
 
 // CompactorFunc adapts a function to [Compactor].
@@ -83,11 +92,20 @@ func (r *Runner) compactionEnabled() bool {
 	return r.limits.HistoryTokenBudget > 0 || r.compactor != nil
 }
 
-func (r *Runner) compact(ctx context.Context, in CompactInput) (CompactOutput, error) {
-	if r.compactor == nil {
-		return stubCompactor{}.Compact(ctx, in)
+// compact runs the Compactor, then records the model calls it made and
+// charges their usage to outcome and the budget pool, whether or not it erred.
+func (r *Runner) compact(ctx context.Context, em runEmitter, outcome *Outcome, in CompactInput) (CompactOutput, error) {
+	var c Compactor = stubCompactor{}
+	if r.compactor != nil {
+		c = r.compactor
 	}
-	return r.compactor.Compact(ctx, in)
+	out, err := c.Compact(ctx, in)
+	for _, call := range out.calls {
+		r.emitCompactionCompletion(ctx, em, call)
+	}
+	outcome.Usage = outcome.Usage.Add(out.Usage)
+	r.budgetPool.Add(out.Usage.ChargeableTokens(r.limits.CacheReadWeight))
+	return out, err
 }
 
 // compactionUnchanged reports whether out leaves in as it was: no messages,

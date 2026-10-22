@@ -267,6 +267,12 @@ type CompletionEvent struct {
 	// ErrKind is [ErrKindContextTooLong] when Err wraps [ErrContextTooLong];
 	// empty otherwise. Open string: tolerate values you do not know.
 	ErrKind string `json:"err_kind,omitempty"`
+	// Purpose names what the completion was for: [CompletionPurposeCompaction]
+	// for a model call a compactor made to summarize history, empty for
+	// every other completion. Its Usage is run spend like any other. Open
+	// string: tolerate values you do not know. A deterministic replay never
+	// serves a completion with a Purpose as an answer.
+	Purpose string `json:"purpose,omitempty"`
 	// Provider is the provider tag ("anthropic", "openai", ...) or the
 	// caller's own config name — the client's [IdentityOf].Provider.
 	Provider string `json:"provider,omitempty"`
@@ -277,6 +283,10 @@ type CompletionEvent struct {
 // ErrKindContextTooLong is the [CompletionEvent.ErrKind] of a completion that
 // failed with an error wrapping [ErrContextTooLong].
 const ErrKindContextTooLong = "context_too_long"
+
+// CompletionPurposeCompaction is the [CompletionEvent.Purpose] of a model
+// call that summarized history for a compaction pass.
+const CompletionPurposeCompaction = "compaction"
 
 // AttemptEvent records one provider attempt ([KindAttempt]) from inside the
 // retry stage: the same request, the attempt's own response or error, and
@@ -370,6 +380,10 @@ type CompactionEvent struct {
 	// Reason is [CompactionReasonOverflow] for a pass that answered an
 	// [ErrContextTooLong]; empty for the threshold-triggered pass. Open string.
 	Reason string `json:"reason,omitempty"`
+	// Summary is the summary text a summarizing compactor substituted for the
+	// pruned prefix, without its "[conversation summary]" header; empty for a
+	// pass that summarized nothing.
+	Summary string `json:"summary,omitempty"`
 }
 
 // CompactionReasonOverflow is the [CompactionEvent.Reason] of a compaction

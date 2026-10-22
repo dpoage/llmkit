@@ -113,6 +113,10 @@ var ErrReplayDiverged = errors.New("agent: replay diverged")
 // MUST assert Err returns nil after a replayed run — a diverged replay is a
 // failed evaluation whatever Run returned.
 //
+// Completions the record marks with a Purpose, such as a [Compactor]'s
+// summary requests, are never served as answers. [ReplayClient.Compactor]
+// serves their summaries instead.
+//
 // ReplayClient is safe for concurrent use, though a single Runner calls it
 // sequentially.
 //
@@ -136,6 +140,10 @@ type ReplayClient struct {
 	// unreproduced is the first recorded compaction the replaying Runner did
 	// not reproduce at its position; Err reports it.
 	unreproduced error
+	// summaries are the recorded summarizing compaction passes that produced
+	// a summary, served in order by [ReplayClient.Compactor].
+	summaries   []recordedSummary
+	nextSummary int
 }
 
 type replayStep struct {
@@ -241,8 +249,14 @@ func NewReplayClient(src llmkit.Source, run llmkit.RunID, caps llmkit.Capabiliti
 		runs    []toolRunAt
 	)
 	var compaction *replayedCompaction
+	var group summaryGroup
 	for _, ev := range evs {
+		if ev.Kind != llmkit.KindAttempt && !isPurposeCompletion(ev) {
+			rc.summaries = group.flush(rc.summaries)
+		}
 		switch {
+		case isPurposeCompletion(ev):
+			group.add(*ev.Completion)
 		case ev.Kind == llmkit.KindStart && ev.Start != nil:
 			offered = ev.Start.Tools
 		case ev.Kind == llmkit.KindToolRun && ev.ToolRun != nil:
@@ -268,6 +282,7 @@ func NewReplayClient(src llmkit.Source, run llmkit.RunID, caps llmkit.Capabiliti
 			pending, compaction = nil, nil
 		}
 	}
+	rc.summaries = group.flush(rc.summaries)
 	unregistered := unregisteredNames(offered, runs)
 	for _, r := range runs {
 		if err := rc.set.add(r.step, r.resp, r.tre, unregistered[r.tre.Call.Name]); err != nil {
@@ -279,6 +294,78 @@ func NewReplayClient(src llmkit.Source, run llmkit.RunID, caps llmkit.Capabiliti
 	}
 	rc.tools = rc.set.tools(rc)
 	return rc, nil
+}
+
+// isPurposeCompletion reports whether ev is a completion made for a purpose
+// other than answering the run, which replay never serves.
+func isPurposeCompletion(ev llmkit.Event) bool {
+	return ev.Kind == llmkit.KindCompletion && ev.Completion != nil && ev.Completion.Purpose != ""
+}
+
+// recordedSummary is one summarizing pass of the record: the summary it
+// produced and the usage of all its summarizer calls as recorded.
+type recordedSummary struct {
+	text  string
+	usage llmkit.Usage
+}
+
+// summaryGroup collects the compaction completions of one summarizing pass.
+// The pass's summary is its last call's, valid only if that call succeeded;
+// its usage is the sum over every call, as recorded.
+type summaryGroup struct {
+	open  bool
+	text  string
+	ok    bool
+	usage llmkit.Usage
+}
+
+func (g *summaryGroup) add(ce llmkit.CompletionEvent) {
+	if ce.Purpose != llmkit.CompletionPurposeCompaction {
+		return
+	}
+	g.open = true
+	g.usage = g.usage.Add(ce.Response.Usage)
+	g.ok = ce.Err == ""
+	if g.ok {
+		g.text = summaryText(ce.Response)
+	}
+}
+
+// flush appends the pass's summary to summaries, if it produced one, and resets g.
+func (g *summaryGroup) flush(summaries []recordedSummary) []recordedSummary {
+	if g.open && g.ok {
+		summaries = append(summaries, recordedSummary{text: g.text, usage: g.usage})
+	}
+	*g = summaryGroup{}
+	return summaries
+}
+
+// Compactor returns a [Compactor] that reproduces the recorded run's
+// summaries without calling a summarizer. It cuts the history where
+// [SummarizingCompactor] does and substitutes the next recorded summary, so
+// install it with [WithCompactor] and the recorded run's HistoryTokenBudget.
+// With no cut point, or no recorded summary left, it stubs like the default
+// compactor. Each pass reports the usage its summarizer calls recorded, so a
+// replayed Outcome.Usage and BudgetPool charge match the recorded run's and
+// the replay stops on a token budget where the recorded run did.
+func (rc *ReplayClient) Compactor() Compactor {
+	return CompactorFunc(func(ctx context.Context, in CompactInput) (CompactOutput, error) {
+		from, at := summaryCut(in.Messages)
+		if at < 0 {
+			return stubCompactor{}.Compact(ctx, in)
+		}
+		rc.mu.Lock()
+		if rc.nextSummary >= len(rc.summaries) {
+			rc.mu.Unlock()
+			return stubCompactor{}.Compact(ctx, in)
+		}
+		rec := rc.summaries[rc.nextSummary]
+		rc.nextSummary++
+		rc.mu.Unlock()
+		out := summarized(in, from, at, rec.text)
+		out.Usage = rec.usage
+		return out, nil
+	})
 }
 
 // NewReplayClientFromResponses builds a ReplayClient that serves resps in
