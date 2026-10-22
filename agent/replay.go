@@ -380,7 +380,8 @@ func (s recordedSummary) compactCalls(ctx context.Context) []compactCall {
 // Compactor returns a [Compactor] that reproduces the recorded run's
 // summaries without calling a summarizer. It cuts the history where
 // [SummarizingCompactor] does and substitutes the next recorded summary, so
-// install it with [WithCompactor] and the recorded run's HistoryTokenBudget.
+// install it with [WithCompactor] and the recorded run's HistoryTokenBudget,
+// ContextReserve and ContextWindow.
 // With no cut point, or no recorded summary left, it stubs like the default
 // compactor. Each pass also returns its recorded summarizer calls, which the
 // Runner records as Purpose "compaction" Completion events with the recorded

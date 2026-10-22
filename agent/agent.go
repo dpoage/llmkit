@@ -189,13 +189,15 @@ type Limits struct {
 	// discount).
 	CacheReadWeight float64
 	// HistoryTokenBudget enables threshold-triggered history compaction. When
-	// the estimated size of the message history (bytes/4 over message content
-	// and tool-call arguments) exceeds this many tokens, the Runner compacts
-	// once: tool-result content older than the most recent few turns is
-	// replaced with short stubs. Compaction preserves the task message, every
-	// assistant turn (the reasoning chain), and tool_call/tool_result ID
-	// pairing. The threshold then re-arms at a higher level, so compaction
-	// fires at most a few bounded times per run.
+	// the estimated size of the request copy of the history (bytes/4 over
+	// text, tool-call arguments, thinking, and a flat 1,568 tokens per image)
+	// exceeds this many tokens, the Runner compacts: by default, tool-result
+	// content older than the most recent few turns is replaced with short
+	// stubs; [WithCompactor] replaces that strategy. The default preserves the
+	// task message, every assistant turn (the reasoning chain), and
+	// tool_call/tool_result ID pairing. A pass the budget trigger fired
+	// re-arms the threshold at a higher level, so it fires at most a few
+	// bounded times per run.
 	//
 	// Compaction trades cost against the provider's prompt cache. Each
 	// firing mutates the message prefix and costs one full-price cache miss
@@ -234,9 +236,10 @@ type Limits struct {
 	// trigger point above the window minus the reserve.
 	//
 	// After an overflow recovery by a free pass, the trigger fires from the
-	// refused size minus ContextReserve. A window the client overstates then
-	// costs one refusal, provided each turn grows the history by less than
-	// ContextReserve; a paid recovery waits for that growth.
+	// lower of the window and the refused size, each minus ContextReserve. A
+	// window the client overstates then costs one refusal, provided each turn
+	// grows the history by less than ContextReserve; a paid recovery waits for
+	// that growth.
 	ContextReserve int64
 }
 

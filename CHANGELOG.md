@@ -183,11 +183,11 @@ entry below is marked.
   the recorded summaries without calling a model and reports each pass's
   recorded usage. When `rc.Err` is nil, a replay's `Outcome.Usage` and
   `BudgetPool` charge match the record and a run that stopped on a budget
-  stops at the same iteration; a record of a failed pass diverges, with
-  different usage. A replay never serves a completion with a `purpose` as an
-  answer. A reader built before this change serves a recorded summarizer
-  call as an ordinary answer: it replays a summarized record with the
-  summary text as `FinalText` and `rc.Err` set.
+  stops at the same iteration; a record of a failed pass diverges, and its
+  replayed usage can differ. A replay never serves a completion with a
+  `purpose` as an answer. A reader built before this change serves a
+  recorded summarizer call as an ordinary answer: it replays a summarized
+  record with the summary text as `FinalText` and `rc.Err` set.
 - `agent`: `Limits.ContextReserve` compacts before a completion when the
   estimated request exceeds the client's `ContextWindow` minus the reserve,
   instead of after a provider refusal. Zero, the default, disables it, and a
@@ -199,8 +199,9 @@ entry below is marked.
   until the estimate has grown by the reserve, and a paid pass (one that
   reported usage) always does, including after a refusal and even when the
   wait puts the trigger point above the window minus the reserve. After an
-  overflow recovery by a free pass the trigger fires from the refused size
-  minus the reserve, so a window the client overstates costs one refusal
+  overflow recovery by a free pass the trigger fires from the lower of the
+  window minus the reserve and the refused size minus the reserve,
+  so a window the client overstates costs one refusal
   rather than one per turn, provided each turn grows the history by less
   than the reserve. It combines with `HistoryTokenBudget`, which doubles
   only after a pass its own trigger fired.
@@ -242,10 +243,13 @@ entry below is marked.
   nothing or compacts differently), or with anything else that changes that
   request, now get a non-nil `rc.Err` wrapping `ErrReplayDiverged`; `Run`'s
   result is unchanged. Replaying a record this build wrote under the
-  recording configuration is still clean. A record written by an earlier
-  llmkit build whose compacted history held thinking blocks or images may
-  report a compaction divergence on replay, even under the recording
-  configuration, because the new estimate moves where compaction fires.
+  recording configuration is still clean, except that a record holding a
+  summarizing compaction replays clean only with `rc.Compactor()` installed
+  or a summarizer that reproduces the recorded text. A record written by an
+  earlier llmkit build whose compacted history held thinking blocks or
+  images may report a compaction divergence on replay, even under the
+  recording configuration, because the new estimate moves where compaction
+  fires.
 - `agent`: a run that stops on `TokenBudget` or a `BudgetPool` and takes the
   RunJSON finalization turn now compacts before that turn, and recovers from
   an overflow of it, with the default stubber even when a `Compactor` is
