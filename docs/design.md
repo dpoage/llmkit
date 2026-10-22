@@ -59,6 +59,11 @@ and any OpenAI-compatible endpoint.
   never added to it or to `ChargeableTokens`. Gemini reports thoughts
   outside `candidatesTokenCount`, so the Google adapter sums them in;
   that meaning change is `EventSchemaVersion` 3.
+- **Missing usage is estimated, not zero:** an endpoint that reports no
+  usage object would read as zero spend and never trip a token budget. The
+  adapter instead sets `Usage.Estimated` and fills bytes/4 estimates of the
+  request body and of the response text and tool calls, so every existing
+  budget fold sees them; `Usage.Add` ORs the flag.
 
 ## Adapters are internal
 

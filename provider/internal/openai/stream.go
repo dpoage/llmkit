@@ -33,7 +33,7 @@ var _ llmkit.StreamingClient = (*openaiAdapter)(nil)
 // "llmkit: stream fn: ..." with a zero Response. Open and transport errors
 // go through the same error normalization as Complete.
 func (o *openaiAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(llmkit.Delta) error) (llmkit.Response, error) {
-	ctx, _ = adapter.WithWire(ctx)
+	ctx, wire := adapter.WithWire(ctx)
 	params, err := o.buildParams(req)
 	if err != nil {
 		return llmkit.Response{}, err
@@ -47,8 +47,11 @@ func (o *openaiAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(
 	var acc openai.ChatCompletionAccumulator
 	calls := newToolCallTracker()
 	var reason reasoningAcc
+	usageReported := false
 	for stream.Next() {
 		chunk := stream.Current()
+		// The accumulator never sets the folded completion's JSON.Usage, so presence is read per chunk.
+		usageReported = usageReported || chunk.JSON.Usage.Valid()
 		if !acc.AddChunk(chunk) {
 			_ = stream.Close()
 			return llmkit.Response{}, &llmkit.APIError{
@@ -85,7 +88,7 @@ func (o *openaiAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(
 		return llmkit.Response{}, o.normalizeErr(ctx, errors.New("stream ended before finish_reason"))
 	}
 	compactGhostToolCalls(&acc.ChatCompletion)
-	return o.toResponse(&acc.ChatCompletion, reason.result()), nil
+	return o.toResponse(&acc.ChatCompletion, reason.result(), wire, usageReported), nil
 }
 
 // compactGhostToolCalls drops never-populated entries the accumulator

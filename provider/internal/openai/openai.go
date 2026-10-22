@@ -140,7 +140,7 @@ func (o *openaiAdapter) Capabilities() llmkit.Capabilities { return o.caps }
 func (o *openaiAdapter) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	// Per-call wire recorder: normalizeErr tells a failure that sent
 	// nothing from one that did.
-	ctx, _ = adapter.WithWire(ctx)
+	ctx, wire := adapter.WithWire(ctx)
 	params, err := o.buildParams(req)
 	if err != nil {
 		return llmkit.Response{}, err
@@ -156,7 +156,7 @@ func (o *openaiAdapter) Complete(ctx context.Context, req llmkit.Request) (llmki
 	if cc == nil || len(cc.Choices) == 0 {
 		return llmkit.Response{}, o.noCompletion(ctx, cc, adapter.ResponseHeader(httpResp))
 	}
-	return o.toResponse(cc, reasoningFromMessage(cc.Choices[0].Message.JSON.ExtraFields)), nil
+	return o.toResponse(cc, reasoningFromMessage(cc.Choices[0].Message.JSON.ExtraFields), wire, cc.JSON.Usage.Valid()), nil
 }
 
 // buildParams applies the shared rules once via adapter.Prepare and maps the
@@ -408,7 +408,7 @@ func openAIUserParts(provider string, m llmkit.Message) ([]openai.ChatCompletion
 	return parts, nil
 }
 
-func (o *openaiAdapter) toResponse(cc *openai.ChatCompletion, rs reasoning) llmkit.Response {
+func (o *openaiAdapter) toResponse(cc *openai.ChatCompletion, rs reasoning, wire *adapter.Wire, usageReported bool) llmkit.Response {
 	var resp llmkit.Response
 	if len(cc.Choices) > 0 {
 		choice := cc.Choices[0]
@@ -441,6 +441,10 @@ func (o *openaiAdapter) toResponse(cc *openai.ChatCompletion, rs reasoning) llmk
 		} else {
 			resp.StopReason = mapOpenAIStop(choice.FinishReason, len(resp.ToolCalls) > 0)
 		}
+	}
+	if !usageReported {
+		resp.Usage = adapter.EstimateUsage(wire, resp)
+		return resp
 	}
 	// xAI counts reasoning outside completion_tokens (OpenAI counts it inside); total_tokens tells which.
 	out := cc.Usage.CompletionTokens
