@@ -442,6 +442,11 @@ func (o *openaiAdapter) toResponse(cc *openai.ChatCompletion, rs reasoning) llmk
 			resp.StopReason = mapOpenAIStop(choice.FinishReason, len(resp.ToolCalls) > 0)
 		}
 	}
+	// xAI counts reasoning outside completion_tokens (OpenAI counts it inside); total_tokens tells which.
+	out := cc.Usage.CompletionTokens
+	if r := cc.Usage.CompletionTokensDetails.ReasoningTokens; r > 0 && cc.Usage.TotalTokens == cc.Usage.PromptTokens+out+r {
+		out += r
+	}
 	// prompt_tokens already INCLUDES cached tokens (OpenAI convention),
 	// matching the normalized Usage semantics directly. Caching is automatic
 	// server-side for OpenAI; prompt_tokens_details.cached_tokens reports the
@@ -450,7 +455,7 @@ func (o *openaiAdapter) toResponse(cc *openai.ChatCompletion, rs reasoning) llmk
 	// zero — exactly the "no cache activity" value.
 	resp.Usage = llmkit.Usage{
 		InputTokens:          cc.Usage.PromptTokens,
-		OutputTokens:         cc.Usage.CompletionTokens,
+		OutputTokens:         out,
 		CacheReadInputTokens: cc.Usage.PromptTokensDetails.CachedTokens,
 		ReasoningTokens:      cc.Usage.CompletionTokensDetails.ReasoningTokens,
 	}
