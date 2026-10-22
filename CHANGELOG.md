@@ -424,7 +424,9 @@ entry below is marked.
   saw the media. `images` sends a generated 64x64 solid blue PNG and requires
   "blue" in the answer; `documents` sends a generated one-page PDF whose only
   text is `QUOKKA7319` and requires that nonce. Both used to pass on any
-  non-empty reply, so a dropped image passed. The compat fixtures
+  non-empty reply, so a dropped image passed. The `documents` prompt offers
+  no "nothing attached" answer, and both cases raise `max_tokens` so the
+  model's thinking does not exhaust the budget. The compat fixtures
   `images.json` and `documents.json` are re-recorded. See `docs/testing.md`.
 
 ### Fixed

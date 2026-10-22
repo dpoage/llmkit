@@ -156,7 +156,7 @@ The fixture writer is secret-free by construction: it refuses to write any fixtu
 
 ## Media live cases assert the answer
 
-The `images` and `documents` live cases prove the model saw the media, not only that it replied. `images` sends a 64x64 solid `#0000FF` PNG and passes only if the answer, with think blocks stripped, names "blue". `documents` sends a one-page PDF whose only text is the nonce `QUOKKA7319` and passes only if the answer contains it. Both files are generated in Go and are byte-stable. Each prompt also tells the model to answer `NO_IMAGE` or `NO_DOCUMENT` when nothing is attached. Without that instruction MiniMax-M3 guesses a colour for a missing image, and the case can pass with the image dropped.
+The `images` and `documents` live cases prove the model saw the media, not only that it replied. `images` sends a 64x64 solid `#0000FF` PNG and passes only if the answer, with think blocks stripped, names "blue". `documents` sends a one-page PDF whose only text is the nonce `QUOKKA7319` and passes only if the answer contains it. Both files are generated in Go and are byte-stable. The `images` prompt tells the model to answer `NO_IMAGE` when nothing is attached. The `documents` prompt has no such escape, because the nonce cannot be guessed. When the prompt offered `NO_DOCUMENT`, MiniMax-M3 sometimes gave that answer with the PDF attached. Both cases raise `max_tokens` above the 768 default (images 2048, documents 4096): MiniMax-M3 thinks before it answers, and at the default cap the thinking can use up the whole budget.
 
 ## The live registry rule
 

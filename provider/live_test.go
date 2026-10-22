@@ -742,6 +742,11 @@ func caseToolChoice(t *testing.T, lc *liveClient) {
 // it saw the document; a model that never received the document cannot.
 const liveDocNonce = "QUOKKA7319"
 
+// documentMaxTokens leaves room for the model to finish thinking before it
+// answers: live runs have spent over 1400 tokens thinking on this case, and
+// at the default cap the thought can consume the whole budget.
+const documentMaxTokens = 4096
+
 // imageMaxTokens leaves room for the model to finish thinking before it names
 // the colour; at the default cap a truncated thought is the whole answer.
 const imageMaxTokens = 2048
@@ -766,13 +771,16 @@ func caseImages(t *testing.T, lc *liveClient) {
 	lc.finish(resp, err)
 }
 
+// caseDocuments offers no "nothing attached" answer: the nonce is unguessable,
+// so such an escape adds no discrimination and lets an unsure model bail out.
 func caseDocuments(t *testing.T, lc *liveClient) {
 	resp, err := lc.complete(llmkit.Request{
+		MaxTokens: documentMaxTokens,
 		Messages: []llmkit.Message{{
 			Role: llmkit.RoleUser,
 			Content: []llmkit.Block{
 				{Kind: llmkit.BlockDocument, MediaType: "application/pdf", Title: "nonce.pdf", Data: textPDF(liveDocNonce)},
-				{Kind: llmkit.BlockText, Text: "What is the word written in the attached document? Answer with that word only. If no document is attached, answer NO_DOCUMENT."},
+				{Kind: llmkit.BlockText, Text: "The attached PDF contains a single code word. Reply with that code word only."},
 			},
 		}},
 	})
