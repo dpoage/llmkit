@@ -153,11 +153,13 @@ entry below is marked.
 - **Breaking:** `agent`: `Tool.Run` now returns `([]llmkit.Block, error)`
   instead of `(string, error)`, so a tool result can carry blocks beyond
   text (llmkit-rli.2.1). A text-only tool behaves as before. The tool-result
-  message content is the returned blocks, except that the Runner replaces a
-  media block the client's profile cannot carry with a marker (see the
-  `agent` media entry under Added) and, under `WithToolOutputLimit`, an
-  oversized result with a spill or truncation stand-in. `ToolEvent.Result` and
-  the `ToolRun` event's `Result` carry the text blocks in order, with a
+  message content is the returned blocks, except that the Runner replaces
+  every media block that is not portable with a marker (inline `Data` of
+  `image/png`, `image/jpeg`, `image/webp` or `application/pdf`, with the
+  matching kind, on a profile with `ToolResultMedia`; see the `agent` media
+  entry under Added) and, under `WithToolOutputLimit`, an oversized result
+  with a spill or truncation stand-in. `ToolEvent.Result` and the `ToolRun`
+  event's `Result` carry the text blocks in order, with a
   size marker at each media block sent and an omission marker at each one
   degraded. A nil or empty result is the empty text result, the same as
   returning `""` before. An error renders from the error alone, as

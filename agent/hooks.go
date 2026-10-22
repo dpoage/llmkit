@@ -125,7 +125,7 @@ type ToolEvent struct {
 	// history: observe it, never modify it.
 	Content []llmkit.Block
 	// Degraded counts the media blocks replaced by omission markers because
-	// the client's profile cannot carry them in a tool result.
+	// they are not portable in a tool result.
 	Degraded int
 	// IsError reports whether Result is an error rendering.
 	IsError bool

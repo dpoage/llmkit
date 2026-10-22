@@ -318,10 +318,10 @@ type AttemptEvent struct {
 // an omission marker for each degraded one. Content is the result's blocks
 // exactly as placed in history; it is set only when they include a media
 // block or Degraded > 0. Degraded counts the media blocks the Runner replaced
-// with omission markers because the client's profile cannot carry them in a
-// tool result. IsError marks a failed execution (Result carries the
-// "ERROR:"-prefixed message). Denied marks a policy denial — then Result is
-// empty and DenyReason says why; there is no separate policy-denied event
+// with omission markers because they are not portable in a tool result.
+// IsError marks a failed execution (Result carries the "ERROR:"-prefixed
+// message). Denied marks a policy denial — then Result is empty and
+// DenyReason says why; there is no separate policy-denied event
 // kind.
 //
 // DispatchedArguments holds the arguments Tool.Run received when a tool
