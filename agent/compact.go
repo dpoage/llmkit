@@ -25,42 +25,28 @@ const compactRecentToolResults = 4
 const compactRearmFactor = 2
 
 // EstimateHistoryTokens approximates the billed token size of a message slice
-// using the same bytes/4 heuristic the Runner's compaction trigger uses. It is
-// exported so callers reporting size numbers can match the live compaction
-// decision.
+// with the bytes/4 heuristic the Runner's compaction trigger uses. It matches
+// the live compaction decision only for the request copy: tool-result media
+// the client cannot carry replaced by markers. A raw history counts it in full.
 func EstimateHistoryTokens(msgs []llmkit.Message) int64 { return estimateTokens(msgs) }
 
-// imageEstimateTokens is the token charge for every image block, whatever its
-// byte size and whether it is inline or a URL. It is Anthropic's standard-tier
-// visual cap: a provider downscales a large image to a bounded tile budget, so
-// the byte count says nothing about the cost, and 1,568 tokens bounds a single
-// image from above on the standard tier.
+// imageEstimateTokens is the flat token charge per image block, whatever its
+// size or source: Anthropic's standard-tier cap, an upper bound per image.
 const imageEstimateTokens = 1568
 
-// documentEstimateBytes is the flat byte charge per document block — 256 tokens
-// at the bytes/4 rate. A document's cost depends on its page count and
-// rendering, not its byte size, so the heuristic stays a relative "is history
-// big" signal rather than pricing it.
+// documentEstimateBytes is the flat byte charge per document block; its cost
+// depends on page count, not byte size.
 const documentEstimateBytes = 1024
 
-// estimateTokens approximates the token cost of a message slice using a
-// bytes/4 heuristic over what the history sends: text-block content, the
-// tool-call names and serialized arguments an assistant turn carries, a flat
-// imageEstimateTokens per image block, documentEstimateBytes per document
-// block, and max(len(Text), len(Raw)) bytes per thinking block. It deliberately
-// ignores per-message framing overhead; it is a relative signal for "is history
-// big enough to compact", not a billing oracle.
+// estimateTokens approximates the token cost of msgs at bytes/4 over what the
+// history sends: text, tool-call names and arguments, imageEstimateTokens per
+// image, documentEstimateBytes per document, and max(len(Text), len(Raw)) per
+// thinking block. It ignores per-message framing: a relative size signal.
 //
-// A thinking block counts its larger payload once, never both: an Anthropic
-// block carries the same reasoning in Text and in Raw, so summing would double
-// it. The count is a deliberate over-estimate: a block another provider tagged
-// is dropped from the wire, and some models strip earlier turns' thinking.
-// Compaction firing early on such a history costs one prefix cache miss;
-// firing late risks a context overflow.
-//
-// The Runner estimates the request copy of its history (see
-// [Runner.wireMessages]), so media the client degrades counts as its marker
-// text. EstimateHistoryTokens of the raw history counts that media in full.
+// A thinking block counts once, not Text plus Raw, which hold the same
+// reasoning on Anthropic. That over-estimates a block another provider tagged
+// (dropped from the wire) and models that strip earlier thinking: firing early
+// costs one cache miss, firing late risks an overflow.
 func estimateTokens(msgs []llmkit.Message) int64 {
 	var b int64
 	for i := range msgs {
@@ -69,10 +55,8 @@ func estimateTokens(msgs []llmkit.Message) int64 {
 	return b / 4
 }
 
-// messageBytes returns the approximate billed byte size of one message: its
-// text-block content, each non-text block's charge as estimateTokens
-// documents, and, for assistant turns, each tool call's name and raw argument
-// JSON.
+// messageBytes returns the approximate billed byte size of one message, per
+// the charges estimateTokens documents.
 func messageBytes(m llmkit.Message) int64 {
 	var b int64
 	for _, blk := range m.Content {
@@ -154,9 +138,8 @@ func compactStub(toolName string, origBytes int, isErr bool, spillRef string) st
 //     text Content shrinks (a stubbed message's Content becomes a single text
 //     block; non-text blocks on a pruned result are dropped with the dump).
 //
-// sent is the request copy of msgs, index-aligned (see [Runner.wireMessages]).
-// A result is a candidate, and its stub reports, its sentBytes in sent, so
-// media the client degrades counts as its marker text.
+// sent is the request copy of msgs, index-aligned. A result is a candidate,
+// and its stub reports, its sentBytes in sent: degraded media counts as text.
 //
 // toolNameFor maps a tool-result's ToolCallID back to the tool name recorded
 // when the call was issued, so the stub can name the tool; an empty/missing

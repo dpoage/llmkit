@@ -265,7 +265,8 @@ type CompletionEvent struct {
 	// Err is the failure, as text; empty on success.
 	Err string `json:"err,omitempty"`
 	// ErrKind is [ErrKindContextTooLong] when Err wraps [ErrContextTooLong];
-	// empty otherwise. Open string: tolerate values you do not know.
+	// empty otherwise. Only the agent Runner sets it: [Observe] and the
+	// provider stages emit it empty. Open string: tolerate unknown values.
 	ErrKind string `json:"err_kind,omitempty"`
 	// Purpose names what the completion was for: [CompletionPurposeCompaction]
 	// for a model call a compactor made to summarize history, empty for
@@ -373,6 +374,8 @@ type ToolRunEvent struct {
 
 // CompactionEvent records one compaction pass ([KindCompaction]): context
 // size before and after, in tokens, and how many messages the pass pruned.
+// A threshold pass estimates the request copy of the history; an overflow
+// pass estimates the raw history, so media the client degrades counts in full.
 type CompactionEvent struct {
 	BeforeTokens int64 `json:"before_tokens"`
 	AfterTokens  int64 `json:"after_tokens"`

@@ -7,9 +7,10 @@ import (
 )
 
 // Compactor makes a conversation history smaller. The Runner calls it when
-// the estimated history crosses [Limits.HistoryTokenBudget] and when the
-// provider refuses a completion with [llmkit.ErrContextTooLong]; the Runner
-// decides when, the Compactor decides how.
+// the estimated history crosses [Limits.HistoryTokenBudget], when the request
+// estimate crosses the context window minus [Limits.ContextReserve], and when
+// a completion fails with [llmkit.ErrContextTooLong]; the Runner decides when,
+// the Compactor decides how.
 //
 // A Compactor must not modify in.Messages, in.Sent, or anything they share;
 // it returns a new slice, or no messages or in.Messages itself to report no
