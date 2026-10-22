@@ -8,6 +8,16 @@ entry below is marked.
 
 ## [Unreleased]
 
+### Added
+
+- `provider`: `Options.StreamIdleTimeout` fails a `Stream` attempt that waits
+  that long for its next delta, measured from the attempt's start and from each
+  delta callback's return. SSE keepalives and chunks with no delta do not reset
+  it. The attempt fails as a retryable `*llmkit.APIError` (`ErrServer`) naming
+  the idle timeout, or as a terminal one once a delta has reached the caller.
+  Zero (the default) disables it and `Complete` ignores it. Models that reason
+  before answering stream nothing meanwhile, so a short value misfires on them.
+
 ## [0.6.0] - 2026-09-30
 
 ### Added
