@@ -56,9 +56,10 @@
 //     max-tokens continuation turn, the forced-finalization turn, and the
 //     RunJSON repair turn. It runs before [Hooks.BeforeCompletion], and the
 //     completion event records the post-policy request. req.Messages is a
-//     shallow clone of the loop's history, except that tool-result media the
-//     client's profile cannot carry is already degraded in the clone, so a
-//     policy reshapes this turn without touching the loop's history.
+//     shallow clone of the loop's history, except that tool-result media is
+//     already degraded in the clone when ToolResultMedia is false or the block
+//     is not portable, so a policy reshapes this turn without touching the
+//     loop's history.
 //   - [ToolPolicy] ([WithToolPolicy]) authorizes every tool call of a turn,
 //     in model order, on the loop goroutine, before any [Tool.Run] starts —
 //     in both dispatch modes. A denial feeds the model
