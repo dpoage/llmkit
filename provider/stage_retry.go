@@ -82,7 +82,9 @@ func (r *retryClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.
 //
 // A positive idle timeout also cancels an attempt that waits that long for
 // its next delta and fails it as a retryable ErrServer *llmkit.APIError;
-// the delivered-delta rule above applies to that error as to any other.
+// the delivered-delta rule above applies to that error as to any other. An
+// inner client without Stream delivers its deltas only after Complete
+// returns, so the timer spans that whole Complete.
 func (r *retryClient) Stream(ctx context.Context, req llmkit.Request, fn func(llmkit.Delta) error) (llmkit.Response, error) {
 	// delivered marks a delta that reached the caller inside the current
 	// attempt; while the caller's ctx is live the classifier turns it into
@@ -203,7 +205,6 @@ func (w *idleWatch) wrap(fn func(llmkit.Delta) error) func(llmkit.Delta) error {
 	}
 }
 
-// expired reports whether the watchdog cancelled the attempt.
 func (w *idleWatch) expired() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()

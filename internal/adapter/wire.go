@@ -19,9 +19,9 @@ import (
 
 // Wire records what one adapter call put on the transport: how many
 // requests reached RoundTrip, the status of the last response, and how many
-// body bytes the last request sent. A Wire
-// belongs to exactly one call — the adapters are shared across goroutines,
-// so the recorder rides the call's context, never the adapter.
+// body bytes the last request sent. A Wire belongs to exactly one call: the
+// adapters are shared across goroutines, so the recorder rides the call's
+// context, never the adapter.
 type Wire struct {
 	requests atomic.Int64
 	status   atomic.Int64

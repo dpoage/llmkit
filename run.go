@@ -119,8 +119,10 @@ func NewRunID() RunID { return RunID(newID()) }
 // way a durable sink must distinguish; additively appended fields do not
 // require a bump.
 //
-// Version 3: google Usage.OutputTokens now includes thoughtsTokenCount
-// (candidatesTokenCount + thoughtsTokenCount); it was candidates only in 2.
+// Version 3: Usage.OutputTokens now includes reasoning tokens: google adds
+// thoughtsTokenCount to candidatesTokenCount, and openai and
+// openai-compatible add reasoning_tokens for xAI-style usage (total_tokens
+// proves it). Version 2 counted neither.
 const EventSchemaVersion = 3
 
 // NewEvent returns an Event of the given kind with the shared header

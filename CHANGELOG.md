@@ -10,35 +10,87 @@ entry below is marked.
 
 ### Added
 
-- `llmkit`: `ThinkingConfig.Effort` (`ReasoningEffort`: `EffortLow`, `EffortMedium`, `EffortHigh`) and `Capabilities.ReasoningEffort`. OpenAI sends `reasoning_effort` and Google sends `thinkingLevel`; the flag is true for OpenAI `gpt-5`, `o1`, `o3` and `o4-mini` entries and Gemini 3 models, false elsewhere. A `ThinkingConfig` is valid with a positive `BudgetTokens` or an `Effort`; an `Effort` outside the set is refused pre-wire on every adapter. Each field the profile reports false is dropped silently, and on Gemini 3 `Effort` wins over `BudgetTokens`. The Anthropic ceiling excludes `ReasoningEffort`.
+- `llmkit`: `ThinkingConfig.Effort` (`ReasoningEffort`: `EffortLow`,
+  `EffortMedium`, `EffortHigh`) and `Capabilities.ReasoningEffort`. OpenAI
+  sends `reasoning_effort` and Google sends `thinkingLevel`. The flag is true
+  for OpenAI `gpt-5`, `o1`, `o3` and `o4-mini` entries and Gemini 3 models,
+  false elsewhere; the Anthropic ceiling excludes it. A `ThinkingConfig` is
+  valid with a positive `BudgetTokens`, or with a zero `BudgetTokens` and an
+  `Effort`. A negative `BudgetTokens` is refused pre-wire wherever `Thinking`
+  or `ReasoningEffort` is true, even with an `Effort`. An `Effort` outside the
+  set is refused on every adapter. Each field the profile reports false is
+  dropped silently. On Google, `Effort` wins over `BudgetTokens` when both
+  survive.
 - `provider`: `Options.StreamIdleTimeout` fails a `Stream` attempt that waits
   that long for its next delta, measured from the attempt's start and from each
-  delta callback's return. SSE keepalives and chunks with no delta do not reset
-  it. The attempt fails as a retryable `*llmkit.APIError` (`ErrServer`) naming
-  the idle timeout, or as a terminal one once a delta has reached the caller.
-  Zero (the default) disables it and `Complete` ignores it. Models that reason
-  before answering stream nothing meanwhile, so a short value misfires on them.
-- `llmkit`: `Usage.ReasoningTokens`, the reasoning tokens inside `OutputTokens`: OpenAI's `completion_tokens_details.reasoning_tokens` (`Complete` and `Stream`, with or without a callback) and Gemini's `thoughtsTokenCount`. Anthropic reports no count, so it stays 0. It is an informational subset: `ChargeableTokens` is unchanged and callers must not add it to `OutputTokens`. `Usage.Add` sums it.
-- `llmkit`: `Usage.Estimated`, true when the endpoint's response carried no usage object (a missing or null `usage` on OpenAI-compatible `Complete` and `Stream`, no `usageMetadata` on Gemini). The adapter then estimates: `InputTokens` is the request body's bytes divided by 4, `OutputTokens` the response text plus every tool call's name and arguments, in bytes divided by 4, rounded up; other counts are 0. A present all-zero usage object is reported, not estimated. `Usage.Add` ORs the flag. Before this, such endpoints read as zero spend and `agent.Limits.TokenBudget` and `agent.BudgetPool` never tripped; they now see the estimate (llmkit-rli.1.4).
+  delta callback's return. SSE keepalives and chunks that emit no delta do not
+  reset it; an OpenAI-compatible chunk with only `reasoning_details` emits no
+  delta. The attempt fails as a retryable `*llmkit.APIError` (`ErrServer`)
+  naming the idle timeout, or as a terminal one once a delta has reached the
+  caller. Zero (the default) or a negative value disables it, and `Complete`
+  ignores it. A client without native `Stream` runs its whole `Complete` under
+  the timer. Models that reason before answering stream nothing meanwhile, so
+  a short value misfires on them.
+- `llmkit`: `Usage.ReasoningTokens`, the reasoning tokens inside
+  `OutputTokens`: OpenAI's `completion_tokens_details.reasoning_tokens`
+  (`Complete` and `Stream`, with or without a callback) and Gemini's
+  `thoughtsTokenCount`. Anthropic reports no count, so it stays 0. It is an
+  informational subset: `ChargeableTokens` is unchanged and callers must not
+  add it to `OutputTokens`. If an endpoint counts reasoning outside
+  `completion_tokens` and its `total_tokens` is absent or differs from prompt
+  plus completion plus reasoning, the count can exceed `OutputTokens`.
+  `Usage.Add` sums it.
+- `llmkit`: `Usage.Estimated`, true when the endpoint's response carried no
+  usage object: a missing or null `usage` on `Complete` and `Stream` for the
+  OpenAI and OpenAI-compatible adapters, no `usageMetadata` on Gemini. The
+  adapter then estimates, rounding up bytes divided by 4: `InputTokens` from
+  the request body; `OutputTokens` from the response text, every tool call's
+  name and arguments, and the thinking blocks; `ReasoningTokens` from the
+  thinking blocks. Other counts are 0. A present all-zero usage object is
+  reported, not estimated. The Anthropic adapter never sets the flag.
+  `Usage.Add` ORs it. Before this, such endpoints read as zero spend and
+  `agent.Limits.TokenBudget` and `agent.BudgetPool` never tripped; they now
+  see the estimate (llmkit-rli.1.4).
 
 ### Changed
 
-- `llmkit`: the ceiling refusal text now says the adapter "does not map" the field instead of claiming it has no wire field.
-- **Breaking:** `provider`: Google `Usage.OutputTokens` is now `candidatesTokenCount + thoughtsTokenCount`; it was `candidatesTokenCount` alone, which left Gemini's billed thinking tokens out of the count. `agent.Limits.TokenBudget` and any caller that sums `OutputTokens` now see thinking runs on Gemini 2.5 and 3 models at their real size and trip sooner than before. Runs with no thinking are unchanged. `EventSchemaVersion` is now 3 to mark the meaning change; recorded v2 events still load.
+- `llmkit`: the ceiling refusal text now says the adapter "does not map" the
+  field instead of claiming it has no wire field.
+- **Breaking:** `provider`: Google `Usage.OutputTokens` is now
+  `candidatesTokenCount + thoughtsTokenCount`; it was `candidatesTokenCount`
+  alone, which left Gemini's billed thinking tokens out of the count.
+  `agent.Limits.TokenBudget` and any caller that sums `OutputTokens` now see
+  thinking runs on Gemini 2.5 and 3 models at their real size and trip sooner
+  than before. Runs with no thinking are unchanged. `EventSchemaVersion` is
+  now 3 to mark the meaning change; recorded v2 events still load.
+- `provider`: OpenAI and OpenAI-compatible `Usage.OutputTokens` now include
+  `completion_tokens_details.reasoning_tokens` for xAI-style usage, where
+  `total_tokens` equals prompt plus completion plus reasoning tokens; xAI
+  counts reasoning outside `completion_tokens`. OpenAI-style usage and usage
+  without `total_tokens` are unchanged. `EventSchemaVersion` 3 covers this
+  too.
+- `provider`: on OpenAI `gpt-5` and the `o1`, `o3` and `o4-mini` entries
+  (`ReasoningEffort` true), a `ThinkingConfig` with no positive
+  `BudgetTokens` and no `Effort`, or with a negative `BudgetTokens`, is now
+  refused pre-wire with an error wrapping `ErrInvalidRequest`. Before, the
+  OpenAI adapters dropped every `ThinkingConfig`.
 
 ### Fixed
 
 - `provider`: OpenAI-compatible reasoning now round-trips (llmkit-rli.1.1).
   `reasoning_content` and OpenRouter-style `reasoning_details` in a response,
-  from Complete or Stream (with or without a callback), surface as one
+  from `Complete` or `Stream` (with or without a callback), surface as one
   `BlockThinking` before the text, tagged `Provider: "openai"` or
-  `"openai-compatible:<host of BaseURL>"`, with `Raw` a JSON object holding
-  the non-empty keys. The adapter sends those keys back on every assistant
-  message carrying such a block, tool calls or not; DeepSeek thinking mode
-  answered HTTP 400 on the next request without them. Blocks with another
-  tag are dropped as before, so changing a compat `BaseURL` host drops earlier
-  reasoning from the history. An own-tag thinking block whose `Raw` is not a
-  JSON object with a non-empty `reasoning_content` string or
+  `"openai-compatible:<host of BaseURL>"`. `Raw` is a canonical JSON
+  re-encoding of the non-empty keys, not the wire bytes. `Text` is
+  `reasoning_content`, so it is empty when only `reasoning_details` arrives.
+  The adapter sends those keys back on every assistant message carrying such
+  a block, tool calls or not; DeepSeek thinking mode answered HTTP 400 on the
+  next request without them. Blocks with another tag are dropped from the
+  outgoing request, so changing a compat `BaseURL` host drops earlier
+  reasoning from that request; the history keeps the blocks. The host in the
+  tag is case- and port-sensitive. An own-tag thinking block whose `Raw` is
+  not a JSON object with a non-empty `reasoning_content` string or
   `reasoning_details` array is refused pre-wire with an error wrapping
   `ErrInvalidRequest`. Visible change: `Response.Blocks`,
   `Response.Message()` and recorded transcripts carry a thinking block on

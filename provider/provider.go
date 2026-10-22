@@ -280,20 +280,17 @@ type Options struct {
 	// client and never touches a transport.
 	HTTPClient *http.Client
 	// StreamIdleTimeout fails a Stream attempt that waits this long for its
-	// next delta, counted from the attempt's start and from each delta
-	// callback's return (time inside the callback never counts). SSE
-	// comments, keepalives, and chunks that carry no delta do not reset it.
-	// The attempt fails as a retryable *llmkit.APIError{Kind: ErrServer}
-	// naming the idle timeout, unless a delta already reached the caller:
-	// that error is terminal, as for any failure after a delivered delta.
-	// Zero (the default) disables it, leaving [retry.Config.RequestTimeout]
-	// as the only bound; Complete ignores it.
+	// next delta, counted from the attempt's start and from each callback's
+	// return (time inside it never counts). Keepalives and chunks that emit
+	// no delta, reasoning_details-only chunks included, do not reset it.
+	// The attempt fails as a retryable *llmkit.APIError{Kind: ErrServer}, or
+	// as a terminal one once a delta reached the caller. Zero or negative
+	// disables it, leaving [retry.Config.RequestTimeout] the only bound;
+	// Complete ignores it.
 	//
-	// Models that reason before answering — OpenAI Chat Completions
-	// reasoning models, Gemini without thought summaries — stream nothing
-	// while they reason, so a short value misfires on them and every retry
-	// re-bills the input. Set it above the longest silent reasoning phase
-	// you expect.
+	// Reasoning models stream nothing while they reason, and a client without
+	// native Stream runs its whole Complete under the timer: set it above the
+	// longest silent phase, or each retry re-bills the input.
 	StreamIdleTimeout time.Duration
 }
 
@@ -466,9 +463,9 @@ func New(ctx context.Context, spec Spec, opts Options) (llmkit.Client, error) {
 // Wrap is idempotent over its own stacks: when c is a client [New] or
 // Wrap returned, Wrap rebuilds one stack from c's base with the new opts
 // — Retry, Observer, StreamIdleTimeout, and Provider (when set) apply;
-// the inner adapter and its transport are kept, and c's Identity carries through unless
-// opts.Provider is set. Wrap(New(spec, o1), o2) therefore runs one
-// retry loop under o2.Retry: one call makes at most o2.Retry's
+// the inner adapter and its transport are kept, and c's Identity carries
+// through unless opts.Provider is set. Wrap(New(spec, o1), o2) therefore
+// runs one retry loop under o2.Retry: one call makes at most o2.Retry's
 // resolved MaxAttempts (a zero Retry resolves via [retry.Config.Or] to
 // retry.Default's 4), never the product of the two schedules. A
 // foreign decorator between the two stacks hides the inner one, and

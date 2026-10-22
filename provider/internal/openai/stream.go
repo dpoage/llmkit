@@ -21,13 +21,10 @@ var _ llmkit.StreamingClient = (*openaiAdapter)(nil)
 // (Thinking); each delta.tool_calls entry → DeltaToolCall with the vendor's
 // wire index renumbered to the call's position in Response.ToolCalls. Refusal
 // deltas emit nothing — the final response normalizes them exactly as
-// Complete does. The reasoning_content and reasoning_details extra fields
-// are also accumulated for every chunk, whether or not fn is nil, and
-// surface as one BlockThinking exactly as Complete builds it
-// (reasoning_details fragments merge by index and type). The accumulated
-// completion goes through the same toResponse normalizer Complete uses, so
-// the returned Response is what Complete would have returned for the same
-// wire exchange.
+// Complete does. reasoning_content and reasoning_details accumulate for
+// every chunk, fn or not, into one BlockThinking built as Complete builds
+// it; only reasoning_content emits a delta, so a reasoning_details-only
+// chunk emits none. toResponse is the normalizer Complete uses.
 //
 // A non-nil fn error cancels the stream: it is returned wrapped as
 // "llmkit: stream fn: ..." with a zero Response. Open and transport errors
@@ -50,7 +47,8 @@ func (o *openaiAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(
 	usageReported := false
 	for stream.Next() {
 		chunk := stream.Current()
-		// The accumulator never sets the folded completion's JSON.Usage, so presence is read per chunk.
+		// The accumulator never sets the folded completion's JSON.Usage, so
+		// usage presence is read per chunk.
 		usageReported = usageReported || chunk.JSON.Usage.Valid()
 		if !acc.AddChunk(chunk) {
 			_ = stream.Close()
