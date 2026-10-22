@@ -10,12 +10,13 @@ import (
 // carry. The rule is uniform across all three adapters and enforced before
 // any wire call: RoleUser carries text/image/document; RoleAssistant carries
 // text/thinking (a thinking block is re-emitted only when its Provider
-// matches the adapter); RoleSystem and RoleToolResult carry text only.
+// matches the adapter); RoleSystem carries text only; RoleToolResult carries
+// text/image/document, media subject to gateToolResultMedia.
 var roleBlockKinds = map[llmkit.Role]map[llmkit.BlockKind]bool{
 	llmkit.RoleUser:       {llmkit.BlockText: true, llmkit.BlockImage: true, llmkit.BlockDocument: true},
 	llmkit.RoleAssistant:  {llmkit.BlockText: true, llmkit.BlockThinking: true},
 	llmkit.RoleSystem:     {llmkit.BlockText: true},
-	llmkit.RoleToolResult: {llmkit.BlockText: true},
+	llmkit.RoleToolResult: {llmkit.BlockText: true, llmkit.BlockImage: true, llmkit.BlockDocument: true},
 }
 
 // validateMessageBlocks enforces the per-role block-kind rule and the media
@@ -69,6 +70,28 @@ func validateMediaBlock(provider string, b llmkit.Block) error {
 			Kind:     llmkit.ErrInvalidRequest,
 			Provider: provider,
 			Message:  fmt.Sprintf("%s block: MediaType must be set when Data is inline", b.Kind),
+		}
+	}
+	return nil
+}
+
+// gateToolResultMedia refuses a tool-result message carrying an image or
+// document block when Capabilities.ToolResultMedia is false; without it a
+// text-only wire mapping would silently drop the media.
+func gateToolResultMedia(provider string, msgs []llmkit.Message, supported bool) error {
+	if supported {
+		return nil
+	}
+	for _, m := range msgs {
+		if m.Role != llmkit.RoleToolResult {
+			continue
+		}
+		for _, b := range m.Content {
+			if b.Kind == llmkit.BlockImage || b.Kind == llmkit.BlockDocument {
+				return Refuse(provider,
+					fmt.Sprintf("%s block in a tool-result message: Capabilities.ToolResultMedia is false for this provider and model, so the wire cannot carry media in a tool result", b.Kind),
+					nil)
+			}
 		}
 	}
 	return nil

@@ -64,9 +64,25 @@ entry below is marked.
   run on the policy, bounded to the 1024 most recently used runs. `Continue`
   starts a new run id, so a continued run's counts start from zero
   (llmkit-rli.2.4).
+- `llmkit`: `Capabilities.ToolResultMedia`. A `RoleToolResult` message may now
+  carry image and document blocks, not only text. Anthropic sends them in the
+  `tool_result` content in order; Google (Gemini 3 models) sends `inlineData`
+  parts in `functionResponse.parts` for `image/png`, `image/jpeg`,
+  `image/webp`, `application/pdf` and `text/plain` only. The flag is true for
+  those two and false for every other Google model, OpenAI and
+  `openai-compatible`. On a false profile a tool result carrying media is
+  refused pre-wire with an error wrapping `ErrInvalidRequest` that names the
+  capability. The OpenAI and `openai-compatible` ceiling is false, so an
+  override forcing it true is refused by `provider.New`. Google refuses URL
+  sources and other media types in a tool result pre-wire (llmkit-rli.2.1).
 
 ### Changed
 
+- `llmkit`: the per-role block rule now lets `RoleToolResult` carry text,
+  image and document blocks (it was text only), gated by
+  `Capabilities.ToolResultMedia`. `RoleSystem` stays text only. Before, any
+  non-text block in a tool result was refused on every adapter; now the
+  refusal depends on the profile.
 - `llmkit`: the ceiling refusal text now says the adapter "does not map" the
   field instead of claiming it has no wire field.
 - **Breaking:** `provider`: Google `Usage.OutputTokens` is now

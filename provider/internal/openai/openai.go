@@ -68,7 +68,8 @@ type Options struct {
 // Completions API has no reasoning-budget parameter (Thinking) and no
 // top_k, so an effective profile reporting either true is refused at
 // construction rather than silently mismapped. ReasoningEffort maps to
-// reasoning_effort.
+// reasoning_effort. A Chat Completions tool message is text, so
+// ToolResultMedia is above the ceiling.
 var openAICeiling = llmkit.Capabilities{
 	StructuredOutput: true,
 	Thinking:         false,
@@ -78,6 +79,7 @@ var openAICeiling = llmkit.Capabilities{
 	TopP:             true,
 	TopK:             false,
 	Seed:             true,
+	ToolResultMedia:  false,
 }
 
 // New builds an OpenAI-backed Client. With a custom BaseURL it serves any
@@ -341,6 +343,7 @@ func toOpenAIMessages(provider, thinkingTag string, msgs []llmkit.Message) ([]op
 			}
 			out = append(out, openai.ChatCompletionMessageParamUnion{OfAssistant: &am})
 		case llmkit.RoleToolResult:
+			// Prepare refuses media here (ceiling keeps ToolResultMedia false).
 			out = append(out, openai.ToolMessage(m.Text(), m.ToolCallID))
 		}
 	}
@@ -704,5 +707,6 @@ func openAICompatibleCapabilities(model string) llmkit.Capabilities {
 		TopP:              true,
 		TopK:              false,
 		Seed:              true,
+		ToolResultMedia:   false,
 	}
 }

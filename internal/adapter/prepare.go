@@ -67,7 +67,9 @@ type Schema struct {
 // StopSequences silently when caps reports that field false, gates Thinking
 // per field (see prepareThinking), drops ResponseSchema when
 // caps.StructuredOutput is false, and refuses an explicit ToolChoice mode
-// other than auto pre-wire when caps.ToolChoice is false. Every refusal is
+// other than auto pre-wire when caps.ToolChoice is false. It also refuses a
+// tool-result message carrying an image or document block pre-wire when
+// caps.ToolResultMedia is false. Every refusal is
 // an error wrapping llmkit.ErrInvalidRequest with Provider = provider and
 // StatusCode 0,
 // returned before any wire call. A tool Parameters or ResponseSchema that
@@ -78,6 +80,10 @@ type Schema struct {
 // unwrapped.
 func Prepare(provider string, caps llmkit.Capabilities, req llmkit.Request) (Prepared, error) {
 	if err := validateMessages(provider, req.Messages); err != nil {
+		return Prepared{}, err
+	}
+
+	if err := gateToolResultMedia(provider, req.Messages, caps.ToolResultMedia); err != nil {
 		return Prepared{}, err
 	}
 
@@ -308,6 +314,7 @@ func wireGates(ceiling, effective llmkit.Capabilities) []wireGate {
 		{"TopP", ceiling.TopP, effective.TopP},
 		{"TopK", ceiling.TopK, effective.TopK},
 		{"Seed", ceiling.Seed, effective.Seed},
+		{"ToolResultMedia", ceiling.ToolResultMedia, effective.ToolResultMedia},
 	}
 }
 
@@ -315,9 +322,9 @@ func wireGates(ceiling, effective llmkit.Capabilities) []wireGate {
 // table-derived profile and its return value becomes effective (nil
 // override keeps the table unchanged). ceiling names every wire-gated
 // field (StructuredOutput, Thinking, ReasoningEffort, ToolChoice,
-// StopSequences, TopP, TopK, Seed) the adapter can put on the wire; an
-// effective profile that reports true for a wire-gated field whose ceiling
-// is false is refused. Advisory and decorator fields (ContextWindow,
+// StopSequences, TopP, TopK, Seed, ToolResultMedia) the adapter can put on
+// the wire; an effective profile that reports true for a wire-gated field
+// whose ceiling is false is refused. Advisory and decorator fields (ContextWindow,
 // ParallelToolCalls, PromptCaching, Images, Documents) are never
 // ceiling-checked.
 func ApplyOverride(provider string, ceiling, table llmkit.Capabilities, override func(llmkit.Capabilities) llmkit.Capabilities) (llmkit.Capabilities, error) {
