@@ -23,6 +23,25 @@ entry below is marked.
 
 - `llmkit`: the ceiling refusal text now says the adapter "does not map" the field instead of claiming it has no wire field.
 
+### Fixed
+
+- `provider`: OpenAI-compatible reasoning now round-trips (llmkit-rli.1.1).
+  `reasoning_content` and OpenRouter-style `reasoning_details` in a response,
+  from Complete or Stream (with or without a callback), surface as one
+  `BlockThinking` before the text, tagged `Provider: "openai"` or
+  `"openai-compatible:<host of BaseURL>"`, with `Raw` a JSON object holding
+  the non-empty keys. The adapter sends those keys back on every assistant
+  message carrying such a block, tool calls or not; DeepSeek thinking mode
+  answered HTTP 400 on the next request without them. Blocks with another
+  tag are dropped as before, so changing a compat `BaseURL` host drops earlier
+  reasoning from the history. An own-tag thinking block whose `Raw` is not a
+  JSON object with a non-empty `reasoning_content` string or
+  `reasoning_details` array is refused pre-wire with an error wrapping
+  `ErrInvalidRequest`. Visible change: `Response.Blocks`,
+  `Response.Message()` and recorded transcripts carry a thinking block on
+  endpoints that return reasoning, although `Capabilities.Thinking` is false
+  there.
+
 ## [0.6.0] - 2026-09-30
 
 ### Added

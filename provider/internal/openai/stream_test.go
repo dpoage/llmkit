@@ -303,9 +303,8 @@ func TestToolCallTracker_RenumbersByFirstAppearance(t *testing.T) {
 // TestOpenAIStream_ReasoningContent: reasoning arrives as a
 // reasoning_content property on the delta, not a typed SDK field
 // (MiniMax/DeepSeek-style compat shape). It must stream as DeltaThinking,
-// JSON null values must not emit, and the final Response carries only the
-// content text — exactly as Complete normalizes the same endpoint's
-// non-stream reply.
+// JSON null values must not emit, and the final Response's Text is the
+// content text only (the reasoning surfaces as a BlockThinking, not Text).
 func TestOpenAIStream_ReasoningContent(t *testing.T) {
 	chunks := []string{
 		chunkJSON(`{"role":"assistant","content":null,"reasoning_content":"I should greet the user."}`, "", ""),

@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 
 	"github.com/dpoage/llmkit"
@@ -27,6 +28,9 @@ type openaiAdapter struct {
 	model    string
 	caps     llmkit.Capabilities
 	provider string // "openai" or "openai-compatible", for error tagging
+	// thinkingTag is the Provider of the BlockThinking blocks this adapter
+	// produces and re-emits.
+	thinkingTag string
 	// requireBoolAdditionalProps forces every object/array-valued
 	// "additionalProperties" in outbound tool-parameter and response_format
 	// schemas down to a permissive boolean — strict openai-compatible schema
@@ -126,6 +130,7 @@ func New(model string, opts Options) (llmkit.Client, error) {
 		model:                      model,
 		caps:                       caps,
 		provider:                   provider,
+		thinkingTag:                thinkingTag(opts.Compatible, opts.BaseURL),
 		requireBoolAdditionalProps: requireBoolAdditionalProps,
 	}, nil
 }
@@ -151,7 +156,7 @@ func (o *openaiAdapter) Complete(ctx context.Context, req llmkit.Request) (llmki
 	if cc == nil || len(cc.Choices) == 0 {
 		return llmkit.Response{}, o.noCompletion(ctx, cc, adapter.ResponseHeader(httpResp))
 	}
-	return o.toResponse(cc), nil
+	return o.toResponse(cc, reasoningFromMessage(cc.Choices[0].Message.JSON.ExtraFields)), nil
 }
 
 // buildParams applies the shared rules once via adapter.Prepare and maps the
@@ -190,7 +195,7 @@ func (o *openaiAdapter) buildParams(req llmkit.Request) (openai.ChatCompletionNe
 	if p.System != "" {
 		msgs = append(msgs, openai.SystemMessage(p.System))
 	}
-	converted, err := toOpenAIMessages(o.provider, p.Messages)
+	converted, err := toOpenAIMessages(o.provider, o.thinkingTag, p.Messages)
 	if err != nil {
 		return openai.ChatCompletionNewParams{}, err
 	}
@@ -275,11 +280,13 @@ func applyOpenAIToolChoice(params *openai.ChatCompletionNewParams, tc llmkit.Too
 // toOpenAIMessages converts normalized messages into Chat Completions
 // messages. Content blocks map in order: text → text part, image →
 // image_url part, document → file part; assistant and tool-result messages
-// carry their concatenated text. Every role and block-kind rule
-// (adapter.Prepare) already holds — this is a pure mapping except for the
-// vendor-specific constraint the file part imposes: no URL source for
-// documents (openAIUserParts).
-func toOpenAIMessages(provider string, msgs []llmkit.Message) ([]openai.ChatCompletionMessageParamUnion, error) {
+// carry their concatenated text. An assistant BlockThinking tagged with
+// thinkingTag re-emits its reasoning keys on that message; other thinking
+// blocks are dropped. Every role and block-kind rule (adapter.Prepare)
+// already holds — this is a pure mapping except for the vendor-specific
+// constraints the file part (no URL source for documents) and the own-tag
+// thinking block (Raw must carry reasoning) impose.
+func toOpenAIMessages(provider, thinkingTag string, msgs []llmkit.Message) ([]openai.ChatCompletionMessageParamUnion, error) {
 	out := make([]openai.ChatCompletionMessageParamUnion, 0, len(msgs))
 	for _, m := range msgs {
 		switch m.Role {
@@ -318,6 +325,21 @@ func toOpenAIMessages(provider string, msgs []llmkit.Message) ([]openai.ChatComp
 						},
 					},
 				})
+			}
+			extra := map[string]any{}
+			for _, b := range m.Content {
+				if b.Kind != llmkit.BlockThinking || b.Provider != thinkingTag {
+					continue
+				}
+				fields, ok := emitFields(b.Raw)
+				if !ok {
+					return nil, adapter.Refuse(provider,
+						"thinking block tagged "+thinkingTag+": Raw must be a JSON object with a non-empty reasoning_content string or reasoning_details array", nil)
+				}
+				maps.Copy(extra, fields)
+			}
+			if len(extra) > 0 {
+				am.SetExtraFields(extra)
 			}
 			out = append(out, openai.ChatCompletionMessageParamUnion{OfAssistant: &am})
 		case llmkit.RoleToolResult:
@@ -386,7 +408,7 @@ func openAIUserParts(provider string, m llmkit.Message) ([]openai.ChatCompletion
 	return parts, nil
 }
 
-func (o *openaiAdapter) toResponse(cc *openai.ChatCompletion) llmkit.Response {
+func (o *openaiAdapter) toResponse(cc *openai.ChatCompletion, rs reasoning) llmkit.Response {
 	var resp llmkit.Response
 	if len(cc.Choices) > 0 {
 		choice := cc.Choices[0]
@@ -399,6 +421,9 @@ func (o *openaiAdapter) toResponse(cc *openai.ChatCompletion) llmkit.Response {
 			resp.Text = choice.Message.Refusal
 		} else {
 			resp.Text = choice.Message.Content
+		}
+		if thinking, ok := rs.block(o.thinkingTag); ok {
+			resp.Blocks = append(resp.Blocks, thinking)
 		}
 		if resp.Text != "" {
 			resp.Blocks = append(resp.Blocks, llmkit.Block{Kind: llmkit.BlockText, Text: resp.Text})
