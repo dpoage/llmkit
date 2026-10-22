@@ -39,7 +39,7 @@ func trmRequest(blocks ...llmkit.Block) llmkit.Request {
 	}
 }
 
-func trmCall(t *testing.T, p trmProfile, override func(llmkit.Capabilities) llmkit.Capabilities, req llmkit.Request) (map[string]any, error, int) {
+func trmCall(t *testing.T, p trmProfile, override func(llmkit.Capabilities) llmkit.Capabilities, req llmkit.Request) (map[string]any, int, error) {
 	t.Helper()
 	isolateEnv(t, baseURLEnvSources...)
 	var body map[string]any
@@ -53,10 +53,10 @@ func trmCall(t *testing.T, p trmProfile, override func(llmkit.Capabilities) llmk
 	})
 	client, err := New(context.Background(), Spec{Type: p.typ, Model: p.model, BaseURL: base, Secret: "k", Capabilities: override}, Options{})
 	if err != nil {
-		return nil, err, hits
+		return nil, hits, err
 	}
 	_, err = client.Complete(context.Background(), req)
-	return body, err, hits
+	return body, hits, err
 }
 
 func trmLast(t *testing.T, body map[string]any, key string) map[string]any {
@@ -114,7 +114,7 @@ func TestToolResultMedia_AnthropicWire(t *testing.T) {
 	p := trmProfiles[0]
 
 	t.Run("text-image", func(t *testing.T) {
-		body, err, hits := trmCall(t, p, nil, trmRequest(
+		body, hits, err := trmCall(t, p, nil, trmRequest(
 			llmkit.Text("cap"), llmkit.Block{Kind: llmkit.BlockImage, MediaType: "image/png", Data: pngBytes}))
 		if err != nil || hits != 1 {
 			t.Fatalf("err = %v, hits = %d", err, hits)
@@ -134,7 +134,7 @@ func TestToolResultMedia_AnthropicWire(t *testing.T) {
 	})
 
 	t.Run("order-preserved", func(t *testing.T) {
-		body, err, _ := trmCall(t, p, nil, trmRequest(
+		body, _, err := trmCall(t, p, nil, trmRequest(
 			llmkit.Block{Kind: llmkit.BlockImage, MediaType: "image/png", Data: pngBytes}, llmkit.Text("tail")))
 		if err != nil {
 			t.Fatalf("Complete: %v", err)
@@ -146,7 +146,7 @@ func TestToolResultMedia_AnthropicWire(t *testing.T) {
 	})
 
 	t.Run("document", func(t *testing.T) {
-		body, err, _ := trmCall(t, p, nil, trmRequest(
+		body, _, err := trmCall(t, p, nil, trmRequest(
 			llmkit.Text("cap"), llmkit.Block{Kind: llmkit.BlockDocument, MediaType: "application/pdf", Data: pdfBytes}))
 		if err != nil {
 			t.Fatalf("Complete: %v", err)
@@ -163,7 +163,7 @@ func TestToolResultMedia_AnthropicWire(t *testing.T) {
 	})
 
 	t.Run("url-sources", func(t *testing.T) {
-		body, err, _ := trmCall(t, p, nil, trmRequest(
+		body, _, err := trmCall(t, p, nil, trmRequest(
 			llmkit.Block{Kind: llmkit.BlockImage, URL: "https://x/y.png"},
 			llmkit.Block{Kind: llmkit.BlockDocument, URL: "https://x/y.pdf"}))
 		if err != nil {
@@ -182,7 +182,7 @@ func TestToolResultMedia_AnthropicWire(t *testing.T) {
 	})
 
 	t.Run("text-only-shape-unchanged", func(t *testing.T) {
-		body, err, _ := trmCall(t, p, nil, trmRequest(llmkit.Text("a"), llmkit.Text("b")))
+		body, _, err := trmCall(t, p, nil, trmRequest(llmkit.Text("a"), llmkit.Text("b")))
 		if err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
@@ -193,7 +193,7 @@ func TestToolResultMedia_AnthropicWire(t *testing.T) {
 	})
 
 	t.Run("non-pdf-document-refused", func(t *testing.T) {
-		_, err, hits := trmCall(t, p, nil, trmRequest(
+		_, hits, err := trmCall(t, p, nil, trmRequest(
 			llmkit.Block{Kind: llmkit.BlockDocument, MediaType: "text/plain", Data: []byte("x")}))
 		if !errors.Is(err, llmkit.ErrInvalidRequest) || hits != 0 {
 			t.Errorf("err = %v, hits = %d, want ErrInvalidRequest with zero hits", err, hits)
@@ -205,7 +205,7 @@ func TestToolResultMedia_GoogleWire(t *testing.T) {
 	p := trmProfiles[1]
 
 	t.Run("text-image", func(t *testing.T) {
-		body, err, hits := trmCall(t, p, nil, trmRequest(
+		body, hits, err := trmCall(t, p, nil, trmRequest(
 			llmkit.Text("cap"), llmkit.Block{Kind: llmkit.BlockImage, MediaType: "image/png", Data: pngBytes}))
 		if err != nil || hits != 1 {
 			t.Fatalf("err = %v, hits = %d", err, hits)
@@ -225,7 +225,7 @@ func TestToolResultMedia_GoogleWire(t *testing.T) {
 	})
 
 	t.Run("document", func(t *testing.T) {
-		body, err, _ := trmCall(t, p, nil, trmRequest(
+		body, _, err := trmCall(t, p, nil, trmRequest(
 			llmkit.Text("cap"), llmkit.Block{Kind: llmkit.BlockDocument, MediaType: "application/pdf", Data: pdfBytes}))
 		if err != nil {
 			t.Fatalf("Complete: %v", err)
@@ -250,7 +250,7 @@ func TestToolResultMedia_GoogleWire(t *testing.T) {
 			}
 			blocks = append(blocks, llmkit.Block{Kind: kind, MediaType: mt, Data: []byte("x")})
 		}
-		body, err, _ := trmCall(t, p, nil, trmRequest(blocks...))
+		body, _, err := trmCall(t, p, nil, trmRequest(blocks...))
 		if err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
@@ -267,7 +267,7 @@ func TestToolResultMedia_GoogleWire(t *testing.T) {
 	})
 
 	t.Run("text-only-has-no-parts", func(t *testing.T) {
-		body, err, _ := trmCall(t, p, nil, trmRequest(llmkit.Text("cap")))
+		body, _, err := trmCall(t, p, nil, trmRequest(llmkit.Text("cap")))
 		if err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
@@ -290,7 +290,7 @@ func TestToolResultMedia_GoogleUnsupportedRefused(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, err, hits := trmCall(t, p, nil, trmRequest(llmkit.Text("cap"), c.blk))
+			_, hits, err := trmCall(t, p, nil, trmRequest(llmkit.Text("cap"), c.blk))
 			if !errors.Is(err, llmkit.ErrInvalidRequest) {
 				t.Errorf("err = %v, want ErrInvalidRequest", err)
 			}
@@ -312,7 +312,7 @@ func TestToolResultMedia_RefusedByCapability(t *testing.T) {
 		}
 		for kind, blk := range blocks {
 			t.Run(p.name+"/"+kind, func(t *testing.T) {
-				_, err, hits := trmCall(t, p, nil, trmRequest(llmkit.Text("cap"), blk))
+				_, hits, err := trmCall(t, p, nil, trmRequest(llmkit.Text("cap"), blk))
 				if !errors.Is(err, llmkit.ErrInvalidRequest) {
 					t.Fatalf("err = %v, want ErrInvalidRequest", err)
 				}
@@ -329,7 +329,7 @@ func TestToolResultMedia_RefusedByCapability(t *testing.T) {
 
 func TestToolResultMedia_OverrideOffRefusesAnthropic(t *testing.T) {
 	off := func(c llmkit.Capabilities) llmkit.Capabilities { c.ToolResultMedia = false; return c }
-	_, err, hits := trmCall(t, trmProfiles[0], off, trmRequest(
+	_, hits, err := trmCall(t, trmProfiles[0], off, trmRequest(
 		llmkit.Block{Kind: llmkit.BlockImage, MediaType: "image/png", Data: pngBytes}))
 	if !errors.Is(err, llmkit.ErrInvalidRequest) || hits != 0 || !strings.Contains(err.Error(), "ToolResultMedia") {
 		t.Errorf("err = %v, hits = %d, want ErrInvalidRequest naming ToolResultMedia with zero hits", err, hits)
@@ -343,7 +343,7 @@ func TestToolResultMedia_CeilingRefusesOpenAIFamily(t *testing.T) {
 			continue
 		}
 		t.Run(p.name, func(t *testing.T) {
-			_, err, hits := trmCall(t, p, on, trmRequest(
+			_, hits, err := trmCall(t, p, on, trmRequest(
 				llmkit.Block{Kind: llmkit.BlockImage, MediaType: "image/png", Data: pngBytes}))
 			if !errors.Is(err, llmkit.ErrInvalidRequest) {
 				t.Fatalf("err = %v, want ErrInvalidRequest from New", err)
@@ -366,7 +366,7 @@ func TestToolResultMedia_SystemMediaStillRefused(t *testing.T) {
 			req := llmkit.Request{Messages: []llmkit.Message{
 				{Role: llmkit.RoleSystem, Content: []llmkit.Block{{Kind: llmkit.BlockImage, MediaType: "image/png", Data: pngBytes}}},
 			}}
-			_, err, hits := trmCall(t, p, nil, req)
+			_, hits, err := trmCall(t, p, nil, req)
 			if !errors.Is(err, llmkit.ErrInvalidRequest) || hits != 0 {
 				t.Errorf("err = %v, hits = %d, want ErrInvalidRequest with zero hits", err, hits)
 			}

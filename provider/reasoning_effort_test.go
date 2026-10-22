@@ -57,9 +57,9 @@ var effortProfiles = []effortProfile{
 }
 
 // effortWire runs one Complete on p's table profile (override applied when
-// non-nil) and returns the client, the captured wire body, the call error,
-// and the wire hit count.
-func effortWire(t *testing.T, p effortProfile, override func(llmkit.Capabilities) llmkit.Capabilities, th *llmkit.ThinkingConfig) (llmkit.Client, map[string]any, error, int) {
+// non-nil) and returns the client, the captured wire body, the wire hit
+// count, and the call error.
+func effortWire(t *testing.T, p effortProfile, override func(llmkit.Capabilities) llmkit.Capabilities, th *llmkit.ThinkingConfig) (llmkit.Client, map[string]any, int, error) {
 	t.Helper()
 	var body map[string]any
 	hits := 0
@@ -77,7 +77,7 @@ func effortWire(t *testing.T, p effortProfile, override func(llmkit.Capabilities
 	req := simpleRequest()
 	req.Thinking = th
 	_, err = client.Complete(context.Background(), req)
-	return client, body, err, hits
+	return client, body, hits, err
 }
 
 // wireThinking returns the vendor's thinking object and the effort key
@@ -108,7 +108,7 @@ func TestReasoningEffort_WireMapping(t *testing.T) {
 	for _, p := range effortProfiles {
 		for _, e := range []llmkit.ReasoningEffort{llmkit.EffortLow, llmkit.EffortMedium, llmkit.EffortHigh} {
 			t.Run(p.name+"/"+string(e), func(t *testing.T) {
-				client, body, err, hits := effortWire(t, p, nil, &llmkit.ThinkingConfig{Effort: e})
+				client, body, hits, err := effortWire(t, p, nil, &llmkit.ThinkingConfig{Effort: e})
 				if err != nil {
 					t.Fatalf("Complete: %v", err)
 				}
@@ -140,7 +140,7 @@ func TestReasoningEffort_OverrideEnablesCompat(t *testing.T) {
 	isolateEnv(t, baseURLEnvSources...)
 	p := effortProfile{"compat", TypeOpenAICompatible, "llama3", false, false}
 	on := func(c llmkit.Capabilities) llmkit.Capabilities { c.ReasoningEffort = true; return c }
-	_, body, err, _ := effortWire(t, p, on, &llmkit.ThinkingConfig{Effort: llmkit.EffortMedium})
+	_, body, _, err := effortWire(t, p, on, &llmkit.ThinkingConfig{Effort: llmkit.EffortMedium})
 	if err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
@@ -210,7 +210,7 @@ func TestReasoningEffort_InvalidConfigOutcomes(t *testing.T) {
 		for _, c := range cases {
 			t.Run(p.name+"/"+c.name, func(t *testing.T) {
 				cfg := c.cfg
-				_, body, err, hits := effortWire(t, p, nil, &cfg)
+				_, body, hits, err := effortWire(t, p, nil, &cfg)
 				refused := c.refuseAlways || p.thinking || p.effort
 				if refused {
 					if !errors.Is(err, llmkit.ErrInvalidRequest) {
@@ -268,7 +268,7 @@ func TestReasoningEffort_ValidityTable(t *testing.T) {
 	for _, c := range cases {
 		for i, w := range c.w {
 			t.Run(c.name+"/"+names[i], func(t *testing.T) {
-				_, body, err, hits := effortWire(t, c.p, nil, w.cfg)
+				_, body, hits, err := effortWire(t, c.p, nil, w.cfg)
 				if err != nil {
 					t.Fatalf("Complete: %v", err)
 				}
