@@ -525,6 +525,102 @@ and tool calls). The `ErrReplayDiverged` and `ErrReplayedFailure` sentinels
 are the only non-root errors a `Decider` from this package returns. A
 `Decider` from `Replay` is safe for concurrent use.
 
+## Gating an agent
+
+A `Decider` can drive an `agent.Runner`'s policies: a `ToolPolicy` that asks
+whether a tool call is destructive, and a `RequestPolicy` that classifies the
+latest user turn. The policy code depends only on `decide.Decider`, so the
+hosted `systemone` client and any other backend are interchangeable.
+
+```go
+// Any decide.Decider works here; systemone.New builds the hosted one.
+var d decide.Decider = exBeliefs{"rm": 0.9, "read_file": 0.1}
+
+// Charge the decider's tokens to the pool the Runner already shares.
+pool := agent.NewBudgetPool(10_000)
+d = decide.Observe(d, llmkit.ObserverFunc(func(_ context.Context, ev llmkit.Event) {
+	if ev.Kind == llmkit.KindDecision && ev.Decision != nil && ev.Decision.Err == "" {
+		pool.Add(ev.Decision.Usage.ChargeableTokens(1))
+	}
+}))
+
+policy := agent.ToolPolicyFunc(func(ctx context.Context, call *llmkit.ToolCall) error {
+	state := map[string]any{"tool": call.Name, "args": call.Arguments}
+	resp, err := d.Ask(ctx, state, decide.Questions{"destructive": decide.Noul{
+		Instructions: "Does this tool call delete or overwrite data outside the workspace?",
+	}})
+	if err != nil {
+		return err // fail closed: no decision, no call
+	}
+	belief, err := resp.Noul("destructive")
+	if err != nil {
+		return err
+	}
+	if belief >= 0.5 {
+		fmt.Println("denied", call.Name)
+		return fmt.Errorf("blocked: belief %.2f", belief)
+	}
+	return nil
+})
+
+client := &exScript{resps: []llmkit.Response{
+	{
+		StopReason: llmkit.StopToolUse,
+		Usage:      llmkit.Usage{InputTokens: 10, OutputTokens: 5},
+		ToolCalls: []llmkit.ToolCall{
+			{ID: "c1", Name: "rm", Arguments: json.RawMessage(`{"path":"/var/data"}`)},
+			{ID: "c2", Name: "read_file", Arguments: json.RawMessage(`{"path":"notes.txt"}`)},
+		},
+	},
+	{Text: "done", StopReason: llmkit.StopEndTurn, Usage: llmkit.Usage{InputTokens: 15, OutputTokens: 5}},
+}}
+runner := agent.NewRunner(client, []agent.Tool{exTool("rm"), exTool("read_file")}, "You tidy files.",
+	agent.WithToolPolicy(policy), agent.WithBudgetPool(pool))
+
+out, err := runner.Run(context.Background(), "Remove the old data and read the notes.")
+if err != nil {
+	fmt.Println("run:", err)
+	return
+}
+fmt.Println(out.FinalText, pool.Spent())
+```
+
+The snippet is the body of `ExampleDecider_gatingAnAgent` in
+`decide/example_test.go`, compiled and run with `go test ./decide/`, and
+`TestDocsGatingSnippetMatchesExample` fails when the two differ. `exBeliefs`,
+`exScript`, and `exTool` are the fakes defined next to it: a `Decider`, an LLM
+client, and a tool. The run prints `denied rm`, `ran read_file`, and
+`done 75`: the `rm` call never ran, and the pool holds 35 LLM tokens plus 40
+decision tokens.
+
+`examples/agent-guardrail` is the runnable version, against a real LLM and
+System One. It reads the `LLMKIT_*` variables of the other examples plus
+`LLMKIT_SYSTEMONE_API_KEY` and `LLMKIT_SYSTEMONE_MODEL` (and optionally
+`LLMKIT_SYSTEMONE_BASE_URL`), and takes `--threshold` (default 0.5) and
+`--budget` (the shared token limit):
+
+```bash
+go run ./examples/agent-guardrail --threshold 0.5 --budget 200000
+```
+
+Design points the program follows:
+
+- **Two `Ask`s, not one.** The request policy fires before each wire call and
+  the tool policy once per tool call, so their questions never share a hook.
+  One `Ask` carries several questions only where they share a hook.
+- **Read the belief through the accessor.** `resp.Noul(id)` fails with
+  `decide.ErrNotAsked` on a mistyped id; indexing `resp.Nouls` reads 0, which
+  the threshold treats as safe.
+- **Fail closed.** A failed `Ask` denies the call or aborts the run.
+- **One budget.** `agent.WithBudgetPool(pool)` charges the LLM's completions.
+  The observer on `decide.Observe` charges the decider's, so the run stops
+  with `agent.TruncBudgetPool` when LLM and decision spend together reach the
+  limit. `agent.Limits.TokenBudget` counts completions only, so it does not
+  see decision tokens.
+- **Replay.** Wrap the decider in `decide.Observe` with a recording sink and
+  replay the run with `decide.Replay` ([Replay](#replay)); without that, a
+  replayed run asks the policies' decider live again.
+
 ## TypeSafe limits and jaggedness
 
 - A request may total at most 64k tokens, and state plus the longest question

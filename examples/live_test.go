@@ -125,6 +125,23 @@ func TestLiveExamplesRun(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("agent-guardrail", func(t *testing.T) {
+		decide := livetest.ResolveDecide(t)
+		guardEnv := map[string]string{
+			"LLMKIT_SYSTEMONE_API_KEY":  decide.Key,
+			"LLMKIT_SYSTEMONE_MODEL":    decide.Model,
+			"LLMKIT_SYSTEMONE_BASE_URL": decide.BaseURL,
+		}
+		for k, v := range env {
+			guardEnv[k] = v
+		}
+		bin := buildExample(t, root, tmp, "agent-guardrail")
+		code, stdout, stderr := runExample(t, bin, nil, guardEnv)
+		if code != 0 {
+			t.Fatalf("exit %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		}
+	})
 }
 
 // runChatPaced runs the chat REPL with stdin on a pipe and paces line2
