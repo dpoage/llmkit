@@ -45,12 +45,13 @@ type Options struct {
 }
 
 // anthropicCeiling names every wire-gated field this adapter can put on the
-// wire: the Messages API has no seed parameter, so an effective profile
-// reporting Seed=true is refused at construction rather than silently
-// dropped.
+// wire: the Messages API has no seed parameter and the adapter does not map
+// ReasoningEffort, so an effective profile reporting either true is refused
+// at construction rather than silently dropped.
 var anthropicCeiling = llmkit.Capabilities{
 	StructuredOutput: true,
 	Thinking:         true,
+	ReasoningEffort:  false,
 	ToolChoice:       true,
 	StopSequences:    true,
 	TopP:             true,
@@ -852,6 +853,7 @@ func anthropicCapabilities(model string) llmkit.Capabilities {
 		PromptCaching:     true,
 		StructuredOutput:  true,
 		Thinking:          true,
+		ReasoningEffort:   false,
 		ToolChoice:        true,
 		Images:            true,
 		Documents:         true,

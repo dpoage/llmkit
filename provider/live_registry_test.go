@@ -38,6 +38,7 @@ var liveCases = []liveCase{
 	{Name: "error_bad_model", Doc: "an unknown model normalizes to ErrInvalidRequest"},
 	{Name: "usage_recorded", Doc: "Options.Observer receives the Completion event's Response.Usage on a bare New client, tagged with the lane's model"},
 	{Name: "attempt_events", Doc: "Options.Observer receives one Completion event plus N Attempt events sharing its SpanID (Q1: New's own completion emitter)"},
+	{Name: "reasoning_round_trip", Doc: "a thinking+tools turn, a no-tool turn, then a tools request: every request is accepted with the earlier reasoning replayed"},
 
 	// Capability-keyed cases: one per llmkit.Capabilities field.
 	{Name: "context_window", Gate: "ContextWindow", Doc: "an oversize prompt yields ErrContextTooLong when the window is known"},
@@ -45,6 +46,7 @@ var liveCases = []liveCase{
 	{Name: "prompt_caching", Gate: "PromptCaching", Doc: "a repeated prefix yields CacheReadInputTokens > 0 on the second call"},
 	{Name: "structured_output", Gate: "StructuredOutput", Doc: "ResponseSchema constrains the output to parseable JSON"},
 	{Name: "thinking", Gate: "Thinking", Doc: "Thinking returns BlockThinking and the block re-sends without ErrInvalidRequest"},
+	{Name: "reasoning_effort", Gate: "ReasoningEffort", Doc: "a request with Thinking.Effort low is accepted"},
 	{Name: "tool_choice", Gate: "ToolChoice", Doc: "none forbids calls, required forces one, named forces that name"},
 	{Name: "images", Gate: "Images", Doc: "an inline data-URI image block is accepted"},
 	{Name: "documents", Gate: "Documents", Doc: "an inline PDF block is accepted"},

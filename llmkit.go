@@ -57,6 +57,10 @@
 // [Usage.CacheReadInputTokens] and [Usage.CacheCreationInputTokens] are
 // informational subsets of InputTokens, never additions to it. A caller that
 // ignores the cache fields sees exactly the pre-caching numbers.
+// [Usage.OutputTokens] includes reasoning tokens; [Usage.ReasoningTokens] is
+// an informational subset, except where an endpoint counts reasoning outside
+// completion_tokens and total_tokens is not prompt+completion+reasoning.
+// [Usage.Estimated] marks counts computed because no usage was reported.
 // [Usage.ChargeableTokens] discounts cache reads by a weight for budget math;
 // cache-creation tokens stay at full weight.
 //
@@ -90,7 +94,8 @@
 // field belongs to one of four enforcement classes:
 //
 //   - DROPPED SILENTLY when false: the adapter omits the feature from the wire
-//     (StructuredOutput, Thinking, StopSequences, TopP, TopK, Seed).
+//     (StructuredOutput, Thinking, ReasoningEffort, StopSequences, TopP,
+//     TopK, Seed).
 //   - REFUSED PRE-WIRE: the adapter rejects the request with an error wrapping
 //     [ErrInvalidRequest] before the wire call (ToolChoice).
 //   - DECORATOR: provider.New installs a wrapping Client that follows the
@@ -202,16 +207,10 @@ const (
 	// only; the OpenAI file part accepts inline data only) are rejected
 	// with an error wrapping ErrInvalidRequest before any wire call.
 	BlockDocument BlockKind = "document"
-	// BlockThinking is a provider reasoning block (e.g. Anthropic extended
-	// thinking). Provider names the adapter that produced/signed it (e.g.
-	// "anthropic"); Raw carries the provider's wire block verbatim — opaque
-	// to llmkit's own logic, but validated by the adapter to carry a
-	// replayable payload before any wire call. An adapter re-emits a
-	// thinking block verbatim ONLY
-	// when its Provider matches the adapter — blocks from a foreign
-	// provider are silently dropped on the way out. For anthropic/google
-	// blocks Text additionally carries the thinking payload for readability;
-	// Raw remains authoritative for the round-trip.
+	// BlockThinking is a provider reasoning block. Provider names the adapter
+	// that produced it; Raw is its replay payload, validated before any wire
+	// call. An adapter re-sends a block only when Provider matches it; a
+	// foreign block leaves the outgoing request but stays in the history.
 	BlockThinking BlockKind = "thinking"
 )
 
@@ -228,8 +227,10 @@ const (
 // {"kind":"text","text":"…"} and a nil Raw never emits "raw":null.
 type Block struct {
 	Kind BlockKind `json:"kind"`
-	// Text holds text for BlockText and, informationally, the thinking
-	// payload for BlockThinking. Message.Text concatenates BlockText only.
+	// Text holds text for BlockText. For BlockThinking it holds the
+	// reasoning text only where the adapter extracts it (Anthropic thinking,
+	// Gemini thought parts, openai reasoning_content); otherwise "" (redacted
+	// thinking, openai reasoning_details only). Message.Text sums BlockText.
 	Text string `json:"text,omitempty"`
 	// MediaType is the MIME type of Data (image/document only).
 	MediaType string `json:"media_type,omitempty"`
@@ -244,14 +245,15 @@ type Block struct {
 	URL string `json:"url,omitempty"`
 	// Title is an optional document label (BlockDocument only).
 	Title string `json:"title,omitempty"`
-	// Provider names the adapter that produced/signed a BlockThinking block
-	// ("anthropic", "google"). See BlockThinking for the round-trip rule.
+	// Provider names the adapter that produced a BlockThinking block:
+	// "anthropic", "google", "openai" (first-party), or
+	// "openai-compatible:<host of BaseURL>" (host is case- and port-sensitive).
+	// A tag the sending adapter does not own drops from the request only.
 	Provider string `json:"provider,omitempty"`
-	// Raw carries a BlockThinking block's provider wire JSON verbatim: it is
-	// opaque to llmkit's own logic and forwarded as received, but adapters
-	// validate that it carries a replayable payload before any wire call.
-	// When the vendor SDK does not expose the original bytes (google), Raw
-	// is a faithful re-encoding of the parsed block.
+	// Raw is a BlockThinking block's replay payload; adapters validate it
+	// before any wire call. Anthropic: the wire block verbatim. Google: a
+	// re-encoding of the parsed part. openai tags: a canonical JSON object
+	// of reasoning_content and/or reasoning_details, not the wire bytes.
 	Raw json.RawMessage `json:"raw,omitempty"`
 }
 
@@ -263,8 +265,8 @@ type Block struct {
 //     documents). TextMessage builds the common single-text-block form.
 //   - assistant: Content holds any text and thinking blocks; ToolCalls holds
 //     tool-use requests. Either or both may be present. An assistant message
-//     that carries thinking blocks re-emits them verbatim on the next
-//     request (see BlockThinking for the per-provider rule).
+//     that carries thinking blocks re-sends those the adapter owns (see
+//     BlockThinking).
 //   - tool-result: ToolCallID identifies the call being answered, Content
 //     holds the (textual) result, and IsError marks a failed execution.
 //
@@ -411,14 +413,24 @@ type ToolCall struct {
 	Arguments json.RawMessage `json:"arguments,omitempty"`
 }
 
-// ThinkingConfig requests provider reasoning (Anthropic extended thinking,
-// Gemini thinkingConfig). Nil on Request.Thinking leaves reasoning off. On
-// providers that honor thinking, BudgetTokens must be positive and their
-// adapters reject anything else with an error wrapping ErrInvalidRequest;
-// providers without reasoning support (Capabilities.Thinking = false, e.g.
-// OpenAI adapters) drop the whole field and never see the budget.
+// ReasoningEffort is a coarse reasoning dial. The set is closed:
+// [EffortLow], [EffortMedium], [EffortHigh]; any other non-empty
+// ThinkingConfig.Effort is refused on every adapter.
+type ReasoningEffort string
+
+const (
+	EffortLow    ReasoningEffort = "low"
+	EffortMedium ReasoningEffort = "medium"
+	EffortHigh   ReasoningEffort = "high"
+)
+
+// ThinkingConfig requests provider reasoning by token budget, effort, or both.
+// Valid iff BudgetTokens > 0, or BudgetTokens == 0 and Effort is set. A
+// negative BudgetTokens is invalid even with Effort set. Where Thinking or
+// ReasoningEffort is true an invalid config wraps ErrInvalidRequest.
 type ThinkingConfig struct {
-	BudgetTokens int `json:"budget_tokens,omitempty"`
+	BudgetTokens int             `json:"budget_tokens,omitempty"`
+	Effort       ReasoningEffort `json:"effort,omitempty"`
 }
 
 // ToolChoiceMode enumerates how strongly the model is steered toward tool
@@ -468,9 +480,9 @@ type Request struct {
 	// default" (some models reject an explicit temperature). Use a pointer so
 	// callers can distinguish "0.0" from "unset".
 	Temperature *float64 `json:"temperature,omitempty"`
-	// Thinking requests provider reasoning. Nil means off. Adapters that do
-	// not support reasoning drop it silently and report Capabilities.Thinking
-	// = false. On Anthropic, combining Thinking with forced tool use (see
+	// Thinking requests provider reasoning. Nil means off. A profile with
+	// neither Capabilities.Thinking nor Capabilities.ReasoningEffort drops it
+	// silently. On Anthropic, combining Thinking with forced tool use (see
 	// [Request.ToolChoice] and [Request.ResponseSchema]) is refused pre-wire.
 	Thinking *ThinkingConfig `json:"thinking,omitempty"`
 	// ToolChoice steers tool use. Zero value = auto (never sent on the wire).
@@ -566,6 +578,17 @@ type Usage struct {
 	// prompt cache this call (Anthropic bills these at 1.25x). Only Anthropic
 	// reports this; it is zero elsewhere.
 	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens,omitempty"`
+	// ReasoningTokens is the reasoning share of OutputTokens: OpenAI
+	// reasoning_tokens, Gemini thoughtsTokenCount; 0 on Anthropic. Never add
+	// it to OutputTokens or ChargeableTokens. It can exceed OutputTokens when
+	// an endpoint counts it outside completion_tokens and total_tokens is not
+	// prompt+completion+reasoning (absent, or excluding reasoning).
+	ReasoningTokens int64 `json:"reasoning_tokens,omitempty"`
+	// Estimated is true when the openai, openai-compatible, or google adapter
+	// saw no usage object (absent or null; all-zero counts as reported) and
+	// estimated Input, Output and ReasoningTokens at bytes/4; cache counts are
+	// 0. The anthropic adapter never sets it.
+	Estimated bool `json:"estimated,omitempty"`
 }
 
 // ChargeableTokens returns the budget-relevant token count for this usage,
@@ -577,6 +600,8 @@ type Usage struct {
 //
 // Cache CREATION tokens are left at full weight (Anthropic bills them at
 // 1.25x; treating them as cheap would understate cost).
+//
+// ReasoningTokens is already inside OutputTokens and is not counted again.
 func (u Usage) ChargeableTokens(cacheReadWeight float64) int64 {
 	uncached := u.InputTokens - u.CacheReadInputTokens
 	if uncached < 0 {
@@ -586,16 +611,18 @@ func (u Usage) ChargeableTokens(cacheReadWeight float64) int64 {
 	return weighted + u.OutputTokens
 }
 
-// Add returns the field-wise sum of u and v across all four fields —
+// Add returns the field-wise sum of u and v across every Usage field —
 // the one summing rule every usage fold in this repository uses (the
 // agent Runner's run total, its JSON-repair fold, and the livetest
-// Tally). It does not mutate u or v.
+// Tally). Estimated is true when either operand's is. It does not mutate u or v.
 func (u Usage) Add(v Usage) Usage {
 	return Usage{
 		InputTokens:              u.InputTokens + v.InputTokens,
 		OutputTokens:             u.OutputTokens + v.OutputTokens,
 		CacheReadInputTokens:     u.CacheReadInputTokens + v.CacheReadInputTokens,
 		CacheCreationInputTokens: u.CacheCreationInputTokens + v.CacheCreationInputTokens,
+		ReasoningTokens:          u.ReasoningTokens + v.ReasoningTokens,
+		Estimated:                u.Estimated || v.Estimated,
 	}
 }
 
@@ -629,7 +656,8 @@ type Response struct {
 // invariant (Text equals the concatenation of BlockText blocks); the
 // surfaced text is appended so the history always carries what the caller
 // received. Think-only responses (Text == "") stay verbatim — no empty text
-// block is invented.
+// block is invented. The same holds for openai-adapter reasoning blocks:
+// dropping them breaks later turns on endpoints that require the replay.
 func (r Response) Message() Message {
 	msg := Message{Role: RoleAssistant, ToolCalls: r.ToolCalls}
 	switch {
@@ -654,13 +682,14 @@ func (r Response) Message() Message {
 //   - Dropped silently when false: the adapter omits the request feature
 //     from the wire (no error). Check the field before relying on the
 //     feature. Each provider type has a ceiling naming the wire-gated
-//     fields (StructuredOutput, Thinking, ToolChoice, StopSequences, TopP,
-//     TopK, Seed) it can actually put on the wire; an effective profile
-//     that reports true for a field above the ceiling is rejected at
-//     construction by provider.New with an error wrapping
+//     fields (StructuredOutput, Thinking, ReasoningEffort, ToolChoice,
+//     StopSequences, TopP, TopK, Seed) it can actually put on the wire; an
+//     effective profile that reports true for a field above the ceiling is
+//     rejected at construction by provider.New with an error wrapping
 //     ErrInvalidRequest, before any network call. Anthropic's ceiling
-//     excludes Seed; OpenAI and openai-compatible's ceiling excludes
-//     Thinking and TopK; Google's ceiling has no excluded field.
+//     excludes Seed and ReasoningEffort; OpenAI and openai-compatible's
+//     ceiling excludes Thinking and TopK; Google's ceiling has no excluded
+//     field.
 //   - Refused pre-wire: the adapter rejects the request with an error
 //     wrapping ErrInvalidRequest before any wire call.
 //   - Decorator: provider.New installs a wrapping Client whose behavior
@@ -689,10 +718,16 @@ type Capabilities struct {
 	// enforcement). When true, adapters honor the schema natively
 	// (grammar-constrained decoding / synthetic forced-output tool).
 	StructuredOutput bool
-	// Dropped silently when false: Request.Thinking is omitted from the wire
-	// and no BlockThinking blocks are returned. When true, the adapter
-	// forwards the reasoning budget and thinking blocks round-trip.
+	// Dropped silently when false: ThinkingConfig.BudgetTokens is omitted from
+	// the wire. Reasoning an endpoint returns anyway (OpenAI-compatible
+	// reasoning_content / reasoning_details) is surfaced as BlockThinking and
+	// round-tripped regardless.
 	Thinking bool
+	// Dropped silently when false: ThinkingConfig.Effort is omitted from the
+	// wire. When true, the adapter maps it to the vendor's effort parameter
+	// (OpenAI reasoning_effort, Gemini 3 thinkingLevel); Google sends Effort
+	// alone when Thinking is also true.
+	ReasoningEffort bool
 	// Refused pre-wire: any explicit Request.ToolChoice mode other than auto
 	// makes the adapter return an error wrapping ErrInvalidRequest before
 	// the wire call (auto stays allowed — dropping an explicit "none" would

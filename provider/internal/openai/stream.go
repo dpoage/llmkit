@@ -2,7 +2,6 @@ package openai
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -22,15 +21,16 @@ var _ llmkit.StreamingClient = (*openaiAdapter)(nil)
 // (Thinking); each delta.tool_calls entry → DeltaToolCall with the vendor's
 // wire index renumbered to the call's position in Response.ToolCalls. Refusal
 // deltas emit nothing — the final response normalizes them exactly as
-// Complete does. The accumulated completion goes through the same toResponse
-// normalizer Complete uses, so the returned Response is what Complete
-// would have returned for the same wire exchange.
+// Complete does. reasoning_content and reasoning_details accumulate for
+// every chunk, fn or not, into one BlockThinking built as Complete builds
+// it; only reasoning_content emits a delta, so a reasoning_details-only
+// chunk emits none. toResponse is the normalizer Complete uses.
 //
 // A non-nil fn error cancels the stream: it is returned wrapped as
 // "llmkit: stream fn: ..." with a zero Response. Open and transport errors
 // go through the same error normalization as Complete.
 func (o *openaiAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(llmkit.Delta) error) (llmkit.Response, error) {
-	ctx, _ = adapter.WithWire(ctx)
+	ctx, wire := adapter.WithWire(ctx)
 	params, err := o.buildParams(req)
 	if err != nil {
 		return llmkit.Response{}, err
@@ -43,8 +43,13 @@ func (o *openaiAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(
 
 	var acc openai.ChatCompletionAccumulator
 	calls := newToolCallTracker()
+	var reason reasoningAcc
+	usageReported := false
 	for stream.Next() {
 		chunk := stream.Current()
+		// The accumulator never sets the folded completion's JSON.Usage, so
+		// usage presence is read per chunk.
+		usageReported = usageReported || chunk.JSON.Usage.Valid()
 		if !acc.AddChunk(chunk) {
 			_ = stream.Close()
 			return llmkit.Response{}, &llmkit.APIError{
@@ -53,13 +58,14 @@ func (o *openaiAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(
 				Message:  "stream chunk does not extend the accumulated completion",
 			}
 		}
-		if fn == nil {
-			continue
-		}
 		for _, ch := range chunk.Choices {
 			if ch.Index != 0 {
 				// The normalizer surfaces choices[0] only; the deltas must
 				// match the final Response, so other choices never emit.
+				continue
+			}
+			reason.add(ch.Delta.JSON.ExtraFields)
+			if fn == nil {
 				continue
 			}
 			for _, d := range deltas(ch.Delta, calls) {
@@ -80,7 +86,7 @@ func (o *openaiAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(
 		return llmkit.Response{}, o.normalizeErr(ctx, errors.New("stream ended before finish_reason"))
 	}
 	compactGhostToolCalls(&acc.ChatCompletion)
-	return o.toResponse(&acc.ChatCompletion), nil
+	return o.toResponse(&acc.ChatCompletion, reason.result(), wire, usageReported), nil
 }
 
 // compactGhostToolCalls drops never-populated entries the accumulator
@@ -112,14 +118,8 @@ func deltas(d openai.ChatCompletionChunkChoiceDelta, calls *toolCallTracker) []l
 	// it as an extra delta property, which the SDK keeps (raw JSON value)
 	// in JSON.ExtraFields — present but flagged invalid, so Valid() is
 	// false even for a value. Null and absent stay silent.
-	if f, ok := d.JSON.ExtraFields["reasoning_content"]; ok {
-		raw := f.Raw()
-		if raw != "" && raw != "null" {
-			var text string
-			if json.Unmarshal([]byte(raw), &text) == nil && text != "" {
-				out = append(out, llmkit.Delta{Kind: llmkit.DeltaThinking, Thinking: text})
-			}
-		}
+	if text := extraString(d.JSON.ExtraFields, keyReasoningContent); text != "" {
+		out = append(out, llmkit.Delta{Kind: llmkit.DeltaThinking, Thinking: text})
 	}
 	if d.Content != "" {
 		out = append(out, llmkit.Delta{Kind: llmkit.DeltaText, Text: d.Content})

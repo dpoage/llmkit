@@ -224,25 +224,27 @@ func TestLiveMatrix(t *testing.T) {
 // --- case bodies ------------------------------------------------------------
 
 var liveCaseBodies = map[string]func(t *testing.T, lc *liveClient){
-	"text_usage":          caseTextUsage,
-	"tool_round_trip":     caseToolRoundTrip,
-	"max_tokens":          caseMaxTokens,
-	"error_bad_key":       caseErrorBadKey,
-	"error_bad_model":     caseErrorBadModel,
-	"usage_recorded":      caseUsageRecorded,
-	"attempt_events":      caseAttemptEvents,
-	"context_window":      caseContextWindow,
-	"parallel_tool_calls": caseParallelToolCalls,
-	"prompt_caching":      casePromptCaching,
-	"structured_output":   caseStructuredOutput,
-	"thinking":            caseThinking,
-	"tool_choice":         caseToolChoice,
-	"images":              caseImages,
-	"documents":           caseDocuments,
-	"stop_sequences":      caseStopSequences,
-	"top_p":               caseTopP,
-	"top_k":               caseTopK,
-	"seed":                caseSeed,
+	"text_usage":           caseTextUsage,
+	"tool_round_trip":      caseToolRoundTrip,
+	"reasoning_round_trip": caseReasoningRoundTrip,
+	"max_tokens":           caseMaxTokens,
+	"error_bad_key":        caseErrorBadKey,
+	"error_bad_model":      caseErrorBadModel,
+	"usage_recorded":       caseUsageRecorded,
+	"attempt_events":       caseAttemptEvents,
+	"context_window":       caseContextWindow,
+	"parallel_tool_calls":  caseParallelToolCalls,
+	"prompt_caching":       casePromptCaching,
+	"structured_output":    caseStructuredOutput,
+	"thinking":             caseThinking,
+	"reasoning_effort":     caseReasoningEffort,
+	"tool_choice":          caseToolChoice,
+	"images":               caseImages,
+	"documents":            caseDocuments,
+	"stop_sequences":       caseStopSequences,
+	"top_p":                caseTopP,
+	"top_k":                caseTopK,
+	"seed":                 caseSeed,
 }
 
 func caseTextUsage(t *testing.T, lc *liveClient) {
@@ -313,6 +315,62 @@ func caseToolRoundTrip(t *testing.T, lc *liveClient) {
 		t.Fatalf("final answer %q does not quote the file's second line", final.Text)
 	}
 	lc.finish(final, err)
+}
+
+// caseReasoningRoundTrip: endpoints enforcing the reasoning replay rule (DeepSeek
+// thinking mode) reject the last request unless every earlier turn replays its reasoning.
+func caseReasoningRoundTrip(t *testing.T, lc *liveClient) {
+	lookup := llmkit.ToolDef{
+		Name:        "lookup",
+		Description: "Looks up a fact by key and returns it.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"key":{"type":"string"}},"required":["key"]}`),
+	}
+	req := llmkit.Request{
+		Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser,
+			"Use the lookup tool with key \"capital_of_france\", then tell me what it returned.")},
+		Tools:     []llmkit.ToolDef{lookup},
+		Thinking:  &llmkit.ThinkingConfig{BudgetTokens: 1024},
+		MaxTokens: 2048,
+	}
+	first, err := lc.complete(req)
+	if err != nil {
+		t.Fatalf("thinking+tools turn: %v", err)
+	}
+	hasThink := false
+	for _, b := range first.Blocks {
+		hasThink = hasThink || b.Kind == llmkit.BlockThinking
+	}
+	if !hasThink {
+		t.Skipf("reasoning_round_trip: turn 1 returned no BlockThinking on %s", lc.sess.Lane.Name)
+	}
+	if len(first.ToolCalls) == 0 {
+		t.Fatalf("turn 1 stop = %q with no tool call; want a lookup request", first.StopReason)
+	}
+
+	// No-tool-call turn: the request keeps the same Tools (a tool history without
+	// tools is a 400 on some endpoints) and asks for the final answer.
+	req.Messages = append(req.Messages, first.Message(), llmkit.Message{
+		Role:       llmkit.RoleToolResult,
+		ToolCallID: first.ToolCalls[0].ID,
+		Content: []llmkit.Block{llmkit.Text(
+			"Paris. You now have the answer: reply with it directly and do not call any tool.")},
+	})
+	second, err := lc.complete(req)
+	if err != nil {
+		t.Fatalf("final-answer turn after the tool result: %v", err)
+	}
+	if len(second.ToolCalls) > 0 {
+		t.Fatalf("turn 2 called tool %q; the case needs a turn without a tool call", second.ToolCalls[0].Name)
+	}
+
+	// Tools request: every earlier assistant turn must replay its reasoning.
+	req.Messages = append(req.Messages, second.Message(),
+		llmkit.TextMessage(llmkit.RoleUser, "Now look up key \"capital_of_spain\" with the lookup tool."))
+	third, err := lc.complete(req)
+	if err != nil {
+		t.Fatalf("tools request after the no-tool turn: %v", err)
+	}
+	lc.finish(third, err)
 }
 
 func caseMaxTokens(t *testing.T, lc *liveClient) {
@@ -597,6 +655,36 @@ func caseThinking(t *testing.T, lc *liveClient) {
 		t.Fatalf("re-sending the thinking turn failed: %v", err)
 	}
 	lc.finish(second, err)
+}
+
+func caseReasoningEffort(t *testing.T, lc *liveClient) {
+	resp, err := lc.complete(llmkit.Request{
+		Messages:  []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "Reply with exactly: OK")},
+		Thinking:  &llmkit.ThinkingConfig{Effort: llmkit.EffortLow},
+		MaxTokens: 2048,
+	})
+	if err != nil {
+		t.Fatalf("Effort low request rejected: %v", err)
+	}
+	if strings.TrimSpace(llmkit.StripThinkBlocks(resp.Text)) == "" {
+		t.Fatalf("empty answer: %q", resp.Text)
+	}
+	var wire struct {
+		Usage struct {
+			Details struct {
+				Reasoning int64 `json:"reasoning_tokens"`
+			} `json:"completion_tokens_details"`
+		} `json:"usage"`
+		Metadata struct {
+			Thoughts int64 `json:"thoughtsTokenCount"`
+		} `json:"usageMetadata"`
+	}
+	exs := lc.tr.Exchanges()
+	_ = json.Unmarshal([]byte(exs[len(exs)-1].Response.Body), &wire)
+	if reported := wire.Usage.Details.Reasoning + wire.Metadata.Thoughts; resp.Usage.ReasoningTokens != reported || resp.Usage.ReasoningTokens > resp.Usage.OutputTokens {
+		t.Fatalf("ReasoningTokens = %d, wire reported %d, OutputTokens %d", resp.Usage.ReasoningTokens, reported, resp.Usage.OutputTokens)
+	}
+	lc.finish(resp, err)
 }
 
 func caseToolChoice(t *testing.T, lc *liveClient) {

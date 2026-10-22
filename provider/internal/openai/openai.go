@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 
 	"github.com/dpoage/llmkit"
@@ -27,6 +28,9 @@ type openaiAdapter struct {
 	model    string
 	caps     llmkit.Capabilities
 	provider string // "openai" or "openai-compatible", for error tagging
+	// thinkingTag is the Provider of the BlockThinking blocks this adapter
+	// produces and re-emits.
+	thinkingTag string
 	// requireBoolAdditionalProps forces every object/array-valued
 	// "additionalProperties" in outbound tool-parameter and response_format
 	// schemas down to a permissive boolean — strict openai-compatible schema
@@ -63,10 +67,12 @@ type Options struct {
 // wire for both the first-party and openai-compatible profiles. The Chat
 // Completions API has no reasoning-budget parameter (Thinking) and no
 // top_k, so an effective profile reporting either true is refused at
-// construction rather than silently mismapped.
+// construction rather than silently mismapped. ReasoningEffort maps to
+// reasoning_effort.
 var openAICeiling = llmkit.Capabilities{
 	StructuredOutput: true,
 	Thinking:         false,
+	ReasoningEffort:  true,
 	ToolChoice:       true,
 	StopSequences:    true,
 	TopP:             true,
@@ -124,6 +130,7 @@ func New(model string, opts Options) (llmkit.Client, error) {
 		model:                      model,
 		caps:                       caps,
 		provider:                   provider,
+		thinkingTag:                thinkingTag(opts.Compatible, opts.BaseURL),
 		requireBoolAdditionalProps: requireBoolAdditionalProps,
 	}, nil
 }
@@ -133,7 +140,7 @@ func (o *openaiAdapter) Capabilities() llmkit.Capabilities { return o.caps }
 func (o *openaiAdapter) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	// Per-call wire recorder: normalizeErr tells a failure that sent
 	// nothing from one that did.
-	ctx, _ = adapter.WithWire(ctx)
+	ctx, wire := adapter.WithWire(ctx)
 	params, err := o.buildParams(req)
 	if err != nil {
 		return llmkit.Response{}, err
@@ -149,7 +156,7 @@ func (o *openaiAdapter) Complete(ctx context.Context, req llmkit.Request) (llmki
 	if cc == nil || len(cc.Choices) == 0 {
 		return llmkit.Response{}, o.noCompletion(ctx, cc, adapter.ResponseHeader(httpResp))
 	}
-	return o.toResponse(cc), nil
+	return o.toResponse(cc, reasoningFromMessage(cc.Choices[0].Message.JSON.ExtraFields), wire, cc.JSON.Usage.Valid()), nil
 }
 
 // buildParams applies the shared rules once via adapter.Prepare and maps the
@@ -177,16 +184,18 @@ func (o *openaiAdapter) buildParams(req llmkit.Request) (openai.ChatCompletionNe
 	if p.Seed != nil {
 		params.Seed = openai.Int(*p.Seed)
 	}
-	// Prepared.TopK and Prepared.Thinking are always nil here: the Chat
-	// Completions API has no top_k, and reasoning_effort is a coarse dial
-	// rather than a token budget — never mapped. Every openai profile reports
-	// both false, and Prepare drops both.
+	// Prepared.TopK is always nil (no top_k in Chat Completions) and
+	// Prepared.Thinking carries Effort only: the ceiling excludes Thinking,
+	// so no budget survives Prepare.
+	if p.Thinking != nil {
+		params.ReasoningEffort = shared.ReasoningEffort(p.Thinking.Effort)
+	}
 
 	msgs := make([]openai.ChatCompletionMessageParamUnion, 0, len(p.Messages)+1)
 	if p.System != "" {
 		msgs = append(msgs, openai.SystemMessage(p.System))
 	}
-	converted, err := toOpenAIMessages(o.provider, p.Messages)
+	converted, err := toOpenAIMessages(o.provider, o.thinkingTag, p.Messages)
 	if err != nil {
 		return openai.ChatCompletionNewParams{}, err
 	}
@@ -271,11 +280,11 @@ func applyOpenAIToolChoice(params *openai.ChatCompletionNewParams, tc llmkit.Too
 // toOpenAIMessages converts normalized messages into Chat Completions
 // messages. Content blocks map in order: text → text part, image →
 // image_url part, document → file part; assistant and tool-result messages
-// carry their concatenated text. Every role and block-kind rule
-// (adapter.Prepare) already holds — this is a pure mapping except for the
-// vendor-specific constraint the file part imposes: no URL source for
-// documents (openAIUserParts).
-func toOpenAIMessages(provider string, msgs []llmkit.Message) ([]openai.ChatCompletionMessageParamUnion, error) {
+// carry their concatenated text. An assistant BlockThinking tagged with
+// thinkingTag re-emits its Raw keys on that message (refused when Raw holds
+// none); other thinking blocks are dropped. Prepare's role and block rules
+// already hold; the file part also refuses URL-sourced documents.
+func toOpenAIMessages(provider, thinkingTag string, msgs []llmkit.Message) ([]openai.ChatCompletionMessageParamUnion, error) {
 	out := make([]openai.ChatCompletionMessageParamUnion, 0, len(msgs))
 	for _, m := range msgs {
 		switch m.Role {
@@ -314,6 +323,21 @@ func toOpenAIMessages(provider string, msgs []llmkit.Message) ([]openai.ChatComp
 						},
 					},
 				})
+			}
+			extra := map[string]any{}
+			for _, b := range m.Content {
+				if b.Kind != llmkit.BlockThinking || b.Provider != thinkingTag {
+					continue
+				}
+				fields, ok := emitFields(b.Raw)
+				if !ok {
+					return nil, adapter.Refuse(provider,
+						"thinking block tagged "+thinkingTag+": Raw must be a JSON object with a non-empty reasoning_content string or reasoning_details array", nil)
+				}
+				maps.Copy(extra, fields)
+			}
+			if len(extra) > 0 {
+				am.SetExtraFields(extra)
 			}
 			out = append(out, openai.ChatCompletionMessageParamUnion{OfAssistant: &am})
 		case llmkit.RoleToolResult:
@@ -382,7 +406,9 @@ func openAIUserParts(provider string, m llmkit.Message) ([]openai.ChatCompletion
 	return parts, nil
 }
 
-func (o *openaiAdapter) toResponse(cc *openai.ChatCompletion) llmkit.Response {
+// toResponse normalizes cc. rs is choice 0's reasoning payload; usageReported
+// is whether the wire carried a usage object (false: EstimateUsage fills it).
+func (o *openaiAdapter) toResponse(cc *openai.ChatCompletion, rs reasoning, wire *adapter.Wire, usageReported bool) llmkit.Response {
 	var resp llmkit.Response
 	if len(cc.Choices) > 0 {
 		choice := cc.Choices[0]
@@ -395,6 +421,9 @@ func (o *openaiAdapter) toResponse(cc *openai.ChatCompletion) llmkit.Response {
 			resp.Text = choice.Message.Refusal
 		} else {
 			resp.Text = choice.Message.Content
+		}
+		if thinking, ok := rs.block(o.thinkingTag); ok {
+			resp.Blocks = append(resp.Blocks, thinking)
 		}
 		if resp.Text != "" {
 			resp.Blocks = append(resp.Blocks, llmkit.Block{Kind: llmkit.BlockText, Text: resp.Text})
@@ -413,6 +442,16 @@ func (o *openaiAdapter) toResponse(cc *openai.ChatCompletion) llmkit.Response {
 			resp.StopReason = mapOpenAIStop(choice.FinishReason, len(resp.ToolCalls) > 0)
 		}
 	}
+	if !usageReported {
+		resp.Usage = adapter.EstimateUsage(wire, resp)
+		return resp
+	}
+	// xAI counts reasoning outside completion_tokens, OpenAI inside. Fold it
+	// in only when total_tokens proves the xAI shape; with no total, never.
+	out := cc.Usage.CompletionTokens
+	if r := cc.Usage.CompletionTokensDetails.ReasoningTokens; r > 0 && cc.Usage.TotalTokens == cc.Usage.PromptTokens+out+r {
+		out += r
+	}
 	// prompt_tokens already INCLUDES cached tokens (OpenAI convention),
 	// matching the normalized Usage semantics directly. Caching is automatic
 	// server-side for OpenAI; prompt_tokens_details.cached_tokens reports the
@@ -421,8 +460,9 @@ func (o *openaiAdapter) toResponse(cc *openai.ChatCompletion) llmkit.Response {
 	// zero — exactly the "no cache activity" value.
 	resp.Usage = llmkit.Usage{
 		InputTokens:          cc.Usage.PromptTokens,
-		OutputTokens:         cc.Usage.CompletionTokens,
+		OutputTokens:         out,
 		CacheReadInputTokens: cc.Usage.PromptTokensDetails.CachedTokens,
+		ReasoningTokens:      cc.Usage.CompletionTokensDetails.ReasoningTokens,
 	}
 	return resp
 }
@@ -547,6 +587,11 @@ func decodeSSEError(data []byte) (typ, msg string) {
 //     support neither structured outputs nor function calling at all
 //     (https://platform.openai.com/docs/models/o1-mini), so their
 //     ToolChoice and ParallelToolCalls are false too.
+//   - https://platform.openai.com/docs/guides/reasoning and
+//     https://developers.openai.com/api/docs/models/gpt-5 — reasoning_effort
+//     (low/medium/high) is accepted by gpt-5, o1, o3 / o3-mini and o4-mini;
+//     o1-mini and o1-preview do not take it, so their ReasoningEffort is
+//     false. gpt-5.x dotted siblings are unknown models (false) until keyed.
 //
 // The table is matched by LONGEST key with a "-" segment boundary
 // (adapter.BestMatchingFamily), so "gpt-4-turbo" and "gpt-4.1" win over the
@@ -574,7 +619,7 @@ func firstPartyCaps(window int, parallel, caching, structured, toolChoice bool) 
 		ParallelToolCalls: parallel,
 		PromptCaching:     caching,
 		StructuredOutput:  structured,
-		Thinking:          false, // reasoning_effort is a coarse dial, not a budget — never mapped
+		Thinking:          false, // Chat Completions has no reasoning budget
 		ToolChoice:        toolChoice,
 		Images:            true,
 		Documents:         true,
@@ -585,8 +630,14 @@ func firstPartyCaps(window int, parallel, caching, structured, toolChoice bool) 
 	}
 }
 
+// reasoningCaps marks a first-party profile as accepting reasoning_effort.
+func reasoningCaps(c llmkit.Capabilities) llmkit.Capabilities {
+	c.ReasoningEffort = true
+	return c
+}
+
 var openAIModelTable = []openAIModelCaps{
-	{"gpt-5", firstPartyCaps(400_000, true, true, true, true)},
+	{"gpt-5", reasoningCaps(firstPartyCaps(400_000, true, true, true, true))},
 	{"gpt-4.1", firstPartyCaps(1_047_576, true, true, true, true)},
 	// gpt-4.5: a dotted sibling of gpt-4 — segment matching can never
 	// inherit the gpt-4 entry, so it carries its own key.
@@ -607,9 +658,9 @@ var openAIModelTable = []openAIModelCaps{
 	{"gpt-3.5-turbo", firstPartyCaps(16_385, true, false, false, true)},
 	{"o1-mini", firstPartyCaps(128_000, false, true, false, false)},
 	{"o1-preview", firstPartyCaps(128_000, false, true, false, false)},
-	{"o1", firstPartyCaps(200_000, true, true, true, true)},
-	{"o3", firstPartyCaps(200_000, true, true, true, true)},
-	{"o4-mini", firstPartyCaps(200_000, true, true, true, true)},
+	{"o1", reasoningCaps(firstPartyCaps(200_000, true, true, true, true))},
+	{"o3", reasoningCaps(firstPartyCaps(200_000, true, true, true, true))},
+	{"o4-mini", reasoningCaps(firstPartyCaps(200_000, true, true, true, true))},
 }
 
 func openAICapabilities(model string) llmkit.Capabilities {
@@ -628,11 +679,12 @@ func openAICapabilities(model string) llmkit.Capabilities {
 // the endpoint reports it (e.g. MiniMax), so cache hits are ledgered even
 // with PromptCaching=false. Callers can override.
 //
-// Thinking is false (this adapter does not map Request.Thinking onto
-// reasoning_effort) and TopK is false (the Chat Completions API has no
-// top_k). Tool choice, images, documents, stop sequences, top_p, and seed
-// are part of the base Chat Completions contract and are sent when
-// requested.
+// Thinking is false (Chat Completions has no reasoning budget),
+// ReasoningEffort is false (the endpoint behind an arbitrary model name may
+// reject reasoning_effort; override to enable) and TopK is false (the Chat
+// Completions API has no top_k). Tool choice, images, documents, stop
+// sequences, top_p, and seed are part of the base Chat Completions contract
+// and are sent when requested.
 //
 // The model parameter is accepted for symmetry with other capability
 // constructors; no per-model lookup is available for arbitrary endpoints,
@@ -644,6 +696,7 @@ func openAICompatibleCapabilities(model string) llmkit.Capabilities {
 		PromptCaching:     false,
 		StructuredOutput:  false,
 		Thinking:          false,
+		ReasoningEffort:   false,
 		ToolChoice:        true,
 		Images:            true,
 		Documents:         true,

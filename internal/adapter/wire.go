@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"sync/atomic"
 )
@@ -17,12 +18,14 @@ import (
 // and never re-encode it.
 
 // Wire records what one adapter call put on the transport: how many
-// requests reached RoundTrip and the status of the last response. A Wire
-// belongs to exactly one call — the adapters are shared across goroutines,
-// so the recorder rides the call's context, never the adapter.
+// requests reached RoundTrip, the status of the last response, and how many
+// body bytes the last request sent. A Wire belongs to exactly one call: the
+// adapters are shared across goroutines, so the recorder rides the call's
+// context, never the adapter.
 type Wire struct {
 	requests atomic.Int64
 	status   atomic.Int64
+	body     atomic.Int64
 }
 
 type wireKey struct{}
@@ -43,6 +46,10 @@ func (w *Wire) Requests() int { return int(w.requests.Load()) }
 // returned, or 0 when none returned one. Last write wins, so a redirect
 // chain leaves the final status the SDK itself saw.
 func (w *Wire) Status() int { return int(w.status.Load()) }
+
+// RequestBytes reports how many body bytes the transport read from the most
+// recent request; a redirect that resends the body restarts the count.
+func (w *Wire) RequestBytes() int64 { return w.body.Load() }
 
 func wireFrom(ctx context.Context) *Wire {
 	w, _ := ctx.Value(wireKey{}).(*Wire)
@@ -72,20 +79,43 @@ type wireTransport struct {
 }
 
 func (t *wireTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	orig := req
 	w := wireFrom(req.Context())
 	if w != nil {
 		// Count on entry: a request that dies dialing was still sent.
 		w.requests.Add(1)
+		w.body.Store(0)
+		if req.Body != nil && req.Body != http.NoBody {
+			counted := *req
+			counted.Body = &countingBody{ReadCloser: req.Body, n: &w.body}
+			req = &counted
+		}
 	}
 	rt := t.rt
 	if rt == nil {
 		rt = http.DefaultTransport
 	}
 	resp, err := rt.RoundTrip(req)
-	if resp != nil && w != nil {
-		w.status.Store(int64(resp.StatusCode))
+	if resp != nil {
+		if resp.Request == req {
+			resp.Request = orig
+		}
+		if w != nil {
+			w.status.Store(int64(resp.StatusCode))
+		}
 	}
 	return resp, err
+}
+
+type countingBody struct {
+	io.ReadCloser
+	n *atomic.Int64
+}
+
+func (b *countingBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	b.n.Add(int64(n))
+	return n, err
 }
 
 // WireClient returns a copy of base whose transport is [WireTransport]
