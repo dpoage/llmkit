@@ -148,7 +148,7 @@ type barrierTool struct {
 
 func (b *barrierTool) Def() llmkit.ToolDef { return echoTool{name: b.name}.Def() }
 
-func (b *barrierTool) Run(_ context.Context, _ json.RawMessage) (string, error) {
+func (b *barrierTool) Run(_ context.Context, _ json.RawMessage) ([]llmkit.Block, error) {
 	b.mu.Lock()
 	b.seen[b.name]++
 	ord := (b.seen[b.name] - 1) / b.n
@@ -161,7 +161,7 @@ func (b *barrierTool) Run(_ context.Context, _ json.RawMessage) (string, error) 
 	b.mu.Unlock()
 	wg.Done()
 	wg.Wait()
-	return "ok", nil
+	return []llmkit.Block{llmkit.Text("ok")}, nil
 }
 
 // perConversationClient answers by how many tool results the request carries.
