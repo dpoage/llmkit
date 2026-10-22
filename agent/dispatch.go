@@ -289,10 +289,11 @@ func (res toolResult) message(callID string) llmkit.Message {
 	if res.isErr {
 		return llmkit.ToolError(callID, res.result)
 	}
+	msg := llmkit.ToolResult(callID, res.result)
 	if res.content != nil {
-		return llmkit.Message{Role: llmkit.RoleToolResult, Content: res.content, ToolCallID: callID}
+		msg.Content = res.content
 	}
-	return llmkit.ToolResult(callID, res.result)
+	return msg
 }
 
 // executeTools runs calls and returns one result per executed call, in the

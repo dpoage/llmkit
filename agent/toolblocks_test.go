@@ -301,3 +301,67 @@ func TestReplayTool_ServesRecordedResultAsTextBlock(t *testing.T) {
 		t.Errorf("replayed tool-result Content = %+v, want one text block with the recorded result", got.Content)
 	}
 }
+
+// emptyIDTool's outcome is chosen by name, one per tool-result path: the
+// fixture behind TestToolResult_EmptyCallIDPanicsAsBase. "denied" is refused
+// by the test's ToolPolicy and never runs.
+type emptyIDTool struct{ name string }
+
+func (e emptyIDTool) Def() llmkit.ToolDef {
+	return llmkit.ToolDef{Name: e.name, Description: "empty id " + e.name, Parameters: json.RawMessage(`{"type":"object"}`)}
+}
+
+func (e emptyIDTool) Run(context.Context, json.RawMessage) ([]llmkit.Block, error) {
+	switch e.name {
+	case "text", "denied":
+		return textBlocks("ok"), nil
+	case "nil":
+		return nil, nil
+	case "empty":
+		return []llmkit.Block{}, nil
+	case "fail":
+		return nil, errors.New("disk on fire")
+	case "boom":
+		panic("tool exploded")
+	}
+	return nil, fmt.Errorf("unexpected tool %q", e.name)
+}
+
+// TestToolResult_EmptyCallIDPanicsAsBase pins that a tool call with an empty
+// ID panics with the c381345 panic value on every tool-result path —
+// success with content, nil, empty, error, panic, denial — sequential and
+// parallel: the block-carrying result keeps llmkit.ToolResult's check.
+func TestToolResult_EmptyCallIDPanicsAsBase(t *testing.T) {
+	cases := []struct{ tool, want string }{
+		{"text", "llmkit.ToolResult: empty callID"},
+		{"nil", "llmkit.ToolResult: empty callID"},
+		{"empty", "llmkit.ToolResult: empty callID"},
+		{"fail", "llmkit.ToolError: empty callID"},
+		{"boom", "llmkit.ToolError: empty callID"},
+		{"denied", "llmkit.ToolError: empty callID"},
+	}
+	policy := ToolPolicyFunc(func(_ context.Context, call *llmkit.ToolCall) error {
+		if call.Name == "denied" {
+			return errors.New("not allowed")
+		}
+		return nil
+	})
+	for _, parallel := range []bool{false, true} {
+		for _, c := range cases {
+			t.Run(fmt.Sprintf("%s/parallel=%v", c.tool, parallel), func(t *testing.T) {
+				opts := []Option{WithToolPolicy(policy)}
+				if parallel {
+					opts = append(opts, WithParallelTools())
+				}
+				fc := newFakeClient(toolResp("", c.tool, `{}`, 1, 1), textResp("done", 1, 1))
+				r := NewRunner(fc, []Tool{emptyIDTool{c.tool}}, "sys", opts...)
+				defer func() {
+					if got := recover(); got != any(c.want) {
+						t.Errorf("panic = %#v, want %#v", got, c.want)
+					}
+				}()
+				_, _ = r.Run(context.Background(), "task")
+			})
+		}
+	}
+}
