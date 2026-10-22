@@ -24,11 +24,30 @@ entry below is marked.
   requires the legend and probabilities.
 - `decide`: `Normalize(state, qs)` validates a state and questions and returns
   them in the root `llmkit.DecisionQuestion` vocabulary, sorted by id, so a
-  backend renders its own request from one validated form. `decide.DecisionAnswers`
-  converts a `Response` to `llmkit.DecisionAnswer`.
+  backend renders its own request from one validated form.
+- `decide`: `Observe(d Decider, obs llmkit.Observer) Decider` wraps any
+  `Decider` and emits one `llmkit.KindDecision` event per `Ask` (RunID and
+  Step from the context, sorted questions and answers, usage, duration, the
+  error text on failure). An `Ask` that fails `Normalize` emits nothing, and a
+  nil `obs` returns `d` unchanged. It reads an optional
+  `Identity() llmkit.Identity` method for `DecisionEvent.Backend` and `Model`,
+  and the wrapper forwards it. `*systemone.Client` now implements
+  `Identity()` (`{Provider: "systemone", Model: <configured model>}`).
+- `decide`: `Replay(src llmkit.Source, run llmkit.RunID) (Decider, error)`
+  builds a `Decider` that answers from the `KindDecision` events recorded for
+  `run`, matching each `Ask` to the earliest unconsumed decision with the same
+  Step and question-id set, so a recorded `ToolPolicy` replays through
+  `agent.NewReplayClient` with no network. It does not compare the state and
+  does not report unconsumed decisions. `decide.ErrReplayDiverged` and
+  `decide.ErrReplayedFailure` are the errors it returns.
 
 ### Changed
 
+- **Breaking:** `systemone.Config.Observer` is removed, and `systemone.Client`
+  no longer emits events. Wrap the client in `decide.Observe(client, obs)` for
+  the same `DecisionEvent` per `Ask`; `Backend` and `Model` come from the
+  client's `Identity()`. An already-cancelled context still emits one event
+  with `Err` set; a validation refusal still emits nothing.
 - **Breaking:** the System One client moved out of `decide` into the new
   package `decide/systemone`; `decide` is now the backend-neutral decision
   vocabulary and holds no HTTP code. `decide.New`, `decide.Config`, and

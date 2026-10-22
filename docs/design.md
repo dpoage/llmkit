@@ -232,7 +232,8 @@ run.go) spans 38 symbols and measures ~1120 with tests, ~250 without,
 under the same rule — the decision is insensitive to the counting rule.
 (`decide` contributed zero in the original measurement — it sat on the
 `Recorder` seam — and is now an Observer consumer in its own right:
-`systemone.Config.Observer` emits one `DecisionEvent` per `Ask` that reaches the wire.)
+`decide.Observe` wraps any `Decider` and emits one `DecisionEvent` per `Ask`
+that passes validation, and `decide.Replay` answers from those events.)
 
 The decisive reason a leaf cannot work is the direction of the type
 dependency, not taste. The payloads embed root's own wire types —

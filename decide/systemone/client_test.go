@@ -583,11 +583,11 @@ func TestAsk_ObserverEmitsOneDecisionEventOnSuccess(t *testing.T) {
 	defer srv.Close()
 
 	obs := &decisionCapture{}
-	c, err := New(Config{Secret: testSecret, Model: "jev-latest", BaseURL: srv.URL, Retry: fastRetry, Observer: obs})
+	c, err := New(Config{Secret: testSecret, Model: "jev-latest", BaseURL: srv.URL, Retry: fastRetry})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, err := c.Ask(context.Background(), "s", mixedQuestions()); err != nil {
+	if _, err := decide.Observe(c, obs).Ask(context.Background(), "s", mixedQuestions()); err != nil {
 		t.Fatalf("Ask: %v", err)
 	}
 	if got := obs.count(); got != 1 {
@@ -643,12 +643,12 @@ func TestAsk_ObserverEmitsOnFailure(t *testing.T) {
 	defer srv.Close()
 
 	obs := &decisionCapture{}
-	c, err := New(Config{Secret: testSecret, Model: "jev-latest", BaseURL: srv.URL, Retry: retry.Config{MaxAttempts: 2, BaseDelay: time.Millisecond}, Observer: obs})
+	c, err := New(Config{Secret: testSecret, Model: "jev-latest", BaseURL: srv.URL, Retry: retry.Config{MaxAttempts: 2, BaseDelay: time.Millisecond}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	askErr := func() error {
-		_, err := c.Ask(context.Background(), "s", mixedQuestions())
+		_, err := decide.Observe(c, obs).Ask(context.Background(), "s", mixedQuestions())
 		return err
 	}()
 	if askErr == nil {
@@ -675,18 +675,15 @@ func TestAsk_ObserverEmitsOnFailure(t *testing.T) {
 	}
 }
 
-// TestAsk_NoObserverEmitsNothing pins that a nil Config.Observer costs
-// nothing: Ask behaves identically with no event ever built.
-func TestAsk_NoObserverEmitsNothing(t *testing.T) {
-	srv := httptest.NewServer(okHandler(mixedAnswers("jev-1.13.0")))
-	defer srv.Close()
-
-	c, err := New(Config{Secret: testSecret, Model: "jev-latest", BaseURL: srv.URL, Retry: fastRetry})
+// TestClient_IdentityNamesBackend pins the Identity decide.Observe reads:
+// Provider "systemone" and the configured alias, not a reported model.
+func TestClient_IdentityNamesBackend(t *testing.T) {
+	c, err := New(Config{Secret: testSecret, Model: "jev-latest"})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, err := c.Ask(context.Background(), "s", mixedQuestions()); err != nil {
-		t.Fatalf("Ask: %v", err)
+	if got, want := c.Identity(), (llmkit.Identity{Provider: "systemone", Model: "jev-latest"}); got != want {
+		t.Errorf("Identity() = %+v, want %+v", got, want)
 	}
 }
 
@@ -765,16 +762,17 @@ func TestAsk_DecisionEventRoundTrip(t *testing.T) {
 	}
 
 	obs := &decisionCapture{}
-	c, err := New(Config{Secret: testSecret, Model: "jev-latest", BaseURL: srv.URL, Retry: fastRetry, Observer: obs})
+	c, err := New(Config{Secret: testSecret, Model: "jev-latest", BaseURL: srv.URL, Retry: fastRetry})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	d := decide.Observe(c, obs)
 	runID := llmkit.NewRunID()
 	ctx := llmkit.BeginCompletion(llmkit.WithStep(llmkit.WithRun(context.Background(), runID), 7))
 	span := llmkit.SpanFromContext(ctx)
 	const asks = 8
 	for range asks {
-		if _, err := c.Ask(ctx, map[string]any{"doc": "sky", "n": 1}, questions); err != nil {
+		if _, err := d.Ask(ctx, map[string]any{"doc": "sky", "n": 1}, questions); err != nil {
 			t.Fatalf("Ask: %v", err)
 		}
 	}

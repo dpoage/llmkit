@@ -3,8 +3,9 @@
 Decisions are two packages:
 
 - `decide` is the vocabulary: the `Noul`, `Choice`, and `Score` questions,
-  `Questions`, `Response` with its accessors, `Check`, `Normalize`, and the
-  `Decider` interface. It holds no HTTP code and names no backend.
+  `Questions`, `Response` with its accessors, `Check`, `Normalize`, the
+  `Decider` interface, and the two decorators `Observe` and `Replay`. It
+  holds no HTTP code and names no backend.
 - `decide/systemone` is the System One wire backend. `systemone.Client`
   satisfies `decide.Decider`. One `Client.Ask` call sends a state plus a
   set of typed questions to a System One host and returns calibrated
@@ -72,7 +73,6 @@ placeholder key. An invalid field returns an error wrapping
 | `BaseURL` | No | Endpoint root of the System One host (TypeSafe, a Kev server, a gateway, a test server), without `/v1`. Default: `https://api.typesafe.ai`. `New` refuses a `BaseURL` that is not an `http` or `https` URL with a host (the scheme is case-insensitive) or that contains `#` anywhere, an empty fragment included, with `ErrInvalidRequest`; the error never echoes the URL or its userinfo. The path `/v1/systemone` is appended to the URL's path (trailing `/` characters dropped) and a query is kept after it: `https://gw.example/x?api-version=1` requests `/x/v1/systemone?api-version=1`. The path is not cleaned: `//` and dot segments are not collapsed or resolved. A URL that parses but cannot be dialed (`http://localhost:99999`) is accepted and fails at request time as a retryable transport error. |
 | `HTTPClient` | No | Used as-is, including its `Timeout`. Default: a plain client with no `http.Client.Timeout`, so the per-attempt `RequestTimeout` is the only bound. |
 | `Retry` | No | Resolved at construction via `retry.Config.Or`: 3 attempts, 30 s per-attempt timeout, `BaseDelay` (500 ms), `MaxDelay` (30 s), and `Jitter` (20%) from `retry.Default`. An explicit `Jitter` of 0 resolves like every other unset field; pin `Retry.Rand` for the resolved defaults with no jitter. |
-| `Observer` | No | Receives one [`llmkit.DecisionEvent`](https://pkg.go.dev/github.com/dpoage/llmkit#DecisionEvent) per `Ask` that passes pre-wire validation (success or failure; a caller's already-cancelled ctx emits one with `Err` set and zero wire hits; a validation refusal emits nothing), via its `Observe(ctx, llmkit.Event)` method. Default: nil (no events). |
 
 ## The three question types
 
@@ -458,15 +458,72 @@ TypeSafe bills input tokens only; output tokens are free
 ([Models](https://docs.typesafe.ai/models.md); no vendor review date on the
 page; verified 2026-09-19). `Response.Usage` reports both counts.
 
-A non-nil `Config.Observer` receives exactly one `llmkit.DecisionEvent`
-per `Ask` that passes pre-wire validation — success or failure, never
-for a validation refusal. A caller's already-cancelled ctx emits
-one event with `Err` set and zero wire hits. On success: `Backend`
-`"systemone"`, `Model` the model id the host reported, `Usage`,
-`State` and `Questions` as validated, `Answers` — each of
-`Questions`/`Answers` sorted by ID. On failure: `Err` set, `Answers`
-nil, `Model` the requested alias. `systemone` never mints a span; the
-event rides whatever Run/Span/Step the `Ask`'s `ctx` already carries.
+`systemone.Client` emits no events itself. Wrap any `Decider` in
+`decide.Observe(d, obs)` to record each `Ask` as one
+[`llmkit.DecisionEvent`](https://pkg.go.dev/github.com/dpoage/llmkit#DecisionEvent)
+(`llmkit.KindDecision`) on the `Ask`'s context, so inside an agent `Runner`
+turn the event carries the run's `RunID` and the turn's `Step`:
+
+```go
+client, _ := systemone.New(systemone.Config{Secret: secret, Model: "jev-latest"})
+d := decide.Observe(client, sink) // sink is any llmkit.Observer
+```
+
+An `Ask` that fails `decide.Normalize` is passed to the wrapped `Decider`
+untouched and emits nothing. Every other `Ask` emits exactly one event,
+success or failure, including a caller's already-cancelled ctx (`Err` set,
+zero wire hits). The event carries `State` and `Questions` as validated,
+`Answers`, `Usage`, and the `Ask`'s wall time as `Duration`; `Questions`
+and `Answers` are each sorted by ID. On failure `Err` is the error's text
+and `Answers` is nil. `Observe` returns the wrapped `Decider`'s `Response`
+and error exactly, and `Observe(d, nil)` returns `d`.
+
+`Observe` reads an optional `Identity() llmkit.Identity` method from the
+`Decider`: `Backend` is its `Provider` (`"systemone"` for `*systemone.Client`),
+`Model` is the response's reported model on success (the identity's `Model`
+when the response names none) and the identity's `Model`, the requested
+alias, on failure. The wrapper implements `Identity()` too when the
+wrapped `Decider` does. A `Decider` without it leaves `Backend` empty.
+`Observe` does not scrub: `Err` is the error text the backend returned, so
+a backend must mask secrets in its errors, as `systemone` does.
+
+### Replay
+
+`decide.Replay(src, run)` builds a `Decider` from the `KindDecision` events
+`src` (any `llmkit.Source`) holds for `run`, so a recorded policy replays
+with no network. Paired with `agent.NewReplayClient`, a run whose
+`ToolPolicy` asked a `Decider` replays offline:
+
+```go
+rc, _ := agent.NewReplayClient(src, run, caps)
+rd, _ := decide.Replay(src, run)
+runner := agent.NewRunner(rc, rc.Tools(), system, agent.WithToolPolicy(myPolicy(rd)))
+```
+
+Each `Ask` follows these rules:
+
+1. `decide.Normalize` runs first; a refusal is returned unchanged and
+   consumes nothing.
+2. The `Ask` matches the earliest unconsumed recorded decision with the same
+   `Step` and the same set of question ids, and consumes it. Two `Ask`s of
+   one step with different id sets match whichever order they arrive in.
+3. No match returns an error wrapping `decide.ErrReplayDiverged` that names
+   the step.
+4. A matched record that failed returns an error wrapping
+   `decide.ErrReplayedFailure` with the recorded error text. The recorded
+   error's type is not kept, so it carries no root `llmkit` sentinel.
+5. Otherwise the recorded answers are rebuilt into a `Response` (by the kind
+   of each asked question, probabilities included) and must pass
+   `decide.Check`; a failure wraps `ErrReplayDiverged`.
+
+Two limits to know. Replay does not compare the state: an `Ask` that
+judges a different state than the recorded one still gets the recorded
+answer, so compare states yourself if that matters. And it does not report
+recorded decisions the replay never asked for; a replay that stops early is
+not an error here (`ReplayClient.Err` still reports unreached completions
+and tool calls). The `ErrReplayDiverged` and `ErrReplayedFailure` sentinels
+are the only non-root errors a `Decider` from this package returns. A
+`Decider` from `Replay` is safe for concurrent use.
 
 ## TypeSafe limits and jaggedness
 

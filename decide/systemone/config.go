@@ -71,13 +71,6 @@ type Config struct {
 	// field — to run the resolved defaults with no jitter, set
 	// Retry.Rand to a function returning 0.5).
 	Retry retry.Config
-
-	// Observer is optional. A non-nil Observer receives exactly one
-	// [llmkit.DecisionEvent] per Ask that passes pre-wire validation —
-	// success or failure; a caller's already-cancelled ctx emits one
-	// with Err set and zero wire hits; a validation refusal emits
-	// nothing — on the Ask's context.
-	Observer llmkit.Observer
 }
 
 // New validates cfg and returns a Client. It returns an error wrapping
@@ -113,7 +106,6 @@ func New(cfg Config) (*Client, error) {
 		endpoint: adapter.JoinEndpoint(root, systemOnePath),
 		client:   cfg.httpClient(),
 		retry:    cfg.retryPolicy(),
-		observer: cfg.Observer,
 	}, nil
 }
 
@@ -126,7 +118,6 @@ type Client struct {
 	endpoint *url.URL // BaseURL joined with systemOnePath; never mutated
 	client   *http.Client
 	retry    retry.Config
-	observer llmkit.Observer
 }
 
 // httpClient returns the injected client as-is, or a plain client with no
