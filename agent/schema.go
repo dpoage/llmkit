@@ -228,13 +228,17 @@ func (t funcTool[Args]) Def() llmkit.ToolDef {
 	}
 }
 
-func (t funcTool[Args]) Run(ctx context.Context, args json.RawMessage) (string, error) {
+func (t funcTool[Args]) Run(ctx context.Context, args json.RawMessage) ([]llmkit.Block, error) {
 	if err := validateParsedSchema(t.parsed, args); err != nil {
-		return "", fmt.Errorf("invalid arguments: %w", err)
+		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 	var a Args
 	if err := UnmarshalArgs(args, &a); err != nil {
-		return "", err
+		return nil, err
 	}
-	return t.fn(ctx, a)
+	out, err := t.fn(ctx, a)
+	if err != nil {
+		return nil, err
+	}
+	return []llmkit.Block{llmkit.Text(out)}, nil
 }

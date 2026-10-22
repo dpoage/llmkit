@@ -103,6 +103,19 @@ entry below is marked.
   `BudgetTokens` and no `Effort`, or with a negative `BudgetTokens`, is now
   refused pre-wire with an error wrapping `ErrInvalidRequest`. Before, the
   OpenAI adapters dropped every `ThinkingConfig`.
+- **Breaking:** `agent`: `Tool.Run` now returns `([]llmkit.Block, error)`
+  instead of `(string, error)`, so a tool result can carry blocks beyond
+  text (llmkit-rli.2.1). The returned blocks become the content of the
+  tool-result message verbatim, never flattened or reordered. The text that
+  `ToolEvent.Result`, the `ToolRun` event's `Result` and error rendering carry
+  is the concatenation of the `BlockText` blocks, so a text-only tool behaves
+  as before. A nil or empty result is the empty text result, the same as
+  returning `""` before. Migration: wrap the text, so
+  `return s, nil` becomes
+  `return []llmkit.Block{llmkit.Text(s)}, nil`, and `return "", err` becomes
+  `return nil, err`. `agent.Func` is unchanged: its handler still returns a
+  string. A non-text block in a tool result is still refused pre-wire by the
+  adapters' per-role block rule, with an error wrapping `ErrInvalidRequest`.
 
 ### Fixed
 

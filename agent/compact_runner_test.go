@@ -24,8 +24,8 @@ func (b bigEchoTool) Def() llmkit.ToolDef {
 	}
 }
 
-func (b bigEchoTool) Run(ctx context.Context, args json.RawMessage) (string, error) {
-	return b.blob, nil
+func (b bigEchoTool) Run(ctx context.Context, args json.RawMessage) ([]llmkit.Block, error) {
+	return textBlocks(b.blob), nil
 }
 
 // toolResultBytes sums tool-result content bytes in a request, the quantity

@@ -49,16 +49,16 @@ func (t *ctxTool) Def() llmkit.ToolDef {
 	return llmkit.ToolDef{Name: t.name, Description: "records run id", Parameters: json.RawMessage(`{"type":"object"}`)}
 }
 
-func (t *ctxTool) Run(ctx context.Context, _ json.RawMessage) (string, error) {
+func (t *ctxTool) Run(ctx context.Context, _ json.RawMessage) ([]llmkit.Block, error) {
 	t.mu.Lock()
 	t.runIDs = append(t.runIDs, llmkit.RunFromContext(ctx))
 	t.calls++
 	fail := t.fail || (t.failN > 0 && t.calls <= t.failN)
 	t.mu.Unlock()
 	if fail {
-		return "", errors.New("boom")
+		return nil, errors.New("boom")
 	}
-	return strings.Repeat("x", t.payload), nil
+	return textBlocks(strings.Repeat("x", t.payload)), nil
 }
 
 // stepRecorder collects the Step every hook family reported.
@@ -641,11 +641,11 @@ func (t *countingTool) Def() llmkit.ToolDef {
 	return llmkit.ToolDef{Name: t.name, Description: "counting", Parameters: json.RawMessage(`{"type":"object"}`)}
 }
 
-func (t *countingTool) Run(_ context.Context, _ json.RawMessage) (string, error) {
+func (t *countingTool) Run(_ context.Context, _ json.RawMessage) ([]llmkit.Block, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	*t.count++
-	return t.result(), nil
+	return textBlocks(t.result()), nil
 }
 
 // errClient fails every Complete with a partial response still in hand.
@@ -664,10 +664,10 @@ func (b blockingTool) Def() llmkit.ToolDef {
 	return llmkit.ToolDef{Name: "block", Parameters: json.RawMessage(`{"type":"object"}`)}
 }
 
-func (b blockingTool) Run(ctx context.Context, _ json.RawMessage) (string, error) {
+func (b blockingTool) Run(ctx context.Context, _ json.RawMessage) ([]llmkit.Block, error) {
 	close(b.started)
 	<-ctx.Done()
-	return "", ctx.Err()
+	return nil, ctx.Err()
 }
 
 // TestObserver_FinalizeOnErrorReturns pins that Finalize is emitted on every
@@ -1051,10 +1051,10 @@ func (t gateTool) Def() llmkit.ToolDef {
 	return llmkit.ToolDef{Name: "gate", Parameters: json.RawMessage(`{"type":"object"}`)}
 }
 
-func (t gateTool) Run(_ context.Context, _ json.RawMessage) (string, error) {
+func (t gateTool) Run(_ context.Context, _ json.RawMessage) ([]llmkit.Block, error) {
 	t.wg.Done()
 	<-t.release
-	return "opened", nil
+	return textBlocks("opened"), nil
 }
 
 // endlessToolClient answers every completion with a fresh two-call turn for
@@ -2258,13 +2258,13 @@ func (t *observeTool) Def() llmkit.ToolDef {
 	return llmkit.ToolDef{Name: t.name, Description: "emits an event", Parameters: json.RawMessage(`{"type":"object"}`)}
 }
 
-func (t *observeTool) Run(ctx context.Context, _ json.RawMessage) (string, error) {
+func (t *observeTool) Run(ctx context.Context, _ json.RawMessage) ([]llmkit.Block, error) {
 	ev := llmkit.NewEvent(ctx, llmkit.KindExec)
 	ev.Exec = &llmkit.ExecEvent{Backend: "fake", Command: []string{"true"}}
 	t.mu.Lock()
 	t.events = append(t.events, ev)
 	t.mu.Unlock()
-	return "ok", nil
+	return textBlocks("ok"), nil
 }
 
 // TestObserver_DecoratorEventInsideToolCarriesTurnStep pins the tool-phase
@@ -2362,15 +2362,15 @@ func (t *spawnRunnerTool) Def() llmkit.ToolDef {
 	return llmkit.ToolDef{Name: "spawn", Description: "runs a nested agent", Parameters: json.RawMessage(`{"type":"object"}`)}
 }
 
-func (t *spawnRunnerTool) Run(ctx context.Context, _ json.RawMessage) (string, error) {
+func (t *spawnRunnerTool) Run(ctx context.Context, _ json.RawMessage) ([]llmkit.Block, error) {
 	out, err := t.child.Run(ctx, "child task")
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	t.mu.Lock()
 	t.out = out
 	t.mu.Unlock()
-	return "spawned", nil
+	return textBlocks("spawned"), nil
 }
 
 // TestObserver_NestedRunnerStartDoesNotInheritForeignStep pins the explicit

@@ -88,8 +88,8 @@ func (b bigResultTool) Def() llmkit.ToolDef {
 	return llmkit.ToolDef{Name: b.name, Description: "big", Parameters: json.RawMessage(`{"type":"object"}`)}
 }
 
-func (b bigResultTool) Run(context.Context, json.RawMessage) (string, error) {
-	return strings.Repeat("x", 4000), nil
+func (b bigResultTool) Run(context.Context, json.RawMessage) ([]llmkit.Block, error) {
+	return textBlocks(strings.Repeat("x", 4000)), nil
 }
 
 // itoa avoids fmt in event lines for a trivially small int domain.

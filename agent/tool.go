@@ -13,7 +13,16 @@ import (
 // tool calls to [Tool.Run].
 //
 // Run receives the raw JSON arguments the model produced (validate/unmarshal
-// them yourself) and returns a textual result. An error returned from Run is
+// them yourself) and returns the result as content blocks. A text-only tool
+// returns []llmkit.Block{llmkit.Text(s)}; a tool whose result is richer (a
+// screenshot, a document) returns those blocks beside its text. The returned
+// blocks become the content of the tool-result message verbatim, never
+// flattened or re-ordered. The text the harness hands to hooks, events, and
+// error rendering is the concatenation of the BlockText blocks in order. A nil
+// or empty result is the empty text result: the message carries one empty
+// text block, exactly as a tool returning "" would. Whether a wire accepts a
+// non-text block in a tool result is the adapter's call; one that cannot
+// carry it refuses the request with [llmkit.ErrInvalidRequest]. An error returned from Run is
 // *not* a loop failure: the harness wraps it as an "ERROR:"-prefixed
 // tool-result message and lets the model decide how to recover. Reserve errors
 // for tool-level problems (bad arguments, file not found); never use them to
@@ -42,10 +51,11 @@ type Tool interface {
 	// parameters) as advertised to the model.
 	Def() llmkit.ToolDef
 	// Run executes the tool with the model-supplied arguments and returns the
-	// textual result to feed back to the model. An error, or a panic, is
+	// result blocks to feed back to the model. An error, or a panic, is
 	// recovered by the harness and rendered to the model as this call's
-	// "ERROR:"-prefixed result (identically in both dispatch modes).
-	Run(ctx context.Context, args json.RawMessage) (string, error)
+	// "ERROR:"-prefixed result (identically in both dispatch modes); the
+	// blocks returned beside an error are discarded.
+	Run(ctx context.Context, args json.RawMessage) ([]llmkit.Block, error)
 }
 
 // UnmarshalArgs decodes raw JSON tool arguments into dst. It returns a

@@ -75,7 +75,7 @@ Use `ToolHealthError` when the failure is infrastructure — a missing container
 
 Tools run one call at a time by default. `WithParallelTools` runs a turn's calls concurrently. Concurrent `Run` calls on one Runner are always allowed. A `Tool.Run` implementation must therefore be safe for concurrent calls.
 
-When to use: give the model capabilities it cannot have on its own — read files, call APIs, run queries. Implement the two-method `Tool` interface when the schema is not a plain struct; use `Func` otherwise. Decode arguments inside a hand-written `Tool.Run` with `agent.UnmarshalArgs`.
+When to use: give the model capabilities it cannot have on its own — read files, call APIs, run queries. Implement the two-method `Tool` interface when the schema is not a plain struct; use `Func` otherwise. Decode arguments inside a hand-written `Tool.Run` with `agent.UnmarshalArgs`. `Tool.Run` returns `[]llmkit.Block`; a text-only tool returns `[]llmkit.Block{llmkit.Text(s)}`, and `Func` does that wrapping for its string handler.
 
 ## Limits and outcomes
 

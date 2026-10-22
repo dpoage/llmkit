@@ -608,8 +608,12 @@ func (t replayTool) Def() llmkit.ToolDef {
 // step matching both name and arguments. No match records the client's
 // divergence: the returned error wraps [ErrReplayDiverged] naming the
 // recorded step, and the harness renders it as this call's ERROR result.
-func (t replayTool) Run(ctx context.Context, args json.RawMessage) (string, error) {
-	return t.rc.serveCall(t.name, callIDFrom(ctx), args)
+func (t replayTool) Run(ctx context.Context, args json.RawMessage) ([]llmkit.Block, error) {
+	out, err := t.rc.serveCall(t.name, callIDFrom(ctx), args)
+	if err != nil {
+		return nil, err
+	}
+	return []llmkit.Block{llmkit.Text(out)}, nil
 }
 
 // serveCall serves and consumes one recorded call, or records the

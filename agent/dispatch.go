@@ -160,10 +160,10 @@ func (r *Runner) authorizeCalls(ctx context.Context, calls []llmkit.ToolCall, re
 //
 // Hooks fire from the goroutine executing the call — concurrently under
 // WithParallelTools.
-func (r *Runner) runTool(ctx context.Context, call llmkit.ToolCall, step int) (result string, isErr bool) {
+func (r *Runner) runTool(ctx context.Context, call llmkit.ToolCall, step int) (result string, content []llmkit.Block, isErr bool) {
 	tool, ok := r.tools.lookup(call.Name)
 	if !ok {
-		return renderUnknownTool(call.Name), true
+		return renderUnknownTool(call.Name), nil, true
 	}
 	runCtx := ctx
 	if r.toolTimeout > 0 {
@@ -183,7 +183,7 @@ func (r *Runner) runTool(ctx context.Context, call llmkit.ToolCall, step int) (r
 		// call's error result and keep the loop going.
 		result = renderToolPanic(call.Name, panicVal)
 		r.fireToolEnd(ctx, step, call, result, true, duration)
-		return result, true
+		return result, nil, true
 	}
 	if err != nil {
 		// Deadline expiry: report the timeout as the tool result, leaving the
@@ -192,7 +192,7 @@ func (r *Runner) runTool(ctx context.Context, call llmkit.ToolCall, step int) (r
 		if r.toolTimeout > 0 && ctx.Err() == nil && runCtx.Err() == context.DeadlineExceeded {
 			timeoutResult := renderToolTimeout(call.Name, r.toolTimeout)
 			r.fireToolEnd(ctx, step, call, timeoutResult, true, duration)
-			return timeoutResult, true
+			return timeoutResult, nil, true
 		}
 		// Record a tool-health signal only for a genuine *ToolHealthError AND
 		// only when ctx is not already cancelled: a failure caused by run
@@ -200,10 +200,21 @@ func (r *Runner) runTool(ctx context.Context, call llmkit.ToolCall, step int) (r
 		r.fireToolHealth(ctx, call.Name, err)
 		result = toolError(err)
 		r.fireToolEnd(ctx, step, call, result, true, duration)
-		return result, true
+		return result, nil, true
 	}
-	r.fireToolEnd(ctx, step, call, out, false, duration)
-	return out, false
+	result = blocksText(out)
+	if len(out) > 0 {
+		content = out
+	}
+	r.fireToolEnd(ctx, step, call, result, false, duration)
+	return result, content, false
+}
+
+// blocksText is the text view of a tool's result blocks: the BlockText texts
+// concatenated in order, the string the hooks, the ToolRun event, and error
+// rendering carry. Non-text blocks contribute nothing.
+func blocksText(blocks []llmkit.Block) string {
+	return llmkit.Message{Content: blocks}.Text()
 }
 
 // invokeTool invokes Tool.Run once, converting a panic into a non-nil
@@ -212,10 +223,10 @@ func (r *Runner) runTool(ctx context.Context, call llmkit.ToolCall, step int) (r
 // parallel mode) is reserved for harness bugs — hook panics — only. A tool
 // that panics with nil still yields a non-nil marker: runtime turns
 // panic(nil) into a *runtime.PanicNilError.
-func invokeTool(ctx context.Context, tool Tool, args json.RawMessage) (out string, panicVal any, err error) {
+func invokeTool(ctx context.Context, tool Tool, args json.RawMessage) (out []llmkit.Block, panicVal any, err error) {
 	defer func() {
 		if v := recover(); v != nil {
-			out, panicVal, err = "", v, nil
+			out, panicVal, err = nil, v, nil
 		}
 	}()
 	out, err = tool.Run(ctx, args)
@@ -229,7 +240,12 @@ func invokeTool(ctx context.Context, tool Tool, args json.RawMessage) (out strin
 // policy rewrote the arguments Tool.Run received (see
 // [llmkit.ToolRunEvent].DispatchedArguments).
 type toolResult struct {
-	result         string
+	result string
+	// content is the blocks the tool returned, fed to the model verbatim as
+	// the tool-result message's content. Nil for every outcome the harness
+	// renders itself (errors, denials, timeouts) and for a tool that returned
+	// no blocks: the message then carries result as a single text block.
+	content        []llmkit.Block
 	isErr          bool
 	denied         bool
 	denyReason     string
@@ -273,7 +289,11 @@ func (res toolResult) message(callID string) llmkit.Message {
 	if res.isErr {
 		return llmkit.ToolError(callID, res.result)
 	}
-	return llmkit.ToolResult(callID, res.result)
+	msg := llmkit.ToolResult(callID, res.result)
+	if res.content != nil {
+		msg.Content = res.content
+	}
+	return msg
 }
 
 // executeTools runs calls and returns one result per executed call, in the
@@ -320,7 +340,7 @@ func (r *Runner) executeTools(ctx context.Context, outcome *Outcome, calls []llm
 			if err := ctx.Err(); err != nil {
 				return results[:i]
 			}
-			results[i].result, results[i].isErr = r.runTool(ctx, call, outcome.Iterations)
+			results[i].result, results[i].content, results[i].isErr = r.runTool(ctx, call, outcome.Iterations)
 		}
 		return results
 	}
@@ -348,7 +368,7 @@ func (r *Runner) executeTools(ctx context.Context, outcome *Outcome, calls []llm
 			if denied != nil && denied[i] {
 				return // deny already rendered into results[i]
 			}
-			results[i].result, results[i].isErr = r.runTool(ctx, call, outcome.Iterations)
+			results[i].result, results[i].content, results[i].isErr = r.runTool(ctx, call, outcome.Iterations)
 		}(i, call)
 	}
 	wg.Wait()
