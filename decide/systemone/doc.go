@@ -91,9 +91,10 @@
 // transport error, or the "(last attempt: ...)" text of a cancelled retry.
 // The mask is "***" when neither credential holds '*'. Credentials are
 // masked as values, so a short one also masks matching characters
-// elsewhere in server or transport text, and in text llmkit writes itself,
-// such as a context error. Only the "llmkit: systemone error (status 500):"
-// prefix, built when APIError.Error is called, stays intact. The
+// elsewhere in the server's and the transport's text. Text llmkit writes
+// itself, such as the "llmkit: systemone error (status 500):" prefix or the
+// context error of a cancelled retry, may still contain text that matches
+// the Secret or the password, for example the characters of a short one. The
 // URL username is replaced only as userinfo ("scheme://user[:password]@").
 // Redaction runs before the 200-byte cap; classification reads the
 // unredacted text. A redaction cuts the error chain: the *llmkit.APIError
