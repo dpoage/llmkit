@@ -568,27 +568,32 @@ func (cs *compactState) due(est int64) (byBudget, byReserve bool) {
 }
 
 // rearm records a counted or paid pass that left the history at post. The
-// budget threshold doubles only when the budget trigger fired. A post size
-// already past the trigger point waits for growth by the reserve; with the
-// refused size learned there is no wait, since it would run past the window.
-func (cs *compactState) rearm(byBudget bool, post int64) {
+// budget threshold doubles only when the budget trigger fired. A paid pass
+// always makes the reserve trigger wait for growth by the reserve; a free
+// one does so only before a refusal, when post is already past the trigger point.
+func (cs *compactState) rearm(byBudget bool, post int64, paid bool) {
 	if byBudget {
 		cs.budget *= compactRearmFactor
 	}
 	cs.floor = 0
-	if cs.proactive && !cs.refused && post >= cs.limit {
+	if cs.proactive && (paid || !cs.refused && post >= cs.limit) {
 		cs.floor = post + cs.reserve
 	}
 }
 
-// refusal records that the provider refused a request of the given estimate.
-// A turn grows the history by less than the reserve, so a request at or below
-// refused-reserve stays under the provider's real limit.
-func (cs *compactState) refusal(refused int64) {
+// refusal records that the provider refused a request of the given estimate
+// and that the recovery pass left the history at post. A turn grows the
+// history by less than the reserve, so a request at or below refused-reserve
+// stays under the provider's real limit. A paid recovery waits for growth by
+// the reserve; a free one may fire again at once.
+func (cs *compactState) refusal(refused, post int64, paid bool) {
 	if !cs.proactive {
 		return
 	}
 	cs.refused, cs.floor = true, 0
+	if paid {
+		cs.floor = post + cs.reserve
+	}
 	if l := refused - cs.reserve; l > 0 && l < cs.limit {
 		cs.limit = l
 	}
@@ -726,7 +731,7 @@ func (r *Runner) maybeCompact(ctx context.Context, em runEmitter, outcome *Outco
 	if after == before && out.Usage == (llmkit.Usage{}) {
 		return messages, nil
 	}
-	cs.rearm(byBudget, after)
+	cs.rearm(byBudget, after, out.Usage != (llmkit.Usage{}))
 	return kept, nil
 }
 
@@ -827,9 +832,10 @@ func (r *Runner) completeRecovering(ctx context.Context, em runEmitter, messages
 	if reflect.DeepEqual(before, after) {
 		return resp, err
 	}
+	post := estimateTokens(after)
 	r.recordCompaction(cctx, em, step, estimateTokens(*messages), estimateTokens(out.Messages), out, llmkit.CompactionReasonOverflow)
 	if cs != nil {
-		cs.refusal(estimateTokens(before))
+		cs.refusal(estimateTokens(before), post, out.Usage != (llmkit.Usage{}))
 	}
 	*messages = out.Messages
 	return r.complete(ctx, em, *messages, outcome, responseSchema, final)

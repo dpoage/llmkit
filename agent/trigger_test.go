@@ -212,6 +212,119 @@ func TestTrigger_OverflowRecoveryArmsTheNextTurn(t *testing.T) {
 	}
 }
 
+func (c *windowClient) requestCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.ests)
+}
+
+// noConsecutive fails when two calls were made on adjacent requests; at holds
+// the client's request count at each call.
+func noConsecutive(t *testing.T, what string, at []int) {
+	t.Helper()
+	for i := 1; i < len(at); i++ {
+		if at[i]-at[i-1] <= 1 {
+			t.Errorf("%s ran on consecutive turns, at requests %v", what, at)
+			return
+		}
+	}
+}
+
+// timedSummarizer answers short summaries for its first short calls and a
+// summary larger than any span afterwards, noting wc's request count at each call.
+func timedSummarizer(wc *windowClient, short int) (*sumClient, *[]int) {
+	var at []int
+	return &sumClient{fn: func(n int, _ llmkit.Request) (llmkit.Response, error) {
+		at = append(at, wc.requestCount())
+		if n < short {
+			return sumResp(fmt.Sprintf("SUMMARY %d", n+1)), nil
+		}
+		return sumResp(strings.Repeat("long ", 4000)), nil
+	}}, &at
+}
+
+// T4 revised: a paid pass always waits for growth by the reserve, after a refusal too.
+// A refusing client holds the real limit below the advertised window.
+func TestTrigger_PaidPassWaitsForGrowth(t *testing.T) {
+	t.Run("no_gain_compactor", func(t *testing.T) {
+		wc := &windowClient{window: 10000, limit: 5000, turns: 40}
+		shrink := shrinkTo(3000)
+		var at []int
+		paid := CompactorFunc(func(ctx context.Context, in CompactInput) (CompactOutput, error) {
+			at = append(at, wc.requestCount())
+			var out CompactOutput
+			if len(at) == 1 {
+				out, _ = shrink.Compact(ctx, in)
+			}
+			out.Usage = llmkit.Usage{InputTokens: 50, OutputTokens: 5}
+			return out, nil
+		})
+		r := NewRunner(wc, []Tool{bigTool(1600)}, "sys", WithLimits(Limits{MaxIterations: 60, ContextReserve: 2000}), WithCompactor(paid))
+		_, _ = r.Run(context.Background(), "task")
+		if len(at) < 2 || len(at) > 4 {
+			t.Errorf("paid compactor ran %d times over %d requests, want 2..4 (at %v)", len(at), wc.requestCount(), at)
+		}
+	})
+	t.Run("summarizer_served_above_learned_limit", func(t *testing.T) {
+		wc := &windowClient{window: 10000, limit: 10000, turns: 30}
+		sc, at := timedSummarizer(wc, 1<<30)
+		r := NewRunner(wc, []Tool{bigTool(400)}, "sys", WithLimits(Limits{MaxIterations: 60, ContextReserve: 2000}), WithCompactor(SummarizingCompactor(sc)))
+		if _, err := r.Run(context.Background(), strings.Repeat("t", 36000)); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if wc.refused == 0 || sc.calls() < 2 || sc.calls() > 5 {
+			t.Errorf("%d refusals, summarizer called %d times over %d requests, want a refusal and 2..5 calls (at %v)", wc.refused, sc.calls(), wc.requestCount(), *at)
+		}
+		noConsecutive(t, "summarizer", *at)
+	})
+	t.Run("real_summarizer_per_turn_cost", func(t *testing.T) {
+		for _, tc := range []struct {
+			name  string
+			limit int64
+			short int
+		}{{"short_summaries", 11000, 1 << 30}, {"summary_outgrows_span", 12000, 1}} {
+			t.Run(tc.name, func(t *testing.T) {
+				wc := &windowClient{window: 20000, limit: tc.limit, turns: 26}
+				sc, at := timedSummarizer(wc, tc.short)
+				r := NewRunner(wc, []Tool{bigTool(1600)}, "sys", WithLimits(Limits{MaxIterations: 60, ContextReserve: 2000}), WithCompactor(SummarizingCompactor(sc)))
+				_, _ = r.Run(context.Background(), strings.Repeat("t", 36000))
+				if wc.refused == 0 || sc.calls() > 9 {
+					t.Errorf("%d refusals, summarizer called %d times over %d requests, want a refusal and at most 9 calls (at %v)", wc.refused, sc.calls(), wc.requestCount(), *at)
+				}
+				noConsecutive(t, "summarizer", *at)
+			})
+		}
+	})
+	t.Run("discarded_summary_once_per_window", func(t *testing.T) {
+		wc := &windowClient{window: 10000, limit: 10000, turns: 30}
+		sc, at := timedSummarizer(wc, 2)
+		r := NewRunner(wc, []Tool{bigTool(400)}, "sys", WithLimits(Limits{MaxIterations: 60, ContextReserve: 2000}), WithCompactor(SummarizingCompactor(sc)))
+		_, _ = r.Run(context.Background(), strings.Repeat("t", 36000))
+		if wc.refused == 0 || sc.calls() < 3 || sc.calls() > 5 {
+			t.Errorf("%d refusals, summarizer called %d times over %d requests, want a refusal and 3..5 calls (at %v)", wc.refused, sc.calls(), wc.requestCount(), *at)
+		}
+		noConsecutive(t, "summarizer", *at)
+	})
+	t.Run("paid_pass_just_under_the_trigger", func(t *testing.T) {
+		wc := &windowClient{window: 10000, turns: 24}
+		shrink := shrinkTo(7950)
+		var at []int
+		paid := CompactorFunc(func(ctx context.Context, in CompactInput) (CompactOutput, error) {
+			at = append(at, wc.requestCount())
+			out, err := shrink.Compact(ctx, in)
+			out.Usage = llmkit.Usage{InputTokens: 50, OutputTokens: 5}
+			return out, err
+		})
+		r := NewRunner(wc, []Tool{bigTool(1600)}, "sys", WithLimits(Limits{MaxIterations: 60, ContextReserve: 2000}), WithCompactor(paid))
+		if _, err := r.Run(context.Background(), "task"); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if allowed := 1 + int((wc.maxEst()-7950)/2000); len(at) < 1 || len(at) > allowed {
+			t.Errorf("paid compactor ran %d times over %d requests, want 1..%d (at %v)", len(at), wc.requestCount(), allowed, at)
+		}
+	})
+}
+
 // sizedTool returns a blob whose size is sizes[n] for its n-th call.
 type sizedTool struct {
 	sizes []int

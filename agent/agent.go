@@ -225,8 +225,11 @@ type Limits struct {
 	//
 	// After a compaction the trigger waits for the estimate to grow by
 	// ContextReserve when the compacted size is already past the trigger
-	// point. After an overflow recovery it fires from the refused size minus
-	// ContextReserve, so a window the client overstates costs one refusal.
+	// point, and always after a paid pass (CompactOutput.Usage non-zero),
+	// also following a refusal. After an overflow recovery by a free pass it
+	// fires from the refused size minus ContextReserve, so a window the
+	// client overstates costs one refusal when a turn grows the history by
+	// less than ContextReserve.
 	ContextReserve int64
 }
 

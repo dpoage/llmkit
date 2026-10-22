@@ -178,11 +178,13 @@ entry below is marked.
   instead of after a provider refusal. Zero, the default, disables it, and a
   client that reports no window never fires it. A positive value also enables
   compaction, so overflow recovery runs. After a compaction that leaves the
-  history past the trigger point the trigger waits until the estimate has
-  grown by the reserve; after an overflow recovery it fires from the refused
-  size minus the reserve, so a window the client overstates costs one
-  refusal rather than one per turn. It combines with `HistoryTokenBudget`,
-  which doubles as before.
+  history past the trigger point, and always after a paid pass (one that
+  reported usage), including after a refusal, the trigger waits until the
+  estimate has grown by the reserve; after an overflow recovery by a free
+  pass it fires from the refused size minus the reserve, so a window the
+  client overstates costs one refusal rather than one per turn when a turn
+  grows the history by less than the reserve. It combines with
+  `HistoryTokenBudget`, which doubles as before.
 
 ### Changed
 
@@ -224,7 +226,8 @@ entry below is marked.
 - `agent`: a compaction pass whose `CompactOutput.Usage` is non-zero (a paid
   pass) re-arms the triggers as if it had compacted, even when the history
   came back unchanged or the summary was discarded: `HistoryTokenBudget`
-  doubles and `ContextReserve` waits for growth. A pass with no usage and no
+  doubles and `ContextReserve` waits for growth by the reserve, also after
+  a provider refusal. A pass with no usage and no
   gain is still not counted and not re-armed, so it is tried again the next
   turn.
 - `llmkit`: the per-role block rule now lets `RoleToolResult` carry text,
