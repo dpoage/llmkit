@@ -22,10 +22,10 @@ type callID [sha256.Size]byte
 
 // RepetitionPolicy returns a [ToolPolicy] that denies a call repeating a
 // periodic pattern of identical calls (same tool, JSON-equal arguments) in the
-// run's last 12 calls: A,A,A or A,B,A,B,A. State is kept per run id and shared
-// by every run using the policy; calls without a run id share one bucket.
-// [Continue] starts a new run id, so it resets the counts unless [WithRunID]
-// reuses the id.
+// run's last 12 calls: A,A,A or A,B,A,B,A. State is kept per run id, so runs
+// that share an id share one window, [WithRunID] pins included; calls without
+// a run id share one bucket. [Continue] starts a new run id, so it resets the
+// counts unless [WithRunID] reuses the id.
 func RepetitionPolicy() ToolPolicy {
 	return &repetitionPolicy{runs: map[llmkit.RunID]*list.Element{}, lru: list.New()}
 }

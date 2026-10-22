@@ -81,8 +81,8 @@ var ErrReplayDiverged = errors.New("agent: replay diverged")
 //
 // A recorded result with Content is served block for block; one without it
 // serves its Result as one text block. The replaying Runner places those
-// blocks under this client's profile, so media it cannot carry degrades again,
-// and the recorded Degraded count is kept.
+// blocks under this client's profile: media it cannot carry degrades again,
+// and that count is added to the recorded Degraded.
 //
 // Replaying under a [ToolPolicy] that rewrote arguments in the recorded run
 // works only if each rewrite produces valid JSON and is deterministic: the

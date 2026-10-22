@@ -15,13 +15,14 @@ entry below is marked.
   result over the limit (the bytes of its text, media data and URLs, after
   media degradation) goes to the `SpillSink` as its blocks, and the model sees
   `[tool output spilled: <ref>, <size> bytes]` plus a head preview of its text,
-  within the limit. A result with no text has an empty preview, so the marker
-  goes alone, with no newline. With a nil sink, or when the sink fails, the
-  text is head-truncated and marked `[tool output truncated: <shown> of <size>
-  bytes shown]`, and media blocks are dropped. A limit smaller than the marker
-  still sends the marker. Errors, denials and timeouts are not limited. A
-  sink that panics is not recovered. `ToolRunEvent` gains `OriginalBytes`,
-  `SpillRef` and `SpillError`, omitted when unset; with no sink only
+  within the limit. When the preview is empty, because the result has no text
+  or the limit leaves no room for it, the marker goes alone, with no newline.
+  With a nil sink, or when the sink fails, the text is head-truncated and
+  marked `[tool output truncated: <shown> of <size> bytes shown]`, and media
+  blocks are dropped. A limit smaller than the marker still sends the marker.
+  Errors, denials and timeouts are not limited. A sink that panics is not
+  recovered. `ToolRunEvent` gains `OriginalBytes`, `SpillRef` and
+  `SpillError`, omitted when unset; with no sink only
   `OriginalBytes` is set, and `Result` stays the text the model saw. A replay
   serves the recorded result without calling the sink, and a compaction stub
   of a spilled result names its reference.
@@ -76,10 +77,11 @@ entry below is marked.
   `9007199254740992` differ. Arguments that do not parse compare by raw bytes.
   The denial reads `repeated identical call: <name> called N times in the
   last 12 calls without progress`. State is kept per run id and shared by every
-  run on the policy, bounded to the 1024 most recently used runs; calls whose
-  context carries no run id share one bucket. `Continue` starts a new run id,
-  so a continued run's counts start from zero, unless `WithRunID` reuses the
-  id (llmkit-rli.2.4).
+  run on the policy, bounded to the 1024 most recently used runs. Runs that
+  share a run id share one window: calls with no run id share one bucket, and
+  runs pinned to the same id with `WithRunID` do too. `Continue` starts a new
+  run id, so a continued run's counts start from zero, unless `WithRunID`
+  reuses the id (llmkit-rli.2.4).
 - `llmkit`: `Capabilities.ToolResultMedia`. A `RoleToolResult` message may now
   carry image and document blocks, not only text. Anthropic sends them in the
   `tool_result` content in order; Google (Gemini 3 models) sends `inlineData`
@@ -113,10 +115,12 @@ entry below is marked.
   placed in history) and `Degraded` (how many blocks were degraded). Both are
   omitted for a result with no media and no degradation, so text-only events,
   hooks and transcripts are unchanged. A recorded `ToolRun` with `Content`
-  replays that content into history, and the replayed run keeps the recorded
-  `Degraded` count; a record without `Content` replays its `Result` as
-  before. A reader built before this change ignores `content` and `degraded`
-  and replays `Result` as text only. `EventSchemaVersion` stays 3.
+  replays that content into history. Under a profile that carries the
+  recorded media the replay matches the record; otherwise the media degrades
+  again and its count is added to the recorded `Degraded`. A record without
+  `Content` replays its `Result` as before. A reader built before this change
+  ignores `content` and `degraded` and replays `Result` as text only.
+  `EventSchemaVersion` stays 3.
 
 ### Changed
 
