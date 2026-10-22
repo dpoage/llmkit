@@ -169,15 +169,15 @@ func canonicalMessages(msgs []llmkit.Message) (form any, ok bool) {
 	return form, true
 }
 
-// reproducedBy compares msgs with the recorded request in canonical JSON form;
-// a recorded request that does not encode cannot be verified and passes.
+// reproducedBy compares msgs with the recorded request in canonical JSON form,
+// or as Go values when either side does not encode.
 func (c *replayedCompaction) reproducedBy(msgs []llmkit.Message) bool {
-	want, ok := canonicalMessages(c.sent)
-	if !ok {
-		return true
+	want, wok := canonicalMessages(c.sent)
+	got, gok := canonicalMessages(msgs)
+	if !wok || !gok {
+		return reflect.DeepEqual(msgs, c.sent)
 	}
-	got, ok := canonicalMessages(msgs)
-	return ok && reflect.DeepEqual(got, want)
+	return reflect.DeepEqual(got, want)
 }
 
 // withSent records the request messages that followed the compaction.

@@ -382,6 +382,42 @@ func TestReplay_ReportsUnreproducedCompaction(t *testing.T) {
 	}
 }
 
+// A record whose requests do not encode as JSON is still verified.
+func TestReplay_VerifiesCompactionWithMalformedArguments(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		args  string
+		calls int
+	}{
+		{"first call", `{"v":"x"`, 1},
+		{"every call", `{bad`, 8},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			steps := overflowTurns(8)
+			for i := range tc.calls {
+				steps[i].resp.ToolCalls[0].Arguments = json.RawMessage(tc.args)
+			}
+			out, err := overflowRunner(newFakeClient(append(steps, textResp("done", 100, 10))...), 1500).Run(context.Background(), "task")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n := len(compactionEvents(out.Transcript.Record)); n < 1 {
+				t.Fatalf("record holds %d compactions, want at least 1", n)
+			}
+			if _, err := json.Marshal(out.Messages); err == nil {
+				t.Fatal("history encodes as JSON; the record must not")
+			}
+			if err := seamReplay(t, out, 1500).Err(); err != nil {
+				t.Errorf("same config: rc.Err = %v", err)
+			}
+			err = seamReplay(t, out, 0).Err()
+			if !errors.Is(err, ErrReplayDiverged) || !strings.Contains(err.Error(), "threshold compaction") {
+				t.Errorf("compaction off: rc.Err = %v, want ErrReplayDiverged naming the threshold compaction", err)
+			}
+		})
+	}
+}
+
 // truncatingCompactor cuts older tool results to 200 bytes, adding no marker.
 func truncatingCompactor() Compactor {
 	return CompactorFunc(func(_ context.Context, in CompactInput) (CompactOutput, error) {
