@@ -203,6 +203,55 @@ func TestToolMedia_AnthropicPassesVerbatim(t *testing.T) {
 	}
 }
 
+// TestToolMedia_PortableNeedsInlineMatchingKind: on media-capable wires only
+// inline png/jpeg/webp images and pdf documents pass; a URL source, or a kind
+// that does not match its MIME type, degrades to its kind's marker.
+func TestToolMedia_PortableNeedsInlineMatchingKind(t *testing.T) {
+	urlPNG := llmkit.Block{Kind: llmkit.BlockImage, MediaType: "image/png", URL: "https://x/y.png"}
+	pngDoc := llmkit.Block{Kind: llmkit.BlockDocument, MediaType: "image/png", Data: tmPNG}
+	pdfImage := llmkit.Block{Kind: llmkit.BlockImage, MediaType: "application/pdf", Data: []byte("%PDF-1")}
+	png := llmkit.Image("image/png", tmPNG)
+	cases := []struct {
+		name   string
+		wire   func() *tmWire
+		key    string
+		block  llmkit.Block
+		marker string // "" when the block passes verbatim
+	}{
+		{"url png image on gemini-3", tmGoogleWire, "contents", urlPNG, tmImageMarker},
+		{"png document on anthropic", tmAnthropicWire, "messages", pngDoc, tmDocMarker},
+		{"pdf image on anthropic", tmAnthropicWire, "messages", pdfImage, tmImageMarker},
+		{"pdf image on gemini-3", tmGoogleWire, "contents", pdfImage, tmImageMarker},
+		{"inline png on anthropic", tmAnthropicWire, "messages", png, ""},
+		{"inline png on gemini-3", tmGoogleWire, "contents", png, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			w := c.wire()
+			blocks := []llmkit.Block{llmkit.Text("cap"), c.block}
+			_, run, _ := tmRun(t, w, blocks)
+			wire := tmLastWireMessage(t, w.bodies[1], c.key)
+			data := base64.StdEncoding.EncodeToString(c.block.Data)
+			if c.marker == "" {
+				if run.Degraded != 0 || !reflect.DeepEqual(run.Content, blocks) {
+					t.Errorf("ToolRun = {Degraded:%d Content:%+v}, want 0, %+v", run.Degraded, run.Content, blocks)
+				}
+				if !strings.Contains(wire, data) || strings.Contains(wire, "omitted") {
+					t.Errorf("wire = %s, want the block verbatim", wire)
+				}
+				return
+			}
+			want := []llmkit.Block{llmkit.Text("cap"), llmkit.Text(c.marker)}
+			if run.Degraded != 1 || !reflect.DeepEqual(run.Content, want) {
+				t.Errorf("ToolRun = {Degraded:%d Content:%+v}, want 1, %+v", run.Degraded, run.Content, want)
+			}
+			if !strings.Contains(wire, c.marker) || (data != "" && strings.Contains(wire, data)) || (c.block.URL != "" && strings.Contains(wire, c.block.URL)) {
+				t.Errorf("wire = %s, want %q in place of the block", wire, c.marker)
+			}
+		})
+	}
+}
+
 // tmFake runs one snap call through a fake client reporting ToolResultMedia=media.
 func tmFake(t *testing.T, media bool, blocks []llmkit.Block, opts ...Option) (*Outcome, []ToolEvent) {
 	t.Helper()
@@ -233,9 +282,8 @@ func toolMessage(t *testing.T, msgs []llmkit.Message) llmkit.Message {
 	return llmkit.Message{}
 }
 
-// TestToolMedia_ReplayServesContent: a run recorded with media replays to the
-// same history (image bytes included) from the in-memory record and from a
-// JSONL round trip, and a recorded degraded run replays identically.
+// TestToolMedia_ReplayServesContent: sent-media, degraded and text-only runs
+// replay from memory and from JSONL to the recorded history and ToolRun events.
 func TestToolMedia_ReplayServesContent(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -244,6 +292,7 @@ func TestToolMedia_ReplayServesContent(t *testing.T) {
 	}{
 		{"sent", true, []llmkit.Block{llmkit.Text("cap"), llmkit.Image("image/png", tmPNG), llmkit.Document("application/pdf", "t", []byte("%PDF"))}},
 		{"degraded", false, []llmkit.Block{llmkit.Text("cap"), llmkit.Image("image/png", tmPNG)}},
+		{"text-only", true, []llmkit.Block{llmkit.Text("plain")}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -269,9 +318,7 @@ func TestToolMedia_ReplayServesContent(t *testing.T) {
 					if !reflect.DeepEqual(out.Messages, rec.Messages) {
 						t.Errorf("replayed history = %+v\nrecorded history = %+v", out.Messages, rec.Messages)
 					}
-					if c.media {
-						rdEqualRuns(t, rdToolRuns(out.Transcript.Record), rdToolRuns(rec.Transcript.Record))
-					}
+					rdEqualRuns(t, rdToolRuns(out.Transcript.Record), rdToolRuns(rec.Transcript.Record))
 				})
 			}
 		})

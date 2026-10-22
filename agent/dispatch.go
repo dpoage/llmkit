@@ -173,9 +173,9 @@ func (r *Runner) runTool(ctx context.Context, call llmkit.ToolCall, step int) to
 		runCtx, cancel = context.WithTimeout(ctx, r.toolTimeout)
 		defer cancel()
 	}
-	// Tool.Run learns which call it serves (see [callIDFrom]); the tool
-	// hooks receive the run's ctx without it.
-	runCtx = withCallID(runCtx, call.ID)
+	// Tool.Run learns which call it serves; a replay tool reports the
+	// degradation its recorded result holds. Hooks get the run's ctx.
+	runCtx, slot := withDispatch(runCtx, call.ID)
 	r.fireToolStart(ctx, step, call)
 	start := time.Now()
 	out, panicVal, err := invokeTool(runCtx, tool, call.Arguments)
@@ -205,6 +205,7 @@ func (r *Runner) runTool(ctx context.Context, call llmkit.ToolCall, step int) to
 		return res
 	}
 	res := r.placeToolBlocks(out)
+	res.degraded += slot.priorDegraded
 	r.fireToolEnd(ctx, step, call, res, duration)
 	return res
 }
@@ -216,12 +217,19 @@ const (
 	documentOmitted = "[document omitted: this model does not accept documents in tool results]"
 )
 
-// portableToolMedia is the media types every ToolResultMedia wire carries.
-var portableToolMedia = map[string]bool{
-	"image/png":       true,
-	"image/jpeg":      true,
-	"image/webp":      true,
-	"application/pdf": true,
+// portableToolMedia reports whether every ToolResultMedia wire carries b: inline
+// bytes of an image in png, jpeg or webp, or of a pdf document.
+func portableToolMedia(b llmkit.Block) bool {
+	if len(b.Data) == 0 {
+		return false
+	}
+	switch b.MediaType {
+	case "image/png", "image/jpeg", "image/webp":
+		return b.Kind == llmkit.BlockImage
+	case "application/pdf":
+		return b.Kind == llmkit.BlockDocument
+	}
+	return false
 }
 
 func isMedia(b llmkit.Block) bool {
@@ -240,7 +248,7 @@ func (r *Runner) placeToolBlocks(out []llmkit.Block) toolResult {
 	var placed []llmkit.Block
 	degraded := 0
 	for i, b := range out {
-		if !isMedia(b) || (accepts && portableToolMedia[b.MediaType]) {
+		if !isMedia(b) || (accepts && portableToolMedia(b)) {
 			if placed != nil {
 				placed = append(placed, b)
 			}
@@ -313,7 +321,7 @@ type toolResult struct {
 	// content. Nil for harness-rendered outcomes (errors, denials, timeouts)
 	// and for a tool that returned no blocks: the message then carries result.
 	content []llmkit.Block
-	// degraded counts the media blocks in content replaced by omission markers.
+	// degraded counts omission markers in content, a replayed record's included.
 	degraded       int
 	isErr          bool
 	denied         bool
@@ -331,12 +339,18 @@ func (res toolResult) eventContent() []llmkit.Block {
 	return nil
 }
 
-// callIDKey keys the ID of the call a Tool.Run serves in its context.
-type callIDKey struct{}
+type dispatchKey struct{}
 
-// withCallID returns ctx carrying id as the call the tool invocation serves.
-func withCallID(ctx context.Context, id string) context.Context {
-	return context.WithValue(ctx, callIDKey{}, id)
+// dispatchSlot is shared by [Runner.runTool] and the Tool.Run it invokes.
+// priorDegraded is set by a replay tool to its record's Degraded.
+type dispatchSlot struct {
+	id            string
+	priorDegraded int
+}
+
+func withDispatch(ctx context.Context, id string) (context.Context, *dispatchSlot) {
+	slot := &dispatchSlot{id: id}
+	return context.WithValue(ctx, dispatchKey{}, slot), slot
 }
 
 // callIDFrom returns the ID of the call Tool.Run serves, or "" when ctx
@@ -344,8 +358,18 @@ func withCallID(ctx context.Context, id string) context.Context {
 // model gave no ID). Only replay tools read it, to match a served call to its
 // recorded counterpart by identity instead of by arguments.
 func callIDFrom(ctx context.Context) string {
-	id, _ := ctx.Value(callIDKey{}).(string)
-	return id
+	if slot, ok := ctx.Value(dispatchKey{}).(*dispatchSlot); ok {
+		return slot.id
+	}
+	return ""
+}
+
+// reportPriorDegraded marks that Tool.Run's blocks already hold n omission
+// markers from the recorded run.
+func reportPriorDegraded(ctx context.Context, n int) {
+	if slot, ok := ctx.Value(dispatchKey{}).(*dispatchSlot); ok {
+		slot.priorDegraded = n
+	}
 }
 
 // deniedResult renders a [ToolPolicy] refusal: the model-visible denial
