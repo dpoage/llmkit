@@ -658,7 +658,7 @@ func (r *Runner) maybeCompact(ctx context.Context, em runEmitter, messages []llm
 	// The pruned history's consuming turn rides the context the event
 	// sees, matching the Step it reports.
 	ctx = llmkit.WithStep(ctx, step)
-	r.recordCompaction(ctx, em, step, before, after, pruned)
+	r.recordCompaction(ctx, em, step, before, after, pruned, "")
 	// Real pruning happened (one prefix cache miss paid). Re-arm upward so the
 	// next firing only comes after history has grown materially again, bounding
 	// total firings and avoiding turn-over-turn cache thrash.
@@ -754,7 +754,7 @@ func (r *Runner) completeRecovering(ctx context.Context, em runEmitter, messages
 		return resp, err
 	}
 	step := outcome.Iterations + 1
-	r.recordOverflowCompaction(llmkit.WithStep(ctx, step), em, step, estimateTokens(*messages), estimateTokens(compacted), pruned)
+	r.recordCompaction(llmkit.WithStep(ctx, step), em, step, estimateTokens(*messages), estimateTokens(compacted), pruned, llmkit.CompactionReasonOverflow)
 	*messages = compacted
 	return r.complete(ctx, em, *messages, outcome, responseSchema, final)
 }

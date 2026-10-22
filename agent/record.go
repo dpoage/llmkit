@@ -152,22 +152,9 @@ func (r *Runner) toolNames() []string {
 	return names
 }
 
-// recordCompaction reports one real history prune as the Compaction event on
-// the run's stream. step is the completion that consumes the compacted
-// history, and the token totals come from the bytes/4 estimate the compaction
-// trigger uses.
-func (r *Runner) recordCompaction(ctx context.Context, em runEmitter, step int, before, after int64, pruned int) {
-	r.emitCompaction(ctx, em, step, before, after, pruned, "")
-}
-
-// recordOverflowCompaction reports the prune that answered a provider
-// [llmkit.ErrContextTooLong] as a Compaction event whose Reason is
-// [llmkit.CompactionReasonOverflow]. step is the completion the retry serves.
-func (r *Runner) recordOverflowCompaction(ctx context.Context, em runEmitter, step int, before, after int64, pruned int) {
-	r.emitCompaction(ctx, em, step, before, after, pruned, llmkit.CompactionReasonOverflow)
-}
-
-func (r *Runner) emitCompaction(ctx context.Context, em runEmitter, step int, before, after int64, pruned int, reason string) {
+// recordCompaction reports one real history prune as the Compaction event;
+// step is the completion that consumes the compacted history.
+func (r *Runner) recordCompaction(ctx context.Context, em runEmitter, step int, before, after int64, pruned int, reason string) {
 	ev := llmkit.NewEvent(ctx, llmkit.KindCompaction)
 	ev.Step = step
 	ev.Compaction = &llmkit.CompactionEvent{
