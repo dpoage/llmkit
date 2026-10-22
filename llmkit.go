@@ -643,7 +643,8 @@ type Response struct {
 	StopReason StopReason `json:"stop_reason,omitempty"`
 	// Served names the backend that produced this response. provider.Fallback
 	// fills it with the member that served; the zero Identity means the
-	// client did not report one.
+	// client did not report one. A Fallback hidden behind another wrapper
+	// whose serving member is anonymous reports the wrapper's Identity.
 	Served Identity `json:"served,omitzero"`
 }
 

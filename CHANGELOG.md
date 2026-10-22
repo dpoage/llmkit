@@ -51,6 +51,20 @@ entry below is marked.
   `Usage.Add` ORs it. Before this, such endpoints read as zero spend and
   `agent.Limits.TokenBudget` and `agent.BudgetPool` never tripped; they now
   see the estimate (llmkit-rli.1.4).
+- `provider`: `Fallback(primary, fallbacks...)` returns a client that tries
+  each member in order and moves on only when `llmkit.Classify` calls the
+  error retryable and the caller's context is live; `Stream` moves on only
+  before the first delta. When every member fails, the last member's error is
+  the single wrapped error and earlier errors appear in the message only.
+  `Capabilities()` and `Identity()` are the primary's. Never `provider.Wrap` a
+  `Fallback`; observe it with `llmkit.Observe`. Each member's retry budget must
+  fit inside the caller's deadline, or later members never run. Thinking
+  blocks pass to a member with the same provider tag and drop for a different
+  one. See `docs/providers.md`.
+- `llmkit`: `Response.Served`, the `Identity` of the backend that produced the
+  response, set by `provider.Fallback` when the serving member left it empty
+  (JSON key `served`, omitted when zero). `Identity` gains the JSON keys
+  `provider` and `model` (llmkit-rli.1.6).
 - `llmkit`, `agent`: `llmkit.Observe` and the agent `Runner` tag a successful
   call's `Completion` event with `Response.Served` when it is set, instead of
   the client's `IdentityOf`. A failed call and a zero `Served` keep the

@@ -187,6 +187,39 @@ If the same client runs inside an `agent.Runner`, the Runner is the emitter that
 
 A `Completion` event from `llmkit.Observe` or the Runner names `Response.Served` as its `Provider`/`Model` when the call succeeded and the response set it; a failed call, or a response with a zero `Served`, names the client's `Identity`.
 
+## Fallback
+
+`provider.Fallback(primary, fallbacks...)` returns a client that calls `primary` and, when it fails retryably, each fallback in order until one serves. Members are any `llmkit.Client`, usually `provider.New` or `provider.Wrap` stacks, each with its own retry and `Observer`. A nil member panics at construction.
+
+```go
+primary, _ := provider.New(ctx, anthropicSpec, provider.Options{Observer: obs})
+backup, _ := provider.New(ctx, compatSpec, provider.Options{Observer: obs})
+fb := llmkit.Observe(provider.Fallback(primary, backup), obs)
+```
+
+When a member is tried, and what comes back:
+
+- **Fall-through rule.** The next member runs only when `llmkit.Classify` calls the error retryable (`ErrRateLimited`, `ErrServer`, `ErrOverloaded`) AND the caller's context is live. `ErrAuth`, `ErrInvalidRequest`, `ErrContextTooLong`, a plain non-`APIError` and any context error return at once, and no later member runs.
+- **Stream.** `Stream` falls through only before the first delta reaches your callback; after that any error is terminal. A member without native `Stream` is driven through `llmkit.Stream`.
+- **All members fail.** The LAST member's error is the single wrapped error, so `errors.Is` and `errors.As` see exactly its chain; earlier members' errors appear in the message only. The primary's `ErrOverloaded` does not satisfy `errors.Is` when the last member returned `ErrServer`. The same holds for a terminal error from a later member.
+- **`Response.Served`.** The serving member's `llmkit.Identity`, set only when the member left it empty, so `Fallback(Fallback(a, b), c)` reports `b` when `b` served. A member that is itself a `Fallback` is never stamped: if its serving member has no Identity (a `provider.Wrap` of a foreign client with a zero Identity and no `Options.Provider`), `Served` stays the zero value rather than naming the failed primary. The exception is a `Fallback` hidden behind another wrapper such as `llmkit.Observe`: with an anonymous serving member, `Served` is that wrapper's Identity, which is the inner primary's. Give every member an Identity to avoid it. `Identity()` and `Capabilities()` are the primary's, unchanged.
+
+### Wiring
+
+Never `provider.Wrap` a `Fallback`: the outer stack retries the whole chain (multiplying every member's retries) and labels every event with the primary's identity. Observe the chain with `llmkit.Observe(fb, obs)` and give each member its own `Options.Observer` to receive its `Attempt` events. Under the agent `Runner` the Runner owns the `Completion`; members still emit `Attempt` events.
+
+### Budget contract
+
+There is no fall-through timeout. A member's retry budget (`MaxAttempts` × `RequestTimeout`, plus backoff and any `Retry-After`) must fit inside the caller's deadline, or a stalled member consumes the deadline and later members never run: the call returns the context error. Under `retry.Default` that budget is about 21 minutes, so set each member's `Retry` explicitly when you bound the caller's context.
+
+### History across providers
+
+The request goes to every member unmodified: Fallback never copies, edits, or strips the history.
+
+- Thinking blocks carry the tag of the adapter that produced them. A serving member whose tag differs drops them from the wire; a member with the same tag (anthropic to anthropic, two models on one compat host) receives them.
+- A serving fallback applies its own request preparation, which may drop or refuse a feature its capabilities lack. `Capabilities()` reports the primary's, so the primary's requests are never degraded by a weaker fallback.
+- Tool-result media is refused per role on every member at this version.
+
 ## Error normalization
 
 Adapters map vendor failures onto the sentinel errors in `llmkit`; match them with `errors.Is` on the returned error. The `Kind` is derived from the HTTP status, with the response body disambiguating 400s:

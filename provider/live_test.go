@@ -49,6 +49,7 @@ import (
 	llmkit "github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/internal/livetest"
 	"github.com/dpoage/llmkit/provider"
+	"github.com/dpoage/llmkit/retry"
 )
 
 func TestMain(m *testing.M) {
@@ -1163,4 +1164,76 @@ func TestLiveGoogleStream(t *testing.T) {
 		redFatal(t, sess, "stop reason = %q, want %q", resp.StopReason, llmkit.StopEndTurn)
 	}
 	lc.finish(resp, err)
+}
+
+// TestLiveProviderFallback streams through a Fallback whose primary is an
+// unreachable compat endpoint and whose secondary is the compat lane, over a
+// history that carries a foreign (anthropic) thinking block and a tool round.
+func TestLiveProviderFallback(t *testing.T) {
+	sess := livetest.Resolve(t, "compat")
+	ctx, _ := livetest.Ctx(t)
+
+	primary, err := provider.New(ctx, provider.Spec{
+		Type: provider.TypeOpenAICompatible, Model: sess.Model, BaseURL: "http://127.0.0.1:1/v1", Secret: sess.Key,
+	}, provider.Options{Provider: "fallback-dead-primary", Retry: retry.Config{MaxAttempts: 1}})
+	if err != nil {
+		redFatal(t, sess, "primary: %v", err)
+	}
+	secondary := sess.Client(ctx, t, livetest.NewTransport(sess.Key), nil)
+	fb := provider.Fallback(primary, secondary)
+
+	readFile := llmkit.ToolDef{
+		Name:        "read_file",
+		Description: "Reads a text file and returns its contents.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`),
+	}
+	req := llmkit.Request{
+		Messages: []llmkit.Message{
+			llmkit.TextMessage(llmkit.RoleUser, "Read poetry.txt with the read_file tool."),
+			{
+				Role: llmkit.RoleAssistant,
+				Content: []llmkit.Block{{
+					Kind: llmkit.BlockThinking, Text: "I should read the file.", Provider: "anthropic",
+					Raw: json.RawMessage(`{"type":"thinking","thinking":"I should read the file.","signature":"c2ln"}`),
+				}},
+				ToolCalls: []llmkit.ToolCall{{ID: "call_1", Name: "read_file", Arguments: json.RawMessage(`{"path":"poetry.txt"}`)}},
+			},
+			llmkit.ToolResult("call_1", "line one\nline two"),
+			llmkit.TextMessage(llmkit.RoleUser, "Quote the second line of the file verbatim."),
+		},
+		Tools:     []llmkit.ToolDef{readFile},
+		MaxTokens: defaultLiveMaxTokens,
+	}
+
+	var deltas int
+	resp, err := llmkit.Stream(ctx, fb, req, func(llmkit.Delta) error {
+		deltas++
+		return nil
+	})
+	if err != nil {
+		redFatal(t, sess, "fallback stream: %v", err)
+	}
+	if deltas == 0 {
+		redFatal(t, sess, "fallback stream delivered no deltas")
+	}
+	if strings.TrimSpace(llmkit.StripThinkBlocks(resp.Text)) == "" {
+		redFatal(t, sess, "empty streamed answer: %q", resp.Text)
+	}
+	if msg := fallbackServedProblem(resp.Served, llmkit.IdentityOf(primary), llmkit.IdentityOf(secondary), sess.Model); msg != "" {
+		redFatal(t, sess, "%s", msg)
+	}
+}
+
+// fallbackServedProblem reports why served fails to name the secondary: the
+// primary's identity differs from the secondary's, so a primary stamp is caught.
+func fallbackServedProblem(served, primary, secondary llmkit.Identity, model string) string {
+	switch {
+	case primary == secondary:
+		return fmt.Sprintf("primary and secondary share identity %+v, so Served cannot tell them apart", primary)
+	case served == primary:
+		return fmt.Sprintf("Served = %+v names the unreachable primary", served)
+	case served != secondary || secondary.Model != model:
+		return fmt.Sprintf("Served = %+v, want the compat lane %+v", served, secondary)
+	}
+	return ""
 }
