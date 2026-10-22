@@ -51,6 +51,19 @@ entry below is marked.
   `Usage.Add` ORs it. Before this, such endpoints read as zero spend and
   `agent.Limits.TokenBudget` and `agent.BudgetPool` never tripped; they now
   see the estimate (llmkit-rli.1.4).
+- `agent`: `RepetitionPolicy()` returns a stock `ToolPolicy` that stops tool
+  loops. It keeps the last 12 calls of a run (denied calls included) and
+  denies a call when the last 2p+1 calls, for some p from 1 to 5, repeat with
+  period p: A,A,A denies the third call, A,B,A,B,A the fifth, and
+  A,B1,A,B2,A none. Two calls are identical when the tool name matches and
+  the arguments are equal as JSON: object key order and whitespace do not
+  matter, and numbers compare by literal text, so `9007199254740993` and
+  `9007199254740992` differ. Arguments that do not parse compare by raw bytes.
+  The denial reads `repeated identical call: <name> called N times in the
+  last 12 calls without progress`. State is kept per run id and shared by every
+  run on the policy, bounded to the 1024 most recently used runs. `Continue`
+  starts a new run id, so a continued run's counts start from zero
+  (llmkit-rli.2.4).
 
 ### Changed
 
