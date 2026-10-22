@@ -169,8 +169,10 @@ entry below is marked.
   pass, is added to `Outcome.Usage` and charged to the `BudgetPool`.
   `CompactOutput` gains `Summary` and `Usage`, and the `compaction` event
   gains `summary`, all omitted when empty. `ReplayClient.Compactor()` serves
-  the recorded summaries without calling a model, and a replay never serves a
-  completion with a `purpose` as an answer.
+  the recorded summaries without calling a model and reports each pass's
+  recorded usage, so a replay's `Outcome.Usage` and `BudgetPool` charge match
+  the record and a run that stopped on a budget stops at the same iteration;
+  a replay never serves a completion with a `purpose` as an answer.
 
 ### Changed
 

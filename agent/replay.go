@@ -140,9 +140,9 @@ type ReplayClient struct {
 	// unreproduced is the first recorded compaction the replaying Runner did
 	// not reproduce at its position; Err reports it.
 	unreproduced error
-	// summaries are the recorded summaries, one per recorded summarizing
-	// compaction pass, served in order by [ReplayClient.Compactor].
-	summaries   []string
+	// summaries are the recorded summarizing compaction passes that produced
+	// a summary, served in order by [ReplayClient.Compactor].
+	summaries   []recordedSummary
 	nextSummary int
 }
 
@@ -302,12 +302,21 @@ func isPurposeCompletion(ev llmkit.Event) bool {
 	return ev.Kind == llmkit.KindCompletion && ev.Completion != nil && ev.Completion.Purpose != ""
 }
 
+// recordedSummary is one summarizing pass of the record: the summary it
+// produced and the usage of all its summarizer calls as recorded.
+type recordedSummary struct {
+	text  string
+	usage llmkit.Usage
+}
+
 // summaryGroup collects the compaction completions of one summarizing pass.
-// The pass's summary is its last call's, valid only if that call succeeded.
+// The pass's summary is its last call's, valid only if that call succeeded;
+// its usage is the sum over every call, as recorded.
 type summaryGroup struct {
-	open bool
-	text string
-	ok   bool
+	open  bool
+	text  string
+	ok    bool
+	usage llmkit.Usage
 }
 
 func (g *summaryGroup) add(ce llmkit.CompletionEvent) {
@@ -315,6 +324,7 @@ func (g *summaryGroup) add(ce llmkit.CompletionEvent) {
 		return
 	}
 	g.open = true
+	g.usage = g.usage.Add(ce.Response.Usage)
 	g.ok = ce.Err == ""
 	if g.ok {
 		g.text = summaryText(ce.Response)
@@ -322,9 +332,9 @@ func (g *summaryGroup) add(ce llmkit.CompletionEvent) {
 }
 
 // flush appends the pass's summary to summaries, if it produced one, and resets g.
-func (g *summaryGroup) flush(summaries []string) []string {
+func (g *summaryGroup) flush(summaries []recordedSummary) []recordedSummary {
 	if g.open && g.ok {
-		summaries = append(summaries, g.text)
+		summaries = append(summaries, recordedSummary{text: g.text, usage: g.usage})
 	}
 	*g = summaryGroup{}
 	return summaries
@@ -335,8 +345,9 @@ func (g *summaryGroup) flush(summaries []string) []string {
 // [SummarizingCompactor] does and substitutes the next recorded summary, so
 // install it with [WithCompactor] and the recorded run's HistoryTokenBudget.
 // With no cut point, or no recorded summary left, it stubs like the default
-// compactor. Its passes spend no tokens, so a replayed Outcome.Usage lacks
-// the recorded summary calls.
+// compactor. Each pass reports the usage its summarizer calls recorded, so a
+// replayed Outcome.Usage and BudgetPool charge match the recorded run's and
+// the replay stops on a token budget where the recorded run did.
 func (rc *ReplayClient) Compactor() Compactor {
 	return CompactorFunc(func(ctx context.Context, in CompactInput) (CompactOutput, error) {
 		from, at := summaryCut(in.Messages)
@@ -348,10 +359,12 @@ func (rc *ReplayClient) Compactor() Compactor {
 			rc.mu.Unlock()
 			return stubCompactor{}.Compact(ctx, in)
 		}
-		text := rc.summaries[rc.nextSummary]
+		rec := rc.summaries[rc.nextSummary]
 		rc.nextSummary++
 		rc.mu.Unlock()
-		return summarized(in, from, at, text), nil
+		out := summarized(in, from, at, rec.text)
+		out.Usage = rec.usage
+		return out, nil
 	})
 }
 

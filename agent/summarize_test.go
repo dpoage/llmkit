@@ -630,7 +630,111 @@ func TestReplay_PurposeCompletionsAreNotServed(t *testing.T) {
 			t.Fatalf("Complete = %q, %v, want %q", resp.Text, err, want)
 		}
 	}
-	if !reflect.DeepEqual(rc.summaries, []string{"SUMMARY A", "SUMMARY C"}) {
-		t.Errorf("summaries = %q, want a pass whose last call failed to leave none", rc.summaries)
+	var texts []string
+	for _, rec := range rc.summaries {
+		texts = append(texts, rec.text)
+	}
+	if !reflect.DeepEqual(texts, []string{"SUMMARY A", "SUMMARY C"}) {
+		t.Errorf("summaries = %q, want a pass whose last call failed to leave none", texts)
+	}
+}
+
+// budgetReplay replays rec with limits, a fresh pool of the same ceiling (when
+// pool is non-nil) and rc.Compactor(), and returns what the replayed Run did.
+func budgetReplay(t *testing.T, src llmkit.Source, rec *Outcome, limits Limits, pool *BudgetPool) (*Outcome, *ReplayClient) {
+	t.Helper()
+	rc, err := NewReplayClient(src, rec.RunID, llmkit.Capabilities{})
+	if err != nil {
+		t.Fatalf("NewReplayClient: %v", err)
+	}
+	out, err := NewRunner(rc, rc.Tools(), "sys",
+		WithLimits(limits), WithCompactor(rc.Compactor()), WithBudgetPool(pool),
+	).Run(context.Background(), "task", WithRunID("budget-replay"))
+	var inc *IncompleteError
+	if err != nil && !errors.As(err, &inc) {
+		t.Fatalf("replayed Run: %v (rc.Err: %v)", err, rc.Err())
+	}
+	return out, rc
+}
+
+// A summarized run that stopped on a token budget or a pool replays with the
+// recorded limits and rc.Compactor() to the same stop: the recorded summary
+// spend counts against the budget in the replay as it did in the recording.
+func TestSummarize_ReplayStopsWhereTheBudgetStoppedTheRecord(t *testing.T) {
+	cases := []struct {
+		name   string
+		limits Limits
+		pool   func() *BudgetPool
+		reason TruncationReason
+	}{
+		{"token_budget", Limits{MaxIterations: 30, HistoryTokenBudget: 150, TokenBudget: 1000}, func() *BudgetPool { return nil }, TruncTokenBudget},
+		{"budget_pool", Limits{MaxIterations: 30, HistoryTokenBudget: 150, TokenBudget: -1}, func() *BudgetPool { return NewBudgetPool(1000) }, TruncBudgetPool},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			sc := numbered()
+			recPool := tc.pool()
+			rec, _, err := summarizeRun(t, sc, recPool, seamTurns(20), nil, WithLimits(tc.limits),
+				WithObserver(JSONL(dir, func(err error) { t.Errorf("sink: %v", err) })))
+			var inc *IncompleteError
+			if err != nil && !errors.As(err, &inc) {
+				t.Fatalf("Run: %v", err)
+			}
+			if rec.TruncationReason != tc.reason {
+				t.Fatalf("recorded stop = %q, want %q", rec.TruncationReason, tc.reason)
+			}
+			if len(summaryCompactions(rec.Transcript.Record)) == 0 || sc.calls() == 0 {
+				t.Fatal("the recorded run summarized nothing; the row pins nothing")
+			}
+			for name, src := range map[string]llmkit.Source{"memory": rec.Transcript, "jsonl": JSONL(dir, nil)} {
+				t.Run(name, func(t *testing.T) {
+					replayPool := tc.pool()
+					out, rc := budgetReplay(t, src, rec, tc.limits, replayPool)
+					if err := rc.Err(); err != nil {
+						t.Fatalf("rc.Err: %v", err)
+					}
+					if out.TruncationReason != tc.reason || out.Iterations != rec.Iterations {
+						t.Errorf("replay stopped %q at iteration %d, recorded %q at %d",
+							out.TruncationReason, out.Iterations, tc.reason, rec.Iterations)
+					}
+					if out.Usage != rec.Usage {
+						t.Errorf("replayed Outcome.Usage %+v != recorded %+v", out.Usage, rec.Usage)
+					}
+					if replayPool != nil && replayPool.Spent() != recPool.Spent() {
+						t.Errorf("replayed pool spent %d, recorded %d", replayPool.Spent(), recPool.Spent())
+					}
+				})
+			}
+		})
+	}
+}
+
+// R-N: a summarizer used on the overflow recovery path is accounted like any
+// other: its usage reaches Outcome.Usage, the pool and the ledger.
+func TestSummarize_OverflowPathSummaryUsageIsRunSpend(t *testing.T) {
+	gc := o1Client()
+	sc := numbered()
+	pool := NewBudgetPool(1 << 40)
+	out, err := overflowRunner(gc, 1_000_000, WithCompactor(SummarizingCompactor(sc)), WithBudgetPool(pool)).Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	comps := compactionEvents(out.Transcript.Record)
+	if len(comps) != 1 || comps[0].Reason != llmkit.CompactionReasonOverflow || comps[0].Summary == "" || sc.calls() != 1 {
+		t.Fatalf("compactions %+v, summarizer calls %d: want one overflow summary from one call", comps, sc.calls())
+	}
+	var ledger llmkit.Usage
+	for _, ev := range out.Transcript.Record {
+		if ev.Kind == llmkit.KindCompletion {
+			ledger = ledger.Add(ev.Completion.Response.Usage)
+		}
+	}
+	want := llmkit.Usage{InputTokens: 7*100 + 200, OutputTokens: 7*10 + 30}
+	if out.Usage != want || ledger != want {
+		t.Errorf("Outcome.Usage %+v, ledger %+v, want %+v: seven answers and the summary call", out.Usage, ledger, want)
+	}
+	if got := out.Usage.ChargeableTokens(1); pool.Spent() != got {
+		t.Errorf("pool charged %d, want %d", pool.Spent(), got)
 	}
 }
