@@ -237,7 +237,7 @@ var liveCaseBodies = map[string]func(t *testing.T, lc *liveClient){
 	"prompt_caching":       casePromptCaching,
 	"structured_output":    caseStructuredOutput,
 	"thinking":             caseThinking,
-	"reasoning_effort":    caseReasoningEffort,
+	"reasoning_effort":     caseReasoningEffort,
 	"tool_choice":          caseToolChoice,
 	"images":               caseImages,
 	"documents":            caseDocuments,
