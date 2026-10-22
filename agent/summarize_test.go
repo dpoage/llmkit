@@ -526,11 +526,7 @@ func assertReplaysSummaries(t *testing.T, sc *sumClient, rec *Outcome, dir strin
 			if sc.calls() != calls {
 				t.Errorf("summarizer called %d more times in the replay", sc.calls()-calls)
 			}
-			for _, ev := range out.Transcript.Record {
-				if ev.Kind == llmkit.KindCompletion && ev.Completion.Purpose != "" {
-					t.Errorf("replay recorded a %q completion", ev.Completion.Purpose)
-				}
-			}
+			assertSameCompactionCalls(t, compactionCompletions(out.Transcript.Record), compactionCompletions(rec.Transcript.Record))
 			if got := answers(out.Transcript.Record); !reflect.DeepEqual(got, want) {
 				gj, _ := json.Marshal(got)
 				wj, _ := json.Marshal(want)
@@ -701,6 +697,7 @@ func TestSummarize_ReplayStopsWhereTheBudgetStoppedTheRecord(t *testing.T) {
 					if out.Usage != rec.Usage {
 						t.Errorf("replayed Outcome.Usage %+v != recorded %+v", out.Usage, rec.Usage)
 					}
+					assertLedger(t, out)
 					if replayPool != nil && replayPool.Spent() != recPool.Spent() {
 						t.Errorf("replayed pool spent %d, recorded %d", replayPool.Spent(), recPool.Spent())
 					}

@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/dpoage/llmkit"
 )
@@ -115,7 +116,7 @@ var ErrReplayDiverged = errors.New("agent: replay diverged")
 //
 // Completions the record marks with a Purpose, such as a [Compactor]'s
 // summary requests, are never served as answers. [ReplayClient.Compactor]
-// serves their summaries instead.
+// replays them as recorded instead.
 //
 // ReplayClient is safe for concurrent use, though a single Runner calls it
 // sequentially.
@@ -256,7 +257,7 @@ func NewReplayClient(src llmkit.Source, run llmkit.RunID, caps llmkit.Capabiliti
 		}
 		switch {
 		case isPurposeCompletion(ev):
-			group.add(*ev.Completion)
+			group.add(ev)
 		case ev.Kind == llmkit.KindStart && ev.Start != nil:
 			offered = ev.Start.Tools
 		case ev.Kind == llmkit.KindToolRun && ev.ToolRun != nil:
@@ -303,10 +304,17 @@ func isPurposeCompletion(ev llmkit.Event) bool {
 }
 
 // recordedSummary is one summarizing pass of the record: the summary it
-// produced and the usage of all its summarizer calls as recorded.
+// produced and its summarizer calls as recorded.
 type recordedSummary struct {
 	text  string
 	usage llmkit.Usage
+	calls []recordedCall
+}
+
+// recordedCall is one recorded summarizer call.
+type recordedCall struct {
+	ce       llmkit.CompletionEvent
+	duration time.Duration
 }
 
 // summaryGroup collects the compaction completions of one summarizing pass.
@@ -317,14 +325,17 @@ type summaryGroup struct {
 	text  string
 	ok    bool
 	usage llmkit.Usage
+	calls []recordedCall
 }
 
-func (g *summaryGroup) add(ce llmkit.CompletionEvent) {
+func (g *summaryGroup) add(ev llmkit.Event) {
+	ce := *ev.Completion
 	if ce.Purpose != llmkit.CompletionPurposeCompaction {
 		return
 	}
 	g.open = true
 	g.usage = g.usage.Add(ce.Response.Usage)
+	g.calls = append(g.calls, recordedCall{ce: ce, duration: ev.Duration})
 	g.ok = ce.Err == ""
 	if g.ok {
 		g.text = summaryText(ce.Response)
@@ -334,10 +345,32 @@ func (g *summaryGroup) add(ce llmkit.CompletionEvent) {
 // flush appends the pass's summary to summaries, if it produced one, and resets g.
 func (g *summaryGroup) flush(summaries []recordedSummary) []recordedSummary {
 	if g.open && g.ok {
-		summaries = append(summaries, recordedSummary{text: g.text, usage: g.usage})
+		summaries = append(summaries, recordedSummary{text: g.text, usage: g.usage, calls: g.calls})
 	}
 	*g = summaryGroup{}
 	return summaries
+}
+
+// compactCalls returns the pass's calls as the Runner records them, each on a
+// fresh span, with the recorded request, response and error.
+func (s recordedSummary) compactCalls(ctx context.Context) []compactCall {
+	calls := make([]compactCall, len(s.calls))
+	for i, rc := range s.calls {
+		var err error
+		switch {
+		case rc.ce.Err == "":
+		case rc.ce.ErrKind == llmkit.ErrKindContextTooLong:
+			err = replayedOverflow(rc.ce.Err)
+		default:
+			err = errors.New(rc.ce.Err)
+		}
+		calls[i] = compactCall{
+			req: rc.ce.Request, resp: rc.ce.Response, err: err,
+			span:     llmkit.SpanFromContext(llmkit.BeginCompletion(ctx)),
+			provider: rc.ce.Provider, model: rc.ce.Model, duration: rc.duration,
+		}
+	}
+	return calls
 }
 
 // Compactor returns a [Compactor] that reproduces the recorded run's
@@ -345,9 +378,11 @@ func (g *summaryGroup) flush(summaries []recordedSummary) []recordedSummary {
 // [SummarizingCompactor] does and substitutes the next recorded summary, so
 // install it with [WithCompactor] and the recorded run's HistoryTokenBudget.
 // With no cut point, or no recorded summary left, it stubs like the default
-// compactor. Each pass reports the usage its summarizer calls recorded, so a
-// replayed Outcome.Usage and BudgetPool charge match the recorded run's and
-// the replay stops on a token budget where the recorded run did.
+// compactor. Each pass also returns its recorded summarizer calls, which the
+// Runner records as Purpose "compaction" Completion events with the recorded
+// request, response and error, so the replayed ledger sums to the replayed
+// Outcome.Usage, the BudgetPool charge matches, and the replay stops on a
+// token budget where the recorded run did.
 func (rc *ReplayClient) Compactor() Compactor {
 	return CompactorFunc(func(ctx context.Context, in CompactInput) (CompactOutput, error) {
 		from, at := summaryCut(in.Messages)
@@ -363,7 +398,7 @@ func (rc *ReplayClient) Compactor() Compactor {
 		rc.nextSummary++
 		rc.mu.Unlock()
 		out := summarized(in, from, at, rec.text)
-		out.Usage = rec.usage
+		out.Usage, out.calls = rec.usage, rec.compactCalls(ctx)
 		return out, nil
 	})
 }
