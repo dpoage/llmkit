@@ -166,7 +166,7 @@ Compaction, steering, and finalization are not hooks: they are events on the run
 
 Hooks run synchronously, inline on the goroutine that reaches the fire point. Every hook reports the same 1-based step for a turn: `ToolEvent.Step` and the `step` the Runner stamps on the run's `llmkit.Event` values. Consumers join on it. A repair turn continues the numbering.
 
-Every hook receives a context without the turn's completion span — the same pre-claim context `RequestPolicy` sees — and so does every tool. A provider client called from a hook therefore never reports its `Attempt` events under the turn's span; whether it emits its own `Completion` follows the emission rule on `llmkit.Observer`. The Runner tags every `Completion` event it emits with the client's identity (`llmkit.IdentityOf(r.client)`): `Provider` and `Model` on the event name the client that served the turn.
+Every hook receives a context without the turn's completion span — the same pre-claim context `RequestPolicy` sees — and so does every tool. A provider client called from a hook therefore never reports its `Attempt` events under the turn's span; whether it emits its own `Completion` follows the emission rule on `llmkit.Observer`. The Runner names the backend on every `Completion` event it emits: `Provider` and `Model` come from `Response.Served` when the call succeeded and the response set it (a `provider.Fallback` sets it to the member that served), and from the client's identity (`llmkit.IdentityOf(r.client)`) otherwise. A replayed run names the `served` value the record holds; a record without it replays with empty `Provider` and `Model`.
 
 ```go
 agent.WithHooks(agent.Hooks{
