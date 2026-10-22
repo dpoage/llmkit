@@ -18,7 +18,6 @@ func askVia(d decide.Decider, qs decide.Questions) (decide.Response, error) {
 	return d.Ask(context.Background(), "state", qs)
 }
 
-// TestAsk_ChoiceOutsideOptionsRetried pins a 200 answering a Choice with an option that was not asked is an ErrServer@200, retried like any ErrServer.
 func TestAsk_ChoiceOutsideOptionsRetried(t *testing.T) {
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

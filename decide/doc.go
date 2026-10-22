@@ -1,6 +1,6 @@
 // Package decide is the vocabulary for decisions: given a state and a set
 // of typed questions, a [Decider] returns a [Response] of per-question
-// answers. The package holds no HTTP code and names no backend. Package
+// answers. The package holds no HTTP code and imports no backend; package
 // decide/systemone is the System One wire backend.
 //
 // A decision model is not a chat model. It has no messages, tools, or
@@ -29,8 +29,8 @@
 // [Response] splits answers by question kind. [Response.Nouls] maps a
 // noul id to its 0..1 belief. [Response.Choices] maps a choice id to a
 // [ChoiceAnswer]. [Response.Scores] maps a score id to a [ScoreAnswer]
-// whose Levels and Probabilities are index-aligned slices. Maps stay nil
-// for kinds the Ask did not include.
+// that carries the score, the reported Levels, and per-level Probabilities.
+// Maps stay nil for kinds the Ask did not include.
 //
 // Read answers through the accessors [Response.Noul], [Response.Choice],
 // and [Response.Score]. Each returns an error wrapping [ErrNotAsked] when
@@ -44,10 +44,10 @@
 //
 // [Decider] is the interface a backend implements. Its errors wrap a root
 // llmkit sentinel (llmkit.Err*) or chain the context's error. A successful
-// Response satisfies [Check] against the questions asked. A Decider that
-// decide itself provides returns, besides the wrapped Decider's errors,
-// only the two [Replay] sentinels [ErrReplayDiverged] and
-// [ErrReplayedFailure].
+// Response satisfies [Check] against the questions asked. Besides the
+// wrapped Decider's errors and a [Normalize] refusal, a Decider that decide
+// provides returns only errors wrapping [ErrReplayDiverged] (distinct from
+// agent.ErrReplayDiverged) or [ErrReplayedFailure].
 //
 // # Observability and replay
 //

@@ -17,7 +17,7 @@
 //
 //   - TypeSafe Jev (https://api.typesafe.ai) reports the versioned model id
 //     it used ("jev-1.13.0" for the alias "jev-latest") and bills input
-//     tokens only. It has no GET /v1/models endpoint.
+//     tokens only.
 //   - Kev (github.com/jaredpalmer/kev) echoes the requested alias
 //     ("kev-latest") as the response model. It accepts questions without
 //     instructions and scores with one level; [decide.Normalize] still
@@ -84,28 +84,22 @@
 // bytes is cut at the last rune boundary at or before byte 200 and gets
 // "..." appended.
 //
-// When the server or the transport echoes [Config.Secret] or the password
-// of [Config.BaseURL] into an error, as sent, escaped by Go's encoding/json
-// or Go-quoted (%q), Ask masks the echo in the error it returns, in every
-// error under it, and in the Err of an event [decide.Observe] emits. That covers a host
-// body, a contract-violation message that quotes an answer id or type, a
-// transport error that quotes server bytes, and the last attempt's error
-// in the "(last attempt: ...)" text of a cancelled retry. The mask is
-// "***" when neither credential holds '*'. Credentials are masked as
-// values, so a short Secret or password also masks the same characters
-// elsewhere in the server's and the transport's text. Text llmkit writes
-// itself, such as the "llmkit: systemone error (status 500):" prefix or the
-// context error of a cancelled retry, may still contain text that matches
-// the Secret or the password, for example the characters of a short one.
-// The URL username is not a value: only where it appears as URL userinfo
-// ("scheme://user[:password]@") is it replaced. Redaction happens before
-// the 200-byte cap, and classification reads the unredacted text, so the
-// Kind is the one the host's text gives. When a redaction happens the
-// error chain is cut: the *llmkit.APIError keeps Kind, StatusCode,
-// RetryAfter, HasRetryAfter and Provider, and errors.Is still matches
-// context.Canceled and context.DeadlineExceeded when they matched; the
-// underlying transport error, net.Error included, is no longer reachable.
-// An error with nothing to redact is returned as it was, chain intact.
+// Ask masks an echo of [Config.Secret] or the [Config.BaseURL] password in
+// the error it returns, in every error under it, and in the Err of an event
+// [decide.Observe] emits. The echo may be as sent, escaped by encoding/json,
+// or Go-quoted (%q), in a host body, a contract-violation message, a
+// transport error, or the "(last attempt: ...)" text of a cancelled retry.
+// The mask is "***" when neither credential holds '*'. Credentials are
+// masked as values, so a short one also masks matching characters
+// elsewhere in server or transport text; text llmkit writes itself, such as
+// the "llmkit: systemone error (status 500):" prefix, is not masked. The
+// URL username is replaced only as userinfo ("scheme://user[:password]@").
+// Redaction runs before the 200-byte cap; classification reads the
+// unredacted text. A redaction cuts the error chain: the *llmkit.APIError
+// keeps Kind, StatusCode, RetryAfter, HasRetryAfter and Provider, and
+// errors.Is still matches context.Canceled and context.DeadlineExceeded,
+// but the transport error, net.Error included, is unreachable. An error
+// with nothing to redact is returned intact.
 //
 // # Retries
 //
@@ -155,20 +149,16 @@
 //     change between releases. Response.Model reports the id the host
 //     sent. Ledger on that reported Model, not on the alias sent. A host
 //     that echoes the alias (Kev) gives no version.
-//   - TypeSafe bills input tokens only; output tokens are free.
 //
 // # Observability
 //
 // A *Client is safe for concurrent use, and each Ask is independent. A
-// Client emits no events itself. Wrap it in [decide.Observe] to record
-// each Ask as one [llmkit.DecisionEvent]; Observe reads the Client's
-// [Client.Identity] (Provider "systemone", Model the configured alias) to
-// set the event's Backend and, on failure, Model. The event carries the
-// response's reported model on success, Usage, and State, Questions, and
-// Answers each sorted by ID, and rides whatever Run/Span/Step the Ask's
-// ctx carries. A validation refusal emits nothing; a caller's
-// already-cancelled ctx emits one event with Err set and zero wire hits.
-// [decide.Replay] later answers from those events with no network.
+// Client emits no events itself. Wrap it in [decide.Observe] to record each
+// Ask as one [llmkit.DecisionEvent]; Observe reads [Client.Identity]
+// (Provider "systemone", Model the configured alias) for the event's
+// Backend and, on failure, Model. A validation refusal emits nothing; a
+// caller's already-cancelled ctx emits one event with Err set and zero wire
+// hits. [decide.Replay] answers from those events with no network.
 //
 // # Construction
 //

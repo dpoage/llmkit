@@ -68,7 +68,7 @@ A keyless lane skips with a message naming the lane and its missing variables. E
 | `openai` | `LLMKIT_LIVE_OPENAI_API_KEY` | `LLMKIT_LIVE_OPENAI_MODEL` | `gpt-4o-mini` |
 | `google` | `LLMKIT_LIVE_GOOGLE_API_KEY` | `LLMKIT_LIVE_GOOGLE_MODEL` | `gemini-2.5-flash-lite` |
 | `typesafe` | `LLMKIT_LIVE_TYPESAFE_API_KEY` | `LLMKIT_LIVE_TYPESAFE_MODEL`, `LLMKIT_LIVE_TYPESAFE_BASE_URL` | `jev-latest` |
-| `kev` | `LLMKIT_LIVE_KEV_BASE_URL` | `LLMKIT_LIVE_KEV_MODEL`, `LLMKIT_LIVE_KEV_API_KEY` | `kev-latest`; key defaults to `local` |
+| `kev` | `LLMKIT_LIVE_KEV_BASE_URL` | `LLMKIT_LIVE_KEV_MODEL`, `LLMKIT_LIVE_KEV_API_KEY` (defaults to `local`) | `kev-latest` |
 
 ### Kev lane
 

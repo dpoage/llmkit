@@ -86,8 +86,6 @@ func marshalOne(t *testing.T, id string, q decide.Question) []byte {
 	return raw
 }
 
-// TestMarshalRequest_BytesMatchLegacyEnvelope pins the full request body
-// byte for byte; the wants were produced by the pre-split encoder.
 func TestMarshalRequest_BytesMatchLegacyEnvelope(t *testing.T) {
 	tests := []struct {
 		name  string

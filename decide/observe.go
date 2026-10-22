@@ -8,31 +8,20 @@ import (
 	"github.com/dpoage/llmkit"
 )
 
-// Observe returns a Decider that behaves exactly like d and reports every
-// Ask to obs as one [llmkit.KindDecision] event, built with
-// [llmkit.NewEvent] on the Ask's context: RunID and Step ride the context,
-// so inside an agent Runner turn the event lands at that turn's Step.
+// Observe returns a Decider that behaves like d and reports every Ask to
+// obs as one [llmkit.KindDecision] event on the Ask's context, so RunID and
+// Step ride the context. A nil obs returns d unchanged. The result is safe
+// for concurrent use when d and obs are.
 //
-// An Ask whose state and questions fail [Normalize] is passed to d
-// untouched and emits nothing: the refusal is d's to report and no
-// decision was attempted. Every other Ask emits exactly one event, success
-// or failure. The event carries the state and questions as Normalize
-// produced them (sorted by id), the answers sorted by id, Usage, the Ask's
-// wall time as Duration, and on failure Err set to the error's text with
-// Answers nil. d is responsible for scrubbing secrets from its errors.
+// An Ask that fails [Normalize] goes to d untouched and emits nothing. Every
+// other Ask emits one event: state and questions as Normalize produced them,
+// answers, Usage, and Duration. A failed Ask sets Err to the error's text
+// and leaves Answers nil and Usage zero. d scrubs secrets from its errors.
 //
-// When d implements
-//
-//	interface{ Identity() llmkit.Identity }
-//
-// the event's Backend is that Identity's Provider; Model is the response's
-// reported model on success (the Identity's Model when the response names
-// none) and the Identity's Model on failure. The returned Decider then
-// implements Identity() too, forwarding d's. When d does not, Backend is
-// empty and Model is the response's.
-//
-// A nil obs returns d unchanged. The returned (Response, error) are d's,
-// exactly. Observe is safe for concurrent use when d and obs are.
+// If d implements interface{ Identity() llmkit.Identity }, the event's
+// Backend is its Provider, Model is the response's model (the Identity's
+// when the response names none, and always on failure), and the result
+// forwards Identity. Otherwise Backend is empty.
 func Observe(d Decider, obs llmkit.Observer) Decider {
 	if obs == nil {
 		return d

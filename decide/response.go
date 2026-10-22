@@ -40,11 +40,11 @@ type ChoiceAnswer struct {
 	Confidence    float64
 }
 
-// ScoreAnswer is the answer to a Score question. Levels is the backend's
-// legend ordered by index and Probabilities is index-aligned with Levels;
-// each has one entry per level asked for. Levels and Probabilities may be
-// nil and Confidence 0 when the backend reports no distribution; a backend
-// must not fabricate them.
+// ScoreAnswer is the answer to a Score question. Levels is the legend the
+// backend reports; Probabilities[i] belongs to the asked Score.Levels[i].
+// Each slice is full (one entry per asked level) or nil, independently, and
+// Confidence is 0 when the backend reports none. A backend must not
+// fabricate them.
 type ScoreAnswer struct {
 	Score         float64
 	Levels        []string

@@ -86,12 +86,6 @@ func deniedCalls(msgs []llmkit.Message) map[string]string {
 	return out
 }
 
-// TestObserveReplay_RunnerToolPolicyRecordsAndReplaysWithoutNetwork is the
-// 1sx.3 acceptance: a Runner whose ToolPolicy asks a Noul through
-// decide.Observe(systemone client) records the Decision events at the tool
-// turn's Step under the run's RunID, and the same run replays through
-// agent.NewReplayClient plus decide.Replay with zero network, an identical
-// FinalText, and the same call denied.
 func TestObserveReplay_RunnerToolPolicyRecordsAndReplaysWithoutNetwork(t *testing.T) {
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -18,7 +18,7 @@ import (
 	"github.com/dpoage/llmkit/retry"
 )
 
-// consumer is one raw-http.Client.Do consumer: decide.Ask, or embed.Embed
+// consumer is one raw-http.Client.Do consumer: systemone's Ask, or embed.Embed
 // over one backend. run makes one call with three attempts allowed and
 // returns the number of backoff sleeps the retry stage took (attempts - 1
 // when every attempt fails retryably) and the call's error.

@@ -55,10 +55,10 @@ type Lane struct {
 	Name      string
 	EnvPrefix string
 	// Type is the provider.Type the lane's clients build through
-	// provider.New. It is empty for lanes that construct a different
-	// client kind (DecideLane): Jev is not an llmkit.Client, so its lane
-	// is resolved by ResolveDecide and its clients built by
-	// Session.DecideClient.
+	// provider.New. It is empty for the decision lanes (DecideLane,
+	// KevLane): a decide.Decider is not an llmkit.Client, so
+	// ResolveDecide and ResolveDecideKev resolve them and
+	// Session.DecideClient builds their clients.
 	Type provider.Type
 	// DefaultModel fills Model when <prefix>_MODEL is unset. Empty means the
 	// model is required (the compat lane: an arbitrary endpoint has no
@@ -124,8 +124,8 @@ type Session struct {
 	Model string
 	Key   string
 	// BaseURL is an explicit endpoint override: required for the compat
-	// lane (an arbitrary endpoint has no default), optional for lanes with
-	// OptionalBaseURL, empty for the rest.
+	// lane (an arbitrary endpoint has no default) and the kev lane,
+	// optional for lanes with OptionalBaseURL, empty for the rest.
 	BaseURL string
 }
 
@@ -321,7 +321,7 @@ func (s *Session) Client(ctx context.Context, t testing.TB, tr *Transport, mutat
 	return cl
 }
 
-// DecideClient builds the typesafe lane's decide client through
+// DecideClient builds a decision lane's client (typesafe or kev) through
 // systemone.New, with the recording transport injected via Config.HTTPClient,
 // and wraps it in decide.Observe with the run-wide token tally as the
 // observer. mutate, when non-nil, adjusts the Config last.

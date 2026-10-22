@@ -16,10 +16,8 @@ import (
 	"github.com/dpoage/llmkit/internal/livetest"
 )
 
-// kevReadmeBody is the example response from github.com/jaredpalmer/kev's
-// README (@main, "Example response from Kev-4B"), verbatim: the model alias
-// echoed back, a latency_ms field this wire does not define, a noul without
-// confidence, and a choice and a score with probabilities and a legend.
+// kevReadmeBody is the response from github.com/jaredpalmer/kev's README
+// (@main, "Example response from Kev-4B"), verbatim, latency_ms included.
 const kevReadmeBody = `{
   "model": "kev-latest",
   "answers": {

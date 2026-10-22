@@ -12,49 +12,37 @@ import (
 )
 
 // ErrReplayDiverged is wrapped by a [Replay] Decider's error when an Ask has
-// no recorded decision to match, or the matched record does not answer the
-// asked questions. Match it with errors.Is.
+// no matching recorded decision, or the match does not answer the asked
+// questions. It is distinct from the agent package's ErrReplayDiverged.
 var ErrReplayDiverged = errors.New("decide: replay diverged")
 
 // ErrReplayedFailure is wrapped by a [Replay] Decider's error when the
-// matched recorded decision is a failed Ask. The error text carries the
-// recorded failure's text; the live error's type and chain are not
-// recorded, so a replayed failure has no root llmkit sentinel. Match it
-// with errors.Is.
+// matched recorded decision is a failed Ask. Only the failure's text is
+// recorded, so the error has no root llmkit sentinel.
 var ErrReplayedFailure = errors.New("decide: replayed failed decision")
 
 // Replay returns a Decider that answers from the [llmkit.KindDecision]
-// events src holds for run, with no backend call: the policy half of a
-// deterministic replay, the counterpart of the agent package's replay
-// client. It returns src's error (wrapping [llmkit.ErrUnknownRun] when src
-// has no record of run). A run that recorded no decisions is valid; every
-// Ask against it diverges.
+// events src holds for run, with no backend call. It returns src's error
+// (wrapping [llmkit.ErrUnknownRun] for an unknown run). A run with no
+// recorded decisions is valid; every Ask against it diverges.
 //
 // Each Ask follows these rules:
 //
-//  1. [Normalize] runs first. A refusal is returned unchanged and consumes
-//     no record.
-//  2. The Ask matches the earliest unconsumed recorded decision with the
-//     same Step ([llmkit.StepFromContext] of the Ask's context equals the
-//     event's Step) and the same set of question ids. The match consumes
-//     the record, so two Asks of one step with different id sets match
-//     whichever order they arrive in, and two Asks with the same id set
-//     match in recorded order.
+//  1. [Normalize] runs first. A refusal is returned unchanged, with Provider
+//     "decide", and consumes no record.
+//  2. The Ask consumes the earliest unconsumed record with the same Step
+//     ([llmkit.StepFromContext]) and the same set of question ids.
 //  3. With no match, Ask returns the zero Response and an error wrapping
 //     [ErrReplayDiverged] that names the step.
 //  4. A matched record with Err set returns the zero Response and an error
 //     wrapping [ErrReplayedFailure] with the recorded text.
-//  5. Otherwise Ask rebuilds the Response (Model, Usage, and the Nouls,
-//     Choices, and Scores of the recorded answers, by the kind of the
-//     asked question) and returns it if it passes [Check] against the
-//     questions; a Check failure wraps [ErrReplayDiverged].
+//  5. Otherwise Ask rebuilds the Response from the recorded answers by the
+//     asked question's kind and returns it if it passes [Check]; a Check
+//     failure wraps [ErrReplayDiverged].
 //
-// Replay compares neither the state nor the Backend: a replayed Ask may
-// judge a different state than the recorded one and still receives the
-// recorded answer. A caller that needs to know the state changed must
-// compare it itself. Recorded decisions the replay never asks for are not
-// reported; a replay that stops early is not an error here. A Decider from
-// Replay is safe for concurrent use.
+// Replay compares neither the state nor the Backend: a changed state still
+// receives the recorded answer. Recorded decisions the replay never asks for
+// are not reported. A Decider from Replay is safe for concurrent use.
 func Replay(src llmkit.Source, run llmkit.RunID) (Decider, error) {
 	events, err := src.Events(context.Background(), run)
 	if err != nil {

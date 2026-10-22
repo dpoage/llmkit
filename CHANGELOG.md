@@ -20,26 +20,34 @@ entry below is marked.
   `ScoreAnswer.Levels` stay.
 - `decide`: `ChoiceAnswer` and `ScoreAnswer` document that a backend that
   reports no distribution leaves `Probabilities` (and `Levels`) nil and
-  `Confidence` 0, and must not fabricate them. The System One client still
-  requires the legend and probabilities.
+  `Confidence` 0, and must not fabricate them. The System One client
+  requires a Score answer's legend and probabilities, and accepts a Choice
+  answer without them (nil `Probabilities`, `Confidence` 0).
 - `decide`: `Normalize(state, qs)` validates a state and questions and returns
   them in the root `llmkit.DecisionQuestion` vocabulary, sorted by id, so a
-  backend renders its own request from one validated form.
+  backend renders its own request from one validated form. It validates
+  questions in sorted id order, so the first refusal is the same on every
+  call; the old client used map order.
 - `decide`: `Observe(d Decider, obs llmkit.Observer) Decider` wraps any
   `Decider` and emits one `llmkit.KindDecision` event per `Ask` (RunID and
-  Step from the context, sorted questions and answers, usage, duration, the
-  error text on failure). An `Ask` that fails `Normalize` emits nothing, and a
-  nil `obs` returns `d` unchanged. It reads an optional
-  `Identity() llmkit.Identity` method for `DecisionEvent.Backend` and `Model`,
-  and the wrapper forwards it. `*systemone.Client` now implements
+  Step from the context, sorted questions and answers, usage, duration; a
+  failed `Ask` carries the error text and zero usage). An `Ask` that fails
+  `Normalize` emits nothing, and a nil `obs` returns `d` unchanged. It reads
+  an optional `Identity() llmkit.Identity` method for
+  `DecisionEvent.Backend` and `Model`, and the wrapper forwards it.
+  `*systemone.Client` now implements
   `Identity()` (`{Provider: "systemone", Model: <configured model>}`).
 - `decide`: `Replay(src llmkit.Source, run llmkit.RunID) (Decider, error)`
   builds a `Decider` that answers from the `KindDecision` events recorded for
   `run`, matching each `Ask` to the earliest unconsumed decision with the same
   Step and question-id set, so a recorded `ToolPolicy` replays through
   `agent.NewReplayClient` with no network. It does not compare the state and
-  does not report unconsumed decisions. `decide.ErrReplayDiverged` and
-  `decide.ErrReplayedFailure` are the errors it returns.
+  does not report unconsumed decisions. Besides `src`'s error, it returns a
+  `Normalize` refusal and errors wrapping `decide.ErrReplayDiverged` (a
+  different sentinel from `agent.ErrReplayDiverged`) or
+  `decide.ErrReplayedFailure`. A refusal keeps Provider `"decide"`, so its
+  text reads `llmkit: decide error` where the live client's reads
+  `llmkit: systemone error`.
 - `examples/agent-guardrail`: an `agent.Runner` gated by a `decide.Decider`.
   A `ToolPolicy` asks a Noul and denies a call at or above `--threshold`; a
   `RequestPolicy` asks a Choice and aborts the run on `injection`. It reads
@@ -51,10 +59,11 @@ entry below is marked.
   `Observe`, `Replay`, and `Decider` gating an agent, all network-free.
 - Budget sharing for decision spend: pass one `agent.BudgetPool` to
   `agent.WithBudgetPool` and charge it from a `decide.Observe` observer with
-  `ev.Decision.Usage.ChargeableTokens(1)`; the run then stops with
-  `agent.TruncBudgetPool` when LLM and decision spend together reach the
-  limit. `agent.Limits.TokenBudget` does not count decision tokens. No API
-  change; the pattern is in `examples/agent-guardrail` and `docs/decide.md`.
+  `ev.Decision.Usage.ChargeableTokens(1)`. The run stops with
+  `agent.TruncBudgetPool` at the first turn boundary after LLM and decision
+  spend together reach the limit, so it can overshoot the limit by one turn.
+  `agent.Limits.TokenBudget` does not count decision tokens. No API change;
+  the pattern is in `examples/agent-guardrail` and `docs/decide.md`.
 - Live tests: a `kev` lane runs the `decide/systemone` live cases against a
   local [Kev](https://github.com/jaredpalmer/kev) server with
   `LLMKIT_LIVE_KEV_BASE_URL` (no credentials; model defaults to `kev-latest`).

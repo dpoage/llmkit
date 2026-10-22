@@ -10,10 +10,10 @@ import (
 )
 
 // Normalize validates state and qs and returns the state's marshalled JSON
-// and the questions in the root vocabulary, sorted by ID. state must
-// marshal to a JSON string, object, or array; Instructions likewise;
-// descriptions (True, False, Options, Levels) also accept null. At least
-// one question is required, each with a non-empty id.
+// and the questions in the root vocabulary, sorted by ID. state and each
+// Instructions must marshal to a JSON string, object, or array; descriptions
+// (True, False, Options, Levels) also accept null. At least one question is
+// required, each with a non-empty id. Questions validate in sorted id order.
 //
 // A refusal is an *llmkit.APIError with Kind llmkit.ErrInvalidRequest,
 // StatusCode 0, Provider "decide", and Message "<path>: <problem>". A

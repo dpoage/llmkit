@@ -119,11 +119,11 @@ answer arrives in `DeltaText` fragments, so the callback prints it.
 | [`fsroot`](https://pkg.go.dev/github.com/dpoage/llmkit/fsroot) | Path containment for agent file tools. | [sandbox](docs/sandbox.md) |
 | [`embed`](https://pkg.go.dev/github.com/dpoage/llmkit/embed) | Embeddings: Ollama and OpenAI-compatible backends, batching, retry, least-recently-used (LRU) cache. | [reference](https://pkg.go.dev/github.com/dpoage/llmkit/embed) |
 | [`decide`](https://pkg.go.dev/github.com/dpoage/llmkit/decide) | The decision vocabulary: `noul`, `choice`, and `score` questions over a state, the `Decider` interface, and answer checks. | [decide](docs/decide.md) |
-| [`decide/systemone`](https://pkg.go.dev/github.com/dpoage/llmkit/decide/systemone) | The System One wire backend for `decide`: TypeSafe's Jev model by default, other hosts through `BaseURL`; calibrated probabilities and confidence. | [decide](docs/decide.md) |
+| [`decide/systemone`](https://pkg.go.dev/github.com/dpoage/llmkit/decide/systemone) | The System One wire backend for `decide`: TypeSafe's Jev model by default, other hosts through `BaseURL`; calibrated probabilities and confidence where the host reports them. | [decide](docs/decide.md) |
 
 ## Examples
 
-Six runnable programs live under `examples/`:
+Seven runnable programs live under `examples/`:
 
 - `examples/basic` — one completion, with capability gating; with `--image`, its user turn is built with `llmkit.UserMessage(llmkit.Text(…), llmkit.Image(…))`.
 - `examples/agent` — the agent loop with hooks, a tool policy, and optional parallel dispatch. Its provider client sets `Options.Retry` and an `Options.Observer` that logs each attempt. With `--record <dir>`, it persists the run as `<dir>/<run id>.jsonl` through `agent.JSONL` and prints the run id.
@@ -131,6 +131,7 @@ Six runnable programs live under `examples/`:
 - `examples/structured` — schema-constrained output with `RunJSONAs`.
 - `examples/chat` — a multi-turn read–eval–print loop (REPL) with mid-run steering.
 - `examples/decide` — one mixed `Ask` (noul, choice, score) against a System One host (TypeSafe Jev by default).
+- `examples/agent-guardrail` — an `agent.Runner` whose tool and request policies ask a `decide.Decider`. The decider's tokens count against the run's shared `agent.BudgetPool`. It reads the `LLMKIT_*` variables plus `LLMKIT_SYSTEMONE_API_KEY` and `LLMKIT_SYSTEMONE_MODEL`, and prints its usage and exits 1 without them.
 
 `basic`, `agent`, `structured`, and `chat` read `LLMKIT_PROVIDER`, `LLMKIT_MODEL`,
 and `LLMKIT_API_KEY`. `LLMKIT_BASE_URL` is required for `openai-compatible` and

@@ -44,17 +44,12 @@ type answerBody struct {
 	Confidence    float64            `json:"confidence"`
 }
 
-// Ask evaluates state against questions in one request: validates them
-// with [decide.Normalize], marshals the envelope, POSTs to
-// <BaseURL>/v1/systemone with an "Authorization: Bearer" header, retries
-// transient failures, and validates the response. ctx bounds the call.
-// Every error from Ask is an *llmkit.APIError with Provider "systemone", except the caller's
-// cancellation or a deadline it set, which is an error chaining the
-// context error (errors.Is(err, ctx.Err()); never retryable) — see the
-// package doc for the status mapping.
-//
-// Ask emits no event of its own: wrap the Client in [decide.Observe] to
-// record each Ask as a [llmkit.DecisionEvent].
+// Ask sends state and questions to <BaseURL>/v1/systemone as one logical
+// request, retrying transient failures; ctx bounds the call. Every error is
+// an *llmkit.APIError with Provider "systemone", except the caller's
+// cancellation or deadline, which chains the context error and is never
+// retried. The package doc has the status mapping. Ask emits no event; wrap
+// the Client in [decide.Observe] to record it.
 func (c *Client) Ask(ctx context.Context, state any, questions decide.Questions) (decide.Response, error) {
 	stateRaw, dqs, err := decide.Normalize(state, questions)
 	if err != nil {
@@ -64,10 +59,8 @@ func (c *Client) Ask(ctx context.Context, state any, questions decide.Questions)
 	if err != nil {
 		return decide.Response{}, err
 	}
-	// An echo of the Secret or the BaseURL password is masked in a returned
-	// error: every attempt's error is scrubbed before retry.Do or the
-	// caller sees it, and a response body is redacted
-	// before its Message is capped.
+	// Every attempt's error is scrubbed of the Secret and the BaseURL
+	// password before retry.Do or the caller sees it.
 	redact := adapter.NewRedactor(c.apiKey, c.endpoint)
 	var resp decide.Response
 	err = retry.Do(ctx, c.retry, llmkit.Classify, func(actx context.Context) error {
@@ -98,8 +91,7 @@ func retagProvider(err error) error {
 }
 
 // Identity returns the Client's backend identity: Provider "systemone" and
-// the configured Model alias. [decide.Observe] reads it to tag the events
-// it emits.
+// the configured Model alias. [decide.Observe] reads it to tag its events.
 func (c *Client) Identity() llmkit.Identity {
 	return llmkit.Identity{Provider: providerName, Model: c.model}
 }
@@ -145,12 +137,9 @@ func (c *Client) attempt(ctx context.Context, redact *adapter.Redactor, body []b
 	return parseResponse(httpResp.StatusCode, respBody, questions)
 }
 
-// parseResponse validates the answer set against the questions and converts
-// it to a Response. A violation of the server's own answer contract — a
-// missing model or usage block, a missing or extra answer, a type that
-// does not match its question, a sparse legend, or a Choice outside the
-// asked options (via [decide.Check]) — is an ErrServer-class
-// APIError at the serving status: the server broke the protocol.
+// parseResponse converts a 200 body to a Response. A violation of the answer
+// contract, including a failed [decide.Check], is an ErrServer APIError at
+// the serving status.
 func parseResponse(status int, body []byte, questions decide.Questions) (decide.Response, error) {
 	var wire wireResponse
 	if err := json.Unmarshal(body, &wire); err != nil {

@@ -5,7 +5,7 @@ Decisions are two packages:
 - `decide` is the vocabulary: the `Noul`, `Choice`, and `Score` questions,
   `Questions`, `Response` with its accessors, `Check`, `Normalize`, the
   `Decider` interface, and the two decorators `Observe` and `Replay`. It
-  holds no HTTP code and names no backend.
+  holds no HTTP code and imports no backend.
 - `decide/systemone` is the System One wire backend. `systemone.Client`
   satisfies `decide.Decider`. One `Client.Ask` call sends a state plus a
   set of typed questions to a System One host and returns calibrated
@@ -31,7 +31,7 @@ works behind `Config.BaseURL`. The default host is TypeSafe at
 | Reported model | The versioned id (`jev-1.13.0` for `jev-latest`). | The requested alias, echoed (`kev-latest`). |
 | Billing | Input tokens only; output tokens are free. | Open weights (Apache-2.0); you run the server. |
 | Instructions-less questions, 1-level scores | `decide.Normalize` refuses both. | The host accepts both, but `decide.Normalize` refuses both before the request. |
-| `GET /v1/models` | Not exposed. | Exposed. The client does not call it. |
+| `GET /v1/models` | Listed in the OpenAPI document. The client does not call it. | Exposed. The client does not call it. |
 | Probabilities | As reported. | Reported at 4 decimals. |
 | Extra response fields | None known. | `latency_ms`, ignored by the client. |
 | Auth | `Authorization: Bearer` key. | A local `kev.serve` needs no auth, but `systemone.New` still requires a non-empty `Secret`. |
@@ -332,10 +332,12 @@ func main() {
 
 A map stays nil when the `Ask` included no question of that kind.
 
-`ScoreAnswer` carries `Probabilities` index-aligned with `Levels`. Both
-follow the server's legend order, from `"0"` to `"n-1"` with `n` equal
-to the levels asked for. The client passes them through verbatim: it
-renormalizes nothing and recomputes no argmax.
+`ScoreAnswer.Probabilities[i]` is the probability of asked level `i`. The
+System One client fills `Levels` and `Probabilities` from the server's
+legend keys `"0"` to `"n-1"`, with `n` equal to the levels asked for, and
+passes them through verbatim: it renormalizes nothing and recomputes no
+argmax. A backend may leave either slice nil; `Check` accepts nil or a full
+slice for each.
 
 ### Accessors
 
@@ -363,14 +365,16 @@ names the offending id. `systemone.Client.Ask` applies it to every answer set it
 `ChoiceAnswer.Probabilities`, `ScoreAnswer.Levels`, and
 `ScoreAnswer.Probabilities` may be nil, and `Confidence` 0, when a backend
 reports no distribution; a backend must not fabricate them. The System One
-client always requires the legend and probabilities from the server and
-rejects a score answer missing either.
+client rejects a score answer missing its legend or probabilities. It
+accepts a `Choice` answer without them: `Probabilities` is nil and
+`Confidence` is 0.
 
 ### Confidence and probabilities
 
-Every System One `Choice` and `Score` answer carries both. `Probabilities` is the
-full distribution. Its shape — concentrated on one outcome or spread out
-— describes the model's uncertainty. `Confidence` is a vendor-computed
+When a host reports them, a `Choice` or `Score` answer carries `Probabilities`
+(the full distribution) and `Confidence`. A missing `confidence` reads as 0.
+The shape of the distribution, concentrated on one outcome or spread out,
+describes the model's uncertainty. `Confidence` is a vendor-computed
 statistic that collapses that shape into one number in [0, 1]. Threshold
 on `Confidence` when you do not want to compute a spread yourself.
 
@@ -474,9 +478,9 @@ untouched and emits nothing. Every other `Ask` emits exactly one event,
 success or failure, including a caller's already-cancelled ctx (`Err` set,
 zero wire hits). The event carries `State` and `Questions` as validated,
 `Answers`, `Usage`, and the `Ask`'s wall time as `Duration`; `Questions`
-and `Answers` are each sorted by ID. On failure `Err` is the error's text
-and `Answers` is nil. `Observe` returns the wrapped `Decider`'s `Response`
-and error exactly, and `Observe(d, nil)` returns `d`.
+and `Answers` are each sorted by ID. On failure `Err` is the error's text,
+`Answers` is nil, and `Usage` is zero. `Observe` returns the wrapped
+`Decider`'s `Response` and error exactly, and `Observe(d, nil)` returns `d`.
 
 `Observe` reads an optional `Identity() llmkit.Identity` method from the
 `Decider`: `Backend` is its `Provider` (`"systemone"` for `*systemone.Client`),
@@ -503,7 +507,9 @@ runner := agent.NewRunner(rc, rc.Tools(), system, agent.WithToolPolicy(myPolicy(
 Each `Ask` follows these rules:
 
 1. `decide.Normalize` runs first; a refusal is returned unchanged and
-   consumes nothing.
+   consumes nothing. Its `Provider` is `"decide"`, so its text reads
+   `llmkit: decide error: ...`, where the live client's reads
+   `llmkit: systemone error: ...`.
 2. The `Ask` matches the earliest unconsumed recorded decision with the same
    `Step` and the same set of question ids, and consumes it. Two `Ask`s of
    one step with different id sets match whichever order they arrive in.
@@ -521,9 +527,11 @@ judges a different state than the recorded one still gets the recorded
 answer, so compare states yourself if that matters. And it does not report
 recorded decisions the replay never asked for; a replay that stops early is
 not an error here (`ReplayClient.Err` still reports unreached completions
-and tool calls). The `ErrReplayDiverged` and `ErrReplayedFailure` sentinels
-are the only non-root errors a `Decider` from this package returns. A
-`Decider` from `Replay` is safe for concurrent use.
+and tool calls). `decide.ErrReplayDiverged` is a different sentinel from
+`agent.ErrReplayDiverged`; match each with `errors.Is`. Besides the wrapped
+`Decider`'s errors and a `Normalize` refusal, a `Decider` from this package
+returns only errors wrapping `ErrReplayDiverged` or `ErrReplayedFailure`.
+A `Decider` from `Replay` is safe for concurrent use.
 
 ## Gating an agent
 
@@ -603,6 +611,12 @@ System One. It reads the `LLMKIT_*` variables of the other examples plus
 go run ./examples/agent-guardrail --threshold 0.5 --budget 200000
 ```
 
+The program checks only that `LLMKIT_SYSTEMONE_API_KEY` and
+`LLMKIT_SYSTEMONE_MODEL` are non-empty. A key with leading or trailing
+whitespace passes that check and fails in `systemone.New`. It prints
+beliefs at two decimals, so a belief just below the threshold can print
+as equal to it, such as `0.50` for `0.49999999`.
+
 Design points the program follows:
 
 - **Two `Ask`s, not one.** The request policy fires before each wire call and
@@ -613,10 +627,11 @@ Design points the program follows:
   the threshold treats as safe.
 - **Fail closed.** A failed `Ask` denies the call or aborts the run.
 - **One budget.** `agent.WithBudgetPool(pool)` charges the LLM's completions.
-  The observer on `decide.Observe` charges the decider's, so the run stops
-  with `agent.TruncBudgetPool` when LLM and decision spend together reach the
-  limit. `agent.Limits.TokenBudget` counts completions only, so it does not
-  see decision tokens.
+  The observer on `decide.Observe` charges the decider's. The run stops with
+  `agent.TruncBudgetPool` at the first turn boundary after combined spend
+  reaches the limit, so it can overshoot the limit by one turn.
+  `agent.Limits.TokenBudget` counts completions only, so it does not see
+  decision tokens.
 - **Replay.** Wrap the decider in `decide.Observe` with a recording sink and
   replay the run with `decide.Replay` ([Replay](#replay)); without that, a
   replayed run asks the policies' decider live again.
