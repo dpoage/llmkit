@@ -103,7 +103,7 @@ func (g *googleAdapter) Capabilities() llmkit.Capabilities { return g.caps }
 func (g *googleAdapter) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	// Per-call wire recorder for normalizeErr: request count and the
 	// transport-status fallback.
-	ctx, _ = adapter.WithWire(ctx)
+	ctx, wire := adapter.WithWire(ctx)
 	contents, cfg, err := g.buildRequest(req)
 	if err != nil {
 		return llmkit.Response{}, err
@@ -115,7 +115,7 @@ func (g *googleAdapter) Complete(ctx context.Context, req llmkit.Request) (llmki
 	if err := g.checkCompletion(ctx, resp); err != nil {
 		return llmkit.Response{}, err
 	}
-	return g.toResponse(resp), nil
+	return g.toResponse(resp, wire), nil
 }
 
 // buildRequest applies the shared rules exactly once via adapter.Prepare,
@@ -439,7 +439,7 @@ func functionCallKey(id, name string) string {
 	return id + "\x00" + name
 }
 
-func (g *googleAdapter) toResponse(resp *genai.GenerateContentResponse) llmkit.Response {
+func (g *googleAdapter) toResponse(resp *genai.GenerateContentResponse, wire *adapter.Wire) llmkit.Response {
 	var out llmkit.Response
 	var text string
 	var stop genai.FinishReason
@@ -509,6 +509,8 @@ func (g *googleAdapter) toResponse(resp *genai.GenerateContentResponse) llmkit.R
 			CacheReadInputTokens: int64(resp.UsageMetadata.CachedContentTokenCount),
 			ReasoningTokens:      int64(resp.UsageMetadata.ThoughtsTokenCount),
 		}
+	} else {
+		out.Usage = adapter.EstimateUsage(wire, out)
 	}
 	out.StopReason = mapGoogleStop(stop, len(out.ToolCalls) > 0)
 	if len(resp.Candidates) == 0 && promptBlocked(resp) {

@@ -59,6 +59,8 @@
 // ignores the cache fields sees exactly the pre-caching numbers.
 // [Usage.OutputTokens] includes reasoning tokens on every adapter;
 // [Usage.ReasoningTokens] is an informational subset of it.
+// [Usage.Estimated] marks counts the adapter computed because the endpoint
+// reported no usage.
 // [Usage.ChargeableTokens] discounts cache reads by a weight for budget math;
 // cache-creation tokens stay at full weight.
 //
@@ -590,6 +592,12 @@ type Usage struct {
 	// OutputTokens). Zero where the provider reports none (Anthropic).
 	// Never add it to OutputTokens or ChargeableTokens.
 	ReasoningTokens int64 `json:"reasoning_tokens,omitempty"`
+	// Estimated is true when the endpoint's response carried no usage object
+	// (absent or null; a present all-zero object is reported, not estimated).
+	// The counts are then estimates: InputTokens is bytes/4 of the request
+	// body sent and OutputTokens is bytes/4 of the response text and tool
+	// calls (names and arguments); every other count is 0.
+	Estimated bool `json:"estimated,omitempty"`
 }
 
 // ChargeableTokens returns the budget-relevant token count for this usage,
@@ -615,7 +623,7 @@ func (u Usage) ChargeableTokens(cacheReadWeight float64) int64 {
 // Add returns the field-wise sum of u and v across every Usage field —
 // the one summing rule every usage fold in this repository uses (the
 // agent Runner's run total, its JSON-repair fold, and the livetest
-// Tally). It does not mutate u or v.
+// Tally). Estimated is true when either operand's is. It does not mutate u or v.
 func (u Usage) Add(v Usage) Usage {
 	return Usage{
 		InputTokens:              u.InputTokens + v.InputTokens,
@@ -623,6 +631,7 @@ func (u Usage) Add(v Usage) Usage {
 		CacheReadInputTokens:     u.CacheReadInputTokens + v.CacheReadInputTokens,
 		CacheCreationInputTokens: u.CacheCreationInputTokens + v.CacheCreationInputTokens,
 		ReasoningTokens:          u.ReasoningTokens + v.ReasoningTokens,
+		Estimated:                u.Estimated || v.Estimated,
 	}
 }
 

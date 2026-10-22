@@ -19,6 +19,7 @@ entry below is marked.
   Zero (the default) disables it and `Complete` ignores it. Models that reason
   before answering stream nothing meanwhile, so a short value misfires on them.
 - `llmkit`: `Usage.ReasoningTokens`, the reasoning tokens inside `OutputTokens`: OpenAI's `completion_tokens_details.reasoning_tokens` (`Complete` and `Stream`, with or without a callback) and Gemini's `thoughtsTokenCount`. Anthropic reports no count, so it stays 0. It is an informational subset: `ChargeableTokens` is unchanged and callers must not add it to `OutputTokens`. `Usage.Add` sums it.
+- `llmkit`: `Usage.Estimated`, true when the endpoint's response carried no usage object (a missing or null `usage` on OpenAI-compatible `Complete` and `Stream`, no `usageMetadata` on Gemini). The adapter then estimates: `InputTokens` is the request body's bytes divided by 4, `OutputTokens` the response text plus every tool call's name and arguments, in bytes divided by 4, rounded up; other counts are 0. A present all-zero usage object is reported, not estimated. `Usage.Add` ORs the flag. Before this, such endpoints read as zero spend and `agent.Limits.TokenBudget` and `agent.BudgetPool` never tripped; they now see the estimate (llmkit-rli.1.4).
 
 ### Changed
 
