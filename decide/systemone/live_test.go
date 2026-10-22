@@ -104,7 +104,7 @@ type decideCase struct {
 	t         *testing.T
 	sess      *livetest.Session
 	tr        *livetest.Transport
-	cl        *systemone.Client
+	cl        decide.Decider
 	ctx       context.Context
 	caseName  string
 	model     string
@@ -346,7 +346,8 @@ func (c *decisionCapture) Observe(_ context.Context, ev llmkit.Event) {
 func caseUsageRecorded(t *testing.T, sess *livetest.Session) {
 	base := newDecideCase(t, sess, "usage_recorded")
 	obs := &decisionCapture{}
-	via := base.variant(func(c *systemone.Config) { c.Observer = llmkit.Observers(obs, livetest.DefaultTally()) })
+	via := base.variant(func(*systemone.Config) {})
+	via.cl = decide.Observe(via.cl, obs)
 	resp, err := via.ask(ticketState, ticketQuestions())
 	if err != nil {
 		t.Fatalf("ask: %v", err)
@@ -355,7 +356,7 @@ func caseUsageRecorded(t *testing.T, sess *livetest.Session) {
 	events := append([]llmkit.Event(nil), obs.events...)
 	obs.mu.Unlock()
 	if len(events) != 1 {
-		t.Fatalf("Config.Observer fired %d time(s), want exactly once per successful Ask", len(events))
+		t.Fatalf("decide.Observe fired %d time(s), want exactly once per successful Ask", len(events))
 	}
 	ev := events[0]
 	if ev.Kind != llmkit.KindDecision || ev.Decision == nil {

@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 )
 
 var _ decide.Decider = (*Client)(nil)
@@ -48,20 +47,14 @@ type answerBody struct {
 // Ask evaluates state against questions in one request: validates them
 // with [decide.Normalize], marshals the envelope, POSTs to
 // <BaseURL>/v1/systemone with an "Authorization: Bearer" header, retries
-// transient failures, and validates the response. ctx bounds the call. Every error from Ask is an
-// *llmkit.APIError with Provider "systemone", except the caller's
+// transient failures, and validates the response. ctx bounds the call.
+// Every error from Ask is an *llmkit.APIError with Provider "systemone", except the caller's
 // cancellation or a deadline it set, which is an error chaining the
 // context error (errors.Is(err, ctx.Err()); never retryable) — see the
 // package doc for the status mapping.
 //
-// When [Config.Observer] is set, Ask emits exactly one
-// [llmkit.DecisionEvent] for every Ask that passes pre-wire validation:
-// on success, Backend "systemone", Model the response's reported model,
-// Usage, State and Questions as validated (sorted by ID), Answers
-// sorted by ID; on failure, Err set, Answers nil, Model the requested
-// alias. A pre-wire validation refusal emits nothing; a caller's
-// already-cancelled ctx emits one event with Err set and zero wire
-// hits. The event rides the Ask's ctx — systemone never mints a span.
+// Ask emits no event of its own: wrap the Client in [decide.Observe] to
+// record each Ask as a [llmkit.DecisionEvent].
 func (c *Client) Ask(ctx context.Context, state any, questions decide.Questions) (decide.Response, error) {
 	stateRaw, dqs, err := decide.Normalize(state, questions)
 	if err != nil {
@@ -71,10 +64,9 @@ func (c *Client) Ask(ctx context.Context, state any, questions decide.Questions)
 	if err != nil {
 		return decide.Response{}, err
 	}
-	start := time.Now()
 	// An echo of the Secret or the BaseURL password is masked in a returned
-	// error: every attempt's error is scrubbed before retry.Do, the
-	// observer or the caller sees it, and a response body is redacted
+	// error: every attempt's error is scrubbed before retry.Do or the
+	// caller sees it, and a response body is redacted
 	// before its Message is capped.
 	redact := adapter.NewRedactor(c.apiKey, c.endpoint)
 	var resp decide.Response
@@ -86,7 +78,6 @@ func (c *Client) Ask(ctx context.Context, state any, questions decide.Questions)
 		resp = r
 		return nil
 	})
-	c.emitDecision(ctx, stateRaw, dqs, resp, err, time.Since(start))
 	if err != nil {
 		return decide.Response{}, err
 	}
@@ -106,30 +97,11 @@ func retagProvider(err error) error {
 	return &tagged
 }
 
-// emitDecision converts and emits one DecisionEvent for an Ask that
-// passed pre-wire validation, gated on c.observer != nil. askErr is
-// the Ask's own outcome (nil on success).
-func (c *Client) emitDecision(ctx context.Context, stateRaw json.RawMessage, dqs []llmkit.DecisionQuestion, resp decide.Response, askErr error, d time.Duration) {
-	if c.observer == nil {
-		return
-	}
-	de := &llmkit.DecisionEvent{
-		Backend:   providerName,
-		State:     stateRaw,
-		Questions: dqs,
-	}
-	if askErr != nil {
-		de.Model = c.model
-		de.Err = askErr.Error()
-	} else {
-		de.Model = resp.Model
-		de.Answers = decide.DecisionAnswers(resp)
-		de.Usage = resp.Usage
-	}
-	ev := llmkit.NewEvent(ctx, llmkit.KindDecision)
-	ev.Duration = d
-	ev.Decision = de
-	c.observer.Observe(ctx, ev)
+// Identity returns the Client's backend identity: Provider "systemone" and
+// the configured Model alias. [decide.Observe] reads it to tag the events
+// it emits.
+func (c *Client) Identity() llmkit.Identity {
+	return llmkit.Identity{Provider: providerName, Model: c.model}
 }
 
 // attempt performs one HTTP round trip and response parse. body is built

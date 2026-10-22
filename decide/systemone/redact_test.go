@@ -50,7 +50,6 @@ func forbiddenFor(secrets ...string) []string {
 func askObserved(t *testing.T, cfg Config, q decide.Questions) (eventErr string, err error) {
 	t.Helper()
 	obs := &decisionCapture{}
-	cfg.Observer = obs
 	if cfg.Model == "" {
 		cfg.Model = "jev-latest"
 	}
@@ -61,7 +60,7 @@ func askObserved(t *testing.T, cfg Config, q decide.Questions) (eventErr string,
 	if cerr != nil {
 		t.Fatalf("New: %v", cerr)
 	}
-	_, err = c.Ask(context.Background(), "state", q)
+	_, err = decide.Observe(c, obs).Ask(context.Background(), "state", q)
 	if err == nil {
 		t.Fatal("Ask succeeded, want an error")
 	}
@@ -324,11 +323,11 @@ func TestAsk_D4_CancelDuringBackoffAfterALeakingAttempt(t *testing.T) {
 		return ctx.Err()
 	}
 	obs := &decisionCapture{}
-	c, err := New(Config{Secret: leakSecret, Model: "m", BaseURL: srv.URL, Retry: pol, Observer: obs})
+	c, err := New(Config{Secret: leakSecret, Model: "m", BaseURL: srv.URL, Retry: pol})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = c.Ask(ctx, "state", oneQuestion)
+	_, err = decide.Observe(c, obs).Ask(ctx, "state", oneQuestion)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
@@ -455,11 +454,11 @@ func TestAsk_D4_CancelMidAttemptWithUserinfo(t *testing.T) {
 	defer cancel()
 	base := strings.Replace(srv.URL, "http://", "http://sk-USERKEY@", 1)
 	obs := &decisionCapture{}
-	c, err := New(Config{Secret: leakSecret, Model: "m", BaseURL: base, Retry: leakPolicy(), Observer: obs})
+	c, err := New(Config{Secret: leakSecret, Model: "m", BaseURL: base, Retry: leakPolicy()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = c.Ask(ctx, "state", oneQuestion)
+	_, err = decide.Observe(c, obs).Ask(ctx, "state", oneQuestion)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want the caller's DeadlineExceeded", err)
 	}

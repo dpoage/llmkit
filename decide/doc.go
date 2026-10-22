@@ -44,5 +44,26 @@
 //
 // [Decider] is the interface a backend implements. Its errors wrap a root
 // llmkit sentinel (llmkit.Err*) or chain the context's error. A successful
-// Response satisfies [Check] against the questions asked.
+// Response satisfies [Check] against the questions asked. A Decider that
+// decide itself provides returns, besides the wrapped Decider's errors,
+// only the two [Replay] sentinels [ErrReplayDiverged] and
+// [ErrReplayedFailure].
+//
+// # Observability and replay
+//
+// [Observe] wraps any Decider and emits one [llmkit.KindDecision] event per
+// Ask to an [llmkit.Observer], on the Ask's context, so inside an agent
+// Runner turn the event carries the run's RunID and the turn's Step. A
+// Decider that implements Identity() llmkit.Identity (the systemone Client
+// does) tags the event's Backend and Model, and the wrapper forwards the
+// method. An Ask that fails [Normalize] emits nothing.
+//
+// [Replay] is the other half: it builds a Decider from the Decision events
+// an [llmkit.Source] holds for a run. Each Ask consumes the earliest
+// recorded decision with the same Step and the same question ids and
+// returns the recorded answers, with no backend call. Paired with the agent
+// package's replay client, a recorded run whose ToolPolicy asked a Decider
+// replays offline with the same denials. Replay does not compare the state
+// and does not report recorded decisions the replay never asked for; see
+// [Replay].
 package decide

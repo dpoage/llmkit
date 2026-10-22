@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/decide"
 	"github.com/dpoage/llmkit/decide/systemone"
 	"github.com/dpoage/llmkit/provider"
 )
@@ -290,16 +291,15 @@ func (s *Session) Client(ctx context.Context, t testing.TB, tr *Transport, mutat
 }
 
 // DecideClient builds the typesafe lane's decide client through
-// systemone.New, with the recording transport injected via Config.HTTPClient
-// and the run-wide token tally as Config.Observer. mutate, when non-nil,
-// adjusts the Config last.
-func (s *Session) DecideClient(ctx context.Context, t testing.TB, tr *Transport, mutate func(*systemone.Config)) *systemone.Client {
+// systemone.New, with the recording transport injected via Config.HTTPClient,
+// and wraps it in decide.Observe with the run-wide token tally as the
+// observer. mutate, when non-nil, adjusts the Config last.
+func (s *Session) DecideClient(ctx context.Context, t testing.TB, tr *Transport, mutate func(*systemone.Config)) decide.Decider {
 	cfg := systemone.Config{
 		Secret:     s.Key,
 		Model:      s.Model,
 		BaseURL:    s.BaseURL,
 		HTTPClient: &http.Client{Transport: tr},
-		Observer:   DefaultTally(),
 	}
 	if mutate != nil {
 		mutate(&cfg)
@@ -309,7 +309,7 @@ func (s *Session) DecideClient(ctx context.Context, t testing.TB, tr *Transport,
 		t.Fatalf("livetest: systemone.New for lane %s: %v", s.Lane.Name, err)
 		return nil
 	}
-	return cl
+	return decide.Observe(cl, DefaultTally())
 }
 
 // Ctx returns a context with a bounded deadline, so a hung vendor fails the
@@ -343,7 +343,8 @@ func (s *Session) Logf(t testing.TB, format string, args ...any) {
 
 // Tally is the run-wide token accumulator. It implements llmkit.Observer
 // and is wired into every client livetest builds (Options.Observer,
-// Config.Observer, agent.WithObserver on every live Runner), so a whole
+// decide.Observe on the decide lane, agent.WithObserver on every live
+// Runner), so a whole
 // test binary's spend is reported by one line at exit. It sums
 // Completion.Response.Usage and DecisionEvent.Usage with [llmkit.Usage.Add]
 // on success — Completion and Decision are the spend ledger; Attempt and

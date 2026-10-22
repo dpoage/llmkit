@@ -9,7 +9,7 @@
 // is not a chat model: it has no messages, tools, streaming, or text
 // output, so this package does not implement [llmkit.Client] and shares no
 // code path with the provider packages. It uses only the root package's
-// error types, retry configuration, usage types, and observer vocabulary.
+// error types, retry configuration, and usage types.
 //
 // # Hosts
 //
@@ -87,7 +87,7 @@
 // When the server or the transport echoes [Config.Secret] or the password
 // of [Config.BaseURL] into an error, as sent, escaped by Go's encoding/json
 // or Go-quoted (%q), Ask masks the echo in the error it returns, in every
-// error under it, and in the Observer event's Err. That covers a host
+// error under it, and in the Err of an event [decide.Observe] emits. That covers a host
 // body, a contract-violation message that quotes an answer id or type, a
 // transport error that quotes server bytes, and the last attempt's error
 // in the "(last attempt: ...)" text of a cancelled retry. The mask is
@@ -159,15 +159,16 @@
 //
 // # Observability
 //
-// A *Client is safe for concurrent use, and each Ask is independent. When
-// [Config.Observer] is set, Ask emits exactly one [llmkit.DecisionEvent]
-// per Ask that passes pre-wire validation — success or failure, none for
-// a validation refusal — with Backend "systemone", Model (the
-// response's reported model on success, the requested alias on
-// failure), Usage, State, Questions, and Answers each sorted by ID. A
-// caller's already-cancelled ctx emits one event with Err set and zero
-// wire hits. systemone never mints a span; the event rides whatever
-// Run/Span/Step the Ask's ctx already carries.
+// A *Client is safe for concurrent use, and each Ask is independent. A
+// Client emits no events itself. Wrap it in [decide.Observe] to record
+// each Ask as one [llmkit.DecisionEvent]; Observe reads the Client's
+// [Client.Identity] (Provider "systemone", Model the configured alias) to
+// set the event's Backend and, on failure, Model. The event carries the
+// response's reported model on success, Usage, and State, Questions, and
+// Answers each sorted by ID, and rides whatever Run/Span/Step the Ask's
+// ctx carries. A validation refusal emits nothing; a caller's
+// already-cancelled ctx emits one event with Err set and zero wire hits.
+// [decide.Replay] later answers from those events with no network.
 //
 // # Construction
 //
