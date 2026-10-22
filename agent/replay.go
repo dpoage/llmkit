@@ -79,11 +79,10 @@ var ErrReplayDiverged = errors.New("agent: replay diverged")
 // Tools other than [ReplayClient.Tools] execute live, and their results are
 // never compared with the record.
 //
-// A recorded tool result that carries Content (media, or omission markers)
-// is served block for block; a record without Content serves its Result as
-// one text block. The replaying Runner then places those blocks under this
-// client's caps like any tool result, so a profile that cannot carry the
-// recorded media degrades it again.
+// A recorded result with Content is served block for block; one without it
+// serves its Result as one text block. The replaying Runner places those
+// blocks under this client's profile: media it cannot carry degrades again,
+// and that count is added to the recorded Degraded.
 //
 // Replaying under a [ToolPolicy] that rewrote arguments in the recorded run
 // works only if each rewrite produces valid JSON and is deterministic: the

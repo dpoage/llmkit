@@ -215,8 +215,6 @@ func (r *Runner) runTool(ctx context.Context, call llmkit.ToolCall, step int) to
 	return res
 }
 
-// Markers that replace a media block the model's profile cannot take in a
-// tool result.
 const (
 	imageOmitted    = "[image omitted: this model does not accept images in tool results]"
 	documentOmitted = "[document omitted: this model does not accept documents in tool results]"
@@ -241,10 +239,8 @@ func isMedia(b llmkit.Block) bool {
 	return b.Kind == llmkit.BlockImage || b.Kind == llmkit.BlockDocument
 }
 
-// placeToolBlocks builds the outcome of a successful Tool.Run: the blocks the
-// model sees, with each media block the client's profile cannot carry in a
-// tool result replaced by its omission marker, and the model-visible text.
-// Capabilities is read only when a media block is present.
+// placeToolBlocks builds the outcome of a successful Tool.Run, degrading each
+// media block the client's profile cannot carry in a tool result.
 func (r *Runner) placeToolBlocks(out []llmkit.Block) toolResult {
 	if !slices.ContainsFunc(out, isMedia) {
 		return toolResult{result: blocksText(out), content: nonEmptyBlocks(out)}
@@ -281,9 +277,9 @@ func degradeToolMedia(blocks []llmkit.Block, accepts bool) ([]llmkit.Block, int)
 	return placed, degraded
 }
 
-// wireMessages applies degradeToolMedia to every tool-result message of history,
-// so media carried in by Continue from another profile reaches this wire in a
-// form it takes. history is never modified; copied reports a fresh slice.
+// wireMessages degrades the media of every tool-result message of history,
+// which Continue can carry in from another profile. history is never modified;
+// copied reports a fresh slice.
 func (r *Runner) wireMessages(history []llmkit.Message) (msgs []llmkit.Message, copied bool) {
 	var accepts, read bool
 	for i, m := range history {
@@ -315,9 +311,8 @@ func nonEmptyBlocks(blocks []llmkit.Block) []llmkit.Block {
 	return blocks
 }
 
-// blocksText is the model-visible text of placed blocks: text blocks
-// concatenated in order, with a size marker in the position of each media
-// block that was sent.
+// blocksText is the model-visible text of placed blocks: text in order, with a
+// size marker at each media block sent.
 func blocksText(blocks []llmkit.Block) string {
 	var b strings.Builder
 	for _, blk := range blocks {
@@ -355,11 +350,11 @@ func invokeTool(ctx context.Context, tool Tool, args json.RawMessage) (out []llm
 // [llmkit.ToolRunEvent].DispatchedArguments).
 type toolResult struct {
 	result string
-	// content is the blocks fed to the model as the tool-result message's
-	// content. Nil for harness-rendered outcomes (errors, denials, timeouts)
-	// and for a tool that returned no blocks: the message then carries result.
+	// content is the blocks fed to the model; nil for harness-rendered outcomes
+	// and for a tool that returned none, when the message carries result.
 	content []llmkit.Block
-	// degraded counts omission markers in content, a replayed record's included.
+	// degraded counts media blocks replaced by omission markers, a replayed
+	// record's included; content may since be a stand-in holding none.
 	degraded int
 	// originalBytes, spillRef and spillErr describe an applied output limit.
 	originalBytes  int
@@ -372,8 +367,7 @@ type toolResult struct {
 }
 
 // eventContent is the Content the ToolRun event and ToolEvent carry: the
-// placed blocks when they hold media or a degradation marker, else nil, so a
-// text-only result serializes as before.
+// placed blocks when they hold media or degraded > 0, else nil.
 func (res toolResult) eventContent() []llmkit.Block {
 	if res.degraded > 0 || slices.ContainsFunc(res.content, isMedia) {
 		return res.content
@@ -431,7 +425,6 @@ func reportRecordedLimit(ctx context.Context, rec recordedLimit) {
 	}
 }
 
-// setText replaces the result with one text block s.
 func (res *toolResult) setText(s string) {
 	res.result = s
 	res.content = []llmkit.Block{llmkit.Text(s)}

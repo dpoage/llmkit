@@ -118,10 +118,10 @@ func steerEvent(ctx context.Context, msg llmkit.Message, followUp bool, step int
 
 // toolRunEvent builds the ToolRun event for one dispatched call: the model's
 // call (never the policy's rewrite; a rewrite rides DispatchedArguments), the
-// textual result exactly as fed to the model, and the error or
-// policy-denial marks. A denial carries Denied and DenyReason with no result
-// — the rendered denial text still rides the conversation as the
-// tool-result message, per [ToolPolicy]'s contract.
+// model-visible result text with its Content, Degraded and output-limit
+// fields, and the error or policy-denial marks. A denial carries Denied and
+// DenyReason with no result — the rendered denial text still rides the
+// conversation as the tool-result message, per [ToolPolicy]'s contract.
 func toolRunEvent(ctx context.Context, call llmkit.ToolCall, res toolResult, step int) llmkit.Event {
 	ev := llmkit.NewEvent(ctx, llmkit.KindToolRun)
 	ev.Step = step

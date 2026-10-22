@@ -335,10 +335,11 @@ type AttemptEvent struct {
 // rewritten.
 //
 // OriginalBytes is the result's size (text, data and URL bytes of its blocks)
-// when the Runner's output limit applied, else zero; Result and Content are
-// then the model-visible stand-in. SpillRef is the sink's reference when the
-// full result was spilled. SpillError is the sink's failure when the limit
-// fell back to truncation.
+// when the Runner's output limit applied, else zero; Result is then the
+// model-visible stand-in, and Content holds it when Degraded > 0. SpillRef is
+// the sink's reference when the full result was spilled. SpillError is the
+// sink's failure when the limit fell back to truncation. With no sink only
+// OriginalBytes is set.
 type ToolRunEvent struct {
 	Call                ToolCall        `json:"call"`
 	DispatchedArguments json.RawMessage `json:"dispatched_arguments,omitempty"`

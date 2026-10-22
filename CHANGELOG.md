@@ -10,17 +10,22 @@ entry below is marked.
 
 ### Added
 
-- agent: `WithToolOutputLimit(maxBytes, sink)` bounds each successful tool
+- `agent`: `WithToolOutputLimit(maxBytes, sink)` bounds each successful tool
   result entering history; off by default, so existing runs are unchanged. A
-  result over the limit (the bytes of its text, media data and URLs) goes whole
-  to the `SpillSink` and the model sees `[tool output spilled: <ref>, <size>
-  bytes]` plus a head preview, within the limit. With a nil sink, or when the
-  sink fails, the text is head-truncated and marked `[tool output truncated:
-  <shown> of <size> bytes shown]`, and media blocks are dropped. `ToolRunEvent`
-  gains `OriginalBytes`, `SpillRef` and `SpillError`, omitted when unset;
-  `Result` stays the text the model saw. A replay serves the recorded result
-  without calling the sink, and a compaction stub of a spilled result names
-  its reference.
+  result over the limit (the bytes of its text, media data and URLs, after
+  media degradation) goes to the `SpillSink` as its blocks, and the model sees
+  `[tool output spilled: <ref>, <size> bytes]` plus a head preview of its text,
+  within the limit. When the preview is empty, because the result has no text
+  or the limit leaves no room for it, the marker goes alone, with no newline.
+  With a nil sink, or when the sink fails, the text is head-truncated and
+  marked `[tool output truncated: <shown> of <size> bytes shown]`, and media
+  blocks are dropped. A limit smaller than the marker still sends the marker.
+  Errors, denials and timeouts are not limited. A sink that panics is not
+  recovered. `ToolRunEvent` gains `OriginalBytes`, `SpillRef` and
+  `SpillError`, omitted when unset; with no sink only
+  `OriginalBytes` is set, and `Result` stays the text the model saw. A replay
+  serves the recorded result without calling the sink, and a compaction stub
+  of a spilled result names its reference.
 - `llmkit`: `ThinkingConfig.Effort` (`ReasoningEffort`: `EffortLow`,
   `EffortMedium`, `EffortHigh`) and `Capabilities.ReasoningEffort`. OpenAI
   sends `reasoning_effort` and Google sends `thinkingLevel`. The flag is true
@@ -72,9 +77,11 @@ entry below is marked.
   `9007199254740992` differ. Arguments that do not parse compare by raw bytes.
   The denial reads `repeated identical call: <name> called N times in the
   last 12 calls without progress`. State is kept per run id and shared by every
-  run on the policy, bounded to the 1024 most recently used runs. `Continue`
-  starts a new run id, so a continued run's counts start from zero
-  (llmkit-rli.2.4).
+  run on the policy, bounded to the 1024 most recently used runs. Runs that
+  share a run id share one window: calls with no run id share one bucket, and
+  runs pinned to the same id with `WithRunID` do too. `Continue` starts a new
+  run id, so a continued run's counts start from zero, unless `WithRunID`
+  reuses the id (llmkit-rli.2.4).
 - `llmkit`: `Capabilities.ToolResultMedia`. A `RoleToolResult` message may now
   carry image and document blocks, not only text. Anthropic sends them in the
   `tool_result` content in order; Google (Gemini 3 models) sends `inlineData`
@@ -85,33 +92,44 @@ entry below is marked.
   refused pre-wire with an error wrapping `ErrInvalidRequest` that names the
   capability. The OpenAI and `openai-compatible` ceiling is false, so an
   override forcing it true is refused by `provider.New`. Google refuses URL
-  sources and other media types in a tool result pre-wire (llmkit-rli.2.1).
+  sources and other media types in a tool result pre-wire, and Anthropic
+  refuses an inline document that is not `application/pdf`
+  (llmkit-rli.2.1).
 - `agent`: a tool result's image and document blocks reach the model, or
-  degrade to a marker (llmkit-rli.2.1). The Runner replaces such a block with
-  a text marker, `[image omitted: this model does not accept images in tool
-  results]` or `[document omitted: this model does not accept documents in
-  tool results]`, when the client's `Capabilities.ToolResultMedia` is false or
-  the block's `MediaType` is outside `image/png`, `image/jpeg`, `image/webp`,
-  `application/pdf`. That set over-degrades `image/gif` on Anthropic and
-  `text/plain` on Gemini 3, and a URL-sourced block (no `MediaType`) always
-  degrades. History, events and the wire agree, so a run on OpenAI or
+  degrade to a marker (llmkit-rli.2.1). The Runner sends a media block in a
+  tool result only when the client's `Capabilities.ToolResultMedia` is true
+  and the block is portable: inline `Data`, a `MediaType` of `image/png`,
+  `image/jpeg`, `image/webp` or `application/pdf`, and the matching kind
+  (image or document). It replaces any other media block, a URL-sourced one
+  included, with a text marker, `[image omitted: this model does not accept
+  images in tool results]` or `[document omitted: this model does not accept
+  documents in tool results]`. That set over-degrades `image/gif` on Anthropic
+  and `text/plain` on Gemini 3. The Runner degrades the results it places
+  itself in history, and the results `Continue` carries in from another
+  profile in each request's copy of the history, so a Runner run on OpenAI or
   `openai-compatible` completes instead of failing with `ErrInvalidRequest`.
-  `ToolRunEvent` and `agent.ToolEvent` keep `Result` as the model-visible
-  text, now with a `[image: <mediatype>, <N> bytes]` (or `[document: ...]`)
-  marker in the position of each media block sent, and gain `Content` (the
-  blocks exactly as placed in history) and `Degraded` (how many blocks were
-  degraded). Both are omitted for a text-only result, so text-only events,
+  A message a `RequestPolicy` adds is not degraded. `ToolRunEvent` and
+  `agent.ToolEvent` keep `Result` as the model-visible text, now with a
+  `[image: <mediatype>, <N> bytes]` (or `[document: ...]`) marker in the
+  position of each media block sent, and gain `Content` (the blocks exactly as
+  placed in history) and `Degraded` (how many blocks were degraded). Both are
+  omitted for a result with no media and no degradation, so text-only events,
   hooks and transcripts are unchanged. A recorded `ToolRun` with `Content`
-  replays that content into history; a record without it replays its `Result`
-  as before, and `EventSchemaVersion` stays 3.
+  replays that content into history. Under a profile that carries the
+  recorded media the replay matches the record; otherwise the media degrades
+  again and its count is added to the recorded `Degraded`. A record without
+  `Content` replays its `Result` as before. A reader built before this change
+  ignores `content` and `degraded` and replays `Result` as text only.
+  `EventSchemaVersion` stays 3.
 
 ### Changed
 
 - `llmkit`: the per-role block rule now lets `RoleToolResult` carry text,
   image and document blocks (it was text only), gated by
   `Capabilities.ToolResultMedia`. `RoleSystem` stays text only. Before, any
-  non-text block in a tool result was refused on every adapter; now the
-  refusal depends on the profile.
+  non-text block in a tool result was refused on every adapter; now image and
+  document blocks follow the profile, and a thinking block in a tool result is
+  still refused everywhere.
 - `llmkit`: the ceiling refusal text now says the adapter "does not map" the
   field instead of claiming it has no wire field.
 - **Breaking:** `provider`: Google `Usage.OutputTokens` is now
@@ -134,17 +152,21 @@ entry below is marked.
   OpenAI adapters dropped every `ThinkingConfig`.
 - **Breaking:** `agent`: `Tool.Run` now returns `([]llmkit.Block, error)`
   instead of `(string, error)`, so a tool result can carry blocks beyond
-  text (llmkit-rli.2.1). The returned blocks become the content of the
-  tool-result message verbatim, never flattened or reordered. The text that
-  `ToolEvent.Result`, the `ToolRun` event's `Result` and error rendering carry
-  is the concatenation of the `BlockText` blocks, so a text-only tool behaves
-  as before. A nil or empty result is the empty text result, the same as
-  returning `""` before. Migration: wrap the text, so
-  `return s, nil` becomes
-  `return []llmkit.Block{llmkit.Text(s)}, nil`, and `return "", err` becomes
-  `return nil, err`. `agent.Func` is unchanged: its handler still returns a
-  string. A tool result's image and document blocks are sent or degraded per
-  the client's profile (see the `agent` media entry under Added).
+  text (llmkit-rli.2.1). A text-only tool behaves as before. The tool-result
+  message content is the returned blocks, except that the Runner replaces a
+  media block the client's profile cannot carry with a marker (see the
+  `agent` media entry under Added) and, under `WithToolOutputLimit`, an
+  oversized result with a spill or truncation stand-in. `ToolEvent.Result` and
+  the `ToolRun` event's `Result` carry the text blocks in order, with a
+  size marker at each media block sent and an omission marker at each one
+  degraded. A nil or empty result is the empty text result, the same as
+  returning `""` before. An error renders from the error alone, as
+  `ERROR: <err>`; blocks returned beside an error are discarded. The Runner
+  keeps the returned slice and `Outcome.Messages` can hold it, so do not
+  modify it after returning. Migration: wrap the text, so `return s, nil`
+  becomes `return []llmkit.Block{llmkit.Text(s)}, nil`, and `return "", err`
+  becomes `return nil, err`. `agent.Func` is unchanged: its handler still
+  returns a string.
 
 ### Fixed
 

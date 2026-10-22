@@ -20,9 +20,12 @@ const (
 
 type callID [sha256.Size]byte
 
-// RepetitionPolicy returns a [ToolPolicy] that denies a call repeating a periodic pattern of
-// identical calls (same tool, JSON-equal arguments) in the run's last 12 calls: A,A,A or
-// A,B,A,B,A. State is per run id and shared by every run using the policy; [Continue] resets it.
+// RepetitionPolicy returns a [ToolPolicy] that denies a call repeating a
+// periodic pattern of identical calls (same tool, JSON-equal arguments) in the
+// run's last 12 calls: A,A,A or A,B,A,B,A. State is kept per run id, so runs
+// that share an id share one window, [WithRunID] pins included; calls without
+// a run id share one bucket. [Continue] starts a new run id, so it resets the
+// counts unless [WithRunID] reuses the id.
 func RepetitionPolicy() ToolPolicy {
 	return &repetitionPolicy{runs: map[llmkit.RunID]*list.Element{}, lru: list.New()}
 }
@@ -75,8 +78,8 @@ func (p *repetitionPolicy) Authorize(ctx context.Context, call *llmkit.ToolCall)
 		call.Name, n, repeatWindow)
 }
 
-// periodicTail reports whether, for some p >= 1 with 2p+1 <= len(t), the last 2p+1 entries satisfy
-// t[i] == t[i+p].
+// periodicTail reports whether, for some p >= 1 with 2p+1 <= len(t), the last
+// 2p+1 entries satisfy t[i] == t[i+p].
 func periodicTail(t []callID) bool {
 	for p := 1; 2*p+1 <= len(t); p++ {
 		s := t[len(t)-2*p-1:]
@@ -94,8 +97,9 @@ func periodicTail(t []callID) bool {
 	return false
 }
 
-// identifyCall hashes the tool name with its arguments decoded under UseNumber and re-encoded
-// (sorted keys, literal numbers). Arguments that do not parse as one JSON value hash their raw bytes.
+// identifyCall hashes the tool name with its arguments decoded under UseNumber
+// and re-encoded (sorted keys, literal numbers); arguments that do not parse
+// as one JSON value hash their raw bytes.
 func identifyCall(name string, args json.RawMessage) callID {
 	h := sha256.New()
 	h.Write([]byte(name))

@@ -779,12 +779,14 @@ type Capabilities struct {
 	// Anthropic and Google Gemini 3 models only; the OpenAI and
 	// openai-compatible ceiling is false.
 	//
-	// The agent Runner never sends the refused form: it replaces a media block
-	// in a tool result with a text marker when this is false or the block's
-	// MediaType is outside the portable set image/png, image/jpeg,
-	// image/webp, application/pdf. The set is the intersection of the wires,
-	// so it over-degrades image/gif on Anthropic and text/plain on Gemini 3,
-	// and a URL-sourced block (no MediaType) always degrades.
+	// Through the agent Runner, a media block in a tool result is sent only
+	// when this is true and the block is portable: inline Data, a MediaType of
+	// image/png, image/jpeg, image/webp or application/pdf, and the matching
+	// Kind (image or document). Any other media block, a URL-sourced one
+	// included, becomes a text marker in the request, tool results carried in
+	// by Continue too. The set over-degrades image/gif on Anthropic and
+	// text/plain on Gemini 3. A message a RequestPolicy adds, or a call made
+	// without the Runner, is not degraded and is refused when this is false.
 	ToolResultMedia bool
 }
 
