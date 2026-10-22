@@ -525,8 +525,8 @@ func TestRunTool_ToolHealth_SkippedOnCancelledCtx(t *testing.T) {
 	}}}, "sys", WithHooks(Hooks{ToolHealth: func(context.Context, string, *ToolHealthError) { called = true }}))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, _, isErr := r.runTool(ctx, llmkit.ToolCall{Name: "broken", Arguments: json.RawMessage("{}")}, 1)
-	if !isErr {
+	res := r.runTool(ctx, llmkit.ToolCall{Name: "broken", Arguments: json.RawMessage("{}")}, 1)
+	if !res.isErr {
 		t.Fatal("a ToolHealthError must still be returned as an error result")
 	}
 	if called {

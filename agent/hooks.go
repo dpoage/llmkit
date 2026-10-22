@@ -114,9 +114,18 @@ type ToolEvent struct {
 	// Call is the tool call as dispatched: rewritten by a [ToolPolicy]
 	// when it modified Arguments; otherwise the model's call.
 	Call llmkit.ToolCall
-	// Result is the tool-result text fed back to the model (including the
-	// "ERROR: " prefix on failure).
+	// Result is the model-visible text of the tool result, including the
+	// "ERROR: " prefix on failure: the text blocks in order, a
+	// "[image: <mediatype>, <N> bytes]" (or "[document: ...]") marker in the
+	// position of each media block sent, and an omission marker for each
+	// degraded one.
 	Result string
+	// Content is the result's blocks exactly as placed in history; set only
+	// when they include a media block or Degraded > 0.
+	Content []llmkit.Block
+	// Degraded counts the media blocks replaced by omission markers because
+	// the client's profile cannot carry them in a tool result.
+	Degraded int
 	// IsError reports whether Result is an error rendering.
 	IsError bool
 	// Duration is the measured wall time of Tool.Run.

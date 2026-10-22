@@ -75,6 +75,24 @@ entry below is marked.
   capability. The OpenAI and `openai-compatible` ceiling is false, so an
   override forcing it true is refused by `provider.New`. Google refuses URL
   sources and other media types in a tool result pre-wire (llmkit-rli.2.1).
+- `agent`: a tool result's image and document blocks reach the model, or
+  degrade to a marker (llmkit-rli.2.1). The Runner replaces such a block with
+  a text marker, `[image omitted: this model does not accept images in tool
+  results]` or `[document omitted: this model does not accept documents in
+  tool results]`, when the client's `Capabilities.ToolResultMedia` is false or
+  the block's `MediaType` is outside `image/png`, `image/jpeg`, `image/webp`,
+  `application/pdf`. That set over-degrades `image/gif` on Anthropic and
+  `text/plain` on Gemini 3, and a URL-sourced block (no `MediaType`) always
+  degrades. History, events and the wire agree, so a run on OpenAI or
+  `openai-compatible` completes instead of failing with `ErrInvalidRequest`.
+  `ToolRunEvent` and `agent.ToolEvent` keep `Result` as the model-visible
+  text, now with a `[image: <mediatype>, <N> bytes]` (or `[document: ...]`)
+  marker in the position of each media block sent, and gain `Content` (the
+  blocks exactly as placed in history) and `Degraded` (how many blocks were
+  degraded). Both are omitted for a text-only result, so text-only events,
+  hooks and transcripts are unchanged. A recorded `ToolRun` with `Content`
+  replays that content into history; a record without it replays its `Result`
+  as before, and `EventSchemaVersion` stays 3.
 
 ### Changed
 
@@ -114,8 +132,8 @@ entry below is marked.
   `return s, nil` becomes
   `return []llmkit.Block{llmkit.Text(s)}, nil`, and `return "", err` becomes
   `return nil, err`. `agent.Func` is unchanged: its handler still returns a
-  string. A non-text block in a tool result is still refused pre-wire by the
-  adapters' per-role block rule, with an error wrapping `ErrInvalidRequest`.
+  string. A tool result's image and document blocks are sent or degraded per
+  the client's profile (see the `agent` media entry under Added).
 
 ### Fixed
 

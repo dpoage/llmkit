@@ -77,6 +77,8 @@ Tools run one call at a time by default. `WithParallelTools` runs a turn's calls
 
 When to use: give the model capabilities it cannot have on its own — read files, call APIs, run queries. Implement the two-method `Tool` interface when the schema is not a plain struct; use `Func` otherwise. Decode arguments inside a hand-written `Tool.Run` with `agent.UnmarshalArgs`. `Tool.Run` returns `[]llmkit.Block`; a text-only tool returns `[]llmkit.Block{llmkit.Text(s)}`, and `Func` does that wrapping for its string handler.
 
+A tool may return image and document blocks beside text, such as a screenshot. Where the client's `Capabilities.ToolResultMedia` is true (Anthropic, Gemini 3) an `image/png`, `image/jpeg`, `image/webp` or `application/pdf` block reaches the model. Any other block, or any media block on a profile without the capability, is replaced in history by a text marker, and `ToolEvent.Degraded` and the `tool_run` event's `degraded` count the replacements. A replay serves a recorded `content` verbatim.
+
 ## Limits and outcomes
 
 `WithLimits(agent.Limits{...})` bounds a run. The zero value resolves to the package defaults.
@@ -265,7 +267,7 @@ Decorator-emitted kinds this table does not list — a provider `attempt`, and t
 |---|---|---|
 | `start` | 0 | the task text and the tool names offered; `parent_run_id` rides here on continued runs |
 | `completion` | turn | the full request–response round-trip (post-policy request, response, usage) or the failure as `err`; one per model turn, span-joined to any provider attempts |
-| `tool_run` | turn | the model's call, the result verbatim as fed to the model; `denied` + `deny_reason` for policy denials, `is_error` for failures; `dispatched_arguments` when a `ToolPolicy` rewrote the arguments `Tool.Run` received (the `call` stays the model's) |
+| `tool_run` | turn | the model's call, the result as the model sees it as text (media blocks sent appear as `[image: <mediatype>, <N> bytes]` markers); `content` (the blocks as placed in history) and `degraded` only when the result held media; `denied` + `deny_reason` for policy denials, `is_error` for failures; `dispatched_arguments` when a `ToolPolicy` rewrote the arguments `Tool.Run` received (the `call` stays the model's) |
 | `compaction` | next turn | token totals before/after and the prune count; only when something was actually pruned |
 | `steer` | next turn | a delivered steering message; `follow_up` marks follow-up turns |
 | `finalize` | completed turns; 0 when `status` is `panicked` | how the run ended (`status`, `err`); unless `status` is `panicked`, also the truncation reason when there is one (`truncation_reason`), usage, the run's last text (`final_text`, as `Outcome.FinalText`), and whether forced finalization fired, with the completed-turn count as the `step` itself; a failed completion does not advance the step, so a run whose only completion failed reports step 0; a `panicked` run reports step 0 whatever step its context carries, a nested Runner's parent tool phase included |

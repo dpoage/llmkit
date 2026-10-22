@@ -778,6 +778,13 @@ type Capabilities struct {
 	// naming this capability, before the wire call. Wire-gated: true on
 	// Anthropic and Google Gemini 3 models only; the OpenAI and
 	// openai-compatible ceiling is false.
+	//
+	// The agent Runner never sends the refused form: it replaces a media block
+	// in a tool result with a text marker when this is false or the block's
+	// MediaType is outside the portable set image/png, image/jpeg,
+	// image/webp, application/pdf. The set is the intersection of the wires,
+	// so it over-degrades image/gif on Anthropic and text/plain on Gemini 3,
+	// and a URL-sourced block (no MediaType) always degrades.
 	ToolResultMedia bool
 }
 
