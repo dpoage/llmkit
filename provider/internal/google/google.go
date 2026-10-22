@@ -133,7 +133,7 @@ func (g *googleAdapter) buildRequest(req llmkit.Request) ([]*genai.Content, *gen
 	if err != nil {
 		return nil, nil, err
 	}
-	if isGemini3(g.model) {
+	if requiresThoughtSignatures(g.model) {
 		signForeignCalls(contents)
 	}
 	cfg := &genai.GenerateContentConfig{}
@@ -750,7 +750,20 @@ func googleCapabilities(model string) llmkit.Capabilities {
 // isGemini3 reports whether model belongs to the Gemini 3 series: the
 // "gemini-3" key followed by end of name, "-" or ".".
 func isGemini3(model string) bool {
-	rest, ok := strings.CutPrefix(model, "gemini-3")
+	return inSeries(model, "gemini-3")
+}
+
+// requiresThoughtSignatures reports whether Google's thought-signature rule applies:
+// "When using Gemini 4 and Gemini 3 models, you must pass back thought signatures"
+// (https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures).
+// It gates only the foreign-call bypass; thinking_level mapping stays on isGemini3.
+func requiresThoughtSignatures(model string) bool {
+	return inSeries(model, "gemini-3") || inSeries(model, "gemini-4")
+}
+
+// inSeries reports whether model is key followed by end of name, "-" or ".".
+func inSeries(model, key string) bool {
+	rest, ok := strings.CutPrefix(model, key)
 	return ok && (rest == "" || rest[0] == '-' || rest[0] == '.')
 }
 
