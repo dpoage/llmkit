@@ -152,17 +152,16 @@ func (r *Runner) toolNames() []string {
 	return names
 }
 
-// recordCompaction reports one real history prune as the Compaction event on
-// the run's stream. step is the completion that consumes the compacted
-// history, and the token totals come from the bytes/4 estimate the compaction
-// trigger uses.
-func (r *Runner) recordCompaction(ctx context.Context, em runEmitter, step int, before, after int64, pruned int) {
+// recordCompaction reports one real history prune as the Compaction event;
+// step is the completion that consumes the compacted history.
+func (r *Runner) recordCompaction(ctx context.Context, em runEmitter, step int, before, after int64, pruned int, reason string) {
 	ev := llmkit.NewEvent(ctx, llmkit.KindCompaction)
 	ev.Step = step
 	ev.Compaction = &llmkit.CompactionEvent{
 		BeforeTokens: before,
 		AfterTokens:  after,
 		Pruned:       pruned,
+		Reason:       reason,
 	}
 	em.emit(ctx, ev)
 }
@@ -180,6 +179,9 @@ func (r *Runner) emitCompletion(ctx context.Context, em runEmitter, step int, st
 	ce := &llmkit.CompletionEvent{Request: req, Response: resp, Provider: identity.Provider, Model: identity.Model}
 	if err != nil {
 		ce.Err = err.Error()
+		if errors.Is(err, llmkit.ErrContextTooLong) {
+			ce.ErrKind = llmkit.ErrKindContextTooLong
+		}
 		ce.Response = llmkit.Response{}
 	}
 	ev.Completion = ce
