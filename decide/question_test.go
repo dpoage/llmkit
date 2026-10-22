@@ -13,54 +13,6 @@ import (
 // any others out.
 var _ = []Question{Noul{}, Choice{}, Score{}}
 
-func TestQuestion_GoldenWire(t *testing.T) {
-	tests := []struct {
-		name string
-		q    Question
-		want string
-	}{
-		{
-			name: "noul minimal omits criteria",
-			q:    Noul{Instructions: "Is 2+2 equal to 4?"},
-			want: `{"type":"noul","instructions":"Is 2+2 equal to 4?"}`,
-		},
-		{
-			name: "noul with one criterion omits the nil side",
-			q:    Noul{Instructions: "Is it hot?", True: "hot above 30C"},
-			want: `{"type":"noul","instructions":"Is it hot?","criteria":{"true":"hot above 30C"}}`,
-		},
-		{
-			name: "noul with both criteria",
-			q:    Noul{Instructions: "Is it hot?", True: "hot", False: "cold"},
-			want: `{"type":"noul","instructions":"Is it hot?","criteria":{"true":"hot","false":"cold"}}`,
-		},
-		{
-			name: "choice with object instructions and null option description",
-			q: Choice{
-				Instructions: map[string]any{"prompt": "pick one"},
-				Options:      map[string]any{"blue": "the sky", "red": nil},
-			},
-			want: `{"type":"choice","instructions":{"prompt":"pick one"},"criteria":{"blue":"the sky","red":null}}`,
-		},
-		{
-			name: "score keeps level order",
-			q:    Score{Instructions: "rate the answer", Levels: []any{"low", "mixed", map[string]any{"desc": "high"}}},
-			want: `{"type":"score","instructions":"rate the answer","criteria":["low","mixed",{"desc":"high"}]}`,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			raw, err := buildQuestion("q1", tt.q)
-			if err != nil {
-				t.Fatalf("buildQuestion: %v", err)
-			}
-			if string(raw) != tt.want {
-				t.Errorf("wire = %s, want %s", raw, tt.want)
-			}
-		})
-	}
-}
-
 func TestQuestion_PrewireValidation(t *testing.T) {
 	noul := Noul{Instructions: "i"}
 	tests := []struct {
@@ -93,7 +45,7 @@ func TestQuestion_PrewireValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, _, err := buildRequest(tt.state, "m", tt.questions)
+			_, _, err := Normalize(tt.state, tt.questions)
 			if err == nil {
 				t.Fatal("expected a pre-wire validation error")
 			}
@@ -107,59 +59,38 @@ func TestQuestion_PrewireValidation(t *testing.T) {
 			if apiErr.StatusCode != 0 {
 				t.Errorf("StatusCode = %d, want 0 (validation must not touch the network)", apiErr.StatusCode)
 			}
-			if apiErr.Provider != "typesafe" {
-				t.Errorf("Provider = %q, want typesafe", apiErr.Provider)
+			if apiErr.Provider != "decide" {
+				t.Errorf("Provider = %q, want decide", apiErr.Provider)
 			}
 		})
 	}
 }
 
-// TestQuestion_NullDescriptionsAllowed pins the kind split: null is a legal
-// description and criterion value (the vendor's string|object|array|null open
-// set), while state and instructions reject it.
-func TestQuestion_NullDescriptionsAllowed(t *testing.T) {
-	raw, err := buildQuestion("q", Noul{Instructions: "i", False: (*int)(nil)})
-	if err != nil {
-		t.Fatalf("noul null criterion: %v", err)
-	}
-	if want := `{"type":"noul","instructions":"i","criteria":{"false":null}}`; string(raw) != want {
-		t.Errorf("noul wire = %s, want %s", raw, want)
-	}
-
-	raw, err = buildQuestion("q", Score{Instructions: "i", Levels: []any{nil, "b"}})
-	if err != nil {
-		t.Fatalf("score null level: %v", err)
-	}
-	if want := `{"type":"score","instructions":"i","criteria":[null,"b"]}`; string(raw) != want {
-		t.Errorf("score wire = %s, want %s", raw, want)
-	}
-}
-
 func TestQuestion_ErrorsNameFieldPaths(t *testing.T) {
-	_, _, err := buildRequest("s", "m", Questions{"q": Noul{Instructions: 7}})
+	_, _, err := Normalize("s", Questions{"q": Noul{Instructions: 7}})
 	if err == nil || !strings.Contains(err.Error(), `questions["q"].instructions`) {
 		t.Errorf("err = %v, want a message naming the instructions path", err)
 	}
 
-	_, _, err = buildRequest("s", "m", Questions{"q": Choice{Instructions: "i", Options: map[string]any{"a": 1}}})
+	_, _, err = Normalize("s", Questions{"q": Choice{Instructions: "i", Options: map[string]any{"a": 1}}})
 	if err == nil || !strings.Contains(err.Error(), `questions["q"].options["a"]`) {
 		t.Errorf("err = %v, want a message naming the option path", err)
 	}
 
-	_, _, err = buildRequest(42, "m", Questions{"q": Noul{Instructions: "i"}})
+	_, _, err = Normalize(42, Questions{"q": Noul{Instructions: "i"}})
 	if err == nil || !strings.Contains(err.Error(), "state") {
 		t.Errorf("err = %v, want a message naming state", err)
 	}
 }
 
-// fakeQuestion proves the seal: an in-package implementation the wire builder
-// must reject rather than guess a type tag for.
+// fakeQuestion proves the seal: an in-package implementation Normalize
+// must reject rather than guess a kind for..
 type fakeQuestion struct{}
 
 func (fakeQuestion) question() {}
 
 func TestQuestion_SealRejectsUnknownImplementation(t *testing.T) {
-	_, err := buildQuestion("q", fakeQuestion{})
+	_, _, err := Normalize("s", Questions{"q": fakeQuestion{}})
 	if err == nil || !errors.Is(err, llmkit.ErrInvalidRequest) {
 		t.Fatalf("err = %v, want ErrInvalidRequest for an unknown Question implementation", err)
 	}

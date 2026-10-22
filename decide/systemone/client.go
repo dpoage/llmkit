@@ -1,11 +1,13 @@
-package decide
+package systemone
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/decide"
 	"github.com/dpoage/llmkit/internal/adapter"
 	"github.com/dpoage/llmkit/retry"
 	"io"
@@ -15,12 +17,7 @@ import (
 	"time"
 )
 
-// wireRequest is the JSON envelope POSTed to /v1/systemone.
-type wireRequest struct {
-	State     json.RawMessage            `json:"state"`
-	Model     string                     `json:"model"`
-	Questions map[string]json.RawMessage `json:"questions"`
-}
+var _ decide.Decider = (*Client)(nil)
 
 // wireResponse is the JSON envelope the endpoint returns. Model and Usage
 // are vendor-required; a 200 body missing either is a server contract
@@ -48,27 +45,31 @@ type answerBody struct {
 	Confidence    float64            `json:"confidence"`
 }
 
-// Ask evaluates state against questions in one request: validates and
-// marshals the envelope, POSTs to <BaseURL>/v1/systemone with an
-// "Authorization: Bearer" header, retries transient failures, and
-// validates the response. ctx bounds the call. Every error from Ask is an
-// *llmkit.APIError with Provider "typesafe", except the caller's
+// Ask evaluates state against questions in one request: validates them
+// with [decide.Normalize], marshals the envelope, POSTs to
+// <BaseURL>/v1/systemone with an "Authorization: Bearer" header, retries
+// transient failures, and validates the response. ctx bounds the call. Every error from Ask is an
+// *llmkit.APIError with Provider "systemone", except the caller's
 // cancellation or a deadline it set, which is an error chaining the
 // context error (errors.Is(err, ctx.Err()); never retryable) — see the
 // package doc for the status mapping.
 //
 // When [Config.Observer] is set, Ask emits exactly one
 // [llmkit.DecisionEvent] for every Ask that passes pre-wire validation:
-// on success, Backend "typesafe", Model the response's reported model,
+// on success, Backend "systemone", Model the response's reported model,
 // Usage, State and Questions as validated (sorted by ID), Answers
 // sorted by ID; on failure, Err set, Answers nil, Model the requested
-// alias. A pre-wire buildRequest refusal emits nothing; a caller's
+// alias. A pre-wire validation refusal emits nothing; a caller's
 // already-cancelled ctx emits one event with Err set and zero wire
-// hits. The event rides the Ask's ctx — decide never mints a span.
-func (c *Client) Ask(ctx context.Context, state any, questions Questions) (Response, error) {
-	body, stateRaw, err := buildRequest(state, c.model, questions)
+// hits. The event rides the Ask's ctx — systemone never mints a span.
+func (c *Client) Ask(ctx context.Context, state any, questions decide.Questions) (decide.Response, error) {
+	stateRaw, dqs, err := decide.Normalize(state, questions)
 	if err != nil {
-		return Response{}, err
+		return decide.Response{}, retagProvider(err)
+	}
+	body, err := marshalRequest(stateRaw, c.model, dqs)
+	if err != nil {
+		return decide.Response{}, err
 	}
 	start := time.Now()
 	// An echo of the Secret or the BaseURL password is masked in a returned
@@ -76,7 +77,7 @@ func (c *Client) Ask(ctx context.Context, state any, questions Questions) (Respo
 	// observer or the caller sees it, and a response body is redacted
 	// before its Message is capped.
 	redact := adapter.NewRedactor(c.apiKey, c.endpoint)
-	var resp Response
+	var resp decide.Response
 	err = retry.Do(ctx, c.retry, llmkit.Classify, func(actx context.Context) error {
 		r, err := c.attempt(actx, redact, body, questions)
 		if err != nil {
@@ -85,31 +86,44 @@ func (c *Client) Ask(ctx context.Context, state any, questions Questions) (Respo
 		resp = r
 		return nil
 	})
-	c.emitDecision(ctx, stateRaw, questions, resp, err, time.Since(start))
+	c.emitDecision(ctx, stateRaw, dqs, resp, err, time.Since(start))
 	if err != nil {
-		return Response{}, err
+		return decide.Response{}, err
 	}
 	return resp, nil
+}
+
+// retagProvider returns err with Provider set to this backend when err is
+// the *llmkit.APIError decide.Normalize returns; the caller's value is not
+// mutated.
+func retagProvider(err error) error {
+	var ae *llmkit.APIError
+	if !errors.As(err, &ae) {
+		return err
+	}
+	tagged := *ae
+	tagged.Provider = providerName
+	return &tagged
 }
 
 // emitDecision converts and emits one DecisionEvent for an Ask that
 // passed pre-wire validation, gated on c.observer != nil. askErr is
 // the Ask's own outcome (nil on success).
-func (c *Client) emitDecision(ctx context.Context, stateRaw json.RawMessage, questions Questions, resp Response, askErr error, d time.Duration) {
+func (c *Client) emitDecision(ctx context.Context, stateRaw json.RawMessage, dqs []llmkit.DecisionQuestion, resp decide.Response, askErr error, d time.Duration) {
 	if c.observer == nil {
 		return
 	}
 	de := &llmkit.DecisionEvent{
 		Backend:   providerName,
 		State:     stateRaw,
-		Questions: toDecisionQuestions(questions),
+		Questions: dqs,
 	}
 	if askErr != nil {
 		de.Model = c.model
 		de.Err = askErr.Error()
 	} else {
 		de.Model = resp.Model
-		de.Answers = toDecisionAnswers(resp)
+		de.Answers = decide.DecisionAnswers(resp)
 		de.Usage = resp.Usage
 	}
 	ev := llmkit.NewEvent(ctx, llmkit.KindDecision)
@@ -120,10 +134,10 @@ func (c *Client) emitDecision(ctx context.Context, stateRaw json.RawMessage, que
 
 // attempt performs one HTTP round trip and response parse. body is built
 // once per Ask and reused across attempts; questions is read-only.
-func (c *Client) attempt(ctx context.Context, redact *adapter.Redactor, body []byte, questions Questions) (Response, error) {
+func (c *Client) attempt(ctx context.Context, redact *adapter.Redactor, body []byte, questions decide.Questions) (decide.Response, error) {
 	req, err := adapter.NewRequest(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
 	if err != nil {
-		return Response{}, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, Provider: providerName, Message: fmt.Sprintf("build request: %s", err), Err: err}
+		return decide.Response{}, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, Provider: providerName, Message: fmt.Sprintf("build request: %s", err), Err: err}
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
@@ -133,13 +147,13 @@ func (c *Client) attempt(ctx context.Context, redact *adapter.Redactor, body []b
 	if err != nil {
 		// url.Error text carries the URL, its username included, and the
 		// cause; Ask scrubs both.
-		return Response{}, adapter.DoError(providerName, ctx, httpResp, err)
+		return decide.Response{}, adapter.DoError(providerName, ctx, httpResp, err)
 	}
 	defer func() { _ = httpResp.Body.Close() }()
 
 	respBody, err := io.ReadAll(httpResp.Body)
 	if err != nil {
-		return Response{}, adapter.TransportError(providerName, ctx, err)
+		return decide.Response{}, adapter.TransportError(providerName, ctx, err)
 	}
 
 	if httpResp.StatusCode != http.StatusOK {
@@ -149,7 +163,7 @@ func (c *Client) attempt(ctx context.Context, redact *adapter.Redactor, body []b
 		}
 		// Classify on the full body: a context-length phrase can sit past
 		// byte 200. Only the Message the caller sees is truncated.
-		return Response{}, adapter.NormalizeCapped(providerName, adapter.VendorError{
+		return decide.Response{}, adapter.NormalizeCapped(providerName, adapter.VendorError{
 			Status:  httpResp.StatusCode,
 			Message: msg,
 			Header:  httpResp.Header,
@@ -163,83 +177,83 @@ func (c *Client) attempt(ctx context.Context, redact *adapter.Redactor, body []b
 // it to a Response. A violation of the server's own answer contract — a
 // missing model or usage block, a missing or extra answer, a type that
 // does not match its question, a sparse legend, or a Choice outside the
-// asked options (via [Check]) — is an ErrServer-class
+// asked options (via [decide.Check]) — is an ErrServer-class
 // APIError at the serving status: the server broke the protocol.
-func parseResponse(status int, body []byte, questions Questions) (Response, error) {
+func parseResponse(status int, body []byte, questions decide.Questions) (decide.Response, error) {
 	var wire wireResponse
 	if err := json.Unmarshal(body, &wire); err != nil {
-		return Response{}, serverError(status, fmt.Sprintf("response: malformed JSON: %s", err))
+		return decide.Response{}, serverError(status, fmt.Sprintf("response: malformed JSON: %s", err))
 	}
 	if wire.Model == "" {
-		return Response{}, serverError(status, "model: missing model id")
+		return decide.Response{}, serverError(status, "model: missing model id")
 	}
 	if wire.Usage == nil {
-		return Response{}, serverError(status, "usage: missing usage block")
+		return decide.Response{}, serverError(status, "usage: missing usage block")
 	}
 
 	nouls := make(map[string]float64)
-	choices := make(map[string]ChoiceAnswer)
-	scores := make(map[string]ScoreAnswer)
+	choices := make(map[string]decide.ChoiceAnswer)
+	scores := make(map[string]decide.ScoreAnswer)
 	for id, raw := range wire.Answers {
 		q, ok := questions[id]
 		if !ok {
-			return Response{}, serverError(status, fmt.Sprintf("answers[%q]: answer for an unknown question id", id))
+			return decide.Response{}, serverError(status, fmt.Sprintf("answers[%q]: answer for an unknown question id", id))
 		}
 		var ab answerBody
 		if err := json.Unmarshal(raw, &ab); err != nil {
-			return Response{}, serverError(status, fmt.Sprintf("answers[%q]: malformed answer: %s", id, err))
+			return decide.Response{}, serverError(status, fmt.Sprintf("answers[%q]: malformed answer: %s", id, err))
 		}
 		switch t := q.(type) {
-		case Noul:
+		case decide.Noul:
 			if ab.Type != "noul" {
-				return Response{}, serverError(status, fmt.Sprintf("answers[%q].type: want \"noul\", got %q", id, ab.Type))
+				return decide.Response{}, serverError(status, fmt.Sprintf("answers[%q].type: want \"noul\", got %q", id, ab.Type))
 			}
 			if ab.Noul == nil {
-				return Response{}, serverError(status, fmt.Sprintf("answers[%q].noul: missing noul value", id))
+				return decide.Response{}, serverError(status, fmt.Sprintf("answers[%q].noul: missing noul value", id))
 			}
 			nouls[id] = *ab.Noul
-		case Choice:
+		case decide.Choice:
 			if ab.Type != "choice" {
-				return Response{}, serverError(status, fmt.Sprintf("answers[%q].type: want \"choice\", got %q", id, ab.Type))
+				return decide.Response{}, serverError(status, fmt.Sprintf("answers[%q].type: want \"choice\", got %q", id, ab.Type))
 			}
 			if ab.Choice == nil {
-				return Response{}, serverError(status, fmt.Sprintf("answers[%q].choice: missing choice value", id))
+				return decide.Response{}, serverError(status, fmt.Sprintf("answers[%q].choice: missing choice value", id))
 			}
-			choices[id] = ChoiceAnswer{Choice: *ab.Choice, Probabilities: ab.Probabilities, Confidence: ab.Confidence}
-		case Score:
+			choices[id] = decide.ChoiceAnswer{Choice: *ab.Choice, Probabilities: ab.Probabilities, Confidence: ab.Confidence}
+		case decide.Score:
 			if ab.Type != "score" {
-				return Response{}, serverError(status, fmt.Sprintf("answers[%q].type: want \"score\", got %q", id, ab.Type))
+				return decide.Response{}, serverError(status, fmt.Sprintf("answers[%q].type: want \"score\", got %q", id, ab.Type))
 			}
 			if ab.Score == nil {
-				return Response{}, serverError(status, fmt.Sprintf("answers[%q].score: missing score value", id))
+				return decide.Response{}, serverError(status, fmt.Sprintf("answers[%q].score: missing score value", id))
 			}
 			levels, err := denseSlice(status, id, ".legend", ab.Legend, len(t.Levels))
 			if err != nil {
-				return Response{}, err
+				return decide.Response{}, err
 			}
 			probs, err := denseSlice(status, id, ".probabilities", ab.Probabilities, len(t.Levels))
 			if err != nil {
-				return Response{}, err
+				return decide.Response{}, err
 			}
-			scores[id] = ScoreAnswer{Score: *ab.Score, Levels: levels, Probabilities: probs, Confidence: ab.Confidence}
+			scores[id] = decide.ScoreAnswer{Score: *ab.Score, Levels: levels, Probabilities: probs, Confidence: ab.Confidence}
 		case nil:
-			return Response{}, serverError(status, fmt.Sprintf("answers[%q]: answer for an unknown question id", id))
+			return decide.Response{}, serverError(status, fmt.Sprintf("answers[%q]: answer for an unknown question id", id))
 		}
 	}
 	for id := range questions {
 		if _, ok := wire.Answers[id]; !ok {
-			return Response{}, serverError(status, fmt.Sprintf("answers[%q]: missing answer for question", id))
+			return decide.Response{}, serverError(status, fmt.Sprintf("answers[%q]: missing answer for question", id))
 		}
 	}
-	resp := Response{
+	resp := decide.Response{
 		Model:   wire.Model,
 		Usage:   llmkit.Usage{InputTokens: wire.Usage.InputTokens, OutputTokens: wire.Usage.OutputTokens},
 		Nouls:   nonEmptyOrNil(nouls),
 		Choices: nonEmptyOrNil(choices),
 		Scores:  nonEmptyOrNil(scores),
 	}
-	if err := Check(questions, resp); err != nil {
-		return Response{}, serverError(status, err.Error())
+	if err := decide.Check(questions, resp); err != nil {
+		return decide.Response{}, serverError(status, err.Error())
 	}
 	return resp, nil
 }
