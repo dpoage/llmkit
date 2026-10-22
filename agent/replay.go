@@ -1,13 +1,16 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/dpoage/llmkit"
 )
@@ -32,13 +35,15 @@ var ErrReplayDiverged = errors.New("agent: replay diverged")
 // checks that the request's last N tool-result messages carry the ids of
 // those N tool runs, in order; fewer than N such messages is a mismatch. If
 // the record holds no tool run there, Complete does no structure check.
-// Matching ignores message text, so prompt wording can change between record
-// and replay without breaking the replay.
+// Outside a recorded compaction (see below), matching ignores message text,
+// so prompt wording can change between record and replay without breaking
+// the replay.
 //
-// Divergence is run state owned by the client, never inferred from
-// conversation text. [ReplayClient.Tools] returns the run's recorded tool
-// set, bound to this client: each tool serves the recorded result of the
-// call it is dispatched for, matched by tool-call ID within the recorded
+// Divergence is run state owned by the client; message text is compared only
+// at a recorded compaction point (below). [ReplayClient.Tools] returns the
+// run's recorded tool set, bound to this client: each tool serves the
+// recorded result of the call it is dispatched for, matched by tool-call ID
+// within the recorded
 // step being replayed. When the calls of a turn carry distinct IDs, replay
 // is therefore deterministic under [WithParallelTools] whatever order the
 // calls dispatch in, even for calls that share a name and arguments. Calls
@@ -76,8 +81,9 @@ var ErrReplayDiverged = errors.New("agent: replay diverged")
 // Runner answers them the same way, byte for byte, and its policy never
 // sees them.
 //
-// Tools other than [ReplayClient.Tools] execute live, and their results are
-// never compared with the record.
+// Tools other than [ReplayClient.Tools] execute live. Outside a recorded
+// compaction point their results are never compared with the record; a live
+// result that changes the request after a compaction diverges there.
 //
 // A recorded result with Content is served block for block; one without it
 // serves its Result as one text block. The replaying Runner places those
@@ -101,9 +107,20 @@ var ErrReplayDiverged = errors.New("agent: replay diverged")
 // follow-up the recorded run received, does it too, and Run returns
 // normally. [ReplayClient.Err] reports both cases, and a caller that took
 // [ReplayClient.Tools] also gets an error for a recorded call that a tool
-// ran in the recorded run and no replay tool served. Callers MUST assert Err
-// returns nil after a replayed run — a diverged replay is a failed
-// evaluation whatever Run returned.
+// ran in the recorded run and no replay tool served. A recorded compaction
+// (threshold or overflow, by any [Compactor]) the replaying Runner does not
+// reproduce at its position is reported the same way: the first request
+// after it must carry messages equal, in their JSON encoding (as Go values
+// when a request cannot be JSON-encoded), to the recorded request's. A record
+// that cannot carry a tool's bytes, for example invalid UTF-8 through JSONL,
+// replays its compactions as diverged. Any other difference in that request,
+// such as a steering turn the replay lacks, is reported the same way. Callers
+// MUST assert Err returns nil after a replayed run — a diverged replay is a
+// failed evaluation whatever Run returned.
+//
+// Completions the record marks with a Purpose, such as a [Compactor]'s
+// summary requests, are never served as answers. [ReplayClient.Compactor]
+// replays them as recorded instead.
 //
 // ReplayClient is safe for concurrent use, though a single Runner calls it
 // sequentially.
@@ -125,20 +142,88 @@ type ReplayClient struct {
 	// gates the unconsumed-calls part of that report.
 	recorded  bool
 	tookTools bool
+	// unreproduced is the first recorded compaction the replaying Runner did
+	// not reproduce at its position; Err reports it.
+	unreproduced error
+	// summaries are the recorded summarizing compaction passes that produced
+	// a summary, served in order by [ReplayClient.Compactor].
+	summaries   []recordedSummary
+	nextSummary int
 }
 
 type replayStep struct {
 	resp          llmkit.Response
+	err           error
 	expectToolIDs []string
+	// compaction is the recorded compaction whose history this step's request
+	// carried; nil when none preceded it.
+	compaction *replayedCompaction
 }
+
+// replayedCompaction is a recorded compaction and the recorded request
+// messages that followed it.
+type replayedCompaction struct {
+	reason string
+	sent   []llmkit.Message
+}
+
+// canonicalMessages decodes msgs' JSON encoding into generic values, so raw
+// JSON fields compare regardless of whitespace and key order.
+func canonicalMessages(msgs []llmkit.Message) (form any, ok bool) {
+	b, err := json.Marshal(msgs)
+	if err != nil {
+		return nil, false
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	if err := dec.Decode(&form); err != nil {
+		return nil, false
+	}
+	return form, true
+}
+
+// reproducedBy compares msgs with the recorded request in canonical JSON form,
+// or as Go values when either side does not encode.
+func (c *replayedCompaction) reproducedBy(msgs []llmkit.Message) bool {
+	want, wok := canonicalMessages(c.sent)
+	got, gok := canonicalMessages(msgs)
+	if !wok || !gok {
+		return reflect.DeepEqual(msgs, c.sent)
+	}
+	return reflect.DeepEqual(got, want)
+}
+
+// withSent records the request messages that followed the compaction.
+func (c *replayedCompaction) withSent(msgs []llmkit.Message) *replayedCompaction {
+	if c != nil {
+		c.sent = msgs
+	}
+	return c
+}
+
+func (c *replayedCompaction) label() string {
+	if c.reason == "" {
+		return "threshold"
+	}
+	return c.reason
+}
+
+// replayedOverflow is a recorded overflow failure: its recorded text,
+// wrapping [llmkit.ErrContextTooLong].
+type replayedOverflow string
+
+func (e replayedOverflow) Error() string { return string(e) }
+func (e replayedOverflow) Unwrap() error { return llmkit.ErrContextTooLong }
 
 // NewReplayClient builds a ReplayClient from src's record of run. It replays
 // the run's COMPLETION events only ([llmkit.KindCompletion], never Attempts,
 // per the observability emission rule): each successful completion's Response
 // is served in order, paired with the tool-call ids recorded since the
 // previous completion, so replay can drive the same tool round-trips
-// deterministically. Failed completions (Completion with Err set) are
-// skipped — a run that aborted at one therefore diverges there with the
+// deterministically. A failed completion is skipped, except one recorded with
+// ErrKind context_too_long, which is served at its position as an error
+// wrapping [llmkit.ErrContextTooLong] so the replaying Runner recompacts.
+// A run that aborted at a skipped failure therefore diverges there with the
 // replay-exhausted error. If the client has served at least one completion
 // and recorded no divergence, [ReplayClient.Err] reports the first
 // successful completion the replay never served.
@@ -168,21 +253,41 @@ func NewReplayClient(src llmkit.Source, run llmkit.RunID, caps llmkit.Capabiliti
 		offered []string
 		runs    []toolRunAt
 	)
+	var compaction *replayedCompaction
+	var group summaryGroup
 	for _, ev := range evs {
+		if ev.Kind != llmkit.KindAttempt && !isPurposeCompletion(ev) {
+			rc.summaries = group.flush(rc.summaries)
+		}
 		switch {
+		case isPurposeCompletion(ev):
+			group.add(ev)
 		case ev.Kind == llmkit.KindStart && ev.Start != nil:
 			offered = ev.Start.Tools
 		case ev.Kind == llmkit.KindToolRun && ev.ToolRun != nil:
 			pending = append(pending, ev.ToolRun.Call.ID)
 			runs = append(runs, toolRunAt{step: ev.Step, resp: len(rc.responses) - 1, tre: *ev.ToolRun})
+		case ev.Kind == llmkit.KindCompaction && ev.Compaction != nil:
+			compaction = &replayedCompaction{reason: ev.Compaction.Reason}
 		case ev.Kind == llmkit.KindCompletion && ev.Completion != nil && ev.Completion.Err == "":
+			compaction = compaction.withSent(ev.Completion.Request.Messages)
 			rc.responses = append(rc.responses, replayStep{
 				resp:          ev.Completion.Response,
 				expectToolIDs: pending,
+				compaction:    compaction,
 			})
-			pending = nil
+			pending, compaction = nil, nil
+		case ev.Kind == llmkit.KindCompletion && ev.Completion != nil && ev.Completion.ErrKind == llmkit.ErrKindContextTooLong:
+			compaction = compaction.withSent(ev.Completion.Request.Messages)
+			rc.responses = append(rc.responses, replayStep{
+				err:           replayedOverflow(ev.Completion.Err),
+				expectToolIDs: pending,
+				compaction:    compaction,
+			})
+			pending, compaction = nil, nil
 		}
 	}
+	rc.summaries = group.flush(rc.summaries)
 	unregistered := unregisteredNames(offered, runs)
 	for _, r := range runs {
 		if err := rc.set.add(r.step, r.resp, r.tre, unregistered[r.tre.Call.Name]); err != nil {
@@ -194,6 +299,113 @@ func NewReplayClient(src llmkit.Source, run llmkit.RunID, caps llmkit.Capabiliti
 	}
 	rc.tools = rc.set.tools(rc)
 	return rc, nil
+}
+
+// isPurposeCompletion reports whether ev is a completion made for a purpose
+// other than answering the run, which replay never serves.
+func isPurposeCompletion(ev llmkit.Event) bool {
+	return ev.Kind == llmkit.KindCompletion && ev.Completion != nil && ev.Completion.Purpose != ""
+}
+
+// recordedSummary is one summarizing pass of the record: the summary it
+// produced and its summarizer calls as recorded.
+type recordedSummary struct {
+	text  string
+	usage llmkit.Usage
+	calls []recordedCall
+}
+
+// recordedCall is one recorded summarizer call.
+type recordedCall struct {
+	ce       llmkit.CompletionEvent
+	duration time.Duration
+}
+
+// summaryGroup collects the compaction completions of one summarizing pass.
+// The pass's summary is its last call's, valid only if that call succeeded;
+// its usage is the sum over every call, as recorded.
+type summaryGroup struct {
+	open  bool
+	text  string
+	ok    bool
+	usage llmkit.Usage
+	calls []recordedCall
+}
+
+func (g *summaryGroup) add(ev llmkit.Event) {
+	ce := *ev.Completion
+	if ce.Purpose != llmkit.CompletionPurposeCompaction {
+		return
+	}
+	g.open = true
+	g.usage = g.usage.Add(ce.Response.Usage)
+	g.calls = append(g.calls, recordedCall{ce: ce, duration: ev.Duration})
+	g.ok = ce.Err == ""
+	if g.ok {
+		g.text = summaryText(ce.Response)
+	}
+}
+
+// flush appends the pass's summary to summaries, if it produced one, and resets g.
+func (g *summaryGroup) flush(summaries []recordedSummary) []recordedSummary {
+	if g.open && g.ok {
+		summaries = append(summaries, recordedSummary{text: g.text, usage: g.usage, calls: g.calls})
+	}
+	*g = summaryGroup{}
+	return summaries
+}
+
+// compactCalls returns the pass's calls as the Runner records them, each on a
+// fresh span, with the recorded request, response and error.
+func (s recordedSummary) compactCalls(ctx context.Context) []compactCall {
+	calls := make([]compactCall, len(s.calls))
+	for i, rc := range s.calls {
+		var err error
+		switch {
+		case rc.ce.Err == "":
+		case rc.ce.ErrKind == llmkit.ErrKindContextTooLong:
+			err = replayedOverflow(rc.ce.Err)
+		default:
+			err = errors.New(rc.ce.Err)
+		}
+		calls[i] = compactCall{
+			req: rc.ce.Request, resp: rc.ce.Response, err: err,
+			span:     llmkit.SpanFromContext(llmkit.BeginCompletion(ctx)),
+			provider: rc.ce.Provider, model: rc.ce.Model, duration: rc.duration,
+		}
+	}
+	return calls
+}
+
+// Compactor returns a [Compactor] that reproduces the recorded run's
+// summaries without calling a summarizer. It cuts the history where
+// [SummarizingCompactor] does and substitutes the next recorded summary, so
+// install it with [WithCompactor] and the recorded run's HistoryTokenBudget,
+// ContextReserve and ContextWindow.
+// With no cut point, or no recorded summary left, it stubs like the default
+// compactor. Each pass also returns its recorded summarizer calls, which the
+// Runner records as Purpose "compaction" Completion events with the recorded
+// request, response and error. When Err is nil, the replayed ledger sums to
+// the replayed Outcome.Usage, the BudgetPool charge matches, and a token
+// budget stops the replay where it stopped the recorded run.
+func (rc *ReplayClient) Compactor() Compactor {
+	return CompactorFunc(func(ctx context.Context, in CompactInput) (CompactOutput, error) {
+		from, at := summaryCut(in.Messages)
+		if at < 0 {
+			return stubCompactor{}.Compact(ctx, in)
+		}
+		rc.mu.Lock()
+		if rc.nextSummary >= len(rc.summaries) {
+			rc.mu.Unlock()
+			return stubCompactor{}.Compact(ctx, in)
+		}
+		rec := rc.summaries[rc.nextSummary]
+		rc.nextSummary++
+		rc.mu.Unlock()
+		out := summarized(in, from, at, rec.text)
+		out.Usage, out.calls = rec.usage, rec.compactCalls(ctx)
+		return out, nil
+	})
 }
 
 // NewReplayClientFromResponses builds a ReplayClient that serves resps in
@@ -246,7 +458,14 @@ func (rc *ReplayClient) Complete(ctx context.Context, req llmkit.Request) (llmki
 			return llmkit.Response{}, err
 		}
 	}
+	if c := step.compaction; c != nil && rc.unreproduced == nil && !c.reproducedBy(req.Messages) {
+		rc.unreproduced = fmt.Errorf("%w at step %d: recorded %s compaction was not reproduced: the replayed request after it differs from the record's",
+			ErrReplayDiverged, rc.idx+1, c.label())
+	}
 	rc.idx++
+	if step.err != nil {
+		return llmkit.Response{}, step.err
+	}
 	return step.resp, nil
 }
 
@@ -478,7 +697,8 @@ func (ts *replayToolSet) tools(rc *ReplayClient) []Tool {
 // recorded completion is also unserved, Err names that completion instead.
 //
 // Only these tools are compared with the record. Any other tool a caller
-// passes to the Runner executes live, and its result is never compared.
+// passes to the Runner executes live; its result is not compared, except
+// through the request after a recorded compaction, which it can change.
 func (rc *ReplayClient) Tools() []Tool {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
@@ -551,7 +771,9 @@ func (rc *ReplayClient) recordDiverged(err error) {
 //     counted, since no replay tool serves them.
 //
 // When both kinds of unreached work exist, Err names the unserved
-// completion.
+// completion. If a recorded compaction precedes that completion, the report
+// names the compaction, though the replay may only have ended early, for
+// example without a steering turn the record held.
 //
 // A divergence in the run's final tool turn can end the run before another
 // Complete happens; Err returns it. If the caller took [ReplayClient.Tools],
@@ -562,12 +784,16 @@ func (rc *ReplayClient) recordDiverged(err error) {
 // it applies the checks above to the replay so far. A client from
 // [NewReplayClientFromResponses] reports no unreached work: its Err is nil
 // unless it served past its last response. Results of tools that are not
-// [ReplayClient.Tools] are never compared with the record.
+// [ReplayClient.Tools] are not compared with the record, except through the
+// request after a recorded compaction, which they can change.
 func (rc *ReplayClient) Err() error {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 	if rc.diverged != nil {
 		return rc.diverged
+	}
+	if rc.unreproduced != nil {
+		return rc.unreproduced
 	}
 	if !rc.recorded || rc.idx == 0 {
 		return nil
@@ -581,6 +807,10 @@ func (rc *ReplayClient) Err() error {
 // make the client refuse later completions; caller holds rc.mu.
 func (rc *ReplayClient) unreached() error {
 	if rc.idx < len(rc.responses) {
+		if c := rc.responses[rc.idx].compaction; c != nil {
+			return fmt.Errorf("%w at step %d: recorded %s compaction before completion %d of %d was never reproduced; the replay served %d",
+				ErrReplayDiverged, rc.idx+1, c.label(), rc.idx+1, len(rc.responses), rc.idx)
+		}
 		return fmt.Errorf("%w at step %d: recorded completion %d of %d was never served; the replay served %d",
 			ErrReplayDiverged, rc.idx+1, rc.idx+1, len(rc.responses), rc.idx)
 	}

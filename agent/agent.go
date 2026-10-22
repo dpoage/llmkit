@@ -44,8 +44,10 @@
 // [TruncOutputCap] and [TruncNoAnswer] are truncation reasons too, and Run
 // reports a run that ends with one the same way.
 // [Limits.HistoryTokenBudget] enables threshold-triggered history
-// compaction, which replaces old tool results with short stubs and re-arms
-// its threshold so the cache cost stays bounded.
+// compaction, which replaces old tool results with short stubs (or runs the
+// [Compactor] from [WithCompactor]) and re-arms its threshold so the cache
+// cost stays bounded, and recovers once per completion from a context-overflow
+// error. [Limits.ContextReserve] compacts before the context window fills.
 //
 // # Policies
 //
@@ -187,13 +189,15 @@ type Limits struct {
 	// discount).
 	CacheReadWeight float64
 	// HistoryTokenBudget enables threshold-triggered history compaction. When
-	// the estimated size of the message history (bytes/4 over message content
-	// and tool-call arguments) exceeds this many tokens, the Runner compacts
-	// once: tool-result content older than the most recent few turns is
-	// replaced with short stubs. Compaction preserves the task message, every
-	// assistant turn (the reasoning chain), and tool_call/tool_result ID
-	// pairing. The threshold then re-arms at a higher level, so compaction
-	// fires at most a few bounded times per run.
+	// the estimated size of the request copy of the history (bytes/4 over
+	// text, tool-call arguments, thinking, and a flat 1,568 tokens per image)
+	// exceeds this many tokens, the Runner compacts: by default, tool-result
+	// content older than the most recent few turns is replaced with short
+	// stubs; [WithCompactor] replaces that strategy. The default preserves the
+	// task message, every assistant turn (the reasoning chain), and
+	// tool_call/tool_result ID pairing. A pass the budget trigger fired
+	// re-arms the threshold at a higher level, so it fires at most a few
+	// bounded times per run.
 	//
 	// Compaction trades cost against the provider's prompt cache. Each
 	// firing mutates the message prefix and costs one full-price cache miss
@@ -202,9 +206,41 @@ type Limits struct {
 	// over the remaining turns exceed that one-time miss. Size the budget
 	// well above a typical short run; the re-arm stops repeated firings.
 	//
-	// Zero disables compaction (pure append-only history). A negative value also
-	// disables it.
+	// Compaction is enabled by a positive value, a positive
+	// [Limits.ContextReserve] or by [WithCompactor]. Enabled compaction also
+	// runs overflow recovery: a completion that fails with an error wrapping
+	// [llmkit.ErrContextTooLong] (the provider's refusal, or a RequestPolicy
+	// error) compacts the history once and is retried once.
+	// The recovery emits a Compaction event with Reason "overflow". Nothing
+	// changed, or a second failure, returns the error. The RequestPolicy and
+	// hooks fire for each attempt. Each completion recovers at most once, not
+	// each run.
+	//
+	// Only a positive value triggers threshold compaction. Without a
+	// [WithCompactor] or ContextReserve, zero or negative disables compaction
+	// and overflow recovery (pure append-only history); with either, no
+	// threshold compaction runs, but overflow recovery does.
 	HistoryTokenBudget int64
+
+	// ContextReserve compacts before a completion when the estimated request
+	// exceeds the client's ContextWindow minus this many tokens. Zero disables
+	// it, and an unknown (zero) window never fires it. A positive value also
+	// enables overflow recovery. The estimate counts the message history only,
+	// so the reserve must also cover the system prompt, the tool definitions
+	// and MaxTokens.
+	//
+	// Before any provider refusal, a free compaction pass leaves the trigger
+	// waiting for the estimate to grow by ContextReserve when the compacted
+	// size is already past the trigger point; a paid pass (CompactOutput.Usage
+	// non-zero) always waits, even after a refusal and even if that puts the
+	// trigger point above the window minus the reserve.
+	//
+	// After an overflow recovery by a free pass, the trigger fires from the
+	// lower of the window and the refused size, each minus ContextReserve. A
+	// window the client overstates then costs one refusal, provided each turn
+	// grows the history by less than ContextReserve; a paid recovery waits for
+	// that growth.
+	ContextReserve int64
 }
 
 // resolve returns the effective limits, substituting defaults for zero values.
