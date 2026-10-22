@@ -172,12 +172,13 @@ entry below is marked.
   skipping it.
 - `agent`: `ReplayClient.Err` now reports a recorded compaction, threshold or
   overflow, that the replaying Runner does not reproduce at its position: the
-  first request after the compaction must carry the same compacted messages
-  (pruned tool results, conversation summaries) as the recorded one. Callers
+  first request after the compaction must carry messages equal, in their JSON
+  encoding, to the recorded request's, whichever `Compactor` made it. Callers
   of `NewReplayClient` who replay a record that holds compactions with a
   different `HistoryTokenBudget` or `Compactor` (compaction off, a budget
   that does not fire at the recorded position, a compactor that changes
-  nothing) now get a non-nil `rc.Err` wrapping `ErrReplayDiverged`; `Run`'s
+  nothing or compacts differently), or with anything else that changes that
+  request, now get a non-nil `rc.Err` wrapping `ErrReplayDiverged`; `Run`'s
   result is unchanged. Replaying under the recording configuration is still
   clean.
 - `llmkit`: the per-role block rule now lets `RoleToolResult` carry text,

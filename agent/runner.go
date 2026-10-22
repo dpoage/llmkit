@@ -646,7 +646,7 @@ func (r *Runner) maybeCompact(ctx context.Context, em runEmitter, messages []llm
 	if err != nil {
 		return messages, threshold, fmt.Errorf("agent: compaction before iteration %d: %w", step, err)
 	}
-	if sameMessages(out.Messages, messages) {
+	if compactionUnchanged(out.Messages, messages) {
 		// Over threshold but nothing prunable yet: either history is dominated by
 		// assistant reasoning, or every prunable result is already a stub, or there
 		// simply aren't more than compactRecentToolResults tool results so far. Leave the
@@ -758,7 +758,7 @@ func (r *Runner) completeRecovering(ctx context.Context, em runEmitter, messages
 	if cerr != nil {
 		return llmkit.Response{}, fmt.Errorf("agent: compaction after context overflow at iteration %d: %w", step, cerr)
 	}
-	if sameMessages(out.Messages, *messages) {
+	if compactionUnchanged(out.Messages, *messages) {
 		return resp, err
 	}
 	after, _ := r.wireMessages(out.Messages)

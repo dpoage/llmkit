@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -300,10 +302,10 @@ func TestCompactor_ErrorEndsRunWithoutRetry(t *testing.T) {
 	})
 }
 
-func seamCompactingRecord(t *testing.T) *Outcome {
+func seamCompactingRecord(t *testing.T, opts ...Option) *Outcome {
 	t.Helper()
 	fc := newFakeClient(append(overflowTurns(8), textResp("done", 100, 10))...)
-	out, err := overflowRunner(fc, 1500).Run(context.Background(), "task")
+	out, err := overflowRunner(fc, 1500, opts...).Run(context.Background(), "task")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,6 +365,94 @@ func TestReplay_ReportsUnreproducedCompaction(t *testing.T) {
 		err := seamReplay(t, out, 1500, WithCompactor(noop)).Err()
 		if !errors.Is(err, ErrReplayDiverged) || !strings.Contains(err.Error(), "compaction") {
 			t.Errorf("no-op compactor: rc.Err = %v, want ErrReplayDiverged naming the compaction", err)
+		}
+	})
+	// marker-free leaves neither a stub nor a summary in the request.
+	for name, c := range map[string]Compactor{"marker-free": truncatingCompactor(), "summary": summaryCompactor()} {
+		t.Run(name, func(t *testing.T) {
+			out := seamCompactingRecord(t, WithCompactor(c))
+			if err := seamReplay(t, out, 1500, WithCompactor(c)).Err(); err != nil {
+				t.Errorf("same compactor: rc.Err = %v", err)
+			}
+			err := seamReplay(t, out, 0).Err()
+			if !errors.Is(err, ErrReplayDiverged) || !strings.Contains(err.Error(), "threshold compaction") {
+				t.Errorf("compaction off: rc.Err = %v, want ErrReplayDiverged naming the threshold compaction", err)
+			}
+		})
+	}
+}
+
+// truncatingCompactor cuts older tool results to 200 bytes, adding no marker.
+func truncatingCompactor() Compactor {
+	return CompactorFunc(func(_ context.Context, in CompactInput) (CompactOutput, error) {
+		out := slices.Clone(in.Messages)
+		pruned := 0
+		for i, m := range out {
+			if m.Role == llmkit.RoleToolResult && i < len(out)-4 && len(m.Text()) > 200 {
+				m.Content = textBlocks(m.Text()[:200])
+				out[i] = m
+				pruned++
+			}
+		}
+		return CompactOutput{Messages: out, Pruned: pruned}, nil
+	})
+}
+
+// summaryCompactor replaces the history before its last assistant turn with a summary.
+func summaryCompactor() Compactor {
+	return CompactorFunc(func(_ context.Context, in CompactInput) (CompactOutput, error) {
+		cut := len(in.Messages) - 1
+		for cut > 0 && in.Messages[cut].Role != llmkit.RoleAssistant {
+			cut--
+		}
+		if cut <= 1 {
+			return CompactOutput{}, nil
+		}
+		summary := llmkit.TextMessage(llmkit.RoleUser, fmt.Sprintf("[conversation summary] %d earlier messages", cut))
+		return CompactOutput{Messages: append([]llmkit.Message{summary}, in.Messages[cut:]...), Pruned: cut}, nil
+	})
+}
+
+// Empty compactor output leaves the history as it was.
+func TestCompactor_EmptyOutputChangesNothing(t *testing.T) {
+	calls := 0
+	empty := CompactorFunc(func(context.Context, CompactInput) (CompactOutput, error) {
+		calls++
+		return CompactOutput{}, nil
+	})
+	t.Run("threshold", func(t *testing.T) {
+		calls = 0
+		fc := newFakeClient(append(overflowTurns(8), textResp("done", 100, 10))...)
+		out, err := overflowRunner(fc, 1500, WithCompactor(empty)).Run(context.Background(), "task")
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		plain, err := overflowRunner(newFakeClient(append(overflowTurns(8), textResp("done", 100, 10))...), 0).Run(context.Background(), "task")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if calls == 0 {
+			t.Fatal("compactor never called")
+		}
+		if comps := compactionEvents(out.Transcript.Record); len(comps) != 0 {
+			t.Errorf("compaction events = %+v, want none", comps)
+		}
+		if !reflect.DeepEqual(out.Messages, plain.Messages) {
+			t.Errorf("history has %d messages, want the uncompacted %d", len(out.Messages), len(plain.Messages))
+		}
+	})
+	t.Run("overflow", func(t *testing.T) {
+		calls = 0
+		gc := &gateClient{steps: []scriptStep{textResp("done", 100, 10)}, overflow: func(llmkit.Request) bool { return true }}
+		out, err := overflowRunner(gc, 0, WithCompactor(empty)).Run(context.Background(), "task")
+		if !errors.Is(err, llmkit.ErrContextTooLong) {
+			t.Fatalf("err = %v, want it to wrap ErrContextTooLong", err)
+		}
+		if calls != 1 || gc.calls() != 1 {
+			t.Errorf("compactor calls %d, completion calls %d, want 1 and 1", calls, gc.calls())
+		}
+		if comps := compactionEvents(out.Transcript.Record); len(comps) != 0 {
+			t.Errorf("compaction events = %+v, want none", comps)
 		}
 	})
 }

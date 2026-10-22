@@ -1,10 +1,12 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -32,8 +34,9 @@ var ErrReplayDiverged = errors.New("agent: replay diverged")
 // checks that the request's last N tool-result messages carry the ids of
 // those N tool runs, in order; fewer than N such messages is a mismatch. If
 // the record holds no tool run there, Complete does no structure check.
-// Matching ignores message text, so prompt wording can change between record
-// and replay without breaking the replay.
+// Outside a recorded compaction (see below), matching ignores message text,
+// so prompt wording can change between record and replay without breaking
+// the replay.
 //
 // Divergence is run state owned by the client, never inferred from
 // conversation text. [ReplayClient.Tools] returns the run's recorded tool
@@ -102,11 +105,13 @@ var ErrReplayDiverged = errors.New("agent: replay diverged")
 // normally. [ReplayClient.Err] reports both cases, and a caller that took
 // [ReplayClient.Tools] also gets an error for a recorded call that a tool
 // ran in the recorded run and no replay tool served. A recorded compaction
-// (threshold or overflow) the replaying Runner does not reproduce at its
-// position is reported the same way: the first request after it must carry
-// the same compacted messages (pruned tool results, conversation summaries)
-// as the recorded one. Callers MUST assert Err returns nil after a replayed
-// run — a diverged replay is a failed evaluation whatever Run returned.
+// (threshold or overflow, by any [Compactor]) the replaying Runner does not
+// reproduce at its position is reported the same way: the first request
+// after it must carry messages equal, in their JSON encoding, to the
+// recorded request's. A record that cannot carry a tool's bytes, for example
+// invalid UTF-8 through JSONL, replays its compactions as diverged. Callers
+// MUST assert Err returns nil after a replayed run — a diverged replay is a
+// failed evaluation whatever Run returned.
 //
 // ReplayClient is safe for concurrent use, though a single Runner calls it
 // sequentially.
@@ -142,35 +147,43 @@ type replayStep struct {
 	compaction *replayedCompaction
 }
 
-// replayedCompaction is a recorded Compaction event and the shape of the
-// request that followed it.
+// replayedCompaction is a recorded compaction and the recorded request
+// messages that followed it.
 type replayedCompaction struct {
 	reason string
-	shape  []msgShape
+	sent   []llmkit.Message
 }
 
-// msgShape is what a compaction changes about a message, without its wording:
-// a pruned tool result or a conversation summary is compacted.
-type msgShape struct {
-	role      llmkit.Role
-	compacted bool
-}
-
-func requestShape(msgs []llmkit.Message) []msgShape {
-	shape := make([]msgShape, len(msgs))
-	for i, m := range msgs {
-		text := m.Text()
-		shape[i] = msgShape{m.Role, (m.Role == llmkit.RoleToolResult && isCompactStub(text)) ||
-			(m.Role == llmkit.RoleUser && strings.HasPrefix(text, conversationSummaryPrefix))}
+// canonicalMessages decodes msgs' JSON encoding into generic values, so raw
+// JSON fields compare regardless of whitespace and key order.
+func canonicalMessages(msgs []llmkit.Message) (form any, ok bool) {
+	b, err := json.Marshal(msgs)
+	if err != nil {
+		return nil, false
 	}
-	return shape
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	if err := dec.Decode(&form); err != nil {
+		return nil, false
+	}
+	return form, true
 }
 
-// withShape records the shape of the request that followed the compaction; a
-// request with no messages leaves the compaction unverifiable.
-func (c *replayedCompaction) withShape(msgs []llmkit.Message) *replayedCompaction {
+// reproducedBy compares msgs with the recorded request in canonical JSON form;
+// a recorded request that does not encode cannot be verified and passes.
+func (c *replayedCompaction) reproducedBy(msgs []llmkit.Message) bool {
+	want, ok := canonicalMessages(c.sent)
+	if !ok {
+		return true
+	}
+	got, ok := canonicalMessages(msgs)
+	return ok && reflect.DeepEqual(got, want)
+}
+
+// withSent records the request messages that followed the compaction.
+func (c *replayedCompaction) withSent(msgs []llmkit.Message) *replayedCompaction {
 	if c != nil {
-		c.shape = requestShape(msgs)
+		c.sent = msgs
 	}
 	return c
 }
@@ -238,7 +251,7 @@ func NewReplayClient(src llmkit.Source, run llmkit.RunID, caps llmkit.Capabiliti
 		case ev.Kind == llmkit.KindCompaction && ev.Compaction != nil:
 			compaction = &replayedCompaction{reason: ev.Compaction.Reason}
 		case ev.Kind == llmkit.KindCompletion && ev.Completion != nil && ev.Completion.Err == "":
-			compaction = compaction.withShape(ev.Completion.Request.Messages)
+			compaction = compaction.withSent(ev.Completion.Request.Messages)
 			rc.responses = append(rc.responses, replayStep{
 				resp:          ev.Completion.Response,
 				expectToolIDs: pending,
@@ -246,7 +259,7 @@ func NewReplayClient(src llmkit.Source, run llmkit.RunID, caps llmkit.Capabiliti
 			})
 			pending, compaction = nil, nil
 		case ev.Kind == llmkit.KindCompletion && ev.Completion != nil && ev.Completion.ErrKind == llmkit.ErrKindContextTooLong:
-			compaction = compaction.withShape(ev.Completion.Request.Messages)
+			compaction = compaction.withSent(ev.Completion.Request.Messages)
 			rc.responses = append(rc.responses, replayStep{
 				err:           replayedOverflow(ev.Completion.Err),
 				expectToolIDs: pending,
@@ -318,8 +331,8 @@ func (rc *ReplayClient) Complete(ctx context.Context, req llmkit.Request) (llmki
 			return llmkit.Response{}, err
 		}
 	}
-	if c := step.compaction; c != nil && rc.unreproduced == nil && len(c.shape) > 0 && !slices.Equal(c.shape, requestShape(req.Messages)) {
-		rc.unreproduced = fmt.Errorf("%w at step %d: recorded %s compaction was not reproduced: the replayed request's compacted messages differ from the record's",
+	if c := step.compaction; c != nil && rc.unreproduced == nil && !c.reproducedBy(req.Messages) {
+		rc.unreproduced = fmt.Errorf("%w at step %d: recorded %s compaction was not reproduced: the replayed request after it differs from the record's",
 			ErrReplayDiverged, rc.idx+1, c.label())
 	}
 	rc.idx++

@@ -12,11 +12,11 @@ import (
 // decides when, the Compactor decides how.
 //
 // A Compactor must not modify in.Messages, in.Sent, or anything they share;
-// it returns a new slice, or in.Messages itself to report no change. When it
-// replaces a prefix with a summary, the summary is a user message whose text
-// starts "[conversation summary]" and the prefix ends at a cut point, so
-// callers can identify it. A Runner is safe for concurrent Run calls, so a
-// Compactor shared across runs is called concurrently.
+// it returns a new slice, or no messages or in.Messages itself to report no
+// change. When it replaces a prefix with a summary, the summary is a user
+// message whose text starts "[conversation summary]" and the prefix ends at a
+// cut point, so callers can identify it. A Runner is safe for concurrent Run
+// calls, so a Compactor shared across runs is called concurrently.
 type Compactor interface {
 	Compact(ctx context.Context, in CompactInput) (CompactOutput, error)
 }
@@ -36,8 +36,8 @@ type CompactInput struct {
 
 // CompactOutput is a compaction result.
 type CompactOutput struct {
-	// Messages is the compacted history; it becomes the run's history. Return
-	// CompactInput.Messages itself to leave the history unchanged.
+	// Messages is the compacted history; it becomes the run's history. Empty
+	// Messages, or CompactInput.Messages itself, leaves the history unchanged.
 	Messages []llmkit.Message
 	// Pruned is the number of messages the compaction replaced or removed,
 	// reported on the Compaction event.
@@ -90,10 +90,8 @@ func (r *Runner) compact(ctx context.Context, in CompactInput) (CompactOutput, e
 	return r.compactor.Compact(ctx, in)
 }
 
-// sameMessages reports whether a and b are one slice, the no-change signal.
-func sameMessages(a, b []llmkit.Message) bool {
-	return len(a) == len(b) && (len(a) == 0 || &a[0] == &b[0])
+// compactionUnchanged reports whether out leaves in as it was: no messages,
+// or in itself.
+func compactionUnchanged(out, in []llmkit.Message) bool {
+	return len(out) == 0 || len(out) == len(in) && &out[0] == &in[0]
 }
-
-// conversationSummaryPrefix starts the text of a summary message (see [Compactor]).
-const conversationSummaryPrefix = "[conversation summary]"
