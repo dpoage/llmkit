@@ -30,22 +30,37 @@ const compactRearmFactor = 2
 // decision.
 func EstimateHistoryTokens(msgs []llmkit.Message) int64 { return estimateTokens(msgs) }
 
-// nonTextBlockEstimateBytes is the fixed byte estimate charged for every
-// non-text content block (image, document, thinking) in estimateTokens.
-// Inline media bytes are not billed linearly (a small image can cost more
-// tokens than its byte count suggests, and thinking payloads are already
-// tokenized text), so a flat 1024 bytes — 256 tokens at the bytes/4 rate —
-// keeps the heuristic a relative "is history big" signal without pretending
-// to price media exactly.
-const nonTextBlockEstimateBytes = 1024
+// imageEstimateTokens is the token charge for every image block, whatever its
+// byte size and whether it is inline or a URL. It is Anthropic's standard-tier
+// visual cap: a provider downscales a large image to a bounded tile budget, so
+// the byte count says nothing about the cost, and 1,568 tokens bounds a single
+// image from above on the standard tier.
+const imageEstimateTokens = 1568
+
+// documentEstimateBytes is the flat byte charge per document block — 256 tokens
+// at the bytes/4 rate. A document's cost depends on its page count and
+// rendering, not its byte size, so the heuristic stays a relative "is history
+// big" signal rather than pricing it.
+const documentEstimateBytes = 1024
 
 // estimateTokens approximates the token cost of a message slice using a
-// bytes/4 heuristic over the text the provider actually bills: text-block
-// content plus the tool-call names and serialized arguments an assistant
-// turn carries, plus a fixed nonTextBlockEstimateBytes charge per image,
-// document, or thinking block. It deliberately ignores per-message framing
-// overhead; it is a relative signal for "is history big enough to compact",
-// not a billing oracle.
+// bytes/4 heuristic over what the history sends: text-block content, the
+// tool-call names and serialized arguments an assistant turn carries, a flat
+// imageEstimateTokens per image block, documentEstimateBytes per document
+// block, and max(len(Text), len(Raw)) bytes per thinking block. It deliberately
+// ignores per-message framing overhead; it is a relative signal for "is history
+// big enough to compact", not a billing oracle.
+//
+// A thinking block counts its larger payload once, never both: an Anthropic
+// block carries the same reasoning in Text and in Raw, so summing would double
+// it. The count is a deliberate over-estimate: a block another provider tagged
+// is dropped from the wire, and some models strip earlier turns' thinking.
+// Compaction firing early on such a history costs one prefix cache miss;
+// firing late risks a context overflow.
+//
+// The Runner estimates the request copy of its history (see
+// [Runner.wireMessages]), so media the client degrades counts as its marker
+// text. EstimateHistoryTokens of the raw history counts that media in full.
 func estimateTokens(msgs []llmkit.Message) int64 {
 	var b int64
 	for i := range msgs {
@@ -55,19 +70,39 @@ func estimateTokens(msgs []llmkit.Message) int64 {
 }
 
 // messageBytes returns the approximate billed byte size of one message: its
-// text-block content plus nonTextBlockEstimateBytes per non-text block and,
-// for assistant turns, each tool call's name and raw argument JSON.
+// text-block content, each non-text block's charge as estimateTokens
+// documents, and, for assistant turns, each tool call's name and raw argument
+// JSON.
 func messageBytes(m llmkit.Message) int64 {
-	b := int64(len(m.Text()))
+	var b int64
 	for _, blk := range m.Content {
-		if blk.Kind != llmkit.BlockText {
-			b += nonTextBlockEstimateBytes
+		switch blk.Kind {
+		case llmkit.BlockText:
+			b += int64(len(blk.Text))
+		case llmkit.BlockImage:
+			b += imageEstimateTokens * 4
+		case llmkit.BlockThinking:
+			b += int64(max(len(blk.Text), len(blk.Raw)))
+		default:
+			b += documentEstimateBytes
 		}
 	}
 	for _, tc := range m.ToolCalls {
 		b += int64(len(tc.Name)) + int64(len(tc.Arguments))
 	}
 	return b
+}
+
+// sentBytes is m's text plus its image and document bytes (inline data and
+// URL); compactHistory sizes a result by it on the request copy.
+func sentBytes(m llmkit.Message) int {
+	n := 0
+	for _, blk := range m.Content {
+		if blk.Kind == llmkit.BlockText || isMedia(blk) {
+			n += len(blk.Text) + len(blk.Data) + len(blk.URL)
+		}
+	}
+	return n
 }
 
 // compactStubPrefix marks content that compactHistory already replaced. It lets
@@ -119,6 +154,10 @@ func compactStub(toolName string, origBytes int, isErr bool, spillRef string) st
 //     text Content shrinks (a stubbed message's Content becomes a single text
 //     block; non-text blocks on a pruned result are dropped with the dump).
 //
+// sent is the request copy of msgs, index-aligned (see [Runner.wireMessages]).
+// A result is a candidate, and its stub reports, its sentBytes in sent, so
+// media the client degrades counts as its marker text.
+//
 // toolNameFor maps a tool-result's ToolCallID back to the tool name recorded
 // when the call was issued, so the stub can name the tool; an empty/missing
 // mapping degrades to a generic stub.
@@ -126,7 +165,7 @@ func compactStub(toolName string, origBytes int, isErr bool, spillRef string) st
 // The returned slice is always a fresh allocation when pruning occurs (the
 // caller must swap it in so the prior, longer prefix is not aliased), and the
 // original is returned unchanged when there is nothing to prune.
-func compactHistory(msgs []llmkit.Message, recentK int, toolNameFor map[string]string) ([]llmkit.Message, int) {
+func compactHistory(msgs, sent []llmkit.Message, recentK int, toolNameFor map[string]string) ([]llmkit.Message, int) {
 	if recentK < 0 {
 		recentK = 0
 	}
@@ -162,13 +201,14 @@ func compactHistory(msgs []llmkit.Message, recentK int, toolNameFor map[string]s
 		if isCompactStub(content) {
 			continue
 		}
-		origBytes, spillRef := len(content), ""
-		if ref, size, ok := parseSpillMarker(content); ok {
-			origBytes, spillRef = size, ref
+		size := sentBytes(sent[idx])
+		origBytes, spillRef := size, ""
+		if ref, spilled, ok := parseSpillMarker(content); ok {
+			origBytes, spillRef = spilled, ref
 		}
 		stub := compactStub(toolNameFor[m.ToolCallID], origBytes, m.IsError, spillRef)
 		// Skip results already smaller than their stub: stubbing would grow them.
-		if len(content) <= len(stub) {
+		if size <= len(stub) {
 			continue
 		}
 		m.Content = []llmkit.Block{{Kind: llmkit.BlockText, Text: stub}}

@@ -124,6 +124,19 @@ entry below is marked.
 
 ### Changed
 
+- `agent`: the history size estimate behind `HistoryTokenBudget` and
+  `EstimateHistoryTokens` now prices thinking and media blocks, so
+  `HistoryTokenBudget` may fire earlier or later for histories that carry
+  them. An image block counts a flat 1,568 tokens, whatever its byte size and
+  inline or URL. A document block still counts 1,024 bytes. A thinking block
+  counts the larger of its `Text` and `Raw` bytes once, where it counted 1,024
+  bytes: an over-estimate for a block another provider tagged, which is not
+  sent, and for models that strip earlier thinking. The `Runner` estimates its
+  request copy, so media the client degrades counts as its marker text, not
+  as an image. A tool result is a compaction candidate by its total size, text
+  plus media bytes, so a short caption with a large image is pruned like a
+  large text dump. The most recent four tool results are still kept, and the
+  stub of a spilled result still names its reference.
 - `llmkit`: the per-role block rule now lets `RoleToolResult` carry text,
   image and document blocks (it was text only), gated by
   `Capabilities.ToolResultMedia`. `RoleSystem` stays text only. Before, any
