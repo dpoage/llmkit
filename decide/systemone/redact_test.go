@@ -1,4 +1,4 @@
-package decide
+package systemone
 
 import (
 	"bufio"
@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/decide"
 	"github.com/dpoage/llmkit/retry"
 )
 
@@ -24,7 +25,7 @@ import (
 // front.
 const leakSecret = "sk-live-9f8e7d6c5b4a39281706f5e4d3c2b1a0"
 
-var oneQuestion = Questions{"q": Noul{Instructions: "i"}}
+var oneQuestion = decide.Questions{"q": decide.Noul{Instructions: "i"}}
 
 // leakPolicy is a fast three-attempt policy: jitter-free, no real waiting.
 func leakPolicy() retry.Config {
@@ -46,10 +47,9 @@ func forbiddenFor(secrets ...string) []string {
 
 // askObserved runs one Ask against cfg and returns its error and the Err
 // of the one DecisionEvent it emitted.
-func askObserved(t *testing.T, cfg Config, q Questions) (eventErr string, err error) {
+func askObserved(t *testing.T, cfg Config, q decide.Questions) (eventErr string, err error) {
 	t.Helper()
 	obs := &decisionCapture{}
-	cfg.Observer = obs
 	if cfg.Model == "" {
 		cfg.Model = "jev-latest"
 	}
@@ -60,7 +60,7 @@ func askObserved(t *testing.T, cfg Config, q Questions) (eventErr string, err er
 	if cerr != nil {
 		t.Fatalf("New: %v", cerr)
 	}
-	_, err = c.Ask(context.Background(), "state", q)
+	_, err = decide.Observe(c, obs).Ask(context.Background(), "state", q)
 	if err == nil {
 		t.Fatal("Ask succeeded, want an error")
 	}
@@ -121,7 +121,7 @@ func TestAsk_D4_ServerRoutesNeverLeakTheSecret(t *testing.T) {
 	type row struct {
 		name      string
 		secret    string
-		questions Questions
+		questions decide.Questions
 		handler   http.HandlerFunc
 	}
 	body := func(status int, b string) http.HandlerFunc {
@@ -135,9 +135,9 @@ func TestAsk_D4_ServerRoutesNeverLeakTheSecret(t *testing.T) {
 		{"599 body echo", leakSecret, oneQuestion, body(599, "key="+leakSecret)},
 		{"200 unknown answer id", leakSecret, oneQuestion, body(200, answerJSON(t, map[string]json.RawMessage{leakSecret: json.RawMessage(`{"type":"noul","noul":0.5}`)}))},
 		{"200 answer type", leakSecret, oneQuestion, body(200, answerJSON(t, map[string]json.RawMessage{"q": json.RawMessage(`{"type":` + string(quoted(leakSecret)) + `}`)}))},
-		{"200 probabilities key with wrong-typed value", leakSecret, Questions{"q": Choice{Instructions: "i", Options: map[string]any{"a": "x"}}},
+		{"200 probabilities key with wrong-typed value", leakSecret, decide.Questions{"q": decide.Choice{Instructions: "i", Options: map[string]any{"a": "x"}}},
 			body(200, answerJSON(t, map[string]json.RawMessage{"q": json.RawMessage(`{"type":"choice","choice":"a","probabilities":{` + string(quoted(leakSecret)) + `:"wrong"}}`)}))},
-		{"200 score legend key", leakSecret, Questions{"q": Score{Instructions: "i", Levels: []any{"lo", "hi"}}},
+		{"200 score legend key", leakSecret, decide.Questions{"q": decide.Score{Instructions: "i", Levels: []any{"lo", "hi"}}},
 			body(200, answerJSON(t, map[string]json.RawMessage{"q": json.RawMessage(`{"type":"score","score":0.5,"legend":{` + string(quoted(leakSecret)) + `:"lo","1":"hi"},"probabilities":{"0":0.5,"1":0.5}}`)}))},
 		{"200 digits-only secret in a number type error", "12345678901234567890123", oneQuestion,
 			body(200, `{"model":"m","answers":{},"usage":{"input_tokens":12345678901234567890123,"output_tokens":1}}`)},
@@ -197,8 +197,8 @@ func TestAsk_D4_KeepsKindStatusAndRetryAfter(t *testing.T) {
 	if !errors.As(err, &api) {
 		t.Fatalf("err = %v, want an *APIError", err)
 	}
-	if api.Kind != llmkit.ErrRateLimited || api.StatusCode != 429 || !api.HasRetryAfter || api.RetryAfter != 7*time.Second || api.Provider != "typesafe" {
-		t.Errorf("APIError = %+v, want Kind ErrRateLimited, status 429, Retry-After 7s, Provider typesafe", *api)
+	if api.Kind != llmkit.ErrRateLimited || api.StatusCode != 429 || !api.HasRetryAfter || api.RetryAfter != 7*time.Second || api.Provider != "systemone" {
+		t.Errorf("APIError = %+v, want Kind ErrRateLimited, status 429, Retry-After 7s, Provider systemone", *api)
 	}
 	if !errors.Is(err, llmkit.ErrRateLimited) {
 		t.Errorf("errors.Is(err, ErrRateLimited) = false")
@@ -323,11 +323,11 @@ func TestAsk_D4_CancelDuringBackoffAfterALeakingAttempt(t *testing.T) {
 		return ctx.Err()
 	}
 	obs := &decisionCapture{}
-	c, err := New(Config{Secret: leakSecret, Model: "m", BaseURL: srv.URL, Retry: pol, Observer: obs})
+	c, err := New(Config{Secret: leakSecret, Model: "m", BaseURL: srv.URL, Retry: pol})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = c.Ask(ctx, "state", oneQuestion)
+	_, err = decide.Observe(c, obs).Ask(ctx, "state", oneQuestion)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
@@ -454,11 +454,11 @@ func TestAsk_D4_CancelMidAttemptWithUserinfo(t *testing.T) {
 	defer cancel()
 	base := strings.Replace(srv.URL, "http://", "http://sk-USERKEY@", 1)
 	obs := &decisionCapture{}
-	c, err := New(Config{Secret: leakSecret, Model: "m", BaseURL: base, Retry: leakPolicy(), Observer: obs})
+	c, err := New(Config{Secret: leakSecret, Model: "m", BaseURL: base, Retry: leakPolicy()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = c.Ask(ctx, "state", oneQuestion)
+	_, err = decide.Observe(c, obs).Ask(ctx, "state", oneQuestion)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want the caller's DeadlineExceeded", err)
 	}

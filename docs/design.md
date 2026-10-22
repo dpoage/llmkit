@@ -22,23 +22,28 @@ flowchart TD
     EMBED --> IA
     SANDBOX["sandbox"] --> ROOT
     DECIDE["decide"] --> ROOT
-    DECIDE --> IA
+    SYSONE["decide/systemone"] --> DECIDE
+    SYSONE --> ROOT
+    SYSONE --> IA
     RETRY["retry"]
     ROOT --> RETRY
     IA --> RETRY
     PROV --> RETRY
     EMBED --> RETRY
-    DECIDE --> RETRY
+    SYSONE --> RETRY
     FSROOT["fsroot"]
 ```
 
 `retry` and `fsroot` import no other kit package. `retry` holds the
 backoff loop: `retry.Config`, `retry.Do`, and `retry.ParseRetryAfter`.
-The root package, the adapter layer, `provider`, `embed`, and `decide`
-all import it directly. `embed` imports the root vocabulary,
-`internal/adapter` for failure normalization, and `retry`; `decide`
-imports the root vocabulary, `internal/adapter` for status
-classification, and `retry`. Neither goes through `provider`.
+The root package, the adapter layer, `provider`, `embed`, and
+`decide/systemone` all import it directly. `embed` imports the root
+vocabulary, `internal/adapter` for failure normalization, and `retry`.
+`decide` is the decision vocabulary and imports only the root
+vocabulary: it has no HTTP, adapter, or retry code. `decide/systemone`
+is a backend of that vocabulary and imports `decide`, the root
+vocabulary, `internal/adapter` for status classification, and `retry`.
+Neither goes through `provider`.
 `agent` drives any `llmkit.Client`, so a `Runner` runs against a provider
 client, a replay client, or your own implementation. The diagram omits
 test-only packages: `internal/livetest` backs the `live` acceptance suite.
@@ -135,11 +140,12 @@ adapter fabricates a context window; an unknown model reports `0`.
 `internal/adapter.Prepare` is shared by all three vendor adapters. It
 validates the messages, defaults `MaxTokens`, decodes tool and response
 schemas, and applies the gate of each wire-gated `Capabilities` field: a
-silent drop, or a refusal (`ToolChoice`, an invalid `ThinkingConfig`). An
-adapter maps a `Prepared` value onto its SDK types without re-applying
-those rules. Each adapter's `New` pins a ceiling naming the wire-gated
-fields (`StructuredOutput`, `Thinking`, `ReasoningEffort`, `ToolChoice`,
-`StopSequences`, `TopP`, `TopK`, `Seed`) it can put on the wire;
+silent drop, or a refusal (`ToolChoice`, an invalid `ThinkingConfig`, media in
+a tool result when `ToolResultMedia` is false). An adapter maps a `Prepared`
+value onto its SDK types without re-applying those rules. Each adapter's
+`New` pins a ceiling naming the nine wire-gated fields (`StructuredOutput`,
+`Thinking`, `ReasoningEffort`, `ToolChoice`, `StopSequences`, `TopP`, `TopK`,
+`Seed`, `ToolResultMedia`) it can put on the wire;
 `internal/adapter.ApplyOverride` refuses a `Spec.Capabilities` override
 that reports a field above the ceiling, so the profile can never claim a
 wire-gated feature the adapter cannot send.
@@ -242,7 +248,8 @@ run.go) spans 38 symbols and measures ~1120 with tests, ~250 without,
 under the same rule — the decision is insensitive to the counting rule.
 (`decide` contributed zero in the original measurement — it sat on the
 `Recorder` seam — and is now an Observer consumer in its own right:
-`Config.Observer` emits one `DecisionEvent` per `Ask` that reaches the wire.)
+`decide.Observe` wraps any `Decider` and emits one `DecisionEvent` per `Ask`
+that passes validation, and `decide.Replay` answers from those events.)
 
 The decisive reason a leaf cannot work is the direction of the type
 dependency, not taste. The payloads embed root's own wire types —
@@ -330,10 +337,21 @@ no cache itself: to cache a backend, a caller passes the `Embedder` that
 TypeSafe's Jev is a decision model. One request carries a state plus typed
 questions (`Noul`, `Choice`, `Score`), and the answer is a belief or a
 probability distribution. Because Jev has no messages, no tools, no
-streaming, and no text output, `decide` does not implement `llmkit.Client`
-and does not go through `provider.New`. `decide.New` is its own validated
-construction path. `embed` is the precedent for a non-chat sibling
-package.
+streaming, and no text output, neither `decide` nor its backend implements
+`llmkit.Client` or goes through `provider.New`. `embed` is the precedent
+for a non-chat sibling package.
+
+The decision surface is split in two. `decide` is the vocabulary:
+`Question`, `Response`, `Decider`, `Check`, and `Normalize`, which
+validates a state and questions into the root event vocabulary. It holds no
+HTTP code and names no vendor. `decide/systemone` is the wire backend: it
+renders `Normalize`'s output as the System One request, owns HTTP, retries,
+and redaction, and decodes the answers. The package is named for the wire
+protocol, not the vendor, because several hosts speak it (TypeSafe's Jev
+by default, Kev through `Config.BaseURL`); `provider`'s
+`TypeOpenAICompatible` is the precedent. `systemone.New` is the backend's
+own validated construction path, and `*systemone.Client` satisfies
+`decide.Decider`.
 
 - **What it buys:** an honest surface. A decision answer cannot masquerade
   as chat text, and no `Capabilities` field lies about streaming or tools.
@@ -341,7 +359,7 @@ package.
   `retry.Config`, `Usage`, and the Observer vocabulary. The retry loop lives in one
   place: `retry.Do`.
 - **What it costs:** a second construction path outside the `provider.New`
-  gate. Code that targets `llmkit.Client` cannot take a `decide` client.
+  gate. Code that targets `llmkit.Client` cannot take a `decide.Decider`.
   The two surfaces share errors and usage, not a request type.
 
 ## How it is tested

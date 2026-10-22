@@ -8,7 +8,7 @@ package livetest
 // A decide.Question is a sealed Go interface — it cannot be unmarshalled
 // from wire JSON — so the recorder stores each question's kind and raw-JSON
 // fields (DecideQuestionSpec) and replay rebuilds the Noul/Choice/Score
-// values from them before re-issuing the Ask through decide.New.
+// values from them before re-issuing the Ask through systemone.New.
 
 import (
 	"encoding/json"
@@ -21,7 +21,7 @@ import (
 
 // DecideFixture documents each field:
 //   - State and Questions are the Ask inputs; replay re-issues them
-//     through decide.New.
+//     through systemone.New.
 //   - Exchanges is the sanitized wire truth — what the vendor actually
 //     received and returned, one per HTTP request (a retried Ask records
 //     several); replay serves them from an httptest server.

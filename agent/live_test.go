@@ -3,8 +3,9 @@
 // Live acceptance tests for the agent harness, run against the compat lane
 // through provider.New. Covers the Func tool loop, RunJSONAs's prompt-embedded
 // schema path, multi-turn continuation, WithMaxTokens continuation, the
-// RequestPolicy seam, Attach, ToolPolicy, Steering, and inline <think>
-// preservation.
+// RequestPolicy seam, Attach, ToolPolicy, RepetitionPolicy, tool-output
+// spilling, Steering, inline <think> preservation, and proactive summary
+// compaction against a small forced ContextWindow.
 //
 // Live-model flakes are handled, not hidden: where an assertion depends on
 // the model producing VISIBLE text or calling mandatory tools, the test
@@ -41,6 +42,7 @@ import (
 	llmkit "github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/agent"
 	"github.com/dpoage/llmkit/internal/livetest"
+	"github.com/dpoage/llmkit/provider"
 )
 
 func TestMain(m *testing.M) {
@@ -767,5 +769,392 @@ func TestLiveAgentSteering(t *testing.T) {
 	}
 	if s.Pending() != 0 {
 		t.Errorf("Pending = %d after the run, want 0", s.Pending())
+	}
+}
+
+// lookupArgs is the argument schema for the live lookup tool.
+type lookupArgs struct {
+	Key string `json:"key"`
+}
+
+// lookupRepeatReason is the exact denial reason RepetitionPolicy gives the
+// third identical call in a row: 3 occurrences in a window of 12.
+const lookupRepeatReason = "repeated identical call: lookup called 3 times in the last 12 calls without progress"
+
+// TestLiveAgentRepetitionPolicyDeniesThirdIdenticalCall pins that
+// agent.RepetitionPolicy stops a model that keeps re-issuing an identical tool
+// call against the live lane: the third identical call is denied with the
+// policy's exact reason on its ToolRun event and Tool.Run executes exactly twice.
+func TestLiveAgentRepetitionPolicyDeniesThirdIdenticalCall(t *testing.T) {
+	ctx, cl, sess := newLiveAgentClient(t)
+	runLiveRepetitionPolicy(ctx, t, cl, func(msg string) { sess.Logf(t, "%s", msg) })
+}
+
+// runLiveRepetitionPolicy is the LV1 body, split from the live-client setup
+// so the assertions are the same code whatever client drives them.
+func runLiveRepetitionPolicy(ctx context.Context, t *testing.T, cl llmkit.Client, record func(string)) {
+	t.Helper()
+	var mu sync.Mutex
+	var executed []string // key of each Tool.Run execution, in order
+	lookup := agent.Func("lookup", "looks up the status of a key; may report NOT READY",
+		func(_ context.Context, p lookupArgs) (string, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			executed = append(executed, p.Key)
+			return "NOT READY yet. Call lookup again with exactly the same key.", nil
+		})
+
+	system := "You are a helpful assistant. Use the `lookup` tool to check the status of a key. While it answers NOT READY, keep calling `lookup` again with exactly the same key, and never change the key. Stop only once it answers READY."
+	// Three distinct phrasings — a byte-identical prompt re-elicits the same correlated noncompliance.
+	tasks := []string{
+		"Call `lookup` with key \"alpha\". If the answer is NOT READY, call `lookup` again with exactly the same key, and keep doing so until it answers READY. Then say READY.",
+		"Check key \"alpha\" with the `lookup` tool. Whenever it says NOT READY, repeat the identical `lookup` call (same key \"alpha\") until the tool says READY, then report it.",
+		"Poll `lookup` for the key \"alpha\", re-calling it with the very same key each time it reports NOT READY, until it reports READY. Then answer in one sentence.",
+	}
+
+	for attempt := 1; attempt <= 3; attempt++ {
+		mu.Lock()
+		executed = nil
+		mu.Unlock()
+		runner := agent.NewRunner(cl, []agent.Tool{lookup}, system,
+			agent.WithToolPolicy(agent.RepetitionPolicy()),
+			agent.WithLimits(agent.Limits{MaxIterations: 6}),
+			agent.WithMaxTokens(2048), agent.WithObserver(livetest.DefaultTally()))
+		out, err := runner.Run(ctx, tasks[attempt-1])
+		// A model that keeps calling after the denial runs into the iteration
+		// cap: an *IncompleteError at TruncMaxIterations with its Outcome is
+		// the expected end of a persistent loop, not a failure.
+		var ie *agent.IncompleteError
+		capped := errors.As(err, &ie) && ie.Reason == agent.TruncMaxIterations
+		switch {
+		case err != nil && capped:
+			out = ie.Outcome
+		case err != nil && isModelFlake(err):
+			if attempt == 3 {
+				t.Fatalf("after 3 differently-phrased attempts the run still ended without an answer: %v", err)
+			}
+			t.Logf("attempt %d: run ended without an answer (%v); retrying with different phrasing", attempt, err)
+			continue
+		case err != nil:
+			t.Fatalf("run (attempt %d): %v", attempt, err)
+		}
+
+		// The lookup ToolRun events, in order: executed and denied calls alike.
+		var runs []*llmkit.ToolRunEvent
+		for _, ev := range out.Transcript.Record {
+			if ev.Kind == llmkit.KindToolRun && ev.ToolRun != nil && ev.ToolRun.Call.Name == "lookup" {
+				runs = append(runs, ev.ToolRun)
+			}
+		}
+		keyOf := func(ev *llmkit.ToolRunEvent) string {
+			var a lookupArgs
+			if err := json.Unmarshal(ev.Call.Arguments, &a); err != nil {
+				return "<undecodable>"
+			}
+			return a.Key
+		}
+		// The premise: the model issued three identical calls. Fewer calls, or a
+		// changed key, means the policy had nothing to deny.
+		premise := len(runs) >= 3 && keyOf(runs[0]) == keyOf(runs[1]) && keyOf(runs[1]) == keyOf(runs[2])
+		if !premise {
+			var keys []string
+			for _, ev := range runs {
+				keys = append(keys, keyOf(ev))
+			}
+			if attempt == 3 {
+				reason := fmt.Sprintf("premise not met in 3 differently-phrased attempts: the model never issued 3 identical lookup calls (last attempt keys %q)", keys)
+				record("premise skip: " + reason)
+				t.Skip(reason)
+			}
+			t.Logf("attempt %d: no 3 identical lookup calls (keys %q); retrying with different phrasing", attempt, keys)
+			continue
+		}
+
+		// The assertions are strict from here: calls 1 and 2 ran, call 3 was denied
+		// with the policy's exact reason, and Tool.Run never saw a third identical call.
+		for i, ev := range runs[:2] {
+			if ev.Denied {
+				t.Errorf("lookup call %d denied (%q), want it executed", i+1, ev.DenyReason)
+			}
+		}
+		if third := runs[2]; !third.Denied || third.DenyReason != lookupRepeatReason {
+			t.Errorf("lookup call 3: Denied=%v DenyReason=%q, want Denied with %q", third.Denied, third.DenyReason, lookupRepeatReason)
+		}
+		repeated := keyOf(runs[0])
+		mu.Lock()
+		same := 0
+		for _, k := range executed {
+			if k == repeated {
+				same++
+			}
+		}
+		total := len(executed)
+		mu.Unlock()
+		if same != 2 {
+			t.Errorf("Tool.Run executed %d time(s) with the repeated key %q (all keys %q), want exactly 2", same, repeated, executed)
+		}
+		if total != same {
+			t.Logf("model varied the key after the denial: %d total executions, %d with the repeated key", total, same)
+		}
+		return
+	}
+}
+
+// spillCall is one SpillSink.Spill invocation as the recording sink saw it.
+type spillCall struct {
+	call llmkit.ToolCall
+	full []llmkit.Block
+}
+
+// recordingSpillSink keeps every spilled result whole and returns a stable ref.
+type recordingSpillSink struct {
+	mu    sync.Mutex
+	calls []spillCall
+}
+
+func (s *recordingSpillSink) Spill(_ context.Context, call llmkit.ToolCall, full []llmkit.Block) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, spillCall{call: call, full: slices.Clone(full)})
+	return fmt.Sprintf("live-spill-%d", len(s.calls)), nil
+}
+
+func (s *recordingSpillSink) snapshot() []spillCall {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.calls)
+}
+
+// liveSpillLimit is the WithToolOutputLimit bound the spill case runs under.
+const liveSpillLimit = 4096
+
+// liveSpillReport builds the ~20 KB tool output: numbered lines, so any
+// truncation or reordering of the spilled bytes shows up as a mismatch.
+func liveSpillReport() string {
+	var b strings.Builder
+	b.WriteString("QUARTERLY REPORT\n")
+	for i := 1; b.Len() < 20*1024; i++ {
+		fmt.Fprintf(&b, "line %04d: the quick brown fox jumps over the lazy dog\n", i)
+	}
+	return b.String()
+}
+
+// TestLiveAgentToolOutputSpill pins that WithToolOutputLimit against the live
+// lane hands a ~20 KB tool result whole to the sink exactly once, records the
+// spill on the ToolRun event, shows the model only a spill-marker stand-in of
+// at most the limit on the next request, and still completes the run.
+func TestLiveAgentToolOutputSpill(t *testing.T) {
+	ctx, cl, sess := newLiveAgentClient(t)
+	runLiveToolOutputSpill(ctx, t, cl, func(msg string) { sess.Logf(t, "%s", msg) })
+}
+
+// runLiveToolOutputSpill is the LV2 body, split from the live-client setup
+// so the assertions are the same code whatever client drives them.
+func runLiveToolOutputSpill(ctx context.Context, t *testing.T, cl llmkit.Client, record func(string)) {
+	t.Helper()
+	report := liveSpillReport()
+	var runs atomic.Int64
+	fetch := agent.Func[struct{}]("fetch_report", "returns the full quarterly report text",
+		func(_ context.Context, _ struct{}) (string, error) {
+			runs.Add(1)
+			return report, nil
+		})
+
+	system := "You are a helpful assistant. Call the `fetch_report` tool exactly once to get the report, then answer. Never call it a second time."
+	tasks := []string{
+		"Call the `fetch_report` tool exactly once. After it returns, reply in one sentence saying the report was retrieved.",
+		"Use `fetch_report` one time to retrieve the quarterly report, then confirm in one sentence that you retrieved it. Do not call it again.",
+		"Fetch the report with a single `fetch_report` call, then state in one short sentence that the report arrived.",
+	}
+
+	for attempt := 1; attempt <= 3; attempt++ {
+		runs.Store(0)
+		sink := &recordingSpillSink{}
+		var mu sync.Mutex
+		var requests [][]llmkit.Message
+		hooks := agent.Hooks{
+			BeforeCompletion: func(_ context.Context, _ int, req *llmkit.Request) {
+				mu.Lock()
+				defer mu.Unlock()
+				requests = append(requests, slices.Clone(req.Messages))
+			},
+		}
+		runner := agent.NewRunner(cl, []agent.Tool{fetch}, system,
+			agent.WithHooks(hooks), agent.WithToolOutputLimit(liveSpillLimit, sink),
+			agent.WithMaxTokens(2048), agent.WithObserver(livetest.DefaultTally()))
+		out, err := runner.Run(ctx, tasks[attempt-1])
+		if err != nil {
+			if !isModelFlake(err) {
+				t.Fatalf("run (attempt %d): %v", attempt, err)
+			}
+			if attempt == 3 {
+				t.Fatalf("after 3 differently-phrased attempts the run still ended without an answer: %v", err)
+			}
+			t.Logf("attempt %d: run ended without an answer (%v); retrying with different phrasing", attempt, err)
+			continue
+		}
+		if got := runs.Load(); got != 1 {
+			if attempt == 3 {
+				record(fmt.Sprintf("premise failure: fetch_report ran %d time(s) in the last attempt, want exactly 1", got))
+				t.Fatalf("after 3 differently-phrased attempts fetch_report still ran %d time(s), want exactly 1", got)
+			}
+			t.Logf("attempt %d: fetch_report ran %d time(s), want 1; retrying with different phrasing", attempt, got)
+			continue
+		}
+
+		// The sink received the full bytes, once.
+		calls := sink.snapshot()
+		if len(calls) != 1 {
+			t.Fatalf("sink received %d spills, want 1", len(calls))
+		}
+		var full strings.Builder
+		for _, b := range calls[0].full {
+			full.WriteString(b.Text)
+		}
+		if full.String() != report || len(calls[0].full) != 1 {
+			t.Errorf("sink received %d block(s), %d bytes; want the one full %d-byte report", len(calls[0].full), full.Len(), len(report))
+		}
+		if calls[0].call.Name != "fetch_report" {
+			t.Errorf("sink call name = %q, want fetch_report", calls[0].call.Name)
+		}
+
+		// The ToolRun event carries the spill.
+		var runEvents []*llmkit.ToolRunEvent
+		for _, ev := range out.Transcript.Record {
+			if ev.Kind == llmkit.KindToolRun && ev.ToolRun != nil && ev.ToolRun.Call.Name == "fetch_report" {
+				runEvents = append(runEvents, ev.ToolRun)
+			}
+		}
+		if len(runEvents) != 1 {
+			t.Fatalf("transcript has %d fetch_report tool_run events, want 1", len(runEvents))
+		}
+		ev := runEvents[0]
+		const wantRef = "live-spill-1"
+		if ev.SpillRef != wantRef || ev.OriginalBytes != len(report) || ev.SpillError != "" || ev.IsError {
+			t.Errorf("ToolRun SpillRef=%q OriginalBytes=%d SpillError=%q IsError=%v, want %q, %d, no error",
+				ev.SpillRef, ev.OriginalBytes, ev.SpillError, ev.IsError, wantRef, len(report))
+		}
+
+		// The next request carries only the stand-in: bounded, and led by the marker.
+		wantMarker := fmt.Sprintf("[tool output spilled: %s, %d bytes]", wantRef, len(report))
+		mu.Lock()
+		reqs := slices.Clone(requests)
+		mu.Unlock()
+		var tool *llmkit.Message
+		for _, msgs := range reqs {
+			for i := range msgs {
+				if msgs[i].Role == llmkit.RoleToolResult {
+					tool = &msgs[i]
+				}
+			}
+			if tool != nil {
+				break
+			}
+		}
+		if tool == nil {
+			t.Fatalf("no request after the tool ran carried a tool-result message (%d requests)", len(reqs))
+		}
+		if text := tool.Text(); len(text) > liveSpillLimit {
+			t.Errorf("tool message is %d bytes, want <= %d", len(text), liveSpillLimit)
+		} else if !strings.HasPrefix(text, wantMarker+"\n") {
+			t.Errorf("tool message does not start with the spill marker %q: %.120q", wantMarker, text)
+		}
+
+		// The run completed past the spill.
+		if out.FinalText == "" {
+			t.Fatalf("no final text after the spill; outcome=%+v", out)
+		}
+		return
+	}
+}
+
+// TestLiveAgentProactiveSummaryCompaction pins that ContextReserve with a
+// summarizing compactor, against a window forced small by a code-level
+// Spec.Capabilities override, compacts before the window fills: the run
+// records a Compaction event with a summary, the summarizer's call as a
+// Purpose=compaction Completion, a Completion ledger that sums to
+// Outcome.Usage, and still completes.
+func TestLiveAgentProactiveSummaryCompaction(t *testing.T) {
+	const window, reserve, chunkBytes, chunks = 6000, 2000, 1500, 12
+	sess := livetest.Resolve(t, "compat")
+	ctx, _ := livetest.Ctx(t)
+	cl := sess.Client(ctx, t, livetest.NewTransport(sess.Key), func(spec *provider.Spec) {
+		prev := spec.Capabilities
+		spec.Capabilities = func(c llmkit.Capabilities) llmkit.Capabilities {
+			if prev != nil {
+				c = prev(c)
+			}
+			c.ContextWindow = window
+			return c
+		}
+	})
+	if got := cl.Capabilities().ContextWindow; got != window {
+		t.Fatalf("client reports ContextWindow %d, want the %d override", got, window)
+	}
+
+	var fetched atomic.Int64
+	fetch := agent.Func("fetch_chunk", "returns chunk n of a long log (1 to 12)",
+		func(_ context.Context, p struct {
+			N int `json:"n"`
+		}) (string, error) {
+			fetched.Add(1)
+			line := fmt.Sprintf("chunk %d: the quick brown fox jumps over the lazy dog. ", p.N)
+			return strings.Repeat(line, chunkBytes/len(line)+1)[:chunkBytes], nil
+		})
+	system := "You are a careful log reader. Fetch every chunk with the `fetch_chunk` tool, one call per turn, in order. Never skip a chunk."
+	tasks := []string{
+		"Fetch chunks 1 through 12 with `fetch_chunk`, one call at a time and in order. After chunk 12, reply with one sentence saying how many chunks you fetched.",
+		"Use `fetch_chunk` for n=1, then n=2, and so on up to n=12, one call per turn. When all twelve are fetched, answer in one sentence with the number of chunks you read.",
+		"Read the log: call `fetch_chunk` once for each n from 1 to 12 in order, then state in one sentence how many chunks you read.",
+	}
+
+	for attempt := 1; attempt <= 3; attempt++ {
+		fetched.Store(0)
+		runner := agent.NewRunner(cl, []agent.Tool{fetch}, system,
+			agent.WithLimits(agent.Limits{MaxIterations: 30, ContextReserve: reserve}),
+			agent.WithCompactor(agent.SummarizingCompactor(cl)),
+			agent.WithMaxTokens(2048), agent.WithObserver(livetest.DefaultTally()))
+		out, err := runner.Run(ctx, tasks[attempt-1])
+		if err != nil {
+			if !isModelFlake(err) {
+				t.Fatalf("run (attempt %d): %v", attempt, err)
+			}
+			if attempt == 3 {
+				t.Fatalf("after 3 differently-phrased attempts the run still ended without an answer: %v", err)
+			}
+			t.Logf("attempt %d: run ended without an answer (%v); retrying with different phrasing", attempt, err)
+			continue
+		}
+
+		var summaries, purposeCalls int
+		var ledger llmkit.Usage
+		for _, ev := range out.Transcript.Record {
+			switch {
+			case ev.Kind == llmkit.KindCompaction && ev.Compaction != nil && ev.Compaction.Summary != "":
+				summaries++
+			case ev.Kind == llmkit.KindCompletion && ev.Completion != nil:
+				ledger = ledger.Add(ev.Completion.Response.Usage)
+				if ev.Completion.Purpose == llmkit.CompletionPurposeCompaction {
+					purposeCalls++
+				}
+			}
+		}
+		if summaries == 0 {
+			if attempt == 3 {
+				t.Fatalf("after 3 attempts no compaction carried a summary (%d chunks fetched, %d iterations)", fetched.Load(), out.Iterations)
+			}
+			t.Logf("attempt %d: no summary (%d chunks fetched in %d iterations); retrying with different phrasing", attempt, fetched.Load(), out.Iterations)
+			continue
+		}
+		if purposeCalls == 0 {
+			t.Errorf("a summary was recorded but no Completion event has Purpose %q", llmkit.CompletionPurposeCompaction)
+		}
+		if ledger != out.Usage {
+			t.Errorf("sum of Completion usage %+v != Outcome.Usage %+v", ledger, out.Usage)
+		}
+		if out.FinalText == "" {
+			t.Fatalf("no final text after the compaction; outcome=%+v", out)
+		}
+		return
 	}
 }

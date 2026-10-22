@@ -536,7 +536,6 @@ func TestConformance_MediaSourceRejectedBeforeWire(t *testing.T) {
 		{llmkit.RoleUser, llmkit.Block{Kind: llmkit.BlockThinking, Provider: "anthropic", Raw: json.RawMessage(`{}`)}},
 		{llmkit.RoleAssistant, llmkit.Block{Kind: llmkit.BlockImage, MediaType: "image/png", Data: pngBytes}},
 		{llmkit.RoleSystem, llmkit.Block{Kind: llmkit.BlockImage, MediaType: "image/png", Data: pngBytes}},
-		{llmkit.RoleToolResult, llmkit.Block{Kind: llmkit.BlockImage, MediaType: "image/png", Data: pngBytes}},
 	}
 	for _, f := range allAdapters() {
 		for i, v := range kindViolations {

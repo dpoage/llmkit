@@ -12,12 +12,24 @@ import (
 // advertises every tool's [llmkit.ToolDef] to the model and dispatches matching
 // tool calls to [Tool.Run].
 //
-// Run receives the raw JSON arguments the model produced (validate/unmarshal
-// them yourself) and returns a textual result. An error returned from Run is
-// *not* a loop failure: the harness wraps it as an "ERROR:"-prefixed
-// tool-result message and lets the model decide how to recover. Reserve errors
-// for tool-level problems (bad arguments, file not found); never use them to
-// signal that the loop should abort.
+// Run receives the model's raw JSON arguments (decode them yourself) and
+// returns the result as content blocks: []llmkit.Block{llmkit.Text(s)} for
+// text, with image or document blocks beside it for a richer result. The
+// Runner keeps the returned slice, which [Outcome.Messages] may hold itself;
+// do not modify it after returning. A nil or empty result is one empty text
+// block.
+//
+// The tool-result content is the returned blocks, except that a media block
+// becomes a text marker when [llmkit.Capabilities.ToolResultMedia] is false
+// or the block is not portable (the rule is on that field) and, under
+// [WithToolOutputLimit], an oversized result becomes a spill or truncation
+// stand-in. Hooks and events receive the text blocks in order, with a size
+// marker at each media block sent and an omission marker at each one degraded.
+//
+// An error from Run is not a loop failure: the harness renders "ERROR: <err>"
+// from the error alone, discarding any blocks returned beside it, and the
+// model decides how to recover. Reserve errors for tool-level problems; never
+// use them to abort the loop.
 //
 // A panic from Run is treated the same way in both dispatch modes
 // (sequential and [WithParallelTools]): the harness recovers it and renders
@@ -42,10 +54,11 @@ type Tool interface {
 	// parameters) as advertised to the model.
 	Def() llmkit.ToolDef
 	// Run executes the tool with the model-supplied arguments and returns the
-	// textual result to feed back to the model. An error, or a panic, is
+	// result blocks to feed back to the model. An error, or a panic, is
 	// recovered by the harness and rendered to the model as this call's
-	// "ERROR:"-prefixed result (identically in both dispatch modes).
-	Run(ctx context.Context, args json.RawMessage) (string, error)
+	// "ERROR:"-prefixed result (identically in both dispatch modes); the
+	// blocks returned beside an error are discarded.
+	Run(ctx context.Context, args json.RawMessage) ([]llmkit.Block, error)
 }
 
 // UnmarshalArgs decodes raw JSON tool arguments into dst. It returns a

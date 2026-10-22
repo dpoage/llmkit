@@ -25,27 +25,28 @@ const compactRecentToolResults = 4
 const compactRearmFactor = 2
 
 // EstimateHistoryTokens approximates the billed token size of a message slice
-// using the same bytes/4 heuristic the Runner's compaction trigger uses. It is
-// exported so callers reporting size numbers can match the live compaction
-// decision.
+// with the bytes/4 heuristic the Runner's compaction trigger uses. It matches
+// the live compaction decision only for the request copy: tool-result media
+// the client cannot carry replaced by markers. A raw history counts it in full.
 func EstimateHistoryTokens(msgs []llmkit.Message) int64 { return estimateTokens(msgs) }
 
-// nonTextBlockEstimateBytes is the fixed byte estimate charged for every
-// non-text content block (image, document, thinking) in estimateTokens.
-// Inline media bytes are not billed linearly (a small image can cost more
-// tokens than its byte count suggests, and thinking payloads are already
-// tokenized text), so a flat 1024 bytes — 256 tokens at the bytes/4 rate —
-// keeps the heuristic a relative "is history big" signal without pretending
-// to price media exactly.
-const nonTextBlockEstimateBytes = 1024
+// imageEstimateTokens is the flat token charge per image block, whatever its
+// size or source: Anthropic's standard-tier cap, an upper bound per image.
+const imageEstimateTokens = 1568
 
-// estimateTokens approximates the token cost of a message slice using a
-// bytes/4 heuristic over the text the provider actually bills: text-block
-// content plus the tool-call names and serialized arguments an assistant
-// turn carries, plus a fixed nonTextBlockEstimateBytes charge per image,
-// document, or thinking block. It deliberately ignores per-message framing
-// overhead; it is a relative signal for "is history big enough to compact",
-// not a billing oracle.
+// documentEstimateBytes is the flat byte charge per document block; its cost
+// depends on page count, not byte size.
+const documentEstimateBytes = 1024
+
+// estimateTokens approximates the token cost of msgs at bytes/4 over what the
+// history sends: text, tool-call names and arguments, imageEstimateTokens per
+// image, documentEstimateBytes per document, and max(len(Text), len(Raw)) per
+// thinking block. It ignores per-message framing: a relative size signal.
+//
+// A thinking block counts once, not Text plus Raw, which hold the same
+// reasoning on Anthropic. That over-estimates a block another provider tagged
+// (dropped from the wire) and models that strip earlier thinking: firing early
+// costs one cache miss, firing late risks an overflow.
 func estimateTokens(msgs []llmkit.Message) int64 {
 	var b int64
 	for i := range msgs {
@@ -54,20 +55,38 @@ func estimateTokens(msgs []llmkit.Message) int64 {
 	return b / 4
 }
 
-// messageBytes returns the approximate billed byte size of one message: its
-// text-block content plus nonTextBlockEstimateBytes per non-text block and,
-// for assistant turns, each tool call's name and raw argument JSON.
+// messageBytes returns the approximate billed byte size of one message, per
+// the charges estimateTokens documents.
 func messageBytes(m llmkit.Message) int64 {
-	b := int64(len(m.Text()))
+	var b int64
 	for _, blk := range m.Content {
-		if blk.Kind != llmkit.BlockText {
-			b += nonTextBlockEstimateBytes
+		switch blk.Kind {
+		case llmkit.BlockText:
+			b += int64(len(blk.Text))
+		case llmkit.BlockImage:
+			b += imageEstimateTokens * 4
+		case llmkit.BlockThinking:
+			b += int64(max(len(blk.Text), len(blk.Raw)))
+		default:
+			b += documentEstimateBytes
 		}
 	}
 	for _, tc := range m.ToolCalls {
 		b += int64(len(tc.Name)) + int64(len(tc.Arguments))
 	}
 	return b
+}
+
+// sentBytes is m's text plus its image and document bytes (inline data and
+// URL); compactHistory sizes a result by it on the request copy.
+func sentBytes(m llmkit.Message) int {
+	n := 0
+	for _, blk := range m.Content {
+		if blk.Kind == llmkit.BlockText || isMedia(blk) {
+			n += len(blk.Text) + len(blk.Data) + len(blk.URL)
+		}
+	}
+	return n
 }
 
 // compactStubPrefix marks content that compactHistory already replaced. It lets
@@ -87,8 +106,9 @@ func isCompactStub(content string) bool {
 // the tool name and original byte size so the model retains a breadcrumb (it can
 // re-read the file if it genuinely needs the bytes back) without paying to carry
 // the full dump every subsequent turn. errored results are marked so the model
-// still knows the call had failed.
-func compactStub(toolName string, origBytes int, isErr bool) string {
+// still knows the call had failed. A non-empty spillRef names where the full
+// output was spilled, so the stub keeps the way back to it.
+func compactStub(toolName string, origBytes int, isErr bool, spillRef string) string {
 	kind := "tool result"
 	if isErr {
 		kind = "errored tool result"
@@ -96,6 +116,9 @@ func compactStub(toolName string, origBytes int, isErr bool) string {
 	name := toolName
 	if name == "" {
 		name = "tool"
+	}
+	if spillRef != "" {
+		return fmt.Sprintf("[%s pruned to save context: %s, %d bytes; full output spilled: %s]", kind, name, origBytes, spillRef)
 	}
 	return fmt.Sprintf("[%s pruned to save context: %s, %d bytes]", kind, name, origBytes)
 }
@@ -115,6 +138,9 @@ func compactStub(toolName string, origBytes int, isErr bool) string {
 //     text Content shrinks (a stubbed message's Content becomes a single text
 //     block; non-text blocks on a pruned result are dropped with the dump).
 //
+// sent is the request copy of msgs, index-aligned. A result is a candidate,
+// and its stub reports, its sentBytes in sent: degraded media counts as text.
+//
 // toolNameFor maps a tool-result's ToolCallID back to the tool name recorded
 // when the call was issued, so the stub can name the tool; an empty/missing
 // mapping degrades to a generic stub.
@@ -122,7 +148,7 @@ func compactStub(toolName string, origBytes int, isErr bool) string {
 // The returned slice is always a fresh allocation when pruning occurs (the
 // caller must swap it in so the prior, longer prefix is not aliased), and the
 // original is returned unchanged when there is nothing to prune.
-func compactHistory(msgs []llmkit.Message, recentK int, toolNameFor map[string]string) ([]llmkit.Message, int) {
+func compactHistory(msgs, sent []llmkit.Message, recentK int, toolNameFor map[string]string) ([]llmkit.Message, int) {
 	if recentK < 0 {
 		recentK = 0
 	}
@@ -158,9 +184,14 @@ func compactHistory(msgs []llmkit.Message, recentK int, toolNameFor map[string]s
 		if isCompactStub(content) {
 			continue
 		}
-		stub := compactStub(toolNameFor[m.ToolCallID], len(content), m.IsError)
+		size := sentBytes(sent[idx])
+		origBytes, spillRef := size, ""
+		if ref, spilled, ok := parseSpillMarker(content); ok {
+			origBytes, spillRef = spilled, ref
+		}
+		stub := compactStub(toolNameFor[m.ToolCallID], origBytes, m.IsError, spillRef)
 		// Skip results already smaller than their stub: stubbing would grow them.
-		if len(content) <= len(stub) {
+		if size <= len(stub) {
 			continue
 		}
 		m.Content = []llmkit.Block{{Kind: llmkit.BlockText, Text: stub}}

@@ -25,9 +25,9 @@ func (h hangingTool) Def() llmkit.ToolDef {
 	return llmkit.ToolDef{Name: h.name, Description: "hangs until cancelled", Parameters: json.RawMessage(`{"type":"object"}`)}
 }
 
-func (h hangingTool) Run(ctx context.Context, _ json.RawMessage) (string, error) {
+func (h hangingTool) Run(ctx context.Context, _ json.RawMessage) ([]llmkit.Block, error) {
 	<-ctx.Done()
-	return "", ctx.Err()
+	return nil, ctx.Err()
 }
 
 // staggerTool sleeps for its delay (honoring cancellation) before returning
@@ -43,12 +43,12 @@ func (s staggerTool) Def() llmkit.ToolDef {
 	return llmkit.ToolDef{Name: s.name, Description: "staggered", Parameters: json.RawMessage(`{"type":"object"}`)}
 }
 
-func (s staggerTool) Run(ctx context.Context, _ json.RawMessage) (string, error) {
+func (s staggerTool) Run(ctx context.Context, _ json.RawMessage) ([]llmkit.Block, error) {
 	select {
 	case <-ctx.Done():
-		return "", ctx.Err()
+		return nil, ctx.Err()
 	case <-time.After(s.delay):
-		return s.result, nil
+		return textBlocks(s.result), nil
 	}
 }
 
@@ -60,7 +60,7 @@ func (p panicTool) Def() llmkit.ToolDef {
 	return llmkit.ToolDef{Name: p.name, Description: "panics", Parameters: json.RawMessage(`{"type":"object"}`)}
 }
 
-func (p panicTool) Run(context.Context, json.RawMessage) (string, error) {
+func (p panicTool) Run(context.Context, json.RawMessage) ([]llmkit.Block, error) {
 	panic("tool exploded")
 }
 
@@ -137,7 +137,7 @@ func (c *ctxObsTool) Def() llmkit.ToolDef {
 	return llmkit.ToolDef{Name: c.name, Description: "observes ctx", Parameters: json.RawMessage(`{"type":"object"}`)}
 }
 
-func (c *ctxObsTool) Run(ctx context.Context, _ json.RawMessage) (string, error) {
+func (c *ctxObsTool) Run(ctx context.Context, _ json.RawMessage) ([]llmkit.Block, error) {
 	c.once.Do(func() { close(c.started) })
 	<-ctx.Done()
 	err := ctx.Err()
@@ -145,7 +145,7 @@ func (c *ctxObsTool) Run(ctx context.Context, _ json.RawMessage) (string, error)
 	case c.observed <- err:
 	default:
 	}
-	return "", err
+	return nil, err
 }
 
 // TestRun_ToolTimeout_DerivesFromRunContext pins that the per-tool deadline
@@ -693,15 +693,15 @@ func (d doneSignalTool) Def() llmkit.ToolDef {
 	return llmkit.ToolDef{Name: d.name, Description: "signals completion", Parameters: json.RawMessage(`{"type":"object"}`)}
 }
 
-func (d doneSignalTool) Run(ctx context.Context, _ json.RawMessage) (string, error) {
+func (d doneSignalTool) Run(ctx context.Context, _ json.RawMessage) ([]llmkit.Block, error) {
 	select {
 	case <-ctx.Done():
 		close(d.done)
-		return "", ctx.Err()
+		return nil, ctx.Err()
 	case <-time.After(d.delay):
 	}
 	close(d.done)
-	return d.result, nil
+	return textBlocks(d.result), nil
 }
 
 // TestRun_ToolPanic_SequentialRenderedAsError pins half of the uniform

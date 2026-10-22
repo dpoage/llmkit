@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -160,10 +162,10 @@ func (r *Runner) authorizeCalls(ctx context.Context, calls []llmkit.ToolCall, re
 //
 // Hooks fire from the goroutine executing the call — concurrently under
 // WithParallelTools.
-func (r *Runner) runTool(ctx context.Context, call llmkit.ToolCall, step int) (result string, isErr bool) {
+func (r *Runner) runTool(ctx context.Context, call llmkit.ToolCall, step int) toolResult {
 	tool, ok := r.tools.lookup(call.Name)
 	if !ok {
-		return renderUnknownTool(call.Name), true
+		return toolResult{result: renderUnknownTool(call.Name), isErr: true}
 	}
 	runCtx := ctx
 	if r.toolTimeout > 0 {
@@ -171,9 +173,9 @@ func (r *Runner) runTool(ctx context.Context, call llmkit.ToolCall, step int) (r
 		runCtx, cancel = context.WithTimeout(ctx, r.toolTimeout)
 		defer cancel()
 	}
-	// Tool.Run learns which call it serves (see [callIDFrom]); the tool
-	// hooks receive the run's ctx without it.
-	runCtx = withCallID(runCtx, call.ID)
+	// Tool.Run learns which call it serves; a replay tool reports the
+	// degradation its recorded result holds. Hooks get the run's ctx.
+	runCtx, slot := withDispatch(runCtx, call.ID)
 	r.fireToolStart(ctx, step, call)
 	start := time.Now()
 	out, panicVal, err := invokeTool(runCtx, tool, call.Arguments)
@@ -181,29 +183,147 @@ func (r *Runner) runTool(ctx context.Context, call llmkit.ToolCall, step int) (r
 	if panicVal != nil {
 		// A panicking Tool.Run is model-recoverable data: render it as this
 		// call's error result and keep the loop going.
-		result = renderToolPanic(call.Name, panicVal)
-		r.fireToolEnd(ctx, step, call, result, true, duration)
-		return result, true
+		res := toolResult{result: renderToolPanic(call.Name, panicVal), isErr: true}
+		r.fireToolEnd(ctx, step, call, res, duration)
+		return res
 	}
 	if err != nil {
 		// Deadline expiry: report the timeout as the tool result, leaving the
 		// run's own context untouched. The parent-ctx guard keeps a genuine
 		// run cancellation from being misreported as a tool timeout.
 		if r.toolTimeout > 0 && ctx.Err() == nil && runCtx.Err() == context.DeadlineExceeded {
-			timeoutResult := renderToolTimeout(call.Name, r.toolTimeout)
-			r.fireToolEnd(ctx, step, call, timeoutResult, true, duration)
-			return timeoutResult, true
+			res := toolResult{result: renderToolTimeout(call.Name, r.toolTimeout), isErr: true}
+			r.fireToolEnd(ctx, step, call, res, duration)
+			return res
 		}
 		// Record a tool-health signal only for a genuine *ToolHealthError AND
 		// only when ctx is not already cancelled: a failure caused by run
 		// teardown/cancellation must never be counted as a tool-health problem.
 		r.fireToolHealth(ctx, call.Name, err)
-		result = toolError(err)
-		r.fireToolEnd(ctx, step, call, result, true, duration)
-		return result, true
+		res := toolResult{result: toolError(err), isErr: true}
+		r.fireToolEnd(ctx, step, call, res, duration)
+		return res
 	}
-	r.fireToolEnd(ctx, step, call, out, false, duration)
-	return out, false
+	res := r.placeToolBlocks(out)
+	res.degraded += slot.priorDegraded
+	if rec := slot.recorded; rec != nil {
+		res.originalBytes, res.spillRef, res.spillErr = rec.originalBytes, rec.spillRef, rec.spillErr
+	} else {
+		res = r.limitToolOutput(ctx, call, res)
+	}
+	r.fireToolEnd(ctx, step, call, res, duration)
+	return res
+}
+
+const (
+	imageOmitted    = "[image omitted: this model does not accept images in tool results]"
+	documentOmitted = "[document omitted: this model does not accept documents in tool results]"
+)
+
+// portableToolMedia reports whether every ToolResultMedia wire carries b: inline
+// bytes of an image in png, jpeg or webp, or of a pdf document.
+func portableToolMedia(b llmkit.Block) bool {
+	if len(b.Data) == 0 {
+		return false
+	}
+	switch b.MediaType {
+	case "image/png", "image/jpeg", "image/webp":
+		return b.Kind == llmkit.BlockImage
+	case "application/pdf":
+		return b.Kind == llmkit.BlockDocument
+	}
+	return false
+}
+
+func isMedia(b llmkit.Block) bool {
+	return b.Kind == llmkit.BlockImage || b.Kind == llmkit.BlockDocument
+}
+
+// placeToolBlocks builds the outcome of a successful Tool.Run, degrading each
+// media block the client's profile cannot carry in a tool result.
+func (r *Runner) placeToolBlocks(out []llmkit.Block) toolResult {
+	if !slices.ContainsFunc(out, isMedia) {
+		return toolResult{result: blocksText(out), content: nonEmptyBlocks(out)}
+	}
+	placed, degraded := degradeToolMedia(out, r.client.Capabilities().ToolResultMedia)
+	return toolResult{result: blocksText(placed), content: placed, degraded: degraded}
+}
+
+// degradeToolMedia replaces each media block a tool result cannot carry by its
+// omission marker; it returns blocks itself, never modified, when none is.
+func degradeToolMedia(blocks []llmkit.Block, accepts bool) ([]llmkit.Block, int) {
+	var placed []llmkit.Block
+	degraded := 0
+	for i, b := range blocks {
+		if !isMedia(b) || (accepts && portableToolMedia(b)) {
+			if placed != nil {
+				placed = append(placed, b)
+			}
+			continue
+		}
+		if placed == nil {
+			placed = append(make([]llmkit.Block, 0, len(blocks)), blocks[:i]...)
+		}
+		marker := imageOmitted
+		if b.Kind == llmkit.BlockDocument {
+			marker = documentOmitted
+		}
+		placed = append(placed, llmkit.Text(marker))
+		degraded++
+	}
+	if placed == nil {
+		return blocks, 0
+	}
+	return placed, degraded
+}
+
+// wireMessages degrades the media of every tool-result message of history,
+// which Continue can carry in from another profile. history is never modified;
+// copied reports a fresh slice.
+func (r *Runner) wireMessages(history []llmkit.Message) (msgs []llmkit.Message, copied bool) {
+	var accepts, read bool
+	for i, m := range history {
+		if m.Role != llmkit.RoleToolResult || !slices.ContainsFunc(m.Content, isMedia) {
+			continue
+		}
+		if !read {
+			accepts, read = r.client.Capabilities().ToolResultMedia, true
+		}
+		content, n := degradeToolMedia(m.Content, accepts)
+		if n == 0 {
+			continue
+		}
+		if msgs == nil {
+			msgs = slices.Clone(history)
+		}
+		msgs[i].Content = content
+	}
+	if msgs == nil {
+		return history, false
+	}
+	return msgs, true
+}
+
+func nonEmptyBlocks(blocks []llmkit.Block) []llmkit.Block {
+	if len(blocks) == 0 {
+		return nil
+	}
+	return blocks
+}
+
+// blocksText is the model-visible text of placed blocks: text in order, with a
+// size marker at each media block sent.
+func blocksText(blocks []llmkit.Block) string {
+	var b strings.Builder
+	for _, blk := range blocks {
+		switch blk.Kind {
+		case llmkit.BlockText:
+			b.WriteString(blk.Text)
+		case llmkit.BlockImage, llmkit.BlockDocument:
+			fmt.Fprintf(&b, "[%s: %s, %d bytes]", blk.Kind, blk.MediaType, len(blk.Data))
+		}
+	}
+	return b.String()
 }
 
 // invokeTool invokes Tool.Run once, converting a panic into a non-nil
@@ -212,10 +332,10 @@ func (r *Runner) runTool(ctx context.Context, call llmkit.ToolCall, step int) (r
 // parallel mode) is reserved for harness bugs — hook panics — only. A tool
 // that panics with nil still yields a non-nil marker: runtime turns
 // panic(nil) into a *runtime.PanicNilError.
-func invokeTool(ctx context.Context, tool Tool, args json.RawMessage) (out string, panicVal any, err error) {
+func invokeTool(ctx context.Context, tool Tool, args json.RawMessage) (out []llmkit.Block, panicVal any, err error) {
 	defer func() {
 		if v := recover(); v != nil {
-			out, panicVal, err = "", v, nil
+			out, panicVal, err = nil, v, nil
 		}
 	}()
 	out, err = tool.Run(ctx, args)
@@ -229,19 +349,53 @@ func invokeTool(ctx context.Context, tool Tool, args json.RawMessage) (out strin
 // policy rewrote the arguments Tool.Run received (see
 // [llmkit.ToolRunEvent].DispatchedArguments).
 type toolResult struct {
-	result         string
+	result string
+	// content is the blocks fed to the model; nil for harness-rendered outcomes
+	// and for a tool that returned none, when the message carries result.
+	content []llmkit.Block
+	// degraded counts media blocks replaced by omission markers, a replayed
+	// record's included; content may since be a stand-in holding none.
+	degraded int
+	// originalBytes, spillRef and spillErr describe an applied output limit.
+	originalBytes  int
+	spillRef       string
+	spillErr       string
 	isErr          bool
 	denied         bool
 	denyReason     string
 	dispatchedArgs json.RawMessage
 }
 
-// callIDKey keys the ID of the call a Tool.Run serves in its context.
-type callIDKey struct{}
+// eventContent is the Content the ToolRun event and ToolEvent carry: the
+// placed blocks when they hold media or degraded > 0, else nil.
+func (res toolResult) eventContent() []llmkit.Block {
+	if res.degraded > 0 || slices.ContainsFunc(res.content, isMedia) {
+		return res.content
+	}
+	return nil
+}
 
-// withCallID returns ctx carrying id as the call the tool invocation serves.
-func withCallID(ctx context.Context, id string) context.Context {
-	return context.WithValue(ctx, callIDKey{}, id)
+type dispatchKey struct{}
+
+// dispatchSlot is shared by [Runner.runTool] and the Tool.Run it invokes.
+// priorDegraded and recorded are set by a replay tool from its record.
+type dispatchSlot struct {
+	id            string
+	priorDegraded int
+	recorded      *recordedLimit
+}
+
+// recordedLimit is the output-limit outcome of a recorded result; a result
+// served with one is never limited again.
+type recordedLimit struct {
+	originalBytes int
+	spillRef      string
+	spillErr      string
+}
+
+func withDispatch(ctx context.Context, id string) (context.Context, *dispatchSlot) {
+	slot := &dispatchSlot{id: id}
+	return context.WithValue(ctx, dispatchKey{}, slot), slot
 }
 
 // callIDFrom returns the ID of the call Tool.Run serves, or "" when ctx
@@ -249,8 +403,31 @@ func withCallID(ctx context.Context, id string) context.Context {
 // model gave no ID). Only replay tools read it, to match a served call to its
 // recorded counterpart by identity instead of by arguments.
 func callIDFrom(ctx context.Context) string {
-	id, _ := ctx.Value(callIDKey{}).(string)
-	return id
+	if slot, ok := ctx.Value(dispatchKey{}).(*dispatchSlot); ok {
+		return slot.id
+	}
+	return ""
+}
+
+// reportPriorDegraded marks that Tool.Run's blocks already hold n omission
+// markers from the recorded run.
+func reportPriorDegraded(ctx context.Context, n int) {
+	if slot, ok := ctx.Value(dispatchKey{}).(*dispatchSlot); ok {
+		slot.priorDegraded = n
+	}
+}
+
+// reportRecordedLimit marks that Tool.Run's blocks are a recorded result
+// already limited, so the Runner's output limit must not touch them.
+func reportRecordedLimit(ctx context.Context, rec recordedLimit) {
+	if slot, ok := ctx.Value(dispatchKey{}).(*dispatchSlot); ok {
+		slot.recorded = &rec
+	}
+}
+
+func (res *toolResult) setText(s string) {
+	res.result = s
+	res.content = []llmkit.Block{llmkit.Text(s)}
 }
 
 // deniedResult renders a [ToolPolicy] refusal: the model-visible denial
@@ -273,7 +450,11 @@ func (res toolResult) message(callID string) llmkit.Message {
 	if res.isErr {
 		return llmkit.ToolError(callID, res.result)
 	}
-	return llmkit.ToolResult(callID, res.result)
+	msg := llmkit.ToolResult(callID, res.result)
+	if res.content != nil {
+		msg.Content = res.content
+	}
+	return msg
 }
 
 // executeTools runs calls and returns one result per executed call, in the
@@ -320,7 +501,9 @@ func (r *Runner) executeTools(ctx context.Context, outcome *Outcome, calls []llm
 			if err := ctx.Err(); err != nil {
 				return results[:i]
 			}
-			results[i].result, results[i].isErr = r.runTool(ctx, call, outcome.Iterations)
+			out := r.runTool(ctx, call, outcome.Iterations)
+			out.dispatchedArgs = results[i].dispatchedArgs
+			results[i] = out
 		}
 		return results
 	}
@@ -348,7 +531,9 @@ func (r *Runner) executeTools(ctx context.Context, outcome *Outcome, calls []llm
 			if denied != nil && denied[i] {
 				return // deny already rendered into results[i]
 			}
-			results[i].result, results[i].isErr = r.runTool(ctx, call, outcome.Iterations)
+			out := r.runTool(ctx, call, outcome.Iterations)
+			out.dispatchedArgs = results[i].dispatchedArgs
+			results[i] = out
 		}(i, call)
 	}
 	wg.Wait()

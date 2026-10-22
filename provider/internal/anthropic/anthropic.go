@@ -47,7 +47,8 @@ type Options struct {
 // anthropicCeiling names every wire-gated field this adapter can put on the
 // wire: the Messages API has no seed parameter and the adapter does not map
 // ReasoningEffort, so an effective profile reporting either true is refused
-// at construction rather than silently dropped.
+// at construction rather than silently dropped. tool_result content accepts
+// image and document blocks, so ToolResultMedia is within the ceiling.
 var anthropicCeiling = llmkit.Capabilities{
 	StructuredOutput: true,
 	Thinking:         true,
@@ -57,6 +58,7 @@ var anthropicCeiling = llmkit.Capabilities{
 	TopP:             true,
 	TopK:             true,
 	Seed:             false,
+	ToolResultMedia:  true,
 }
 
 // New builds an Anthropic-backed Client. The vendor SDK's built-in retries are
@@ -492,8 +494,11 @@ func toAnthropicMessages(msgs []llmkit.Message) ([]anthropic.MessageParam, error
 			}
 			out = append(out, anthropic.NewAssistantMessage(blocks...))
 		case llmkit.RoleToolResult:
-			pendingResults = append(pendingResults,
-				anthropic.NewToolResultBlock(m.ToolCallID, m.Text(), m.IsError))
+			block, err := anthropicToolResultBlock(m)
+			if err != nil {
+				return nil, err
+			}
+			pendingResults = append(pendingResults, block)
 		}
 	}
 	flush()
@@ -512,34 +517,11 @@ func anthropicUserBlocks(m llmkit.Message) ([]anthropic.ContentBlockParamUnion, 
 		case llmkit.BlockText:
 			blocks = append(blocks, anthropic.NewTextBlock(b.Text))
 		case llmkit.BlockImage:
-			src := anthropic.ImageBlockParamSourceUnion{}
-			if b.URL != "" {
-				src.OfURL = &anthropic.URLImageSourceParam{URL: b.URL}
-			} else {
-				src.OfBase64 = &anthropic.Base64ImageSourceParam{
-					Data:      base64.StdEncoding.EncodeToString(b.Data),
-					MediaType: anthropic.Base64ImageSourceMediaType(b.MediaType),
-				}
-			}
-			blocks = append(blocks, anthropic.ContentBlockParamUnion{
-				OfImage: &anthropic.ImageBlockParam{Source: src},
-			})
+			blocks = append(blocks, anthropic.ContentBlockParamUnion{OfImage: anthropicImageBlock(b)})
 		case llmkit.BlockDocument:
-			if len(b.Data) > 0 && b.MediaType != "application/pdf" {
-				return nil, adapter.Refuse("anthropic",
-					"document block: Anthropic base64 documents support application/pdf only", nil)
-			}
-			src := anthropic.DocumentBlockParamSourceUnion{}
-			if b.URL != "" {
-				src.OfURL = &anthropic.URLPDFSourceParam{URL: b.URL}
-			} else {
-				src.OfBase64 = &anthropic.Base64PDFSourceParam{
-					Data: base64.StdEncoding.EncodeToString(b.Data),
-				}
-			}
-			dp := &anthropic.DocumentBlockParam{Source: src}
-			if b.Title != "" {
-				dp.Title = anthropic.String(b.Title)
+			dp, err := anthropicDocumentBlock(b)
+			if err != nil {
+				return nil, err
 			}
 			blocks = append(blocks, anthropic.ContentBlockParamUnion{OfDocument: dp})
 		}
@@ -548,6 +530,80 @@ func anthropicUserBlocks(m llmkit.Message) ([]anthropic.ContentBlockParamUnion, 
 		blocks = append(blocks, anthropic.NewTextBlock(""))
 	}
 	return blocks, nil
+}
+
+// anthropicImageBlock maps an image block (base64 or URL source); shared by
+// user turns and tool results.
+func anthropicImageBlock(b llmkit.Block) *anthropic.ImageBlockParam {
+	src := anthropic.ImageBlockParamSourceUnion{}
+	if b.URL != "" {
+		src.OfURL = &anthropic.URLImageSourceParam{URL: b.URL}
+	} else {
+		src.OfBase64 = &anthropic.Base64ImageSourceParam{
+			Data:      base64.StdEncoding.EncodeToString(b.Data),
+			MediaType: anthropic.Base64ImageSourceMediaType(b.MediaType),
+		}
+	}
+	return &anthropic.ImageBlockParam{Source: src}
+}
+
+// anthropicDocumentBlock maps a document block (base64 PDF or URL source),
+// refusing inline non-PDF bytes; shared by user turns and tool results.
+func anthropicDocumentBlock(b llmkit.Block) (*anthropic.DocumentBlockParam, error) {
+	if len(b.Data) > 0 && b.MediaType != "application/pdf" {
+		return nil, adapter.Refuse("anthropic",
+			"document block: Anthropic base64 documents support application/pdf only", nil)
+	}
+	src := anthropic.DocumentBlockParamSourceUnion{}
+	if b.URL != "" {
+		src.OfURL = &anthropic.URLPDFSourceParam{URL: b.URL}
+	} else {
+		src.OfBase64 = &anthropic.Base64PDFSourceParam{
+			Data: base64.StdEncoding.EncodeToString(b.Data),
+		}
+	}
+	dp := &anthropic.DocumentBlockParam{Source: src}
+	if b.Title != "" {
+		dp.Title = anthropic.String(b.Title)
+	}
+	return dp, nil
+}
+
+// anthropicToolResultBlock maps a tool result to one tool_result block: joined
+// text when media-free (the pre-media wire shape), else every block in order.
+func anthropicToolResultBlock(m llmkit.Message) (anthropic.ContentBlockParamUnion, error) {
+	hasMedia := false
+	for _, b := range m.Content {
+		if b.Kind == llmkit.BlockImage || b.Kind == llmkit.BlockDocument {
+			hasMedia = true
+			break
+		}
+	}
+	if !hasMedia {
+		return anthropic.NewToolResultBlock(m.ToolCallID, m.Text(), m.IsError), nil
+	}
+	content := make([]anthropic.ToolResultBlockParamContentUnion, 0, len(m.Content))
+	for _, b := range m.Content {
+		switch b.Kind {
+		case llmkit.BlockText:
+			content = append(content, anthropic.ToolResultBlockParamContentUnion{
+				OfText: &anthropic.TextBlockParam{Text: b.Text},
+			})
+		case llmkit.BlockImage:
+			content = append(content, anthropic.ToolResultBlockParamContentUnion{OfImage: anthropicImageBlock(b)})
+		case llmkit.BlockDocument:
+			dp, err := anthropicDocumentBlock(b)
+			if err != nil {
+				return anthropic.ContentBlockParamUnion{}, err
+			}
+			content = append(content, anthropic.ToolResultBlockParamContentUnion{OfDocument: dp})
+		}
+	}
+	return anthropic.ContentBlockParamUnion{OfToolResult: &anthropic.ToolResultBlockParam{
+		ToolUseID: m.ToolCallID,
+		Content:   content,
+		IsError:   anthropic.Bool(m.IsError),
+	}}, nil
 }
 
 // anthropicAssistantBlocks maps an assistant message's content blocks onto
@@ -861,6 +917,7 @@ func anthropicCapabilities(model string) llmkit.Capabilities {
 		TopP:              true,
 		TopK:              true,
 		Seed:              false,
+		ToolResultMedia:   true,
 	}
 	best := adapter.BestMatchingFamily(model, anthropicModelTable, func(e anthropicModelCaps) string { return e.prefix })
 	if best >= 0 {

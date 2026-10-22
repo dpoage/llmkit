@@ -84,11 +84,11 @@ func (*stepProbeTool) Def() llmkit.ToolDef {
 	return llmkit.ToolDef{Name: "nest", Description: "nest", Parameters: json.RawMessage(`{"type":"object"}`)}
 }
 
-func (p *stepProbeTool) Run(ctx context.Context, _ json.RawMessage) (string, error) {
+func (p *stepProbeTool) Run(ctx context.Context, _ json.RawMessage) ([]llmkit.Block, error) {
 	p.ctxStep = llmkit.NewEvent(ctx, llmkit.KindFinalize).Step
 	p.inner(ctx)
 	p.innerDone = true
-	return "ok", nil
+	return textBlocks("ok"), nil
 }
 
 // TestFinalize_PanickedStepIsZeroUnderAnyContext pins that a panicked Finalize

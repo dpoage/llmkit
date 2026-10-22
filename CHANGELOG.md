@@ -66,6 +66,222 @@ entry below is marked.
   to the serving member's identity when the response left it empty, except for
   a member that is itself a `Fallback`. `Identity`, which was not serialized
   before, gains the JSON keys `provider` and `model` (llmkit-rli.1.6).
+- `agent`: `WithToolOutputLimit(maxBytes, sink)` bounds each successful tool
+  result entering history; off by default, so existing runs are unchanged. A
+  result over the limit (the bytes of its text, media data and URLs, after
+  media degradation) goes to the `SpillSink` as its blocks, and the model sees
+  `[tool output spilled: <ref>, <size> bytes]` plus a head preview of its text,
+  within the limit. When the preview is empty, because the result has no text
+  or the limit leaves no room for it, the marker goes alone, with no newline.
+  With a nil sink, or when the sink fails, the text is head-truncated and
+  marked `[tool output truncated: <shown> of <size> bytes shown]`, and media
+  blocks are dropped. A limit smaller than the marker still sends the marker.
+  Errors, denials and timeouts are not limited. A sink that panics is not
+  recovered. `ToolRunEvent` gains `OriginalBytes`, `SpillRef` and
+  `SpillError`, omitted when unset; with no sink only
+  `OriginalBytes` is set, and `Result` stays the text the model saw. A replay
+  serves the recorded result without calling the sink, and a compaction stub
+  of a spilled result names its reference.
+- `agent`: `RepetitionPolicy()` returns a stock `ToolPolicy` that stops tool
+  loops. It keeps the last 12 calls of a run (denied calls included) and
+  denies a call when the last 2p+1 calls, for some p from 1 to 5, repeat with
+  period p: A,A,A denies the third call, A,B,A,B,A the fifth, and
+  A,B1,A,B2,A none. Two calls are identical when the tool name matches and
+  the arguments are equal as JSON: object key order and whitespace do not
+  matter, and numbers compare by literal text, so `9007199254740993` and
+  `9007199254740992` differ. Arguments that do not parse compare by raw bytes.
+  The denial reads `repeated identical call: <name> called N times in the
+  last 12 calls without progress`. State is kept per run id and shared by every
+  run on the policy, bounded to the 1024 most recently used runs. Runs that
+  share a run id share one window: calls with no run id share one bucket, and
+  runs pinned to the same id with `WithRunID` do too. `Continue` starts a new
+  run id, so a continued run's counts start from zero, unless `WithRunID`
+  reuses the id (llmkit-rli.2.4).
+- `llmkit`: `Capabilities.ToolResultMedia`. A `RoleToolResult` message may now
+  carry image and document blocks, not only text. Anthropic sends them in the
+  `tool_result` content in order; Google (Gemini 3 models) sends `inlineData`
+  parts in `functionResponse.parts` for `image/png`, `image/jpeg`,
+  `image/webp`, `application/pdf` and `text/plain` only. The flag is true for
+  those two and false for every other Google model, OpenAI and
+  `openai-compatible`. On a false profile a tool result carrying media is
+  refused pre-wire with an error wrapping `ErrInvalidRequest` that names the
+  capability. The OpenAI and `openai-compatible` ceiling is false, so an
+  override forcing it true is refused by `provider.New`. Google refuses URL
+  sources and other media types in a tool result pre-wire, and Anthropic
+  refuses an inline document that is not `application/pdf`
+  (llmkit-rli.2.1).
+- `agent`: a tool result's image and document blocks reach the model, or
+  degrade to a marker (llmkit-rli.2.1). The Runner sends a media block in a
+  tool result only when the client's `Capabilities.ToolResultMedia` is true
+  and the block is portable: inline `Data`, a `MediaType` of `image/png`,
+  `image/jpeg`, `image/webp` or `application/pdf`, and the matching kind
+  (image or document). It replaces any other media block, a URL-sourced one
+  included, with a text marker, `[image omitted: this model does not accept
+  images in tool results]` or `[document omitted: this model does not accept
+  documents in tool results]`. That set over-degrades `image/gif` on Anthropic
+  and `text/plain` on Gemini 3. The Runner degrades the results it places
+  itself in history, and the results `Continue` carries in from another
+  profile in each request's copy of the history, so a Runner run on OpenAI or
+  `openai-compatible` completes instead of failing with `ErrInvalidRequest`.
+  A message a `RequestPolicy` adds is not degraded. `ToolRunEvent` and
+  `agent.ToolEvent` keep `Result` as the model-visible text, now with a
+  `[image: <mediatype>, <N> bytes]` (or `[document: ...]`) marker in the
+  position of each media block sent, and gain `Content` (the blocks exactly as
+  placed in history) and `Degraded` (how many blocks were degraded). Both are
+  omitted for a result with no media and no degradation, so text-only events,
+  hooks and transcripts are unchanged. A recorded `ToolRun` with `Content`
+  replays that content into history. Under a profile that carries the
+  recorded media the replay matches the record; otherwise the media degrades
+  again and its count is added to the recorded `Degraded`. A record without
+  `Content` replays its `Result` as before. A reader built before this change
+  ignores `content` and `degraded` and replays `Result` as text only.
+  `EventSchemaVersion` stays 3.
+- `agent`: overflow recovery. With compaction enabled (a positive
+  `Limits.HistoryTokenBudget` or `Limits.ContextReserve`, or
+  `WithCompactor`), a completion that fails with an error wrapping
+  `llmkit.ErrContextTooLong` (main turn, max-tokens continuation,
+  finalization; the provider's refusal, or an error a `RequestPolicy`
+  returns) compacts the history once and is retried once. The limit is once
+  per completion, not once per run. The repair turn follows the same rule,
+  but its history is the repair prompt alone, which the default and
+  summarizing compactors leave unchanged, so it returns the error. The pass
+  emits a `compaction` event with the new `reason` `overflow`
+  (`CompactionEvent.Reason`, `llmkit.CompactionReasonOverflow`); the
+  threshold pass leaves `reason` omitted. The overflow event's token totals
+  estimate the raw history, where a threshold event estimates the request
+  copy, so media the client degrades counts in full. A history the
+  compaction leaves unchanged returns the original error with no event and
+  no retry, and a second refusal is returned unchanged, with no finalization
+  turn. `WithRequestPolicy` and the completion hooks fire for each attempt.
+  `CompletionEvent.ErrKind` (`err_kind`, `llmkit.ErrKindContextTooLong`)
+  marks a failed completion that wraps `ErrContextTooLong`. Only the
+  `completion` events the agent Runner emits carry it; `llmkit.Observe` and
+  `provider.Wrap` emit it empty. Both new fields are omitted when empty, so
+  existing records are unchanged and `EventSchemaVersion` stays 3.
+  `ReplayClient` serves a recorded completion with that `err_kind` at its
+  position as an error wrapping `ErrContextTooLong`, so the replaying Runner
+  recompacts and its events equal the recorded ones. A reader built before
+  this change skips the failed completion: an overflow record replays with
+  `rc.Err` nil, and the overflow and its recovery disappear from the replay.
+- `agent`: the `Compactor` interface (`Compact(ctx, CompactInput)
+  (CompactOutput, error)`), `CompactorFunc`, and `WithCompactor` replace
+  history compaction with your own. `CompactInput` carries the history, its
+  index-aligned request copy, and a `Reason` (empty for the threshold,
+  `llmkit.CompactionReasonOverflow` for overflow recovery); `CompactOutput`
+  carries the new history and the pruned count for the `compaction` event. A
+  summary a compactor produces is a user message starting `[conversation
+  summary]`. Without the option the Runner stubs old tool results exactly as
+  before. A compactor makes compaction enabled: overflow recovery runs with a
+  zero `HistoryTokenBudget`, which alone gates threshold compaction. A
+  compactor error ends the run, wrapped, with no retry.
+- `agent`: `SummarizingCompactor(client)` is a `Compactor` that replaces the
+  history after the task, up to a cut point, with one model-written summary,
+  a user message starting `[conversation summary]` and a newline, so the
+  history reads task, summary, assistant turn. The cut is just before the
+  latest assistant message that leaves every earlier tool call with its
+  result and does not directly follow a prompt the Runner injected; a
+  steering message may be summarized, and the latest assistant turn is
+  always kept. With no cut it stubs like the default compactor. The
+  summarizer gets a fixed prompt (goal, constraints, progress, key
+  decisions, next steps, files) and no tools; tool results are
+  cut to 2,000 characters and thinking blocks left out. An earlier summary in
+  the span feeds the next one, and a summary that would not shrink the
+  history is discarded. A summary request that fails with
+  `ErrContextTooLong` is split in halves and merged, at most three splits
+  deep; one message too large for the context ends the run with an error
+  wrapping `ErrContextTooLong`. The summarizer's calls are `completion`
+  events with the new `purpose` `compaction` (`CompletionEvent.Purpose`,
+  `llmkit.CompletionPurposeCompaction`), and their usage, even from a failed
+  pass, is added to `Outcome.Usage` and charged to the `BudgetPool`.
+  `CompactOutput` gains `Summary` and `Usage`, and the `compaction` event
+  gains `summary`, all omitted when empty. `ReplayClient.Compactor()` serves
+  the recorded summaries without calling a model and reports each pass's
+  recorded usage. When `rc.Err` is nil, a replay's `Outcome.Usage` and
+  `BudgetPool` charge match the record and a run that stopped on a budget
+  stops at the same iteration; a record of a failed pass diverges, and its
+  replayed usage can differ. A replay never serves a completion with a
+  `purpose` as an answer. A reader built before this change serves a
+  recorded summarizer call as an ordinary answer: it replays a summarized
+  record with the summary text as `FinalText` and `rc.Err` set.
+- `agent`: `Limits.ContextReserve` compacts before a completion when the
+  estimated request exceeds the client's `ContextWindow` minus the reserve,
+  instead of after a provider refusal. Zero, the default, disables it, and a
+  client that reports no window never fires it. The estimate counts the
+  message history only, so the reserve must also cover the system prompt,
+  the tool definitions and `MaxTokens`. A positive value also enables
+  compaction, so overflow recovery runs. Before any refusal, a free pass
+  that leaves the history past the trigger point makes the trigger wait
+  until the estimate has grown by the reserve, and a paid pass (one that
+  reported usage) always does, including after a refusal and even when the
+  wait puts the trigger point above the window minus the reserve. After an
+  overflow recovery by a free pass the trigger fires from the lower of the
+  window minus the reserve and the refused size minus the reserve,
+  so a window the client overstates costs one refusal
+  rather than one per turn, provided each turn grows the history by less
+  than the reserve. It combines with `HistoryTokenBudget`, which doubles
+  only after a pass its own trigger fired.
+- `decide`: `Decider`, the backend-neutral interface
+  `Ask(ctx, state, qs Questions) (Response, error)`; `*systemone.Client` satisfies it.
+  A backend's errors wrap a root `llmkit` sentinel or chain `ctx.Err()`.
+- `decide`: `Check(qs, resp)` reports whether a `Response` answers a
+  `Questions` set exactly, and `Response.Noul`, `Choice`, and `Score`
+  return an answer by id or an error wrapping the new `decide.ErrNotAsked`
+  for an id that was not asked as that kind. The answer maps and
+  `ScoreAnswer.Levels` stay.
+- `decide`: `ChoiceAnswer` and `ScoreAnswer` document that a backend that
+  reports no distribution leaves `Probabilities` (and `Levels`) nil and
+  `Confidence` 0, and must not fabricate them. The System One client
+  requires a Score answer's legend and probabilities, and accepts a Choice
+  answer without them (nil `Probabilities`, `Confidence` 0).
+- `decide`: `Normalize(state, qs)` validates a state and questions and returns
+  them in the root `llmkit.DecisionQuestion` vocabulary, sorted by id, so a
+  backend renders its own request from one validated form. It validates
+  questions in sorted id order, so the first refusal is the same on every
+  call; the old client used map order.
+- `decide`: `Observe(d Decider, obs llmkit.Observer) Decider` wraps any
+  `Decider` and emits one `llmkit.KindDecision` event per `Ask` (RunID and
+  Step from the context, sorted questions and answers, usage, duration; a
+  failed `Ask` carries the error text and zero usage). An `Ask` that fails
+  `Normalize` emits nothing, and a nil `obs` returns `d` unchanged. It reads
+  an optional `Identity() llmkit.Identity` method for
+  `DecisionEvent.Backend` and `Model`, and the wrapper forwards it.
+  `*systemone.Client` now implements
+  `Identity()` (`{Provider: "systemone", Model: <configured model>}`).
+- `decide`: `Replay(src llmkit.Source, run llmkit.RunID) (Decider, error)`
+  builds a `Decider` that answers from the `KindDecision` events recorded for
+  `run`, matching each `Ask` to the earliest unconsumed decision with the same
+  Step and question-id set, so a recorded `ToolPolicy` replays through
+  `agent.NewReplayClient` with no network. It does not compare the state and
+  does not report unconsumed decisions. Besides `src`'s error, it returns a
+  `Normalize` refusal and errors wrapping `decide.ErrReplayDiverged` (a
+  different sentinel from `agent.ErrReplayDiverged`) or
+  `decide.ErrReplayedFailure`. A refusal keeps Provider `"decide"`, so its
+  text reads `llmkit: decide error` where the live client's reads
+  `llmkit: systemone error`.
+- `examples/agent-guardrail`: an `agent.Runner` gated by a `decide.Decider`.
+  A `ToolPolicy` asks a Noul and denies a call at or above `--threshold`; a
+  `RequestPolicy` asks a Choice and aborts the run on `injection`. It reads
+  the `LLMKIT_*` variables plus `LLMKIT_SYSTEMONE_API_KEY`,
+  `LLMKIT_SYSTEMONE_MODEL`, and optionally `LLMKIT_SYSTEMONE_BASE_URL`, and
+  prints usage and exits 1 without them. `docs/decide.md` gains a "Gating an
+  agent" section.
+- `decide`: `Example` functions for `Decider`, `Response.Noul`, `Check`,
+  `Observe`, `Replay`, and `Decider` gating an agent, all network-free.
+- Budget sharing for decision spend: pass one `agent.BudgetPool` to
+  `agent.WithBudgetPool` and charge it from a `decide.Observe` observer with
+  `ev.Decision.Usage.ChargeableTokens(1)`. The run stops with
+  `agent.TruncBudgetPool` at the first turn boundary after LLM and decision
+  spend together reach the limit, so it can overshoot the limit by one turn.
+  A run whose overshooting turn is its last ends normally, without
+  `TruncBudgetPool`.
+  `agent.Limits.TokenBudget` does not count decision tokens. No API change;
+  the pattern is in `examples/agent-guardrail` and `docs/decide.md`.
+- Live tests: a `kev` lane runs the `decide/systemone` live cases against a
+  local [Kev](https://github.com/jaredpalmer/kev) server with
+  `LLMKIT_LIVE_KEV_BASE_URL` (no credentials; model defaults to `kev-latest`).
+  CI does not run it. `systemone.Ask` also has hermetic tests against Kev's
+  README response and a captured one; the live suite is now
+  `TestLiveDecide/<lane>/<case>`. See `docs/testing.md`.
 
 ### Changed
 
@@ -99,6 +315,111 @@ entry below is marked.
   replayed `Completion`; before, replayed `Completion` events had empty
   `Provider` and `Model`, and a record without `served` still replays that way
   (llmkit-rli.1.6).
+- `agent`: the history size estimate behind `HistoryTokenBudget` and
+  `EstimateHistoryTokens` now prices thinking and media blocks, so
+  `HistoryTokenBudget` may fire earlier or later for histories that carry
+  them. An image block counts a flat 1,568 tokens, whatever its byte size and
+  inline or URL. A document block still counts 1,024 bytes. A thinking block
+  counts the larger of its `Text` and `Raw` bytes once, where it counted 1,024
+  bytes: an over-estimate for a block another provider tagged, which is not
+  sent, and for models that strip earlier thinking. The `Runner` estimates its
+  request copy, so media the client degrades counts as its marker text, not
+  as an image, and `EstimateHistoryTokens` matches the live decision only for
+  the request copy. A tool result is a compaction candidate by its size in the
+  request copy, its text plus the media bytes the client sends, and its stub
+  reports that size. On a client that accepts media in tool results, a short
+  caption with a large image is pruned like a large text dump; on one that
+  degrades the image, only its marker text counts. The most recent four tool
+  results are still kept, and the stub of a spilled result still names its
+  reference.
+- `agent`: with compaction enabled (a positive `HistoryTokenBudget` or
+  `ContextReserve`, or `WithCompactor`), a provider context-overflow refusal
+  no longer ends the run on the first occurrence when the history has
+  prunable tool results. Runs without those settings behave as before, but
+  their records now carry `err_kind` `context_too_long` on the failed
+  completion, and a replay of a record holding such a completion now serves
+  that error instead of skipping it.
+- `agent`: `ReplayClient.Err` now reports a recorded compaction, threshold or
+  overflow, that the replaying Runner does not reproduce at its position: the
+  first request after the compaction must carry messages equal, in their JSON
+  encoding (as Go values when a request cannot be JSON-encoded), to the
+  recorded request's, whichever `Compactor` made it. Callers
+  of `NewReplayClient` who replay a record that holds compactions with a
+  different `HistoryTokenBudget` or `Compactor` (compaction off, a budget
+  that does not fire at the recorded position, a compactor that changes
+  nothing or compacts differently), or with anything else that changes that
+  request, now get a non-nil `rc.Err` wrapping `ErrReplayDiverged`; `Run`'s
+  result is unchanged. Replaying a record this build wrote under the
+  recording configuration is still clean, except that a record holding a
+  summarizing compaction replays clean only with `rc.Compactor()` installed
+  or a summarizer that reproduces the recorded text. A record written by an
+  earlier llmkit build whose compacted history held thinking blocks or
+  images may report a compaction divergence on replay, even under the
+  recording configuration, because the new estimate moves where compaction
+  fires.
+- `agent`: a run that stops on `TokenBudget` or a `BudgetPool` and takes the
+  RunJSON finalization turn now compacts before that turn, and recovers from
+  an overflow of it, with the default stubber even when a `Compactor` is
+  installed, so the stop never pays for a summary. A stop at `MaxIterations`
+  keeps the installed compactor.
+- `agent`: a compaction pass whose `CompactOutput.Usage` is non-zero (a paid
+  pass) re-arms the triggers as if it had compacted, even when the history
+  came back unchanged or the summary was discarded: `HistoryTokenBudget`
+  doubles and `ContextReserve` waits for growth by the reserve, also after
+  a provider refusal. A pass with no usage and no
+  gain is still not counted and not re-armed, so it is tried again the next
+  turn.
+- `llmkit`: the per-role block rule now lets `RoleToolResult` carry text,
+  image and document blocks (it was text only), gated by
+  `Capabilities.ToolResultMedia`. `RoleSystem` stays text only. Before, any
+  non-text block in a tool result was refused on every adapter; now image and
+  document blocks follow the profile, and a thinking block in a tool result is
+  still refused everywhere.
+- **Breaking:** `agent`: `Tool.Run` now returns `([]llmkit.Block, error)`
+  instead of `(string, error)`, so a tool result can carry blocks beyond
+  text (llmkit-rli.2.1). A text-only tool behaves as before. The tool-result
+  message content is the returned blocks, except that the Runner replaces a
+  media block with a marker when `ToolResultMedia` is false or the block is
+  not portable (inline `Data` of `image/png`, `image/jpeg`, `image/webp` or
+  `application/pdf`, with the matching kind; see the `agent` media entry
+  under Added) and, under `WithToolOutputLimit`, an oversized result with a
+  spill or truncation stand-in. `ToolEvent.Result` and the `ToolRun` event's
+  `Result` carry the text blocks in order, with a size marker at each media
+  block sent and an omission marker at each one degraded. A nil or empty
+  result is the empty text result, the same as
+  returning `""` before. An error renders from the error alone, as
+  `ERROR: <err>`; blocks returned beside an error are discarded. The Runner
+  keeps the returned slice and `Outcome.Messages` can hold it, so do not
+  modify it after returning. Migration: wrap the text, so `return s, nil`
+  becomes `return []llmkit.Block{llmkit.Text(s)}, nil`, and `return "", err`
+  becomes `return nil, err`. `agent.Func` is unchanged: its handler still
+  returns a string.
+- **Breaking:** `decide.Config.Observer` is removed, and `systemone.Client`
+  emits no events. Drop the field and wrap the client in
+  `decide.Observe(client, obs)` for the same `DecisionEvent` per `Ask`;
+  `Backend` and `Model` come from the client's `Identity()`. An
+  already-cancelled context still emits one event with `Err` set; a
+  validation refusal still emits nothing.
+- **Breaking:** the System One client moved out of `decide` into the new
+  package `decide/systemone`; `decide` is now the backend-neutral decision
+  vocabulary and holds no HTTP code. `decide.New`, `decide.Config`, and
+  `decide.Client` are now `systemone.New`, `systemone.Config`, and
+  `systemone.Client` (the same fields except `Observer`, same defaults, same
+  validation; the default `BaseURL` stays `https://api.typesafe.ai`). The
+  package is named for the wire protocol, so any host that speaks System One
+  works through `Config.BaseURL`. Migrate by changing the import to
+  `github.com/dpoage/llmkit/decide/systemone`, the constructor call, and the
+  `*decide.Client` type; `decide.Questions`, `decide.Noul`, `decide.Choice`,
+  `decide.Score`, and `decide.Response` do not change.
+- **Breaking:** `APIError.Provider` on every error from the client, and
+  `DecisionEvent.Backend` on its events, are now `"systemone"` instead of
+  `"typesafe"`. Construction errors now start with `systemone:` instead of
+  `decide:`. A question the client refuses before the wire carries `Provider`
+  `"systemone"`; `decide.Normalize` itself tags it `"decide"`.
+- **Breaking:** `examples/decide` reads `LLMKIT_SYSTEMONE_API_KEY`,
+  `LLMKIT_SYSTEMONE_MODEL`, and `LLMKIT_SYSTEMONE_BASE_URL` instead of the
+  `LLMKIT_TYPESAFE_*` names. The live lane keeps `LLMKIT_LIVE_TYPESAFE_*`.
+- CI and the live workflow now run `./decide/...` instead of `./decide/`.
 
 ### Fixed
 
@@ -134,6 +455,11 @@ entry below is marked.
   `Response.Message()` and recorded transcripts carry a thinking block on
   endpoints that return reasoning, although `Capabilities.Thinking` is false
   there.
+- `decide`: `Ask` accepted a `Choice` answer whose option was outside the
+  asked set. It now returns `ErrServer` with `StatusCode` 200 and retries
+  it like any `ErrServer`.
+
+||||||| f4bbf40
 
 ## [0.6.0] - 2026-09-30
 

@@ -118,10 +118,10 @@ func steerEvent(ctx context.Context, msg llmkit.Message, followUp bool, step int
 
 // toolRunEvent builds the ToolRun event for one dispatched call: the model's
 // call (never the policy's rewrite; a rewrite rides DispatchedArguments), the
-// textual result exactly as fed to the model, and the error or
-// policy-denial marks. A denial carries Denied and DenyReason with no result
-// — the rendered denial text still rides the conversation as the
-// tool-result message, per [ToolPolicy]'s contract.
+// model-visible result text with its Content, Degraded and output-limit
+// fields, and the error or policy-denial marks. A denial carries Denied and
+// DenyReason with no result — the rendered denial text still rides the
+// conversation as the tool-result message, per [ToolPolicy]'s contract.
 func toolRunEvent(ctx context.Context, call llmkit.ToolCall, res toolResult, step int) llmkit.Event {
 	ev := llmkit.NewEvent(ctx, llmkit.KindToolRun)
 	ev.Step = step
@@ -131,6 +131,11 @@ func toolRunEvent(ctx context.Context, call llmkit.ToolCall, res toolResult, ste
 		tre.DenyReason = res.denyReason
 	} else {
 		tre.Result = res.result
+		tre.Content = res.eventContent()
+		tre.Degraded = res.degraded
+		tre.OriginalBytes = res.originalBytes
+		tre.SpillRef = res.spillRef
+		tre.SpillError = res.spillErr
 		tre.IsError = res.isErr
 	}
 	ev.ToolRun = tre
@@ -147,19 +152,50 @@ func (r *Runner) toolNames() []string {
 	return names
 }
 
-// recordCompaction reports one real history prune as the Compaction event on
-// the run's stream. step is the completion that consumes the compacted
-// history, and the token totals come from the bytes/4 estimate the compaction
-// trigger uses.
-func (r *Runner) recordCompaction(ctx context.Context, em runEmitter, step int, before, after int64, pruned int) {
+// recordCompaction reports one real history prune as the Compaction event;
+// step is the completion that consumes the compacted history.
+func (r *Runner) recordCompaction(ctx context.Context, em runEmitter, step int, before, after int64, out CompactOutput, reason string) {
 	ev := llmkit.NewEvent(ctx, llmkit.KindCompaction)
 	ev.Step = step
 	ev.Compaction = &llmkit.CompactionEvent{
 		BeforeTokens: before,
 		AfterTokens:  after,
-		Pruned:       pruned,
+		Pruned:       out.Pruned,
+		Reason:       reason,
+		Summary:      out.Summary,
 	}
 	em.emit(ctx, ev)
+}
+
+// emitCompactionCompletion emits the Completion event of one model call a
+// Compactor made, on the span the call claimed and the step ctx carries.
+func (r *Runner) emitCompactionCompletion(ctx context.Context, em runEmitter, call compactCall) {
+	ev := llmkit.NewEvent(ctx, llmkit.KindCompletion)
+	ev.SpanID = call.span
+	ev.Duration = call.duration
+	ce := &llmkit.CompletionEvent{
+		Request:  call.req,
+		Response: call.resp,
+		Purpose:  llmkit.CompletionPurposeCompaction,
+		Provider: call.provider,
+		Model:    call.model,
+	}
+	setCompletionErr(ce, call.err)
+	ev.Completion = ce
+	em.emit(ctx, ev)
+}
+
+// setCompletionErr records a failed completion's error and its ErrKind on ce
+// and clears its response.
+func setCompletionErr(ce *llmkit.CompletionEvent, err error) {
+	if err == nil {
+		return
+	}
+	ce.Err = err.Error()
+	if errors.Is(err, llmkit.ErrContextTooLong) {
+		ce.ErrKind = llmkit.ErrKindContextTooLong
+	}
+	ce.Response = llmkit.Response{}
 }
 
 // emitCompletion emits the Completion event for one logical completion,
@@ -176,10 +212,7 @@ func (r *Runner) emitCompletion(ctx context.Context, em runEmitter, step int, st
 		identity = resp.Served
 	}
 	ce := &llmkit.CompletionEvent{Request: req, Response: resp, Provider: identity.Provider, Model: identity.Model}
-	if err != nil {
-		ce.Err = err.Error()
-		ce.Response = llmkit.Response{}
-	}
+	setCompletionErr(ce, err)
 	ev.Completion = ce
 	em.emit(ctx, ev)
 }
@@ -244,10 +277,10 @@ func (r *Runner) fireToolStart(ctx context.Context, step int, call llmkit.ToolCa
 
 // fireToolEnd fires every registered [Hooks.ToolEnd], in registration order,
 // with the result exactly as fed to the model.
-func (r *Runner) fireToolEnd(ctx context.Context, step int, call llmkit.ToolCall, result string, isErr bool, d time.Duration) {
+func (r *Runner) fireToolEnd(ctx context.Context, step int, call llmkit.ToolCall, res toolResult, d time.Duration) {
 	for _, h := range r.hooks {
 		if h.ToolEnd != nil {
-			h.ToolEnd(ctx, ToolEvent{Step: step, Call: call, Result: result, IsError: isErr, Duration: d})
+			h.ToolEnd(ctx, ToolEvent{Step: step, Call: call, Result: res.result, Content: res.eventContent(), Degraded: res.degraded, IsError: res.isErr, Duration: d})
 		}
 	}
 }

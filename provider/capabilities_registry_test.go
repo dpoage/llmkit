@@ -154,7 +154,7 @@ func TestCapabilities_NilSpec_KeepsTableProfile(t *testing.T) {
 			ContextWindow: window, ParallelToolCalls: true, PromptCaching: true,
 			StructuredOutput: true, Thinking: thinking, ToolChoice: true,
 			Images: true, Documents: true, StopSequences: true, TopP: true,
-			TopK: true, Seed: false,
+			TopK: true, Seed: false, ToolResultMedia: true,
 		}
 	}
 	// openAIFirstParty fills the shared Chat Completions surface.

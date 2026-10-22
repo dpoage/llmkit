@@ -30,11 +30,11 @@ func (e echoTool) Def() llmkit.ToolDef {
 	}
 }
 
-func (e echoTool) Run(ctx context.Context, args json.RawMessage) (string, error) {
+func (e echoTool) Run(ctx context.Context, args json.RawMessage) ([]llmkit.Block, error) {
 	if e.failMsg != "" {
-		return "", errors.New(e.failMsg)
+		return nil, errors.New(e.failMsg)
 	}
-	return "echo:" + string(args), nil
+	return textBlocks("echo:" + string(args)), nil
 }
 
 func TestRun_CleanFinish(t *testing.T) {
@@ -418,14 +418,14 @@ func (e healthEchoTool) Def() llmkit.ToolDef {
 	}
 }
 
-func (e healthEchoTool) Run(ctx context.Context, args json.RawMessage) (string, error) {
+func (e healthEchoTool) Run(ctx context.Context, args json.RawMessage) ([]llmkit.Block, error) {
 	if e.health != nil {
-		return "", e.health
+		return nil, e.health
 	}
 	if e.plain != "" {
-		return "", errors.New(e.plain)
+		return nil, errors.New(e.plain)
 	}
-	return "ok", nil
+	return textBlocks("ok"), nil
 }
 
 // TestHook_ToolHealth_FiresOnToolHealthError verifies that a tool returning a
@@ -525,8 +525,8 @@ func TestRunTool_ToolHealth_SkippedOnCancelledCtx(t *testing.T) {
 	}}}, "sys", WithHooks(Hooks{ToolHealth: func(context.Context, string, *ToolHealthError) { called = true }}))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, isErr := r.runTool(ctx, llmkit.ToolCall{Name: "broken", Arguments: json.RawMessage("{}")}, 1)
-	if !isErr {
+	res := r.runTool(ctx, llmkit.ToolCall{Name: "broken", Arguments: json.RawMessage("{}")}, 1)
+	if !res.isErr {
 		t.Fatal("a ToolHealthError must still be returned as an error result")
 	}
 	if called {

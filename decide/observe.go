@@ -1,61 +1,93 @@
 package decide
 
 import (
-	"encoding/json"
+	"context"
 	"sort"
+	"time"
 
 	"github.com/dpoage/llmkit"
 )
 
-// toDecisionQuestions converts qs to the root [llmkit.DecisionQuestion]
-// vocabulary, sorted by ID. Field marshaling cannot fail on this path
-// because buildRequest already validated Instructions/True/False/Options/
-// Levels marshal cleanly for the same Questions value; marshalRaw
-// degrades to nil so a telemetry conversion never fails an Ask that
-// already succeeded or failed on its own.
-func toDecisionQuestions(qs Questions) []llmkit.DecisionQuestion {
-	ids := make([]string, 0, len(qs))
-	for id := range qs {
-		ids = append(ids, id)
+// Observe returns a Decider that behaves like d and reports every Ask to
+// obs as one [llmkit.KindDecision] event on the Ask's context, so RunID and
+// Step ride the context. A nil obs returns d unchanged. The result is safe
+// for concurrent use when d and obs are.
+//
+// An Ask that fails [Normalize] goes to d untouched and emits nothing. Every
+// other Ask emits one event: state and questions as Normalize produced them,
+// answers, Usage, and Duration. A failed Ask sets Err to the error's text
+// and leaves Answers nil and Usage zero. d scrubs secrets from its errors.
+//
+// If d implements interface{ Identity() llmkit.Identity }, the event's
+// Backend is its Provider, Model is the response's model (the Identity's
+// when the response names none, and always on failure), and the result
+// forwards Identity. Otherwise Backend is empty.
+func Observe(d Decider, obs llmkit.Observer) Decider {
+	if obs == nil {
+		return d
 	}
-	sort.Strings(ids)
-	out := make([]llmkit.DecisionQuestion, 0, len(qs))
-	for _, id := range ids {
-		dq := llmkit.DecisionQuestion{ID: id}
-		switch q := qs[id].(type) {
-		case Noul:
-			dq.Kind = "noul"
-			dq.Instructions = marshalRaw(q.Instructions)
-			if q.True != nil {
-				dq.True = marshalRaw(q.True)
-			}
-			if q.False != nil {
-				dq.False = marshalRaw(q.False)
-			}
-		case Choice:
-			dq.Kind = "choice"
-			dq.Instructions = marshalRaw(q.Instructions)
-			dq.Options = make(map[string]json.RawMessage, len(q.Options))
-			for opt, desc := range q.Options {
-				dq.Options[opt] = marshalRaw(desc)
-			}
-		case Score:
-			dq.Kind = "score"
-			dq.Instructions = marshalRaw(q.Instructions)
-			dq.Levels = make([]json.RawMessage, len(q.Levels))
-			for i, level := range q.Levels {
-				dq.Levels[i] = marshalRaw(level)
-			}
-		}
-		out = append(out, dq)
+	o := &observed{d: d, obs: obs}
+	if id, ok := d.(identified); ok {
+		return &observedIdentified{observed: o, identified: id}
 	}
-	return out
+	return o
 }
 
-// toDecisionAnswers converts resp's per-kind answer maps to the root
-// [llmkit.DecisionAnswer] vocabulary, sorted by ID. Each id appears in
-// exactly one of resp.Nouls/Choices/Scores, matching its question's kind.
-func toDecisionAnswers(resp Response) []llmkit.DecisionAnswer {
+// identified is the optional interface a Decider implements to name its
+// backend; see [Observe].
+type identified interface{ Identity() llmkit.Identity }
+
+type observed struct {
+	d   Decider
+	obs llmkit.Observer
+}
+
+// observedIdentified is the Observe result for a Decider that has an
+// Identity; embedding forwards Ask, the explicit field forwards Identity.
+type observedIdentified struct {
+	*observed
+	identified
+}
+
+func (o *observed) Ask(ctx context.Context, state any, qs Questions) (Response, error) {
+	stateRaw, dqs, nerr := Normalize(state, qs)
+	if nerr != nil {
+		return o.d.Ask(ctx, state, qs)
+	}
+	start := time.Now()
+	resp, err := o.d.Ask(ctx, state, qs)
+	dur := time.Since(start)
+
+	var id llmkit.Identity
+	if i, ok := o.d.(identified); ok {
+		id = i.Identity()
+	}
+	de := &llmkit.DecisionEvent{
+		Backend:   id.Provider,
+		State:     stateRaw,
+		Questions: dqs,
+	}
+	if err != nil {
+		de.Model = id.Model
+		de.Err = err.Error()
+	} else {
+		de.Model = resp.Model
+		if de.Model == "" {
+			de.Model = id.Model
+		}
+		de.Answers = decisionAnswers(resp)
+		de.Usage = resp.Usage
+	}
+	ev := llmkit.NewEvent(ctx, llmkit.KindDecision)
+	ev.Duration = dur
+	ev.Decision = de
+	o.obs.Observe(ctx, ev)
+	return resp, err
+}
+
+// decisionAnswers converts resp's per-kind answer maps to the root
+// [llmkit.DecisionAnswer] vocabulary, sorted by ID.
+func decisionAnswers(resp Response) []llmkit.DecisionAnswer {
 	ids := make(map[string]struct{}, len(resp.Nouls)+len(resp.Choices)+len(resp.Scores))
 	for id := range resp.Nouls {
 		ids[id] = struct{}{}
@@ -94,14 +126,4 @@ func toDecisionAnswers(resp Response) []llmkit.DecisionAnswer {
 		out = append(out, da)
 	}
 	return out
-}
-
-// marshalRaw marshals v to json.RawMessage, degrading to nil on failure
-// so a telemetry conversion never propagates an error.
-func marshalRaw(v any) json.RawMessage {
-	raw, err := json.Marshal(v)
-	if err != nil {
-		return nil
-	}
-	return raw
 }

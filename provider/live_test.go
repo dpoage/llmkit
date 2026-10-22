@@ -242,6 +242,7 @@ var liveCaseBodies = map[string]func(t *testing.T, lc *liveClient){
 	"tool_choice":          caseToolChoice,
 	"images":               caseImages,
 	"documents":            caseDocuments,
+	"tool_result_media":    caseToolResultMedia,
 	"stop_sequences":       caseStopSequences,
 	"top_p":                caseTopP,
 	"top_k":                caseTopK,
@@ -769,6 +770,45 @@ func caseDocuments(t *testing.T, lc *liveClient) {
 		t.Fatalf("empty answer for document input: %q", resp.Text)
 	}
 	lc.finish(resp, err)
+}
+
+func caseToolResultMedia(t *testing.T, lc *liveClient) {
+	screenshot := llmkit.ToolDef{
+		Name:        "screenshot",
+		Description: "Captures the screen and returns the image.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
+	}
+	req := llmkit.Request{
+		Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser,
+			"Call the screenshot tool, then reply with the single word OK once you have the image.")},
+		Tools: []llmkit.ToolDef{screenshot},
+	}
+	resp, err := lc.complete(req)
+	if err != nil {
+		t.Fatalf("tool request: %v", err)
+	}
+	if resp.StopReason != llmkit.StopToolUse || len(resp.ToolCalls) == 0 {
+		t.Fatalf("stop = %q with %d tool call(s); want a tool request", resp.StopReason, len(resp.ToolCalls))
+	}
+	req.Messages = append(req.Messages,
+		resp.Message(),
+		llmkit.Message{
+			Role:       llmkit.RoleToolResult,
+			ToolCallID: resp.ToolCalls[0].ID,
+			Content: []llmkit.Block{
+				{Kind: llmkit.BlockText, Text: "screenshot attached"},
+				{Kind: llmkit.BlockImage, MediaType: "image/png", Data: tinyPNG()},
+			},
+		},
+	)
+	final, err := lc.complete(req)
+	if err != nil {
+		t.Fatalf("final answer after image tool result: %v", err)
+	}
+	if strings.TrimSpace(llmkit.StripThinkBlocks(final.Text)) == "" {
+		t.Fatalf("empty answer after image tool result: %q", final.Text)
+	}
+	lc.finish(final, err)
 }
 
 func caseStopSequences(t *testing.T, lc *liveClient) {

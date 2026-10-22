@@ -147,8 +147,10 @@ const (
 	// KindDecision records one decision-model call: the judged state, the
 	// questions asked and the answers returned (or the error). The payload
 	// mirrors the decide package's vocabulary in root-owned structs so the
-	// root package never imports decide. Payload: [DecisionEvent]. Step is the
-	// enclosing turn when emitted inside a Runner turn, else 0.
+	// root package never imports decide. Emitted by the decide.Observe
+	// decorator, one per Ask that passes validation; decide.Replay answers from
+	// these events. Payload: [DecisionEvent]. Step is the enclosing turn when
+	// emitted inside a Runner turn, else 0.
 	KindDecision EventKind = "decision"
 	// KindEmbed records one embedding call: model, input count, resulting
 	// dimensions, cache hits, usage, or the error. Payload: [EmbedEvent]. Step
@@ -264,6 +266,16 @@ type CompletionEvent struct {
 	Response Response `json:"response"`
 	// Err is the failure, as text; empty on success.
 	Err string `json:"err,omitempty"`
+	// ErrKind is [ErrKindContextTooLong] when Err wraps [ErrContextTooLong];
+	// empty otherwise. Only the agent Runner sets it: [Observe] and the
+	// provider stages emit it empty. Open string: tolerate unknown values.
+	ErrKind string `json:"err_kind,omitempty"`
+	// Purpose names what the completion was for: [CompletionPurposeCompaction]
+	// for a model call a compactor made to summarize history, empty for
+	// every other completion. Its Usage is run spend like any other. Open
+	// string: tolerate values you do not know. A deterministic replay never
+	// serves a completion with a Purpose as an answer.
+	Purpose string `json:"purpose,omitempty"`
 	// Provider is the provider tag ("anthropic", "openai", ...) or the
 	// caller's own config name. On success, a non-zero Response.Served
 	// supplies both Provider and Model; otherwise the client's [IdentityOf].
@@ -271,6 +283,14 @@ type CompletionEvent struct {
 	// Model is the model identifier, from the same source as Provider.
 	Model string `json:"model,omitempty"`
 }
+
+// ErrKindContextTooLong is the [CompletionEvent.ErrKind] of a completion that
+// failed with an error wrapping [ErrContextTooLong].
+const ErrKindContextTooLong = "context_too_long"
+
+// CompletionPurposeCompaction is the [CompletionEvent.Purpose] of a model
+// call that summarized history for a compaction pass.
+const CompletionPurposeCompaction = "compaction"
 
 // AttemptEvent records one provider attempt ([KindAttempt]) from inside the
 // retry stage: the same request, the attempt's own response or error, and
@@ -314,7 +334,13 @@ type AttemptEvent struct {
 
 // ToolRunEvent records one tool call ([KindToolRun]). Call is the model's
 // request, exactly as the model made it; Result is the model-visible textual
-// result. IsError marks a failed execution (Result carries the
+// result: the text blocks in order, with a "[image: <mediatype>, <N> bytes]"
+// (or "[document: ...]") marker in the position of each media block sent, and
+// an omission marker for each degraded one. Content is the result's blocks
+// exactly as placed in history; it is set only when they include a media
+// block or Degraded > 0. Degraded counts the media blocks the Runner replaced
+// with omission markers: all of them when ToolResultMedia is false, else those
+// that are not portable. IsError marks a failed execution (Result carries the
 // "ERROR:"-prefixed message). Denied marks a policy denial — then Result is
 // empty and DenyReason says why; there is no separate policy-denied event
 // kind.
@@ -328,10 +354,22 @@ type AttemptEvent struct {
 // tool the rewritten bytes, compares them with Call.Arguments, and
 // diverges. A record written before the field existed reads as never
 // rewritten.
+//
+// OriginalBytes is the result's size (text, data and URL bytes of its blocks)
+// when the Runner's output limit applied, else zero; Result is then the
+// model-visible stand-in, and Content holds it when Degraded > 0. SpillRef is
+// the sink's reference when the full result was spilled. SpillError is the
+// sink's failure when the limit fell back to truncation. With no sink only
+// OriginalBytes is set.
 type ToolRunEvent struct {
 	Call                ToolCall        `json:"call"`
 	DispatchedArguments json.RawMessage `json:"dispatched_arguments,omitempty"`
 	Result              string          `json:"result,omitempty"`
+	Content             []Block         `json:"content,omitempty"`
+	Degraded            int             `json:"degraded,omitempty"`
+	OriginalBytes       int             `json:"original_bytes,omitempty"`
+	SpillRef            string          `json:"spill_ref,omitempty"`
+	SpillError          string          `json:"spill_error,omitempty"`
 	IsError             bool            `json:"is_error,omitempty"`
 	Denied              bool            `json:"denied,omitempty"`
 	DenyReason          string          `json:"deny_reason,omitempty"`
@@ -339,11 +377,24 @@ type ToolRunEvent struct {
 
 // CompactionEvent records one compaction pass ([KindCompaction]): context
 // size before and after, in tokens, and how many messages the pass pruned.
+// A threshold pass estimates the request copy of the history; an overflow
+// pass estimates the raw history, so media the client degrades counts in full.
 type CompactionEvent struct {
 	BeforeTokens int64 `json:"before_tokens"`
 	AfterTokens  int64 `json:"after_tokens"`
 	Pruned       int   `json:"pruned"`
+	// Reason is [CompactionReasonOverflow] for a pass that answered an
+	// [ErrContextTooLong]; empty for the threshold-triggered pass. Open string.
+	Reason string `json:"reason,omitempty"`
+	// Summary is the summary text a summarizing compactor substituted for the
+	// pruned prefix, without its "[conversation summary]" header; empty for a
+	// pass that summarized nothing.
+	Summary string `json:"summary,omitempty"`
 }
+
+// CompactionReasonOverflow is the [CompactionEvent.Reason] of a compaction
+// that recovered a completion the provider refused with [ErrContextTooLong].
+const CompactionReasonOverflow = "overflow"
 
 // SteerEvent records one steering message injected into a running turn
 // ([KindSteer]). Message is what the user sent; FollowUp marks that the
@@ -426,8 +477,8 @@ type FinalizeEvent struct {
 // Questions and Answers are each sorted by ID (decide.Questions is a map;
 // the conversion layer sorts), and an answer matches its question by ID.
 type DecisionEvent struct {
-	// Backend names the decision backend (e.g. "typesafe"); Model its model
-	// identifier.
+	// Backend names the decision backend (e.g. "systemone"), from the
+	// decider's Identity().Provider; Model its model identifier.
 	Backend string `json:"backend,omitempty"`
 	Model   string `json:"model,omitempty"`
 	// State is the state the Ask judged, as raw JSON (string, object, or

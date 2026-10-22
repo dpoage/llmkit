@@ -13,11 +13,12 @@ import (
 
 	"github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/decide"
+	"github.com/dpoage/llmkit/decide/systemone"
 	"github.com/dpoage/llmkit/embed"
 	"github.com/dpoage/llmkit/retry"
 )
 
-// consumer is one raw-http.Client.Do consumer: decide.Ask, or embed.Embed
+// consumer is one raw-http.Client.Do consumer: systemone's Ask, or embed.Embed
 // over one backend. run makes one call with three attempts allowed and
 // returns the number of backoff sleeps the retry stage took (attempts - 1
 // when every attempt fails retryably) and the call's error.
@@ -52,9 +53,9 @@ func consumers() []consumer {
 		{"decide", func(t *testing.T, baseURL string, hc *http.Client) (int, error) {
 			t.Helper()
 			var sleeps int
-			c, err := decide.New(decide.Config{Secret: "sk-redirect-test", Model: "m", BaseURL: baseURL, HTTPClient: hc, Retry: policy(&sleeps)})
+			c, err := systemone.New(systemone.Config{Secret: "sk-redirect-test", Model: "m", BaseURL: baseURL, HTTPClient: hc, Retry: policy(&sleeps)})
 			if err != nil {
-				t.Fatalf("decide.New: %v", err)
+				t.Fatalf("systemone.New: %v", err)
 			}
 			_, err = c.Ask(context.Background(), "state", decide.Questions{"q": decide.Noul{Instructions: "i"}})
 			return sleeps, err

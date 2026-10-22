@@ -38,9 +38,9 @@ type Options struct {
 }
 
 // googleCeiling names every wire-gated field this adapter can put on the
-// wire: the Gemini API has a wire field for all eight, so no override is
-// ever refused at construction — the one documented case where every field
-// is within ceiling.
+// wire: the Gemini API has a wire field for all nine (ToolResultMedia rides
+// FunctionResponse.parts), so no override is ever refused at construction —
+// the one documented case where every field is within ceiling.
 var googleCeiling = llmkit.Capabilities{
 	StructuredOutput: true,
 	Thinking:         true,
@@ -50,6 +50,7 @@ var googleCeiling = llmkit.Capabilities{
 	TopP:             true,
 	TopK:             true,
 	Seed:             true,
+	ToolResultMedia:  true,
 }
 
 // New builds a Gemini-backed Client. genai's only built-in retry path is for
@@ -301,6 +302,10 @@ func toGoogleContents(msgs []llmkit.Message) ([]*genai.Content, error) {
 			}
 			out = append(out, &genai.Content{Role: "model", Parts: parts})
 		case llmkit.RoleToolResult:
+			respParts, err := googleToolResultParts(m)
+			if err != nil {
+				return nil, err
+			}
 			// Gemini expects the function result wrapped under an "output" key.
 			resultObj := map[string]any{"output": m.Text()}
 			if m.IsError {
@@ -320,12 +325,44 @@ func toGoogleContents(msgs []llmkit.Message) ([]*genai.Content, error) {
 						ID:       m.ToolCallID,
 						Name:     name,
 						Response: resultObj,
+						Parts:    respParts,
 					},
 				}},
 			})
 		}
 	}
 	return out, nil
+}
+
+// googleToolResultMIME is the media types a FunctionResponse part may carry.
+var googleToolResultMIME = map[string]bool{
+	"image/png":       true,
+	"image/jpeg":      true,
+	"image/webp":      true,
+	"application/pdf": true,
+	"text/plain":      true,
+}
+
+// googleToolResultParts maps a tool result's media blocks to inlineData parts.
+// FunctionResponsePart.fileData is unsupported in the Gemini API (genai
+// types.go), so URL sources and other media types are refused.
+func googleToolResultParts(m llmkit.Message) ([]*genai.FunctionResponsePart, error) {
+	var parts []*genai.FunctionResponsePart
+	for _, b := range m.Content {
+		if b.Kind != llmkit.BlockImage && b.Kind != llmkit.BlockDocument {
+			continue
+		}
+		if len(b.Data) == 0 {
+			return nil, adapter.Refuse("google",
+				string(b.Kind)+" block in a tool result: Gemini function responses carry inline bytes only (FunctionResponsePart.fileData is unsupported in the Gemini API); a URL source is refused", nil)
+		}
+		if !googleToolResultMIME[b.MediaType] {
+			return nil, adapter.Refuse("google",
+				string(b.Kind)+" block in a tool result: media type "+b.MediaType+" is not supported by Gemini function responses (image/png, image/jpeg, image/webp, application/pdf, text/plain only)", nil)
+		}
+		parts = append(parts, genai.NewFunctionResponsePartFromBytes(b.Data, b.MediaType))
+	}
+	return parts, nil
 }
 
 // googleUserParts maps a user message's content blocks onto genai parts.
@@ -679,6 +716,8 @@ func (g *googleAdapter) normalizeErr(ctx context.Context, err error) error {
 //     must not combine it with thinking_budget, so ReasoningEffort is true
 //     for exactly that generation (isGemini3) and false for every other
 //     model, known or not.
+//   - genai FunctionResponse.Parts (types.go): ToolResultMedia is true for
+//     exactly isGemini3 models and false for every other model.
 //
 // The table is matched by LONGEST key with a "-" segment boundary
 // (adapter.BestMatchingFamily), so "gemini-2.5-flash-lite" and the
@@ -746,6 +785,7 @@ func googleCapabilities(model string) llmkit.Capabilities {
 		caps.PromptCaching = e.caching
 	}
 	caps.ReasoningEffort = isGemini3(model)
+	caps.ToolResultMedia = isGemini3(model)
 	return caps
 }
 

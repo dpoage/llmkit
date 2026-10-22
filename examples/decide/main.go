@@ -4,11 +4,12 @@
 //
 // Usage:
 //
-//	LLMKIT_TYPESAFE_API_KEY=... LLMKIT_TYPESAFE_MODEL=jev-latest \
+//	LLMKIT_SYSTEMONE_API_KEY=... LLMKIT_SYSTEMONE_MODEL=jev-latest \
 //	  go run ./examples/decide
 //
-// LLMKIT_TYPESAFE_BASE_URL optionally targets a gateway; unset means the
-// vendor's production endpoint. Without the two required variables the
+// LLMKIT_SYSTEMONE_BASE_URL optionally targets another System One host (a
+// gateway or a local Kev server); unset means TypeSafe's production
+// endpoint. Without the two required variables the
 // program prints usage and exits 1 without touching the network.
 package main
 
@@ -21,12 +22,13 @@ import (
 
 	"github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/decide"
+	"github.com/dpoage/llmkit/decide/systemone"
 )
 
 const usage = `missing environment:
-  LLMKIT_TYPESAFE_API_KEY   TypeSafe API key (Jev decision model)
-  LLMKIT_TYPESAFE_MODEL     model name, e.g. jev-latest
-  LLMKIT_TYPESAFE_BASE_URL  optional; gateway base URL, default https://api.typesafe.ai
+  LLMKIT_SYSTEMONE_API_KEY   System One host API key (any non-empty value for a local Kev server)
+  LLMKIT_SYSTEMONE_MODEL     model name, e.g. jev-latest or kev-latest
+  LLMKIT_SYSTEMONE_BASE_URL  optional; host base URL, default https://api.typesafe.ai
 
 set the variables above, then re-run:
   go run ./examples/decide`
@@ -39,16 +41,16 @@ func main() {
 }
 
 func run() error {
-	key := os.Getenv("LLMKIT_TYPESAFE_API_KEY")
-	model := os.Getenv("LLMKIT_TYPESAFE_MODEL")
+	key := os.Getenv("LLMKIT_SYSTEMONE_API_KEY")
+	model := os.Getenv("LLMKIT_SYSTEMONE_MODEL")
 	if key == "" || model == "" {
 		return errors.New(usage)
 	}
 
-	client, err := decide.New(decide.Config{
+	client, err := systemone.New(systemone.Config{
 		Secret:  key,
 		Model:   model,
-		BaseURL: os.Getenv("LLMKIT_TYPESAFE_BASE_URL"),
+		BaseURL: os.Getenv("LLMKIT_SYSTEMONE_BASE_URL"),
 	})
 	if err != nil {
 		return fmt.Errorf("build client: %w", err)

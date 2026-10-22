@@ -25,3 +25,16 @@ func TestGoogleCapabilities_ReasoningEffortIsGemini3Only(t *testing.T) {
 		}
 	}
 }
+
+func TestGoogleCapabilities_ToolResultMediaIsGemini3Only(t *testing.T) {
+	for _, model := range []string{"gemini-3", "gemini-3-flash-preview", "gemini-3.1-pro-preview"} {
+		if !googleCapabilities(model).ToolResultMedia {
+			t.Errorf("googleCapabilities(%q).ToolResultMedia = false, want true", model)
+		}
+	}
+	for _, model := range []string{"gemini-30-x", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-1.5-pro", "gemini-unknown", ""} {
+		if googleCapabilities(model).ToolResultMedia {
+			t.Errorf("googleCapabilities(%q).ToolResultMedia = true, want false", model)
+		}
+	}
+}

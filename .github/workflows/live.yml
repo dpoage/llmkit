@@ -24,8 +24,9 @@
 # deliberate LOCAL operation; the committed fixtures under
 # provider/testdata are the always-on hermetic adapter-regression guard via
 # provider/fixture_replay_test.go, as the decide fixtures under
-# decide/testdata are via decide/fixture_replay_test.go — both run in CI
-# without credentials.
+# decide/systemone/testdata are via
+# decide/systemone/fixture_replay_test.go — both run in CI without
+# credentials.
 
 name: Live
 
@@ -90,4 +91,4 @@ jobs:
 
       - name: run live suite
         if: steps.creds.outputs.available == 'true'
-        run: go test -tags live -count=1 -v ./provider/ ./agent/ ./examples/... ./decide/
+        run: go test -tags live -count=1 -v ./provider/ ./agent/ ./examples/... ./decide/...
