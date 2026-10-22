@@ -151,6 +151,19 @@ Only `call.Arguments` may be rewritten, and the conversation history keeps the m
 
 When to use: guardrails. Allowlists and denylists, argument rewrites (constrain paths to a workspace), or a human approval step. To rewrite tool results, wrap the `Tool` instead.
 
+#### RepetitionPolicy
+
+`agent.RepetitionPolicy()` is a stock `ToolPolicy` that stops a model looping on the same tool call. It keeps the last 12 calls of the run, denied calls included, and denies a call when the last 2p+1 calls ending at it repeat with period p (p from 1 to 5). `A,A,A` denies the third call, `A,B,A,B,A` the fifth, `A,B,C,A,B,C,A` the seventh. `A,B1,A,B2,A` runs in full. The check spans steps, not only one turn. Denial is per call; there is no latch, so a model that changes its call is allowed again.
+
+Two calls are identical when the tool name matches and the arguments are equal as JSON: key order and whitespace are ignored, and numbers compare by literal text, so `{"n":9007199254740993}` and `{"n":9007199254740992}` differ, as do `1` and `1.0`. Arguments that do not parse compare by raw bytes. The model sees `ERROR: tool <name> denied: repeated identical call: <name> called N times in the last 12 calls without progress`, where N counts the identical calls in the window.
+
+```go
+runner := agent.NewRunner(client, tools, "You are an agent.",
+	agent.WithToolPolicy(agent.RepetitionPolicy()))
+```
+
+State is keyed by run id, so one policy instance serves concurrent runs and replays without crosstalk, and a replay (a new run id) starts clean. The policy remembers the 1024 most recently used runs. `Continue` starts a new run id, so a continued run's counts start from zero. To combine it with another policy, call both from one `ToolPolicyFunc`.
+
 ## Hooks
 
 `WithHooks` registers a callback struct with one optional callback per live loop event. Every field is independent; a nil func is a no-op, and a zero `Hooks` value is valid. Each `WithHooks` call appends: callbacks fire in registration order, and a nil field in one registration does not suppress another registration's callback.
