@@ -641,6 +641,10 @@ type Response struct {
 	Usage Usage `json:"usage"`
 	// StopReason is the normalized stop reason.
 	StopReason StopReason `json:"stop_reason,omitempty"`
+	// Served names the backend that produced this response. provider.Fallback
+	// fills it with the member that served; the zero Identity means the
+	// client did not report one.
+	Served Identity `json:"served,omitzero"`
 }
 
 // Message returns the assistant history turn for this response: RoleAssistant
@@ -782,8 +786,8 @@ type Client interface {
 // provider.Options.Provider; Model is the model identifier. The zero
 // Identity means "unknown client".
 type Identity struct {
-	Provider string
-	Model    string
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
 }
 
 // IdentifiedClient is a [Client] that knows its own [Identity]: every

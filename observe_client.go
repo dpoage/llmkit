@@ -82,6 +82,9 @@ func (o *observingClient) Stream(ctx context.Context, req Request, fn func(Delta
 // the caller still receives that partial response, unchanged.
 func (o *observingClient) emit(ctx context.Context, req Request, resp Response, err error, d time.Duration) {
 	identity := IdentityOf(o.inner)
+	if err == nil && resp.Served != (Identity{}) {
+		identity = resp.Served
+	}
 	ce := &CompletionEvent{
 		Request:  req,
 		Provider: identity.Provider,

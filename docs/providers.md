@@ -183,6 +183,8 @@ Because the observer's outermost stage sits above the serializer, a `Completion`
 
 If the same client runs inside an `agent.Runner`, the Runner is the emitter that owns the turn's `Completion` (with `Step` set, tagged with the client's `Identity`); `Options.Observer` still receives the `Attempt` events when set. An extra `llmkit.Observe` around a Runner-run client receives the context the Runner already claimed, so it never records a second `Completion`.
 
+A `Completion` event from `llmkit.Observe` or the Runner names `Response.Served` as its `Provider`/`Model` when the call succeeded and the response set it; a failed call, or a response with a zero `Served`, names the client's `Identity`.
+
 ## Error normalization
 
 Adapters map vendor failures onto the sentinel errors in `llmkit`; match them with `errors.Is` on the returned error. The `Kind` is derived from the HTTP status, with the response body disambiguating 400s:
