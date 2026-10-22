@@ -89,6 +89,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go/config"
 	"github.com/dpoage/llmkit"
@@ -278,6 +279,19 @@ type Options struct {
 	// attempt. Wrap ignores this field: it decorates an already-built
 	// client and never touches a transport.
 	HTTPClient *http.Client
+	// StreamIdleTimeout fails a Stream attempt that waits this long for its
+	// next delta, counted from the attempt's start and from each callback's
+	// return (time inside it never counts). Keepalives and chunks that emit
+	// no delta, reasoning_details-only chunks included, do not reset it.
+	// The attempt fails as a retryable *llmkit.APIError{Kind: ErrServer}, or
+	// as a terminal one once a delta reached the caller. Zero or negative
+	// disables it, leaving [retry.Config.RequestTimeout] the only bound;
+	// Complete ignores it.
+	//
+	// Reasoning models stream nothing while they reason, and a client without
+	// native Stream runs its whole Complete under the timer: set it above the
+	// longest silent phase, or each retry re-bills the input.
+	StreamIdleTimeout time.Duration
 }
 
 // New builds a fully-wrapped Client for the given provider spec: the same
@@ -448,10 +462,10 @@ func New(ctx context.Context, spec Spec, opts Options) (llmkit.Client, error) {
 //
 // Wrap is idempotent over its own stacks: when c is a client [New] or
 // Wrap returned, Wrap rebuilds one stack from c's base with the new opts
-// — Retry, Observer, and Provider (when set) apply; the inner adapter
-// and its transport are kept, and c's Identity carries through unless
-// opts.Provider is set. Wrap(New(spec, o1), o2) therefore runs one
-// retry loop under o2.Retry: one call makes at most o2.Retry's
+// — Retry, Observer, StreamIdleTimeout, and Provider (when set) apply;
+// the inner adapter and its transport are kept, and c's Identity carries
+// through unless opts.Provider is set. Wrap(New(spec, o1), o2) therefore
+// runs one retry loop under o2.Retry: one call makes at most o2.Retry's
 // resolved MaxAttempts (a zero Retry resolves via [retry.Config.Or] to
 // retry.Default's 4), never the product of the two schedules. A
 // foreign decorator between the two stacks hides the inner one, and
@@ -490,7 +504,7 @@ func Wrap(c llmkit.Client, opts Options) llmkit.Client {
 // leaves unset ([retry.Config.Or]).
 func wrap(c llmkit.Client, opts Options, identity llmkit.Identity) llmkit.Client {
 	retryCfg := opts.Retry.Or(retry.Default())
-	stack := retryStage(c, retryCfg, opts.Observer, identity)
+	stack := retryStage(c, retryCfg, opts.Observer, identity, opts.StreamIdleTimeout)
 	stack = serializeStage(stack)
 	return &stackClient{
 		base:     c,

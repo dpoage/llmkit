@@ -9,6 +9,7 @@ import (
 	"errors"
 	"math"
 	"net/http"
+	"strings"
 
 	"github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/internal/adapter"
@@ -37,12 +38,13 @@ type Options struct {
 }
 
 // googleCeiling names every wire-gated field this adapter can put on the
-// wire: the Gemini API has a wire field for all seven, so no override is
+// wire: the Gemini API has a wire field for all eight, so no override is
 // ever refused at construction — the one documented case where every field
 // is within ceiling.
 var googleCeiling = llmkit.Capabilities{
 	StructuredOutput: true,
 	Thinking:         true,
+	ReasoningEffort:  true,
 	ToolChoice:       true,
 	StopSequences:    true,
 	TopP:             true,
@@ -101,7 +103,7 @@ func (g *googleAdapter) Capabilities() llmkit.Capabilities { return g.caps }
 func (g *googleAdapter) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
 	// Per-call wire recorder for normalizeErr: request count and the
 	// transport-status fallback.
-	ctx, _ = adapter.WithWire(ctx)
+	ctx, wire := adapter.WithWire(ctx)
 	contents, cfg, err := g.buildRequest(req)
 	if err != nil {
 		return llmkit.Response{}, err
@@ -113,7 +115,7 @@ func (g *googleAdapter) Complete(ctx context.Context, req llmkit.Request) (llmki
 	if err := g.checkCompletion(ctx, resp); err != nil {
 		return llmkit.Response{}, err
 	}
-	return g.toResponse(resp), nil
+	return g.toResponse(resp, wire), nil
 }
 
 // buildRequest applies the shared rules exactly once via adapter.Prepare,
@@ -169,16 +171,20 @@ func (g *googleAdapter) buildRequest(req llmkit.Request) ([]*genai.Content, *gen
 		s := int32(*p.Seed)
 		cfg.Seed = &s
 	}
-	// p.Thinking is nil unless g.caps.Thinking is true AND the caller
-	// supplied one; BudgetTokens is already validated >= 1. IncludeThoughts
+	// p.Thinking carries BudgetTokens only if g.caps.Thinking and Effort
+	// only if g.caps.ReasoningEffort. Gemini 3 takes thinkingLevel XOR
+	// thinkingBudget, so Effort wins when both survive. IncludeThoughts
 	// makes the model return thought-summary parts so reasoning is visible
 	// (and round-trippable) in Response.Blocks.
 	if p.Thinking != nil {
-		budget := int32(p.Thinking.BudgetTokens)
-		cfg.ThinkingConfig = &genai.ThinkingConfig{
-			ThinkingBudget:  &budget,
-			IncludeThoughts: true,
+		tc := &genai.ThinkingConfig{IncludeThoughts: true}
+		if p.Thinking.Effort != "" {
+			tc.ThinkingLevel = googleThinkingLevel(p.Thinking.Effort)
+		} else {
+			budget := int32(p.Thinking.BudgetTokens)
+			tc.ThinkingBudget = &budget
 		}
+		cfg.ThinkingConfig = tc
 	}
 
 	// Request.ToolChoice: already validated and gated by Prepare. auto (and
@@ -433,7 +439,7 @@ func functionCallKey(id, name string) string {
 	return id + "\x00" + name
 }
 
-func (g *googleAdapter) toResponse(resp *genai.GenerateContentResponse) llmkit.Response {
+func (g *googleAdapter) toResponse(resp *genai.GenerateContentResponse, wire *adapter.Wire) llmkit.Response {
 	var out llmkit.Response
 	var text string
 	var stop genai.FinishReason
@@ -495,11 +501,16 @@ func (g *googleAdapter) toResponse(resp *genai.GenerateContentResponse) llmkit.R
 		// convention), matching the normalized Usage semantics directly.
 		// Gemini 2.x caches implicitly server-side; we only surface the hit
 		// count — no explicit CachedContent management in this thin layer.
+		// candidatesTokenCount EXCLUDES thoughtsTokenCount, which is billed
+		// as output: OutputTokens carries both, ReasoningTokens the thoughts.
 		out.Usage = llmkit.Usage{
 			InputTokens:          int64(resp.UsageMetadata.PromptTokenCount),
-			OutputTokens:         int64(resp.UsageMetadata.CandidatesTokenCount),
+			OutputTokens:         int64(resp.UsageMetadata.CandidatesTokenCount) + int64(resp.UsageMetadata.ThoughtsTokenCount),
 			CacheReadInputTokens: int64(resp.UsageMetadata.CachedContentTokenCount),
+			ReasoningTokens:      int64(resp.UsageMetadata.ThoughtsTokenCount),
 		}
+	} else {
+		out.Usage = adapter.EstimateUsage(wire, out)
 	}
 	out.StopReason = mapGoogleStop(stop, len(out.ToolCalls) > 0)
 	if len(resp.Candidates) == 0 && promptBlocked(resp) {
@@ -623,6 +634,11 @@ func (g *googleAdapter) normalizeErr(ctx context.Context, err error) error {
 //     tiers 1,048,576. The 2.0/1.5 generations have no thinkingConfig —
 //     Thinking is false there. gemini-2.0-flash-lite launched without
 //     function calling, so its ParallelToolCalls and ToolChoice are false.
+//   - https://ai.google.dev/gemini-api/docs/gemini-3 — the Gemini 3 series
+//     (gemini-3-*, gemini-3.N-*) takes thinking_level low/medium/high and
+//     must not combine it with thinking_budget, so ReasoningEffort is true
+//     for exactly that generation (isGemini3) and false for every other
+//     model, known or not.
 //
 // The table is matched by LONGEST key with a "-" segment boundary
 // (adapter.BestMatchingFamily), so "gemini-2.5-flash-lite" and the
@@ -689,5 +705,25 @@ func googleCapabilities(model string) llmkit.Capabilities {
 		caps.StructuredOutput = e.structured
 		caps.PromptCaching = e.caching
 	}
+	caps.ReasoningEffort = isGemini3(model)
 	return caps
+}
+
+// isGemini3 reports whether model belongs to the Gemini 3 series: the
+// "gemini-3" key followed by end of name, "-" or ".".
+func isGemini3(model string) bool {
+	rest, ok := strings.CutPrefix(model, "gemini-3")
+	return ok && (rest == "" || rest[0] == '-' || rest[0] == '.')
+}
+
+// googleThinkingLevel maps a validated llmkit effort onto the genai enum.
+func googleThinkingLevel(e llmkit.ReasoningEffort) genai.ThinkingLevel {
+	switch e {
+	case llmkit.EffortLow:
+		return genai.ThinkingLevelLow
+	case llmkit.EffortMedium:
+		return genai.ThinkingLevelMedium
+	default:
+		return genai.ThinkingLevelHigh
+	}
 }

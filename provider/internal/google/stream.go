@@ -29,7 +29,7 @@ var errStreamNoFinishReason = errors.New("google: stream ended before finishReas
 // wrapped, with no Response.
 func (g *googleAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(llmkit.Delta) error) (llmkit.Response, error) {
 	// Per-call wire recorder for normalizeErr, mirroring Complete.
-	ctx, _ = adapter.WithWire(ctx)
+	ctx, wire := adapter.WithWire(ctx)
 	contents, cfg, err := g.buildRequest(req)
 	if err != nil {
 		return llmkit.Response{}, err
@@ -71,7 +71,7 @@ func (g *googleAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(
 	if err := g.checkCompletion(ctx, agg); err != nil {
 		return llmkit.Response{}, err
 	}
-	return g.toResponse(agg), nil
+	return g.toResponse(agg, wire), nil
 }
 
 // absorbChunk folds one streamed chunk into agg and, when fn is non-nil,
