@@ -40,6 +40,12 @@ entry below is marked.
   `agent.NewReplayClient` with no network. It does not compare the state and
   does not report unconsumed decisions. `decide.ErrReplayDiverged` and
   `decide.ErrReplayedFailure` are the errors it returns.
+- Live tests: a `kev` lane runs the `decide/systemone` live cases against a
+  local [Kev](https://github.com/jaredpalmer/kev) server with
+  `LLMKIT_LIVE_KEV_BASE_URL` (no credentials; model defaults to `kev-latest`).
+  CI does not run it. `systemone.Ask` also has hermetic tests against Kev's
+  README response and a captured one; the live suite is now
+  `TestLiveDecide/<lane>/<case>`. See `docs/testing.md`.
 
 ### Changed
 

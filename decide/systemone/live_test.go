@@ -1,25 +1,30 @@
 //go:build live
 
-// Live acceptance suite for the systemone package: TypeSafe's Jev (System One)
-// decision API through systemone.New. Every case asserts structural invariants
-// only (ranges, argmax consistency, legend alignment, usage accounting); exact
-// probabilities are the vendor's business. Fixtures are recorded under
-// -update into decide/systemone/testdata/<case>.json and replayed hermetically by
+// Live acceptance suite for the systemone package: the System One wire
+// through systemone.New, against two lanes. The typesafe lane is TypeSafe's
+// Jev; the kev lane is a local Kev server. Every case asserts structural
+// invariants only (ranges, argmax consistency, legend alignment, usage
+// accounting); exact probabilities are the backend's business. Fixtures are
+// recorded for the typesafe lane only, under -update, into
+// decide/systemone/testdata/<case>.json and replayed hermetically by
 // fixture_replay_test.go.
 //
 // Environment (see docs/testing.md):
 //
-//	LLMKIT_LIVE_TYPESAFE_API_KEY   (required)
+//	LLMKIT_LIVE_TYPESAFE_API_KEY   (required for typesafe)
 //	LLMKIT_LIVE_TYPESAFE_MODEL     (optional, default jev-latest)
 //	LLMKIT_LIVE_TYPESAFE_BASE_URL  (optional gateway override)
+//	LLMKIT_LIVE_KEV_BASE_URL       (required for kev, e.g. http://127.0.0.1:8009)
+//	LLMKIT_LIVE_KEV_MODEL          (optional, default kev-latest)
+//	LLMKIT_LIVE_KEV_API_KEY        (optional, default local)
 //
-// A keyless lane skips at the lane level, naming its variable. TypeSafe
-// bills input tokens only; the whole lane costs a handful. Run with
+// A lane missing a required variable skips at the lane level, naming it.
+// TypeSafe bills input tokens only; the whole lane costs a handful. Run with
 //
 //	go test -tags live -count=1 ./decide/systemone/ -v
 //
-// adding -update to re-record fixtures. Keys are never logged; raw body
-// logs go through livetest's redacting logger.
+// adding -update to re-record the typesafe fixtures. Keys are never logged;
+// raw body logs go through livetest's redacting logger.
 package systemone_test
 
 import (
@@ -141,7 +146,7 @@ func (dc *decideCase) ask(state any, questions decide.Questions) (decide.Respons
 // finish records the Ask inputs, sanitized wire exchanges, and the
 // normalized outcome (or error kind) when -update is set.
 func (dc *decideCase) finish(resp decide.Response, err error) {
-	if !livetest.Update() {
+	if !livetest.Update() || dc.sess.Lane.Name != livetest.DecideLane.Name {
 		return
 	}
 	state, err2 := json.Marshal(dc.state)
@@ -173,16 +178,70 @@ func (dc *decideCase) finish(resp decide.Response, err error) {
 	livetest.WriteDecideFixture(dc.t, filepath.Join("testdata", dc.caseName+".json"), f, dc.sess.Key)
 }
 
-// TestLiveDecide resolves the typesafe lane once and runs every case under
-// it; the lane-level skip names LLMKIT_LIVE_TYPESAFE_API_KEY.
-func TestLiveDecide(t *testing.T) {
-	sess := livetest.ResolveDecide(t)
+// liveCase is one structural case a lane runs.
+type liveCase struct {
+	name string
+	run  func(*testing.T, *livetest.Session)
+}
 
-	t.Run("mixed_questions", func(t *testing.T) { caseMixedQuestions(t, sess) })
-	t.Run("structured_state", func(t *testing.T) { caseStructuredState(t, sess) })
-	t.Run("error_bad_key", func(t *testing.T) { caseErrorBadKey(t, sess) })
-	t.Run("error_bad_model", func(t *testing.T) { caseErrorBadModel(t, sess) })
-	t.Run("usage_recorded", func(t *testing.T) { caseUsageRecorded(t, sess) })
+// liveLane pairs a lane's resolver with the cases its backend can pass.
+type liveLane struct {
+	name    string
+	resolve func(testing.TB) *livetest.Session
+	cases   []liveCase
+}
+
+var liveLanes = []liveLane{
+	{
+		name:    livetest.DecideLane.Name,
+		resolve: livetest.ResolveDecide,
+		cases: []liveCase{
+			{"mixed_questions", caseMixedQuestions},
+			{"structured_state", caseStructuredState},
+			{"error_bad_key", caseErrorBadKey},
+			{"error_bad_model", caseErrorBadModel},
+			{"usage_recorded", caseUsageRecorded},
+		},
+	},
+	{
+		// No error_bad_key (a local server needs no auth) and no
+		// error_bad_model (Kev serves any model alias).
+		name:    livetest.KevLane.Name,
+		resolve: livetest.ResolveDecideKev,
+		cases: []liveCase{
+			{"mixed_questions", caseMixedQuestions},
+			{"structured_state", caseStructuredState},
+			{"usage_recorded", caseUsageRecorded},
+		},
+	},
+}
+
+// TestLiveDecide resolves each lane once and runs its case list; a lane
+// missing a required variable skips, naming it.
+func TestLiveDecide(t *testing.T) {
+	for _, lane := range liveLanes {
+		t.Run(lane.name, func(t *testing.T) {
+			sess := lane.resolve(t)
+			for _, c := range lane.cases {
+				t.Run(c.name, func(t *testing.T) { c.run(t, sess) })
+			}
+		})
+	}
+}
+
+// assertReportedModel checks the model id the backend reports: the kev
+// lane echoes the requested alias; typesafe reports a versioned id.
+func assertReportedModel(t *testing.T, sess *livetest.Session, model string) {
+	t.Helper()
+	if sess.Lane.Name == livetest.KevLane.Name {
+		if model != sess.Model {
+			t.Fatalf("Model = %q, want the requested alias %q echoed", model, sess.Model)
+		}
+		return
+	}
+	if model == "" {
+		t.Fatal("empty Model: the vendor's versioned id must be reported")
+	}
 }
 
 // caseMixedQuestions asks one Noul, one Choice, and one Score in a single
@@ -193,9 +252,7 @@ func caseMixedQuestions(t *testing.T, sess *livetest.Session) {
 	if err != nil {
 		t.Fatalf("ask: %v", err)
 	}
-	if resp.Model == "" {
-		t.Fatal("empty Model: the vendor's versioned id must be reported")
-	}
+	assertReportedModel(t, sess, resp.Model)
 	if resp.Usage.InputTokens <= 0 {
 		t.Fatalf("usage not accounted: %+v", resp.Usage)
 	}

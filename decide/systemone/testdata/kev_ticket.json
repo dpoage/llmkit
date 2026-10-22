@@ -1,0 +1,94 @@
+{
+  "case": "kev_ticket",
+  "lane": "kev",
+  "model": "kev-latest",
+  "state": "Shoes arrived two weeks late and in the wrong size. Also I see two charges on my card.",
+  "questions": {
+    "department": {
+      "kind": "choice",
+      "instructions": "Which team should handle this?",
+      "options": {
+        "billing": "Charges, invoices, payment problems",
+        "returns": "Exchanges, refunds, wrong or damaged items",
+        "shipping": "Delivery status, delays, lost packages"
+      }
+    },
+    "escalate": {
+      "kind": "noul",
+      "instructions": "Does this need urgent human attention?"
+    },
+    "frustration": {
+      "kind": "score",
+      "instructions": "How frustrated is the customer?",
+      "levels": [
+        "Calm",
+        "Frustrated",
+        "Very angry"
+      ]
+    }
+  },
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/systemone",
+        "headers": {
+          "accept": "application/json",
+          "content-type": "application/json"
+        },
+        "body": "{\"state\":\"Shoes arrived two weeks late and in the wrong size. Also I see two charges on my card.\",\"model\":\"kev-latest\",\"questions\":{\"department\":{\"type\":\"choice\",\"instructions\":\"Which team should handle this?\",\"criteria\":{\"billing\":\"Charges, invoices, payment problems\",\"returns\":\"Exchanges, refunds, wrong or damaged items\",\"shipping\":\"Delivery status, delays, lost packages\"}},\"escalate\":{\"type\":\"noul\",\"instructions\":\"Does this need urgent human attention?\"},\"frustration\":{\"type\":\"score\",\"instructions\":\"How frustrated is the customer?\",\"criteria\":[\"Calm\",\"Frustrated\",\"Very angry\"]}}}"
+      },
+      "response": {
+        "headers": {
+          "content-length": "453",
+          "content-type": "application/json",
+          "date": "Thu, 22 Oct 2026 04:41:45 GMT",
+          "server": "uvicorn",
+          "server-timing": "app;dur=40.0",
+          "x-typesafe-request-id": "dff085e610464e52b1a6715785feb92a"
+        },
+        "body": "{\"model\":\"kev-latest\",\"answers\":{\"department\":{\"type\":\"choice\",\"choice\":\"shipping\",\"confidence\":0.2805,\"probabilities\":{\"billing\":0.1685,\"returns\":0.3111,\"shipping\":0.5204}},\"escalate\":{\"type\":\"noul\",\"noul\":0.5512},\"frustration\":{\"type\":\"score\",\"score\":1.23,\"legend\":{\"0\":\"Calm\",\"1\":\"Frustrated\",\"2\":\"Very angry\"},\"probabilities\":{\"0\":0.0515,\"1\":0.667,\"2\":0.2815},\"confidence\":0.5005}},\"usage\":{\"input_tokens\":101,\"output_tokens\":179},\"latency_ms\":37.1}",
+        "status": 200
+      }
+    }
+  ],
+  "normalized": {
+    "response": {
+      "Model": "kev-latest",
+      "Usage": {
+        "input_tokens": 101,
+        "output_tokens": 179
+      },
+      "Nouls": {
+        "escalate": 0.5512
+      },
+      "Choices": {
+        "department": {
+          "Choice": "shipping",
+          "Probabilities": {
+            "billing": 0.1685,
+            "returns": 0.3111,
+            "shipping": 0.5204
+          },
+          "Confidence": 0.2805
+        }
+      },
+      "Scores": {
+        "frustration": {
+          "Score": 1.23,
+          "Levels": [
+            "Calm",
+            "Frustrated",
+            "Very angry"
+          ],
+          "Probabilities": [
+            0.0515,
+            0.667,
+            0.2815
+          ],
+          "Confidence": 0.5005
+        }
+      }
+    }
+  }
+}
