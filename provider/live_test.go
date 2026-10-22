@@ -742,8 +742,13 @@ func caseToolChoice(t *testing.T, lc *liveClient) {
 // it saw the document; a model that never received the document cannot.
 const liveDocNonce = "QUOKKA7319"
 
+// imageMaxTokens leaves room for the model to finish thinking before it names
+// the colour; at the default cap a truncated thought is the whole answer.
+const imageMaxTokens = 2048
+
 func caseImages(t *testing.T, lc *liveClient) {
 	resp, err := lc.complete(llmkit.Request{
+		MaxTokens: imageMaxTokens,
 		Messages: []llmkit.Message{{
 			Role: llmkit.RoleUser,
 			Content: []llmkit.Block{
