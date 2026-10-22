@@ -1,0 +1,575 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"reflect"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/dpoage/llmkit"
+)
+
+// sumClient is a scripted summarizer client; fn gets the 0-based call number.
+type sumClient struct {
+	mu    sync.Mutex
+	fn    func(n int, req llmkit.Request) (llmkit.Response, error)
+	reqs  []llmkit.Request
+	spans []llmkit.SpanID
+}
+
+func (c *sumClient) Capabilities() llmkit.Capabilities { return llmkit.Capabilities{} }
+
+func (c *sumClient) Identity() llmkit.Identity {
+	return llmkit.Identity{Provider: "sumprov", Model: "summodel"}
+}
+
+func (c *sumClient) Complete(ctx context.Context, req llmkit.Request) (llmkit.Response, error) {
+	c.mu.Lock()
+	n := len(c.reqs)
+	c.reqs = append(c.reqs, req)
+	c.spans = append(c.spans, llmkit.SpanFromContext(ctx))
+	c.mu.Unlock()
+	return c.fn(n, req)
+}
+
+func (c *sumClient) calls() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.reqs)
+}
+
+func tooLong() error { return fmt.Errorf("provider: prompt is too long: %w", llmkit.ErrContextTooLong) }
+
+func sumResp(text string) llmkit.Response {
+	return llmkit.Response{Text: text, StopReason: llmkit.StopEndTurn, Usage: llmkit.Usage{InputTokens: 200, OutputTokens: 30}}
+}
+
+// numbered answers "SUMMARY <n+1>" to every call.
+func numbered() *sumClient {
+	return &sumClient{fn: func(n int, _ llmkit.Request) (llmkit.Response, error) {
+		return sumResp(fmt.Sprintf("SUMMARY %d", n+1)), nil
+	}}
+}
+
+func user(s string) llmkit.Message { return llmkit.TextMessage(llmkit.RoleUser, s) }
+func asst(s string) llmkit.Message { return llmkit.TextMessage(llmkit.RoleAssistant, s) }
+
+func call(id string) llmkit.Message {
+	return llmkit.Message{Role: llmkit.RoleAssistant, ToolCalls: []llmkit.ToolCall{{ID: id, Name: "mix", Arguments: json.RawMessage(`{}`)}}}
+}
+
+func result(id, text string) llmkit.Message {
+	return llmkit.Message{Role: llmkit.RoleToolResult, ToolCallID: id, Content: []llmkit.Block{llmkit.Text(text)}}
+}
+
+func summaryMsg(body string) llmkit.Message {
+	return llmkit.TextMessage(llmkit.RoleUser, conversationSummaryHeader+body)
+}
+
+func TestSummaryCut(t *testing.T) {
+	final := finalizationPrompt([]byte(`{"type":"object"}`))
+	for _, c := range []struct {
+		name     string
+		msgs     []llmkit.Message
+		lead, at int
+	}{
+		{"steering message is the cut", []llmkit.Message{
+			user("task"), call("c1"), result("c1", "r"), call("c2"), result("c2", "r"), user("steer"), call("c3"), result("c3", "r")}, 0, 5},
+		{"empty-turn nudge is never the cut", []llmkit.Message{
+			user("task"), call("c1"), result("c1", "r"), user("steer"), asst(""), user(emptyTurnNudge), call("c2"), result("c2", "r")}, 0, 3},
+		{"continuation prompt is never the cut", []llmkit.Message{
+			user("task"), call("c1"), result("c1", "r"), user("steer"), asst("cut"), user(maxTokensContinuePrompt), asst("off")}, 0, 3},
+		{"finalize prompt is never the cut", []llmkit.Message{
+			user("task"), call("c1"), result("c1", "r"), user("steer"), call("c2"), result("c2", "r"), user(final), asst("{}")}, 0, 3},
+		{"leading system messages stay outside", []llmkit.Message{
+			llmkit.TextMessage(llmkit.RoleSystem, "sys"), user("task"), call("c1"), result("c1", "r"), user("again"), asst("a")}, 1, 4},
+		{"the task alone is no cut", []llmkit.Message{
+			user("task"), call("c1"), result("c1", "r"), call("c2"), result("c2", "r")}, 0, -1},
+		{"a steer after the last assistant turn leaves no turn", []llmkit.Message{
+			user("task"), call("c1"), result("c1", "r"), user("steer")}, 0, -1},
+		{"a lone previous summary is not re-summarized", []llmkit.Message{
+			summaryMsg("old"), user("steer"), call("c1"), result("c1", "r")}, 0, -1},
+		{"a cut never separates a call from its result", []llmkit.Message{
+			user("task"), call("c1"), user("odd"), result("c1", "r"), asst("a")}, 0, -1},
+		{"an earlier cut is used when the last one splits a pair", []llmkit.Message{
+			user("task"), asst("a"), user("steer"), call("c1"), user("odd"), result("c1", "r"), asst("b")}, 0, 2},
+		{"a summary is not a cut", []llmkit.Message{
+			user("task"), asst("a"), summaryMsg("old"), call("c1"), result("c1", "r"), asst("b")}, 0, -1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			lead, at := summaryCut(c.msgs)
+			if lead != c.lead || at != c.at {
+				t.Errorf("summaryCut = (%d, %d), want (%d, %d)", lead, at, c.lead, c.at)
+			}
+		})
+	}
+}
+
+// steerAfterStep queues a steering message once the tools of turn step ran.
+func steerAfterStep(step int) (Option, RunOption) {
+	st := NewSteering()
+	hook := WithHooks(Hooks{ToolEnd: func(_ context.Context, ev ToolEvent) {
+		if ev.Step == step {
+			st.Steer(llmkit.Text("steer"))
+		}
+	}})
+	return hook, WithSteering(st)
+}
+
+// summarizeHistory runs one continued conversation: a seed of four tool turns,
+// then a task whose turns cross a small HistoryTokenBudget.
+func summarizeHistory(t *testing.T, sc *sumClient, pool *BudgetPool, main []scriptStep, opts ...Option) (*Outcome, *fakeClient, error) {
+	return summarizeRun(t, sc, pool, main, nil, opts...)
+}
+
+func summarizeRun(t *testing.T, sc *sumClient, pool *BudgetPool, main []scriptStep, runOpts []RunOption, opts ...Option) (*Outcome, *fakeClient, error) {
+	t.Helper()
+	seed := seedOutcome(t)
+	fc := newFakeClient(main...)
+	opts = append([]Option{
+		WithLimits(Limits{MaxIterations: 30, HistoryTokenBudget: 150}),
+		WithCompactor(SummarizingCompactor(sc)),
+		WithBudgetPool(pool),
+	}, opts...)
+	runOpts = append([]RunOption{Continue(seed), WithRunID("sum-run")}, runOpts...)
+	out, err := NewRunner(fc, []Tool{seamTool{}}, "sys", opts...).Run(context.Background(), "task", runOpts...)
+	return out, fc, err
+}
+
+func summaryCompactions(evs []llmkit.Event) []llmkit.CompactionEvent {
+	var out []llmkit.CompactionEvent
+	for _, c := range compactionEvents(evs) {
+		if c.Summary != "" {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func requestHasSummary(req llmkit.Request) bool {
+	return len(req.Messages) > 0 && isSummaryMessage(req.Messages[0])
+}
+
+func assertPaired(t *testing.T, msgs []llmkit.Message) {
+	t.Helper()
+	seen := map[string]bool{}
+	for _, m := range msgs {
+		for _, c := range m.ToolCalls {
+			seen[c.ID] = true
+		}
+		if m.Role == llmkit.RoleToolResult && !seen[m.ToolCallID] {
+			t.Errorf("tool result %q has no call before it in %d messages", m.ToolCallID, len(msgs))
+		}
+	}
+}
+
+// SU1: the summary replaces the history before the task, and the kept suffix starts at it.
+func TestSummarize_RunReplacesPrefix(t *testing.T) {
+	sc := numbered()
+	out, fc, err := summarizeHistory(t, sc, nil, append(seamTurnsFrom(5, 6), textResp("done", 100, 10)))
+	if err != nil || out.FinalText != "done" {
+		t.Fatalf("Run: %v, final %q", err, out.FinalText)
+	}
+	evs := summaryCompactions(out.Transcript.Record)
+	if len(evs) == 0 || sc.calls() != len(evs) {
+		t.Fatalf("summary compactions %d, summarizer calls %d, want equal and positive", len(evs), sc.calls())
+	}
+	if evs[0].Summary != "SUMMARY 1" || evs[0].Pruned != 10 {
+		t.Errorf("first compaction = %+v, want SUMMARY 1 replacing the 10 seed messages", evs[0])
+	}
+	var first *llmkit.Request
+	for i := range fc.requests {
+		if requestHasSummary(fc.requests[i]) {
+			first = &fc.requests[i]
+			break
+		}
+	}
+	if first == nil {
+		t.Fatal("no request carried a summary")
+	}
+	if got := first.Messages[0].Text(); got != conversationSummaryHeader+"SUMMARY 1" {
+		t.Errorf("summary message = %q", got)
+	}
+	if m := first.Messages[1]; m.Role != llmkit.RoleUser || m.Text() != "task" {
+		t.Errorf("kept suffix starts at %s %q, want the caller's task", m.Role, m.Text())
+	}
+	assertPaired(t, first.Messages)
+	if !strings.HasPrefix(out.Messages[0].Text(), "[conversation summary]") {
+		t.Errorf("final history starts %q", out.Messages[0].Text())
+	}
+	assertPaired(t, out.Messages)
+}
+
+// SU1 boundary: an empty turn's nudge is never the cut, so the task starts the suffix.
+func TestSummarize_NudgeIsNotACutPoint(t *testing.T) {
+	sc := numbered()
+	main := append([]scriptStep{thinkOnlyResp("hmm", 100, 10)}, seamTurnsFrom(5, 6)...)
+	out, fc, err := summarizeHistory(t, sc, nil, append(main, textResp("done", 100, 10)))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	n := 0
+	for _, req := range fc.requests {
+		if !requestHasSummary(req) {
+			continue
+		}
+		n++
+		if m := req.Messages[1]; m.Text() != "task" {
+			t.Errorf("suffix after a summary starts %q, want the task", m.Text())
+		}
+	}
+	if n == 0 || len(summaryCompactions(out.Transcript.Record)) == 0 {
+		t.Fatalf("no summary compaction fired (%d requests with a summary)", n)
+	}
+}
+
+// SU2: the summarizer's usage is run spend, in the ledger and the pool.
+func TestSummarize_UsageIsRunSpend(t *testing.T) {
+	sc := numbered()
+	pool := NewBudgetPool(1 << 40)
+	out, _, err := summarizeHistory(t, sc, pool, append(seamTurnsFrom(5, 6), textResp("done", 100, 10)))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var sum llmkit.Usage
+	var compaction, answers int
+	spans := map[llmkit.SpanID]bool{}
+	for _, ev := range out.Transcript.Record {
+		if ev.Kind != llmkit.KindCompletion {
+			continue
+		}
+		sum = sum.Add(ev.Completion.Response.Usage)
+		if ev.Completion.Purpose == llmkit.CompletionPurposeCompaction {
+			compaction++
+			spans[ev.SpanID] = true
+			if p, m := ev.Completion.Provider, ev.Completion.Model; p != "sumprov" || m != "summodel" {
+				t.Errorf("compaction completion is attributed to %q/%q, want the summarizer's", p, m)
+			}
+			if ev.Step == 0 {
+				t.Error("compaction completion has no step")
+			}
+		} else {
+			answers++
+		}
+	}
+	if compaction != sc.calls() || compaction == 0 {
+		t.Fatalf("%d compaction completions for %d summarizer calls", compaction, sc.calls())
+	}
+	if sum != out.Usage {
+		t.Errorf("sum of completion usage %+v != Outcome.Usage %+v", sum, out.Usage)
+	}
+	if out.Iterations != answers {
+		t.Errorf("Iterations = %d, answer completions %d: summary calls must not count as turns", out.Iterations, answers)
+	}
+	if want := out.Usage.ChargeableTokens(1); pool.Spent() != want {
+		t.Errorf("pool charged %d, want %d (summary spend included)", pool.Spent(), want)
+	}
+	for _, s := range sc.spans {
+		if !spans[s] {
+			t.Errorf("summarizer saw span %q, which no compaction completion carries", s)
+		}
+	}
+	if len(spans) != compaction {
+		t.Errorf("%d distinct spans for %d compaction completions", len(spans), compaction)
+	}
+}
+
+// longHistory is a prefix of n tool turns, a steering message, and one more turn.
+func longHistory(n int) CompactInput {
+	msgs := []llmkit.Message{user("task")}
+	for i := range n {
+		id := fmt.Sprintf("c%d", i)
+		msgs = append(msgs, call(id), result(id, fmt.Sprintf("result %d %s", i, strings.Repeat("x", 500))))
+	}
+	msgs = append(msgs, user("steer"), call("last"), result("last", "r"))
+	return CompactInput{Messages: msgs, Sent: msgs}
+}
+
+// SU3: an overflowing summary request is split in halves and the halves merged.
+func TestSummarize_ChunksOverflow(t *testing.T) {
+	in := longHistory(6)
+	sc := &sumClient{fn: func(n int, req llmkit.Request) (llmkit.Response, error) {
+		if n == 0 {
+			return llmkit.Response{}, tooLong()
+		}
+		return sumResp(fmt.Sprintf("S%d", n)), nil
+	}}
+	out, err := SummarizingCompactor(sc).Compact(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if sc.calls() != 4 {
+		t.Fatalf("calls = %d, want 4 (full, two halves, merge)", sc.calls())
+	}
+	first, left, right, merge := sc.reqs[0].Messages[0].Text(), sc.reqs[1].Messages[0].Text(), sc.reqs[2].Messages[0].Text(), sc.reqs[3].Messages[0].Text()
+	if !strings.Contains(first, "result 0") || !strings.Contains(first, "result 5") {
+		t.Error("the full request does not hold the whole prefix")
+	}
+	if !strings.Contains(left, "result 0") || strings.Contains(left, "result 5") || strings.Contains(right, "result 0") || !strings.Contains(right, "result 5") {
+		t.Errorf("halves are not disjoint halves of the prefix\nleft: %s\nright: %s", left, right)
+	}
+	if !strings.Contains(merge, "S1") || !strings.Contains(merge, "S2") || strings.Contains(merge, "result") {
+		t.Errorf("merge request = %s, want the two half summaries only", merge)
+	}
+	if out.Summary != "S3" || out.Messages[0].Text() != conversationSummaryHeader+"S3" {
+		t.Errorf("summary = %q, message %q", out.Summary, out.Messages[0].Text())
+	}
+	if want := (llmkit.Usage{InputTokens: 600, OutputTokens: 90}); out.Usage != want {
+		t.Errorf("usage = %+v, want %+v: the failed call is free, the three answers charged", out.Usage, want)
+	}
+	if len(out.calls) != 4 || out.calls[0].err == nil {
+		t.Errorf("calls recorded = %d, want 4 with the first failed", len(out.calls))
+	}
+}
+
+func TestSummarize_SplitDepthIsBounded(t *testing.T) {
+	sc := &sumClient{fn: func(int, llmkit.Request) (llmkit.Response, error) { return llmkit.Response{}, tooLong() }}
+	_, err := SummarizingCompactor(sc).Compact(context.Background(), longHistory(20))
+	if !errors.Is(err, llmkit.ErrContextTooLong) {
+		t.Fatalf("err = %v, want ErrContextTooLong", err)
+	}
+	if sc.calls() != summaryMaxDepth+1 {
+		t.Errorf("calls = %d, want %d: one per level down the left spine", sc.calls(), summaryMaxDepth+1)
+	}
+}
+
+// SU3: a single message too large for the context ends the run with the wrapped error, spend charged.
+func TestSummarize_IrreducibleMessageFailsRun(t *testing.T) {
+	sc := &sumClient{fn: func(n int, _ llmkit.Request) (llmkit.Response, error) {
+		if n == 1 {
+			return sumResp("LEFT"), nil
+		}
+		return llmkit.Response{}, tooLong()
+	}}
+	pool := NewBudgetPool(1 << 40)
+	out, _, err := summarizeHistory(t, sc, pool, append(seamTurnsFrom(5, 6), textResp("done", 100, 10)))
+	if !errors.Is(err, llmkit.ErrContextTooLong) {
+		t.Fatalf("Run err = %v, want one wrapping ErrContextTooLong", err)
+	}
+	var spent llmkit.Usage
+	for _, ev := range out.Transcript.Record {
+		if ev.Kind == llmkit.KindCompletion && ev.Completion.Purpose == llmkit.CompletionPurposeCompaction {
+			spent = spent.Add(ev.Completion.Response.Usage)
+		}
+	}
+	if spent.OutputTokens != 30 {
+		t.Fatalf("the one successful half is %+v in the ledger, want 30 output tokens", spent)
+	}
+	var all llmkit.Usage
+	for _, ev := range out.Transcript.Record {
+		if ev.Kind == llmkit.KindCompletion {
+			all = all.Add(ev.Completion.Response.Usage)
+		}
+	}
+	if all != out.Usage || pool.Spent() != out.Usage.ChargeableTokens(1) {
+		t.Errorf("ledger %+v, Outcome.Usage %+v, pool %d: the failed pass's spend is not charged", all, out.Usage, pool.Spent())
+	}
+}
+
+func TestSummarize_NoCutFallsBackToStub(t *testing.T) {
+	sc := numbered()
+	msgs := []llmkit.Message{user("task")}
+	for i := range 8 {
+		id := fmt.Sprintf("c%d", i)
+		msgs = append(msgs, call(id), result(id, strings.Repeat("x", 800)))
+	}
+	in := CompactInput{Messages: msgs, Sent: msgs}
+	got, err := SummarizingCompactor(sc).Compact(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := stubCompactor{}.Compact(context.Background(), in)
+	if sc.calls() != 0 || got.Summary != "" || got.Pruned == 0 || !reflect.DeepEqual(got.Messages, want.Messages) {
+		t.Errorf("no cut: %d summarizer calls, summary %q, pruned %d; want the stubber's result", sc.calls(), got.Summary, got.Pruned)
+	}
+}
+
+func TestSummarize_LargerSummaryIsDiscardedButCharged(t *testing.T) {
+	in := CompactInput{Messages: []llmkit.Message{user("task"), asst("a"), user("steer"), call("c"), result("c", "r")}}
+	in.Sent = in.Messages
+	sc := &sumClient{fn: func(int, llmkit.Request) (llmkit.Response, error) {
+		return sumResp(strings.Repeat("long ", 200)), nil
+	}}
+	out, err := SummarizingCompactor(sc).Compact(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compactionUnchanged(out.Messages, in.Messages) || out.Summary != "" || out.Usage.OutputTokens != 30 || len(out.calls) != 1 {
+		t.Errorf("out = %+v: want the history unchanged and the call's spend kept", out)
+	}
+}
+
+// SU5: a previous summary feeds the next one; tool results are cut and thinking is left out.
+func TestSummarize_PromptContent(t *testing.T) {
+	sc := numbered()
+	big := strings.Repeat("z", 5000)
+	msgs := []llmkit.Message{
+		user("task"),
+		{Role: llmkit.RoleAssistant, Content: []llmkit.Block{
+			{Kind: llmkit.BlockThinking, Text: "SECRET-THOUGHT", Raw: json.RawMessage(`{"sig":"SECRET-RAW"}`)},
+			llmkit.Text("looking"),
+		}, ToolCalls: []llmkit.ToolCall{{ID: "c1", Name: "read_file", Arguments: json.RawMessage(`{"path":"a.go"}`)}}},
+		result("c1", big),
+		user("steer one"), asst("ok"), user("steer two"), asst("fine"),
+	}
+	first, err := SummarizingCompactor(sc).Compact(context.Background(), CompactInput{Messages: msgs, Sent: msgs})
+	if err != nil || first.Summary != "SUMMARY 1" {
+		t.Fatalf("first Compact: %+v, %v", first, err)
+	}
+	req := sc.reqs[0]
+	text := req.Messages[0].Text()
+	if len(req.Tools) != 0 || len(req.Messages) != 1 || req.Messages[0].Role != llmkit.RoleUser {
+		t.Errorf("request = %d tools, %d messages: want one user message and no tools", len(req.Tools), len(req.Messages))
+	}
+	for _, h := range []string{"## Goal", "## Constraints", "## Progress", "## Key Decisions", "## Next Steps", "## Files"} {
+		if !strings.Contains(req.System, h) {
+			t.Errorf("system prompt lacks %q", h)
+		}
+	}
+	if n := strings.Count(text, "z"); n != summaryToolResultChars {
+		t.Errorf("serialized tool result keeps %d chars, want %d", n, summaryToolResultChars)
+	}
+	if !strings.Contains(text, "3000 more characters truncated") || !strings.Contains(text, "read_file") || !strings.Contains(text, `{"path":"a.go"}`) {
+		t.Errorf("tool result or call not serialized as expected:\n%.300s", text)
+	}
+	if strings.Contains(text, "SECRET") || !strings.Contains(text, "looking") {
+		t.Error("thinking blocks must be omitted and text kept")
+	}
+
+	// The second pass: the first summary rides at the head of the new prefix.
+	next := append(append([]llmkit.Message{}, first.Messages...), user("steer three"), asst("more"))
+	second, err := SummarizingCompactor(sc).Compact(context.Background(), CompactInput{Messages: next, Sent: next})
+	if err != nil || second.Summary != "SUMMARY 2" {
+		t.Fatalf("second Compact: %+v, %v", second, err)
+	}
+	if got := sc.reqs[1].Messages[0].Text(); !strings.Contains(got, "<previous-summary>\nSUMMARY 1\n</previous-summary>") {
+		t.Errorf("second prompt lacks the first summary:\n%s", got)
+	}
+}
+
+func replayWithSummaries(t *testing.T, src llmkit.Source, run llmkit.RunID) (*Outcome, *ReplayClient) {
+	t.Helper()
+	rc, err := NewReplayClient(src, run, llmkit.Capabilities{})
+	if err != nil {
+		t.Fatalf("NewReplayClient: %v", err)
+	}
+	hook, steer := steerAfterStep(3)
+	out, err := NewRunner(rc, rc.Tools(), "sys",
+		WithLimits(Limits{MaxIterations: 30, HistoryTokenBudget: 150}),
+		WithCompactor(rc.Compactor()), hook).
+		Run(context.Background(), "task", Continue(seedOutcome(t)), WithRunID("sum-replay"), steer)
+	if err != nil {
+		t.Fatalf("replayed Run: %v", err)
+	}
+	return out, rc
+}
+
+func seedOutcome(t *testing.T) *Outcome {
+	t.Helper()
+	fc := newFakeClient(append(seamTurns(4), textResp("seeded", 100, 10))...)
+	out, err := NewRunner(fc, []Tool{seamTool{}}, "sys", WithLimits(Limits{MaxIterations: 30})).Run(context.Background(), "seed")
+	if err != nil {
+		t.Fatalf("seed Run: %v", err)
+	}
+	return out
+}
+
+// answers keeps the events a replay reproduces: what summary calls added is not among them.
+func answers(evs []llmkit.Event) []any {
+	var kept []llmkit.Event
+	for _, ev := range evs {
+		if ev.Kind == llmkit.KindCompletion && ev.Completion.Purpose != "" {
+			continue
+		}
+		kept = append(kept, ev)
+	}
+	return replayEvents(kept)
+}
+
+// SU4: a replay serves the recorded summaries without a summarizer and never as an answer.
+func TestSummarize_ReplayServesRecordedSummaries(t *testing.T) {
+	dir := t.TempDir()
+	sc := numbered()
+	hook, steer := steerAfterStep(3)
+	rec, _, err := summarizeRun(t, sc, nil, append(seamTurnsFrom(5, 8), textResp("done", 100, 10)), []RunOption{steer},
+		hook, WithObserver(JSONL(dir, func(err error) { t.Errorf("sink: %v", err) })))
+	if err != nil || rec.FinalText != "done" {
+		t.Fatalf("Run: %v, final %q", err, rec.FinalText)
+	}
+	if n := len(summaryCompactions(rec.Transcript.Record)); n < 2 {
+		t.Fatalf("recorded %d summary compactions, want at least 2 to pin the order", n)
+	}
+	calls := sc.calls()
+	want := answers(rec.Transcript.Record)
+	for name, src := range map[string]llmkit.Source{"memory": rec.Transcript, "jsonl": JSONL(dir, nil)} {
+		t.Run(name, func(t *testing.T) {
+			out, rc := replayWithSummaries(t, src, rec.RunID)
+			if err := rc.Err(); err != nil {
+				t.Fatalf("rc.Err: %v", err)
+			}
+			if out.FinalText != "done" {
+				t.Errorf("FinalText = %q, want the recorded answer, never a summary", out.FinalText)
+			}
+			if sc.calls() != calls {
+				t.Errorf("summarizer called %d more times in the replay", sc.calls()-calls)
+			}
+			for _, ev := range out.Transcript.Record {
+				if ev.Kind == llmkit.KindCompletion && ev.Completion.Purpose != "" {
+					t.Errorf("replay recorded a %q completion", ev.Completion.Purpose)
+				}
+			}
+			if got := answers(out.Transcript.Record); !reflect.DeepEqual(got, want) {
+				gj, _ := json.Marshal(got)
+				wj, _ := json.Marshal(want)
+				t.Fatalf("replayed events differ\n got: %s\nwant: %s", gj, wj)
+			}
+		})
+	}
+}
+
+// A compaction completion is never an answer, whatever its outcome or purpose value.
+func TestReplay_PurposeCompletionsAreNotServed(t *testing.T) {
+	ctx := llmkit.WithRun(context.Background(), "purposes")
+	tr := NewTranscript()
+	tr.RunID = "purposes"
+	add := func(kind llmkit.EventKind, fill func(*llmkit.Event)) {
+		ev := llmkit.NewEvent(ctx, kind)
+		fill(&ev)
+		tr.Record = append(tr.Record, ev)
+	}
+	completion := func(purpose, text, errText string) func(*llmkit.Event) {
+		return func(ev *llmkit.Event) {
+			ev.Completion = &llmkit.CompletionEvent{Purpose: purpose, Err: errText, Response: llmkit.Response{Text: text}}
+			if errText != "" {
+				ev.Completion.ErrKind = llmkit.ErrKindContextTooLong
+			}
+		}
+	}
+	add(llmkit.KindCompletion, completion("compaction", "dropped: next call fails", "overflow"))
+	add(llmkit.KindCompletion, completion("compaction", "half", ""))
+	add(llmkit.KindCompletion, completion("compaction", "SUMMARY A", ""))
+	add(llmkit.KindCompletion, completion("other", "not an answer", ""))
+	add(llmkit.KindCompletion, completion("", "answer 1", ""))
+	add(llmkit.KindCompletion, completion("compaction", "SUMMARY B", ""))
+	add(llmkit.KindCompletion, completion("compaction", "SUMMARY LOST", "overflow"))
+	add(llmkit.KindCompaction, func(ev *llmkit.Event) { ev.Compaction = &llmkit.CompactionEvent{} })
+	add(llmkit.KindCompletion, completion("", "answer 2", ""))
+	add(llmkit.KindCompletion, completion("compaction", "SUMMARY C", ""))
+	rc, err := NewReplayClient(tr, "purposes", llmkit.Capabilities{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"answer 1", "answer 2"} {
+		resp, err := rc.Complete(context.Background(), llmkit.Request{})
+		if err != nil || resp.Text != want {
+			t.Fatalf("Complete = %q, %v, want %q", resp.Text, err, want)
+		}
+	}
+	if !reflect.DeepEqual(rc.summaries, []string{"SUMMARY A", "SUMMARY C"}) {
+		t.Errorf("summaries = %q, want a pass whose last call failed to leave none", rc.summaries)
+	}
+}

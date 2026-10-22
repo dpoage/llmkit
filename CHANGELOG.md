@@ -148,6 +148,27 @@ entry below is marked.
   before. A compactor makes compaction enabled: overflow recovery runs with a
   zero `HistoryTokenBudget`, which alone gates threshold compaction. A
   compactor error ends the run, wrapped, with no retry.
+- `agent`: `SummarizingCompactor(client)` is a `Compactor` that replaces the
+  history before a cut point with one model-written summary, a user message
+  starting `[conversation summary]` and a newline. The cut is just before the
+  last user message of the caller (the task or a steering message) that has
+  an assistant turn after it, never before a prompt the Runner injected and
+  never between a tool call and its result; with no cut it stubs like the
+  default compactor. The summarizer gets a fixed prompt (goal, constraints,
+  progress, key decisions, next steps, files) and no tools; tool results are
+  cut to 2,000 characters and thinking blocks left out. An earlier summary in
+  the prefix feeds the next one, and a summary that would not shrink the
+  history is discarded. A summary request that fails with
+  `ErrContextTooLong` is split in halves and merged, at most three splits
+  deep; one message too large for the context ends the run with an error
+  wrapping `ErrContextTooLong`. The summarizer's calls are `completion`
+  events with the new `purpose` `compaction` (`CompletionEvent.Purpose`,
+  `llmkit.CompletionPurposeCompaction`), and their usage, even from a failed
+  pass, is added to `Outcome.Usage` and charged to the `BudgetPool`.
+  `CompactOutput` gains `Summary` and `Usage`, and the `compaction` event
+  gains `summary`, all omitted when empty. `ReplayClient.Compactor()` serves
+  the recorded summaries without calling a model, and a replay never serves a
+  completion with a `purpose` as an answer.
 
 ### Changed
 
