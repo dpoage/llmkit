@@ -535,6 +535,66 @@ func TestFallback_F7_NestedServedNamesTheServingMember(t *testing.T) {
 	}
 }
 
+func TestFallback_R1_ServedNeverNamesAFailedMember(t *testing.T) {
+	anon := func() llmkit.Client {
+		foreign := &fbFake{complete: func(context.Context, llmkit.Request) (llmkit.Response, error) {
+			return llmkit.Response{Text: "from b"}, nil
+		}}
+		return Wrap(foreign, Options{})
+	}
+	if got := llmkit.IdentityOf(anon()); got != (llmkit.Identity{}) {
+		t.Fatalf("foreign member must be anonymous, got %+v", got)
+	}
+	build := map[string]func(a, b llmkit.Client) llmkit.Client{
+		"flat":   func(a, b llmkit.Client) llmkit.Client { return Fallback(a, b) },
+		"nested": func(a, b llmkit.Client) llmkit.Client { return Fallback(Fallback(a, b), fbServes("c", "from c")) },
+	}
+	for name, mk := range build {
+		for _, mode := range []string{"Complete", "Stream"} {
+			t.Run(name+"/"+mode, func(t *testing.T) {
+				srv := fbHTTP(t, 529, fbAnthropicOverloaded)
+				a := fbStack(t, TypeAnthropic, "claude-a", srv.url, retry.Config{MaxAttempts: 1})
+				fb := mk(a, anon())
+				var resp llmkit.Response
+				var err error
+				if mode == "Complete" {
+					resp, err = fb.Complete(context.Background(), fbReq())
+				} else {
+					resp, err = fb.(llmkit.StreamingClient).Stream(context.Background(), fbReq(), nil)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if resp.Text != "from b" || srv.hits.Load() != 1 {
+					t.Fatalf("b must serve after one failed call on a: text %q, a hits %d", resp.Text, srv.hits.Load())
+				}
+				if resp.Served == llmkit.IdentityOf(a) {
+					t.Errorf("Served names the failed member a: %+v", resp.Served)
+				}
+				if resp.Served != (llmkit.Identity{}) {
+					t.Errorf("Served = %+v, want zero for the anonymous serving member", resp.Served)
+				}
+			})
+		}
+	}
+}
+
+func TestFallback_R1_HiddenFallbackLimitIsTheDocumentedOne(t *testing.T) {
+	srv := fbHTTP(t, 529, fbAnthropicOverloaded)
+	a := fbStack(t, TypeAnthropic, "claude-a", srv.url, retry.Config{MaxAttempts: 1})
+	foreign := &fbFake{complete: func(context.Context, llmkit.Request) (llmkit.Response, error) {
+		return llmkit.Response{Text: "from b"}, nil
+	}}
+	hidden := llmkit.Observe(Fallback(a, Wrap(foreign, Options{})), llmkit.ObserverFunc(func(context.Context, llmkit.Event) {}))
+	resp, err := Fallback(hidden, fbServes("c", "from c")).Complete(context.Background(), fbReq())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Text != "from b" || resp.Served != llmkit.IdentityOf(hidden) {
+		t.Errorf("hidden Fallback: text %q Served %+v, want the wrapper's Identity %+v", resp.Text, resp.Served, llmkit.IdentityOf(hidden))
+	}
+}
+
 func TestFallback_F8_BudgetContract(t *testing.T) {
 	stall := func(t *testing.T) *fbServer {
 		s := &fbServer{}

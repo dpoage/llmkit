@@ -13,7 +13,10 @@ import (
 // each fallback in order until one serves. It panics on a nil member.
 // Each member is usually a [New] or [Wrap] stack with its own retry and
 // Observer; Capabilities and Identity are the primary's, and a response
-// whose Served is empty is stamped with the serving member's identity.
+// whose Served is empty is stamped with the serving member's identity. A
+// member that is itself a Fallback is never stamped, so an anonymous serving
+// member leaves Served empty; behind another wrapper that hides the Fallback,
+// the wrapper's Identity (the inner primary's) is stamped instead.
 // Never [Wrap] the result, which multiplies retries and labels every call as
 // the primary: observe it with [llmkit.Observe]. See docs/providers.md.
 func Fallback(primary llmkit.Client, fallbacks ...llmkit.Client) llmkit.Client {
@@ -78,7 +81,13 @@ func fallsThrough(ctx context.Context, err error) bool {
 	return retryable && ctx.Err() == nil
 }
 
+// stamp names the serving member unless it is a Fallback: that one has
+// stamped what it can, and its own Identity is its primary's, which may not
+// have served.
 func stamp(resp llmkit.Response, m llmkit.Client) llmkit.Response {
+	if _, nested := m.(*fallbackClient); nested {
+		return resp
+	}
 	if resp.Served == (llmkit.Identity{}) {
 		resp.Served = llmkit.IdentityOf(m)
 	}

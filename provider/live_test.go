@@ -1175,7 +1175,7 @@ func TestLiveProviderFallback(t *testing.T) {
 
 	primary, err := provider.New(ctx, provider.Spec{
 		Type: provider.TypeOpenAICompatible, Model: sess.Model, BaseURL: "http://127.0.0.1:1/v1", Secret: sess.Key,
-	}, provider.Options{Retry: retry.Config{MaxAttempts: 1}})
+	}, provider.Options{Provider: "fallback-dead-primary", Retry: retry.Config{MaxAttempts: 1}})
 	if err != nil {
 		redFatal(t, sess, "primary: %v", err)
 	}
@@ -1219,7 +1219,21 @@ func TestLiveProviderFallback(t *testing.T) {
 	if strings.TrimSpace(llmkit.StripThinkBlocks(resp.Text)) == "" {
 		redFatal(t, sess, "empty streamed answer: %q", resp.Text)
 	}
-	if want := llmkit.IdentityOf(secondary); resp.Served != want || want.Model != sess.Model {
-		redFatal(t, sess, "Served = %+v, want the compat lane %+v", resp.Served, want)
+	if msg := fallbackServedProblem(resp.Served, llmkit.IdentityOf(primary), llmkit.IdentityOf(secondary), sess.Model); msg != "" {
+		redFatal(t, sess, "%s", msg)
 	}
+}
+
+// fallbackServedProblem reports why served fails to name the secondary: the
+// primary's identity differs from the secondary's, so a primary stamp is caught.
+func fallbackServedProblem(served, primary, secondary llmkit.Identity, model string) string {
+	switch {
+	case primary == secondary:
+		return fmt.Sprintf("primary and secondary share identity %+v, so Served cannot tell them apart", primary)
+	case served == primary:
+		return fmt.Sprintf("Served = %+v names the unreachable primary", served)
+	case served != secondary || secondary.Model != model:
+		return fmt.Sprintf("Served = %+v, want the compat lane %+v", served, secondary)
+	}
+	return ""
 }
