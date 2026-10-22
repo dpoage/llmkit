@@ -204,7 +204,7 @@ func summaryCut(msgs []llmkit.Message) (from, at int) {
 	for i := from; i < len(msgs); i++ {
 		m := msgs[i]
 		if m.Role == llmkit.RoleAssistant && len(pending) == 0 && i > from &&
-			!isHarnessPrompt(msgs[i-1]) && !(i == from+1 && isSummaryMessage(msgs[from])) {
+			!isHarnessPrompt(msgs[i-1]) && (i != from+1 || !isSummaryMessage(msgs[from])) {
 			at = i
 		}
 		for _, c := range m.ToolCalls {
