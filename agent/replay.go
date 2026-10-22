@@ -339,7 +339,7 @@ func (g *summaryGroup) flush(summaries []string) []string {
 // the recorded summary calls.
 func (rc *ReplayClient) Compactor() Compactor {
 	return CompactorFunc(func(ctx context.Context, in CompactInput) (CompactOutput, error) {
-		lead, at := summaryCut(in.Messages)
+		from, at := summaryCut(in.Messages)
 		if at < 0 {
 			return stubCompactor{}.Compact(ctx, in)
 		}
@@ -351,7 +351,7 @@ func (rc *ReplayClient) Compactor() Compactor {
 		text := rc.summaries[rc.nextSummary]
 		rc.nextSummary++
 		rc.mu.Unlock()
-		return summarized(in, lead, at, text), nil
+		return summarized(in, from, at, text), nil
 	})
 }
 

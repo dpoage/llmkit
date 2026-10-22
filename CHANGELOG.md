@@ -149,15 +149,17 @@ entry below is marked.
   zero `HistoryTokenBudget`, which alone gates threshold compaction. A
   compactor error ends the run, wrapped, with no retry.
 - `agent`: `SummarizingCompactor(client)` is a `Compactor` that replaces the
-  history before a cut point with one model-written summary, a user message
-  starting `[conversation summary]` and a newline. The cut is just before the
-  last user message of the caller (the task or a steering message) that has
-  an assistant turn after it, never before a prompt the Runner injected and
-  never between a tool call and its result; with no cut it stubs like the
-  default compactor. The summarizer gets a fixed prompt (goal, constraints,
-  progress, key decisions, next steps, files) and no tools; tool results are
+  history after the task, up to a cut point, with one model-written summary,
+  a user message starting `[conversation summary]` and a newline, so the
+  history reads task, summary, assistant turn. The cut is just before the
+  latest assistant message that leaves every earlier tool call with its
+  result and does not directly follow a prompt the Runner injected; a
+  steering message may be summarized, and the latest assistant turn is
+  always kept. With no cut it stubs like the default compactor. The
+  summarizer gets a fixed prompt (goal, constraints, progress, key
+  decisions, next steps, files) and no tools; tool results are
   cut to 2,000 characters and thinking blocks left out. An earlier summary in
-  the prefix feeds the next one, and a summary that would not shrink the
+  the span feeds the next one, and a summary that would not shrink the
   history is discarded. A summary request that fails with
   `ErrContextTooLong` is split in halves and merged, at most three splits
   deep; one message too large for the context ends the run with an error

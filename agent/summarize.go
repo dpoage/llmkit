@@ -45,19 +45,19 @@ What the agent should do next, in order.
 ## Files
 Files read and files modified, one path per line, with a few words on each.`
 
-// SummarizingCompactor returns a [Compactor] that replaces the history before
-// a cut point with one model-written summary. Pass the run's own client unless
-// a cheaper model will do; its calls are recorded as completion events with
-// purpose "compaction" and their usage counts against the run's budgets.
+// SummarizingCompactor returns a [Compactor] that replaces the history after
+// the task, up to a cut point, with one model-written summary. Pass the run's
+// own client unless a cheaper model will do; its calls are recorded as
+// completion events with purpose "compaction" and their usage counts against
+// the run's budgets.
 //
-// The cut is just before the last user message of the caller (the task or a
-// steering message) that leaves at least one assistant turn after it, and
-// never before a harness prompt or inside a tool call and its result. With no
+// The cut is just before the latest assistant message that follows no
+// harness prompt and leaves no earlier tool call without its result. With no
 // such cut it falls back to the default compactor. A summary that would not
 // shrink the history is discarded. The summary is the user message
 // "[conversation summary]\n" plus the summary text, and an earlier summary in
-// the prefix is fed into the next one. If the summary request overflows the
-// context, the prefix is summarized in halves and the halves merged, up to
+// the span is fed into the next one. If the summary request overflows the
+// context, the span is summarized in halves and the halves merged, up to
 // three splits deep; a single message too large for the context is an error
 // wrapping [llmkit.ErrContextTooLong]. Request policies and hooks do not fire
 // for the summary calls.
@@ -68,7 +68,7 @@ func SummarizingCompactor(client llmkit.Client) Compactor {
 type summarizer struct{ client llmkit.Client }
 
 func (s summarizer) Compact(ctx context.Context, in CompactInput) (CompactOutput, error) {
-	lead, at := summaryCut(in.Messages)
+	from, at := summaryCut(in.Messages)
 	if at < 0 {
 		return stubCompactor{}.Compact(ctx, in)
 	}
@@ -76,11 +76,11 @@ func (s summarizer) Compact(ctx context.Context, in CompactInput) (CompactOutput
 		return CompactOutput{}, errors.New("agent: summarizing compactor has no client")
 	}
 	run := summaryRun{ctx: ctx, client: s.client}
-	text, err := run.summarize(serializePrefix(in.Sent[lead:at]), 0)
+	text, err := run.summarize(serializePrefix(in.Sent[from:at]), 0)
 	if err != nil {
 		return CompactOutput{Usage: run.usage, calls: run.calls}, fmt.Errorf("agent: summarize history: %w", err)
 	}
-	out := summarized(in, lead, at, text)
+	out := summarized(in, from, at, text)
 	out.Usage, out.calls = run.usage, run.calls
 	return out, nil
 }
@@ -173,42 +173,51 @@ func splitPoint(entries []string) int {
 	return len(entries) / 2
 }
 
-// summarized builds the compaction of in that replaces in.Messages[lead:at]
+// summarized builds the compaction of in that replaces in.Messages[from:at]
 // with the summary text, or leaves the history unchanged when that would not
 // shrink it.
-func summarized(in CompactInput, lead, at int, text string) CompactOutput {
+func summarized(in CompactInput, from, at int, text string) CompactOutput {
 	msg := llmkit.TextMessage(llmkit.RoleUser, conversationSummaryHeader+text)
 	join := func(msgs []llmkit.Message) []llmkit.Message {
-		out := make([]llmkit.Message, 0, lead+1+len(msgs)-at)
-		out = append(out, msgs[:lead]...)
+		out := make([]llmkit.Message, 0, from+1+len(msgs)-at)
+		out = append(out, msgs[:from]...)
 		out = append(out, msg)
 		return append(out, msgs[at:]...)
 	}
 	if estimateTokens(join(in.Sent)) >= estimateTokens(in.Sent) {
 		return CompactOutput{Messages: in.Messages}
 	}
-	return CompactOutput{Messages: join(in.Messages), Pruned: at - lead, Summary: text}
+	return CompactOutput{Messages: join(in.Messages), Pruned: at - from, Summary: text}
 }
 
-// summaryCut returns the number of leading system messages and the index of
-// the user message the summary ends before, or -1 for no cut point.
-func summaryCut(msgs []llmkit.Message) (lead, at int) {
-	for lead < len(msgs) && msgs[lead].Role == llmkit.RoleSystem {
-		lead++
+// summaryCut returns the span msgs[from:at] the summary replaces, or at -1
+// for none: from is just past the task, at the latest assistant message that
+// follows no harness prompt and leaves no tool call before it unanswered.
+func summaryCut(msgs []llmkit.Message) (from, at int) {
+	from = 0
+	for from < len(msgs) && msgs[from].Role == llmkit.RoleSystem {
+		from++
 	}
-	lastAssistant := -1
-	for i, m := range msgs {
-		if m.Role == llmkit.RoleAssistant {
-			lastAssistant = i
+	if from == len(msgs) || msgs[from].Role != llmkit.RoleUser || isSummaryMessage(msgs[from]) {
+		return from, -1
+	}
+	from++
+	at = -1
+	pending := map[string]bool{}
+	for i := from; i < len(msgs); i++ {
+		m := msgs[i]
+		if m.Role == llmkit.RoleAssistant && len(pending) == 0 && i > from &&
+			!isHarnessPrompt(msgs[i-1]) && !(i == from+1 && isSummaryMessage(msgs[from])) {
+			at = i
+		}
+		for _, c := range m.ToolCalls {
+			pending[c.ID] = true
+		}
+		if m.Role == llmkit.RoleToolResult {
+			delete(pending, m.ToolCallID)
 		}
 	}
-	for i := lastAssistant - 1; i > lead; i-- {
-		if !isCallerUser(msgs[i]) || i-lead == 1 && isSummaryMessage(msgs[lead]) || splitsToolCall(msgs, i) {
-			continue
-		}
-		return lead, i
-	}
-	return lead, -1
+	return from, at
 }
 
 func isSummaryMessage(m llmkit.Message) bool {
@@ -217,42 +226,13 @@ func isSummaryMessage(m llmkit.Message) bool {
 
 var finalizationPromptHead = finalizationPrompt(nil)
 
-// isCallerUser reports whether m is a user turn of the caller: not a summary
-// and not a prompt the Runner injected.
-func isCallerUser(m llmkit.Message) bool {
-	if m.Role != llmkit.RoleUser || isSummaryMessage(m) {
+// isHarnessPrompt reports whether m is a user prompt the Runner injected.
+func isHarnessPrompt(m llmkit.Message) bool {
+	if m.Role != llmkit.RoleUser {
 		return false
 	}
 	text := m.Text()
-	return text != emptyTurnNudge && text != maxTokensContinuePrompt && !strings.HasPrefix(text, finalizationPromptHead)
-}
-
-// splitsToolCall reports whether a tool result at or after cut answers a call
-// issued before it.
-func splitsToolCall(msgs []llmkit.Message, cut int) bool {
-	for j := cut; j < len(msgs); j++ {
-		if msgs[j].Role != llmkit.RoleToolResult {
-			continue
-		}
-		for k := j - 1; k >= 0; k-- {
-			if msgs[k].Role == llmkit.RoleAssistant && issuesCall(msgs[k], msgs[j].ToolCallID) {
-				if k < cut {
-					return true
-				}
-				break
-			}
-		}
-	}
-	return false
-}
-
-func issuesCall(m llmkit.Message, id string) bool {
-	for _, c := range m.ToolCalls {
-		if c.ID == id {
-			return true
-		}
-	}
-	return false
+	return text == emptyTurnNudge || text == maxTokensContinuePrompt || strings.HasPrefix(text, finalizationPromptHead)
 }
 
 // serializePrefix renders msgs as the summarizer's input, one entry per message.
