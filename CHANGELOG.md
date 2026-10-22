@@ -51,6 +51,10 @@ entry below is marked.
   `Usage.Add` ORs it. Before this, such endpoints read as zero spend and
   `agent.Limits.TokenBudget` and `agent.BudgetPool` never tripped; they now
   see the estimate (llmkit-rli.1.4).
+- `llmkit`, `agent`: `llmkit.Observe` and the agent `Runner` tag a successful
+  call's `Completion` event with `Response.Served` when it is set, instead of
+  the client's `IdentityOf`. A failed call and a zero `Served` keep the
+  client's identity (llmkit-rli.1.6).
 
 ### Changed
 
