@@ -57,6 +57,8 @@
 // [Usage.CacheReadInputTokens] and [Usage.CacheCreationInputTokens] are
 // informational subsets of InputTokens, never additions to it. A caller that
 // ignores the cache fields sees exactly the pre-caching numbers.
+// [Usage.OutputTokens] includes reasoning tokens on every adapter;
+// [Usage.ReasoningTokens] is an informational subset of it.
 // [Usage.ChargeableTokens] discounts cache reads by a weight for budget math;
 // cache-creation tokens stay at full weight.
 //
@@ -582,6 +584,12 @@ type Usage struct {
 	// prompt cache this call (Anthropic bills these at 1.25x). Only Anthropic
 	// reports this; it is zero elsewhere.
 	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens,omitempty"`
+	// ReasoningTokens is the subset of OutputTokens spent on reasoning:
+	// OpenAI completion_tokens_details.reasoning_tokens, Gemini
+	// thoughtsTokenCount (which the google adapter also adds into
+	// OutputTokens). Zero where the provider reports none (Anthropic).
+	// Never add it to OutputTokens or ChargeableTokens.
+	ReasoningTokens int64 `json:"reasoning_tokens,omitempty"`
 }
 
 // ChargeableTokens returns the budget-relevant token count for this usage,
@@ -593,6 +601,8 @@ type Usage struct {
 //
 // Cache CREATION tokens are left at full weight (Anthropic bills them at
 // 1.25x; treating them as cheap would understate cost).
+//
+// ReasoningTokens is already inside OutputTokens and is not counted again.
 func (u Usage) ChargeableTokens(cacheReadWeight float64) int64 {
 	uncached := u.InputTokens - u.CacheReadInputTokens
 	if uncached < 0 {
@@ -602,7 +612,7 @@ func (u Usage) ChargeableTokens(cacheReadWeight float64) int64 {
 	return weighted + u.OutputTokens
 }
 
-// Add returns the field-wise sum of u and v across all four fields —
+// Add returns the field-wise sum of u and v across every Usage field —
 // the one summing rule every usage fold in this repository uses (the
 // agent Runner's run total, its JSON-repair fold, and the livetest
 // Tally). It does not mutate u or v.
@@ -612,6 +622,7 @@ func (u Usage) Add(v Usage) Usage {
 		OutputTokens:             u.OutputTokens + v.OutputTokens,
 		CacheReadInputTokens:     u.CacheReadInputTokens + v.CacheReadInputTokens,
 		CacheCreationInputTokens: u.CacheCreationInputTokens + v.CacheCreationInputTokens,
+		ReasoningTokens:          u.ReasoningTokens + v.ReasoningTokens,
 	}
 }
 

@@ -54,6 +54,11 @@ and any OpenAI-compatible endpoint.
   probe, and an `errors.Is` check read the same for every backend.
 - **What it costs:** a vendor-specific parameter waits for a normalized
   field, or travels as an adapter-specific path instead.
+- **Usage means the same everywhere:** `OutputTokens` includes reasoning on
+  every adapter, and `ReasoningTokens` is an informational subset of it,
+  never added to it or to `ChargeableTokens`. Gemini reports thoughts
+  outside `candidatesTokenCount`, so the Google adapter sums them in;
+  that meaning change is `EventSchemaVersion` 3.
 
 ## Adapters are internal
 

@@ -18,10 +18,12 @@ entry below is marked.
   the idle timeout, or as a terminal one once a delta has reached the caller.
   Zero (the default) disables it and `Complete` ignores it. Models that reason
   before answering stream nothing meanwhile, so a short value misfires on them.
+- `llmkit`: `Usage.ReasoningTokens`, the reasoning tokens inside `OutputTokens`: OpenAI's `completion_tokens_details.reasoning_tokens` (`Complete` and `Stream`, with or without a callback) and Gemini's `thoughtsTokenCount`. Anthropic reports no count, so it stays 0. It is an informational subset: `ChargeableTokens` is unchanged and callers must not add it to `OutputTokens`. `Usage.Add` sums it.
 
 ### Changed
 
 - `llmkit`: the ceiling refusal text now says the adapter "does not map" the field instead of claiming it has no wire field.
+- **Breaking:** `provider`: Google `Usage.OutputTokens` is now `candidatesTokenCount + thoughtsTokenCount`; it was `candidatesTokenCount` alone, which left Gemini's billed thinking tokens out of the count. `agent.Limits.TokenBudget` and any caller that sums `OutputTokens` now see thinking runs on Gemini 2.5 and 3 models at their real size and trip sooner than before. Runs with no thinking are unchanged. `EventSchemaVersion` is now 3 to mark the meaning change; recorded v2 events still load.
 
 ### Fixed
 

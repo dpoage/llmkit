@@ -452,6 +452,7 @@ func (o *openaiAdapter) toResponse(cc *openai.ChatCompletion, rs reasoning) llmk
 		InputTokens:          cc.Usage.PromptTokens,
 		OutputTokens:         cc.Usage.CompletionTokens,
 		CacheReadInputTokens: cc.Usage.PromptTokensDetails.CachedTokens,
+		ReasoningTokens:      cc.Usage.CompletionTokensDetails.ReasoningTokens,
 	}
 	return resp
 }

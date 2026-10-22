@@ -270,7 +270,7 @@ func TestEventGoldenJSON(t *testing.T) {
   "run_id": "1758366600000-deadbeef00112233",
   "parent_run_id": "1758366500000-cafebabefeedface",
   "time": "2026-09-20T12:30:00Z",
-  "schema_version": 2,
+  "schema_version": 3,
   "start": {
     "task": "summarize the ledger",
     "tools": [
@@ -286,7 +286,7 @@ func TestEventGoldenJSON(t *testing.T) {
   "step": 2,
   "time": "2026-09-20T12:30:00Z",
   "duration": 1500000000,
-  "schema_version": 2,
+  "schema_version": 3,
   "completion": {
     "request": {
       "system": "sys",
@@ -369,7 +369,7 @@ func TestEventGoldenJSON(t *testing.T) {
   "span_id": "1758366600001-0123456789abcdef",
   "time": "2026-09-20T12:30:00Z",
   "duration": 250000000,
-  "schema_version": 2,
+  "schema_version": 3,
   "attempt": {
     "attempt": 1,
     "request": {
@@ -401,7 +401,7 @@ func TestEventGoldenJSON(t *testing.T) {
   "step": 3,
   "time": "2026-09-20T12:30:00Z",
   "duration": 200000000,
-  "schema_version": 2,
+  "schema_version": 3,
   "tool_run": {
     "call": {
       "id": "t1",
@@ -416,7 +416,7 @@ func TestEventGoldenJSON(t *testing.T) {
   "run_id": "1758366600000-deadbeef00112233",
   "step": 3,
   "time": "2026-09-20T12:30:00Z",
-  "schema_version": 2,
+  "schema_version": 3,
   "tool_run": {
     "call": {
       "id": "t2",
@@ -433,7 +433,7 @@ func TestEventGoldenJSON(t *testing.T) {
   "step": 4,
   "time": "2026-09-20T12:30:00Z",
   "duration": 5000000,
-  "schema_version": 2,
+  "schema_version": 3,
   "compaction": {
     "before_tokens": 9000,
     "after_tokens": 4000,
@@ -445,7 +445,7 @@ func TestEventGoldenJSON(t *testing.T) {
   "run_id": "1758366600000-deadbeef00112233",
   "step": 5,
   "time": "2026-09-20T12:30:00Z",
-  "schema_version": 2,
+  "schema_version": 3,
   "steer": {
     "message": {
       "role": "user",
@@ -466,7 +466,7 @@ func TestEventGoldenJSON(t *testing.T) {
   "step": 8,
   "time": "2026-09-20T12:30:00Z",
   "duration": 60000000000,
-  "schema_version": 2,
+  "schema_version": 3,
   "finalize": {
     "truncation_reason": "max_steps",
     "finalized": true,
@@ -484,7 +484,7 @@ func TestEventGoldenJSON(t *testing.T) {
   "run_id": "1758366600000-deadbeef00112233",
   "time": "2026-09-20T12:30:00Z",
   "duration": 800000000,
-  "schema_version": 2,
+  "schema_version": 3,
   "decision": {
     "backend": "typesafe",
     "model": "jev-1",
@@ -572,7 +572,7 @@ func TestEventGoldenJSON(t *testing.T) {
   "run_id": "1758366600000-deadbeef00112233",
   "time": "2026-09-20T12:30:00Z",
   "duration": 120000000,
-  "schema_version": 2,
+  "schema_version": 3,
   "embed": {
     "model": "text-embed-3",
     "inputs": 4,
@@ -584,7 +584,7 @@ func TestEventGoldenJSON(t *testing.T) {
   "run_id": "1758366600000-deadbeef00112233",
   "time": "2026-09-20T12:30:00Z",
   "duration": 2000000000,
-  "schema_version": 2,
+  "schema_version": 3,
   "exec": {
     "backend": "docker",
     "command": [
@@ -656,7 +656,7 @@ func TestSchemaVersionOnEveryEncodedEvent(t *testing.T) {
 			if err != nil {
 				t.Fatalf("marshal: %v", err)
 			}
-			if !strings.Contains(string(data), `"schema_version":2`) {
+			if !strings.Contains(string(data), `"schema_version":3`) {
 				t.Fatalf("schema_version missing from %s event: %s", tc.name, data)
 			}
 			var back Event

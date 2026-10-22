@@ -141,7 +141,8 @@
       "input_tokens": 480,
       "output_tokens": 74,
       "cache_read_input_tokens": 384,
-      "cache_creation_input_tokens": 0
+      "cache_creation_input_tokens": 0,
+      "reasoning_tokens": 26
     }
   }
 }
