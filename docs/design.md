@@ -54,16 +54,20 @@ and any OpenAI-compatible endpoint.
   probe, and an `errors.Is` check read the same for every backend.
 - **What it costs:** a vendor-specific parameter waits for a normalized
   field, or travels as an adapter-specific path instead.
-- **Usage means the same everywhere:** `OutputTokens` includes reasoning on
-  every adapter, and `ReasoningTokens` is an informational subset of it,
-  never added to it or to `ChargeableTokens`. Gemini reports thoughts
-  outside `candidatesTokenCount`, so the Google adapter sums them in;
-  that meaning change is `EventSchemaVersion` 3.
+- **Usage means the same everywhere:** `OutputTokens` includes reasoning,
+  and `ReasoningTokens` is an informational subset of it, never added to it
+  or to `ChargeableTokens`. Gemini reports thoughts outside
+  `candidatesTokenCount`, so the Google adapter sums them in; that meaning
+  change is `EventSchemaVersion` 3. An xAI-style endpoint that counts
+  reasoning outside `completion_tokens` and omits `total_tokens` keeps its
+  reasoning out of `OutputTokens`, so `ReasoningTokens` can exceed it.
 - **Missing usage is estimated, not zero:** an endpoint that reports no
   usage object would read as zero spend and never trip a token budget. The
-  adapter instead sets `Usage.Estimated` and fills bytes/4 estimates of the
-  request body and of the response text and tool calls, so every existing
-  budget fold sees them; `Usage.Add` ORs the flag.
+  OpenAI, OpenAI-compatible, and Google adapters instead set
+  `Usage.Estimated` and fill bytes/4 estimates of the request body and of
+  the response text, tool calls, and thinking blocks, so every existing
+  budget fold sees them; `Usage.Add` ORs the flag. The Anthropic adapter
+  never sets the flag.
 
 ## Adapters are internal
 
@@ -130,10 +134,10 @@ adapter fabricates a context window; an unknown model reports `0`.
 `internal/adapter.Prepare` is shared by all three vendor adapters. It
 validates the messages, defaults `MaxTokens`, decodes tool and response
 schemas, and applies the gate of each wire-gated `Capabilities` field: a
-silent drop, or the `ToolChoice` refusal. An adapter maps a `Prepared`
-value onto its SDK types without re-applying those rules. Each adapter's
-`New` pins a ceiling naming the
-wire-gated fields (`StructuredOutput`, `Thinking`, `ToolChoice`,
+silent drop, or a refusal (`ToolChoice`, an invalid `ThinkingConfig`). An
+adapter maps a `Prepared` value onto its SDK types without re-applying
+those rules. Each adapter's `New` pins a ceiling naming the wire-gated
+fields (`StructuredOutput`, `Thinking`, `ReasoningEffort`, `ToolChoice`,
 `StopSequences`, `TopP`, `TopK`, `Seed`) it can put on the wire;
 `internal/adapter.ApplyOverride` refuses a `Spec.Capabilities` override
 that reports a field above the ceiling, so the profile can never claim a

@@ -281,11 +281,9 @@ func applyOpenAIToolChoice(params *openai.ChatCompletionNewParams, tc llmkit.Too
 // messages. Content blocks map in order: text → text part, image →
 // image_url part, document → file part; assistant and tool-result messages
 // carry their concatenated text. An assistant BlockThinking tagged with
-// thinkingTag re-emits its reasoning keys on that message; other thinking
-// blocks are dropped. Every role and block-kind rule (adapter.Prepare)
-// already holds — this is a pure mapping except for the vendor-specific
-// constraints the file part (no URL source for documents) and the own-tag
-// thinking block (Raw must carry reasoning) impose.
+// thinkingTag re-emits its Raw keys on that message (refused when Raw holds
+// none); other thinking blocks are dropped. Prepare's role and block rules
+// already hold; the file part also refuses URL-sourced documents.
 func toOpenAIMessages(provider, thinkingTag string, msgs []llmkit.Message) ([]openai.ChatCompletionMessageParamUnion, error) {
 	out := make([]openai.ChatCompletionMessageParamUnion, 0, len(msgs))
 	for _, m := range msgs {
@@ -408,6 +406,8 @@ func openAIUserParts(provider string, m llmkit.Message) ([]openai.ChatCompletion
 	return parts, nil
 }
 
+// toResponse normalizes cc. rs is choice 0's reasoning payload; usageReported
+// is whether the wire carried a usage object (false: EstimateUsage fills it).
 func (o *openaiAdapter) toResponse(cc *openai.ChatCompletion, rs reasoning, wire *adapter.Wire, usageReported bool) llmkit.Response {
 	var resp llmkit.Response
 	if len(cc.Choices) > 0 {
@@ -446,7 +446,8 @@ func (o *openaiAdapter) toResponse(cc *openai.ChatCompletion, rs reasoning, wire
 		resp.Usage = adapter.EstimateUsage(wire, resp)
 		return resp
 	}
-	// xAI counts reasoning outside completion_tokens (OpenAI counts it inside); total_tokens tells which.
+	// xAI counts reasoning outside completion_tokens, OpenAI inside. Fold it
+	// in only when total_tokens proves the xAI shape; with no total, never.
 	out := cc.Usage.CompletionTokens
 	if r := cc.Usage.CompletionTokensDetails.ReasoningTokens; r > 0 && cc.Usage.TotalTokens == cc.Usage.PromptTokens+out+r {
 		out += r

@@ -63,12 +63,13 @@ type Schema struct {
 }
 
 // Prepare validates req.Messages, defaults MaxTokens, decodes tool and
-// response schemas, and gates req on caps: it drops TopP, TopK, Seed,
-// StopSequences, and Thinking silently when caps reports that field false,
-// drops ResponseSchema when caps.StructuredOutput is false, and refuses an
-// explicit ToolChoice mode other than auto pre-wire when caps.ToolChoice
-// is false. Every refusal is an error wrapping
-// llmkit.ErrInvalidRequest with Provider = provider and StatusCode 0,
+// response schemas, and gates req on caps: it drops TopP, TopK, Seed, and
+// StopSequences silently when caps reports that field false, gates Thinking
+// per field (see prepareThinking), drops ResponseSchema when
+// caps.StructuredOutput is false, and refuses an explicit ToolChoice mode
+// other than auto pre-wire when caps.ToolChoice is false. Every refusal is
+// an error wrapping llmkit.ErrInvalidRequest with Provider = provider and
+// StatusCode 0,
 // returned before any wire call. A tool Parameters or ResponseSchema that
 // is zero-length or the JSON literal null counts as "not supplied" (Schema
 // nil / ResponseSchema nil); any other non-object JSON (array, string,
@@ -202,12 +203,8 @@ func gateToolChoice(provider string, tc llmkit.ToolChoice, supported bool) error
 	return nil
 }
 
-// prepareThinking validates and gates Request.Thinking. An Effort outside
-// the closed set is refused on every profile. With neither caps.Thinking nor
-// caps.ReasoningEffort the config is dropped silently; otherwise an invalid
-// one (negative budget, or no budget and no effort) is refused. The result
-// keeps BudgetTokens only if caps.Thinking and Effort only if
-// caps.ReasoningEffort, and is nil when neither survives.
+// prepareThinking refuses a bad Effort always and an invalid config when
+// either capability is true, and keeps each field only under its capability.
 func prepareThinking(provider string, tc *llmkit.ThinkingConfig, caps llmkit.Capabilities) (*llmkit.ThinkingConfig, error) {
 	if tc == nil {
 		return nil, nil
@@ -221,7 +218,7 @@ func prepareThinking(provider string, tc *llmkit.ThinkingConfig, caps llmkit.Cap
 		return nil, nil
 	}
 	if tc.BudgetTokens < 0 || (tc.BudgetTokens == 0 && tc.Effort == "") {
-		return nil, Refuse(provider, "Thinking.BudgetTokens must be positive unless Thinking.Effort is set", nil)
+		return nil, Refuse(provider, "Thinking.BudgetTokens must be positive, or zero with Thinking.Effort set", nil)
 	}
 	var out llmkit.ThinkingConfig
 	if caps.Thinking {

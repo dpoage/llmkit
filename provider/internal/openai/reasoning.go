@@ -36,7 +36,6 @@ type reasoning struct {
 	Details json.RawMessage `json:"reasoning_details,omitempty"`
 }
 
-// block returns the response's BlockThinking, or false when the payload is empty.
 func (r reasoning) block(tag string) (llmkit.Block, bool) {
 	if r.Content == "" && len(r.Details) == 0 {
 		return llmkit.Block{}, false
@@ -89,7 +88,6 @@ func canonicalDetails(elems []any) json.RawMessage {
 	return b
 }
 
-// reasoningFromMessage reads a non-streamed message's reasoning extra fields.
 func reasoningFromMessage(extra map[string]respjson.Field) reasoning {
 	return reasoning{
 		Content: extraString(extra, keyReasoningContent),
@@ -180,7 +178,6 @@ func (m *detailsMerger) merged() []any {
 	return out
 }
 
-// fieldKey renders an index/type value as a comparable key.
 func fieldKey(v any) string {
 	switch x := v.(type) {
 	case nil:

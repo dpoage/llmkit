@@ -5,10 +5,11 @@ import "github.com/dpoage/llmkit"
 // bytesPerToken is the estimate's heuristic: one token per four bytes.
 const bytesPerToken = 4
 
-// EstimateUsage is the Usage for a response whose endpoint reported none (Estimated is true).
-// InputTokens is ceil(request body bytes w saw sent / 4). ReasoningTokens is ceil(bytes of every
-// BlockThinking block's Text, or its Raw when Text is empty, / 4); OutputTokens is ceil(bytes of
-// resp.Text plus every tool call's name and arguments / 4) + ReasoningTokens. Other counts are 0.
+// EstimateUsage returns the Usage for a response whose endpoint reported
+// none, with Estimated true. Each count is ceil(bytes/4): InputTokens over
+// the request body w saw sent; ReasoningTokens over every BlockThinking
+// block's Text (its Raw when Text is empty); OutputTokens over resp.Text
+// and every tool call's name and arguments, plus ReasoningTokens.
 func EstimateUsage(w *Wire, resp llmkit.Response) llmkit.Usage {
 	out := int64(len(resp.Text))
 	for _, tc := range resp.ToolCalls {
