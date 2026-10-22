@@ -133,6 +133,9 @@ func toolRunEvent(ctx context.Context, call llmkit.ToolCall, res toolResult, ste
 		tre.Result = res.result
 		tre.Content = res.eventContent()
 		tre.Degraded = res.degraded
+		tre.OriginalBytes = res.originalBytes
+		tre.SpillRef = res.spillRef
+		tre.SpillError = res.spillErr
 		tre.IsError = res.isErr
 	}
 	ev.ToolRun = tre

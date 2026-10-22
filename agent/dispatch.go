@@ -206,6 +206,11 @@ func (r *Runner) runTool(ctx context.Context, call llmkit.ToolCall, step int) to
 	}
 	res := r.placeToolBlocks(out)
 	res.degraded += slot.priorDegraded
+	if rec := slot.recorded; rec != nil {
+		res.originalBytes, res.spillRef, res.spillErr = rec.originalBytes, rec.spillRef, rec.spillErr
+	} else {
+		res = r.limitToolOutput(ctx, call, res)
+	}
 	r.fireToolEnd(ctx, step, call, res, duration)
 	return res
 }
@@ -322,7 +327,11 @@ type toolResult struct {
 	// and for a tool that returned no blocks: the message then carries result.
 	content []llmkit.Block
 	// degraded counts omission markers in content, a replayed record's included.
-	degraded       int
+	degraded int
+	// originalBytes, spillRef and spillErr describe an applied output limit.
+	originalBytes  int
+	spillRef       string
+	spillErr       string
 	isErr          bool
 	denied         bool
 	denyReason     string
@@ -342,10 +351,19 @@ func (res toolResult) eventContent() []llmkit.Block {
 type dispatchKey struct{}
 
 // dispatchSlot is shared by [Runner.runTool] and the Tool.Run it invokes.
-// priorDegraded is set by a replay tool to its record's Degraded.
+// priorDegraded and recorded are set by a replay tool from its record.
 type dispatchSlot struct {
 	id            string
 	priorDegraded int
+	recorded      *recordedLimit
+}
+
+// recordedLimit is the output-limit outcome of a recorded result; a result
+// served with one is never limited again.
+type recordedLimit struct {
+	originalBytes int
+	spillRef      string
+	spillErr      string
 }
 
 func withDispatch(ctx context.Context, id string) (context.Context, *dispatchSlot) {
@@ -370,6 +388,20 @@ func reportPriorDegraded(ctx context.Context, n int) {
 	if slot, ok := ctx.Value(dispatchKey{}).(*dispatchSlot); ok {
 		slot.priorDegraded = n
 	}
+}
+
+// reportRecordedLimit marks that Tool.Run's blocks are a recorded result
+// already limited, so the Runner's output limit must not touch them.
+func reportRecordedLimit(ctx context.Context, rec recordedLimit) {
+	if slot, ok := ctx.Value(dispatchKey{}).(*dispatchSlot); ok {
+		slot.recorded = &rec
+	}
+}
+
+// setText replaces the result with one text block s.
+func (res *toolResult) setText(s string) {
+	res.result = s
+	res.content = []llmkit.Block{llmkit.Text(s)}
 }
 
 // deniedResult renders a [ToolPolicy] refusal: the model-visible denial

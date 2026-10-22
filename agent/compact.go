@@ -87,8 +87,9 @@ func isCompactStub(content string) bool {
 // the tool name and original byte size so the model retains a breadcrumb (it can
 // re-read the file if it genuinely needs the bytes back) without paying to carry
 // the full dump every subsequent turn. errored results are marked so the model
-// still knows the call had failed.
-func compactStub(toolName string, origBytes int, isErr bool) string {
+// still knows the call had failed. A non-empty spillRef names where the full
+// output was spilled, so the stub keeps the way back to it.
+func compactStub(toolName string, origBytes int, isErr bool, spillRef string) string {
 	kind := "tool result"
 	if isErr {
 		kind = "errored tool result"
@@ -96,6 +97,9 @@ func compactStub(toolName string, origBytes int, isErr bool) string {
 	name := toolName
 	if name == "" {
 		name = "tool"
+	}
+	if spillRef != "" {
+		return fmt.Sprintf("[%s pruned to save context: %s, %d bytes; full output spilled: %s]", kind, name, origBytes, spillRef)
 	}
 	return fmt.Sprintf("[%s pruned to save context: %s, %d bytes]", kind, name, origBytes)
 }
@@ -158,7 +162,11 @@ func compactHistory(msgs []llmkit.Message, recentK int, toolNameFor map[string]s
 		if isCompactStub(content) {
 			continue
 		}
-		stub := compactStub(toolNameFor[m.ToolCallID], len(content), m.IsError)
+		origBytes, spillRef := len(content), ""
+		if ref, size, ok := parseSpillMarker(content); ok {
+			origBytes, spillRef = size, ref
+		}
+		stub := compactStub(toolNameFor[m.ToolCallID], origBytes, m.IsError, spillRef)
 		// Skip results already smaller than their stub: stubbing would grow them.
 		if len(content) <= len(stub) {
 			continue
