@@ -411,14 +411,27 @@ type ToolCall struct {
 	Arguments json.RawMessage `json:"arguments,omitempty"`
 }
 
-// ThinkingConfig requests provider reasoning (Anthropic extended thinking,
-// Gemini thinkingConfig). Nil on Request.Thinking leaves reasoning off. On
-// providers that honor thinking, BudgetTokens must be positive and their
-// adapters reject anything else with an error wrapping ErrInvalidRequest;
-// providers without reasoning support (Capabilities.Thinking = false, e.g.
-// OpenAI adapters) drop the whole field and never see the budget.
+// ReasoningEffort is a coarse reasoning dial. The set is closed:
+// [EffortLow], [EffortMedium], [EffortHigh].
+type ReasoningEffort string
+
+const (
+	EffortLow    ReasoningEffort = "low"
+	EffortMedium ReasoningEffort = "medium"
+	EffortHigh   ReasoningEffort = "high"
+)
+
+// ThinkingConfig requests provider reasoning via a token budget
+// (Capabilities.Thinking) and/or an effort level (Capabilities.ReasoningEffort).
+// Valid iff BudgetTokens > 0 or Effort is set; an Effort outside the closed set
+// is refused on every adapter with an error wrapping ErrInvalidRequest, and an
+// invalid config is refused wherever either capability is true. Each field the
+// effective profile reports false is dropped silently; when nothing survives no
+// thinking config goes on the wire. When both survive and the vendor takes one
+// (Gemini 3), Effort is sent and BudgetTokens dropped.
 type ThinkingConfig struct {
-	BudgetTokens int `json:"budget_tokens,omitempty"`
+	BudgetTokens int             `json:"budget_tokens,omitempty"`
+	Effort       ReasoningEffort `json:"effort,omitempty"`
 }
 
 // ToolChoiceMode enumerates how strongly the model is steered toward tool
@@ -654,13 +667,14 @@ func (r Response) Message() Message {
 //   - Dropped silently when false: the adapter omits the request feature
 //     from the wire (no error). Check the field before relying on the
 //     feature. Each provider type has a ceiling naming the wire-gated
-//     fields (StructuredOutput, Thinking, ToolChoice, StopSequences, TopP,
-//     TopK, Seed) it can actually put on the wire; an effective profile
-//     that reports true for a field above the ceiling is rejected at
-//     construction by provider.New with an error wrapping
+//     fields (StructuredOutput, Thinking, ReasoningEffort, ToolChoice,
+//     StopSequences, TopP, TopK, Seed) it can actually put on the wire; an
+//     effective profile that reports true for a field above the ceiling is
+//     rejected at construction by provider.New with an error wrapping
 //     ErrInvalidRequest, before any network call. Anthropic's ceiling
-//     excludes Seed; OpenAI and openai-compatible's ceiling excludes
-//     Thinking and TopK; Google's ceiling has no excluded field.
+//     excludes Seed and ReasoningEffort; OpenAI and openai-compatible's
+//     ceiling excludes Thinking and TopK; Google's ceiling has no excluded
+//     field.
 //   - Refused pre-wire: the adapter rejects the request with an error
 //     wrapping ErrInvalidRequest before any wire call.
 //   - Decorator: provider.New installs a wrapping Client whose behavior
@@ -693,6 +707,10 @@ type Capabilities struct {
 	// and no BlockThinking blocks are returned. When true, the adapter
 	// forwards the reasoning budget and thinking blocks round-trip.
 	Thinking bool
+	// Dropped silently when false: ThinkingConfig.Effort is omitted from the
+	// wire. When true, the adapter maps it to the vendor's effort parameter
+	// (OpenAI reasoning_effort, Gemini 3 thinkingLevel).
+	ReasoningEffort bool
 	// Refused pre-wire: any explicit Request.ToolChoice mode other than auto
 	// makes the adapter return an error wrapping ErrInvalidRequest before
 	// the wire call (auto stays allowed — dropping an explicit "none" would
