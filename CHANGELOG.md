@@ -11,6 +11,13 @@ entry below is marked.
 ### Added
 
 - `llmkit`: `ThinkingConfig.Effort` (`ReasoningEffort`: `EffortLow`, `EffortMedium`, `EffortHigh`) and `Capabilities.ReasoningEffort`. OpenAI sends `reasoning_effort` and Google sends `thinkingLevel`; the flag is true for OpenAI `gpt-5`, `o1`, `o3` and `o4-mini` entries and Gemini 3 models, false elsewhere. A `ThinkingConfig` is valid with a positive `BudgetTokens` or an `Effort`; an `Effort` outside the set is refused pre-wire on every adapter. Each field the profile reports false is dropped silently, and on Gemini 3 `Effort` wins over `BudgetTokens`. The Anthropic ceiling excludes `ReasoningEffort`.
+- `provider`: `Options.StreamIdleTimeout` fails a `Stream` attempt that waits
+  that long for its next delta, measured from the attempt's start and from each
+  delta callback's return. SSE keepalives and chunks with no delta do not reset
+  it. The attempt fails as a retryable `*llmkit.APIError` (`ErrServer`) naming
+  the idle timeout, or as a terminal one once a delta has reached the caller.
+  Zero (the default) disables it and `Complete` ignores it. Models that reason
+  before answering stream nothing meanwhile, so a short value misfires on them.
 
 ### Changed
 
