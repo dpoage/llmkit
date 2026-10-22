@@ -79,6 +79,11 @@ var ErrReplayDiverged = errors.New("agent: replay diverged")
 // Tools other than [ReplayClient.Tools] execute live, and their results are
 // never compared with the record.
 //
+// A recorded result with Content is served block for block; one without it
+// serves its Result as one text block. The replaying Runner places those
+// blocks under this client's profile: media it cannot carry degrades again,
+// and that count is added to the recorded Degraded.
+//
 // Replaying under a [ToolPolicy] that rewrote arguments in the recorded run
 // works only if each rewrite produces valid JSON and is deterministic: the
 // replay policy must hand each tool arguments that match the record's
@@ -274,10 +279,13 @@ func matchToolIDs(step int, want, got []string) error {
 
 // replayedToolCall is one recorded, served tool call, with its step and error mark.
 type replayedToolCall struct {
-	call    llmkit.ToolCall
-	result  string
-	isError bool
-	step    int
+	call     llmkit.ToolCall
+	result   string
+	content  []llmkit.Block // the recorded Content; nil for a record without it
+	degraded int            // the recorded Degraded
+	limit    recordedLimit  // the recorded output-limit outcome
+	isError  bool
+	step     int
 	// args is what Tool.Run received in the recorded run: the record's
 	// DispatchedArguments when a policy rewrote them, else the model's
 	// Call.Arguments. nullClears marks a rewrite recorded as the JSON literal
@@ -396,11 +404,14 @@ func (ts *replayToolSet) add(step, resp int, tre llmkit.ToolRunEvent, unregister
 		return nil
 	}
 	rec := replayedToolCall{
-		call:    tre.Call,
-		result:  tre.Result,
-		isError: tre.IsError,
-		step:    step,
-		args:    tre.Call.Arguments,
+		call:     tre.Call,
+		result:   tre.Result,
+		content:  tre.Content,
+		degraded: tre.Degraded,
+		limit:    recordedLimit{originalBytes: tre.OriginalBytes, spillRef: tre.SpillRef, spillErr: tre.SpillError},
+		isError:  tre.IsError,
+		step:     step,
+		args:     tre.Call.Arguments,
 	}
 	if len(tre.DispatchedArguments) > 0 {
 		rec.args = tre.DispatchedArguments
@@ -608,18 +619,19 @@ func (t replayTool) Def() llmkit.ToolDef {
 // step matching both name and arguments. No match records the client's
 // divergence: the returned error wraps [ErrReplayDiverged] naming the
 // recorded step, and the harness renders it as this call's ERROR result.
-func (t replayTool) Run(ctx context.Context, args json.RawMessage) (string, error) {
-	return t.rc.serveCall(t.name, callIDFrom(ctx), args)
+func (t replayTool) Run(ctx context.Context, args json.RawMessage) ([]llmkit.Block, error) {
+	return t.rc.serveCall(ctx, t.name, args)
 }
 
 // serveCall serves and consumes one recorded call, or records the
-// divergence. id is the dispatched call's ID, or "" for the (name, args)
-// fallback. An ID is only looked up in the recorded tool turn the replay is
-// in (the group whose response is the last one served), because providers
-// may repeat call IDs from turn to turn. Among the turn's unconsumed calls
-// with that ID, the first whose name and recorded Tool.Run arguments fit is
-// served; when none fits, the first is the one reported as diverged.
-func (rc *ReplayClient) serveCall(name, id string, args json.RawMessage) (string, error) {
+// divergence. The dispatched call's ID comes from ctx; "" selects the (name,
+// args) fallback. An ID is only looked up in the recorded tool turn the
+// replay is in (the group whose response is the last one served), because
+// providers may repeat call IDs from turn to turn. Among the turn's unconsumed
+// calls with that ID, the first whose name and recorded Tool.Run arguments fit
+// is served; when none fits, the first is the one reported as diverged.
+func (rc *ReplayClient) serveCall(ctx context.Context, name string, args json.RawMessage) ([]llmkit.Block, error) {
+	id := callIDFrom(ctx)
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 	set := rc.set
@@ -656,12 +668,12 @@ func (rc *ReplayClient) serveCall(name, id string, args json.RawMessage) (string
 				err := fmt.Errorf("%w at step %d: call %q was recorded for tool %q, replayed for tool %q",
 					ErrReplayDiverged, rec.step, id, rec.call.Name, name)
 				rc.recordDiverged(err)
-				return "", err
+				return nil, err
 			case !rec.ranWith(args):
-				return "", rc.argsDiverged(rec, name, args)
+				return nil, rc.argsDiverged(rec, name, args)
 			}
 			rec.used = true
-			return serveRecorded(rec)
+			return serveRecorded(ctx, rec)
 		}
 		// No match in this step. Unconsumed calls here mean the replay
 		// diverged; a fully consumed step advances to the next recorded
@@ -674,7 +686,7 @@ func (rc *ReplayClient) serveCall(name, id string, args json.RawMessage) (string
 			}
 		}
 		if unconsumed >= 0 {
-			return "", rc.argsDiverged(&g.calls[unconsumed], name, args)
+			return nil, rc.argsDiverged(&g.calls[unconsumed], name, args)
 		}
 		set.gi++
 	}
@@ -684,7 +696,7 @@ func (rc *ReplayClient) serveCall(name, id string, args json.RawMessage) (string
 	}
 	err := fmt.Errorf("%w at step %d: extra tool call to %q with arguments %s; every recorded call is served", ErrReplayDiverged, lastStep, name, argsString(args))
 	rc.recordDiverged(err)
-	return "", err
+	return nil, err
 }
 
 // argsDiverged records, and returns, the divergence where a tool was called
@@ -700,13 +712,21 @@ func (rc *ReplayClient) argsDiverged(rec *replayedToolCall, name string, args js
 // serveRecorded renders one recorded call's outcome the way the original run
 // fed it to the model: an error strips the "ERROR: " prefix so the Runner's
 // renderer re-adds it (the fed-back result is byte-identical and the history
-// keeps the is_error mark); a success returns the recorded result verbatim.
+// keeps the is_error mark); a success reports the recorded Degraded to the
+// dispatching Runner and returns the recorded Content verbatim, or the
+// recorded Result as one text block when the record has no Content. The
+// Runner's output limit is skipped for it: the record is already limited.
 // Denied calls never reach here: they are not among the served calls.
-func serveRecorded(rec *replayedToolCall) (string, error) {
+func serveRecorded(ctx context.Context, rec *replayedToolCall) ([]llmkit.Block, error) {
 	if rec.isError {
-		return "", errors.New(strings.TrimPrefix(rec.result, "ERROR: "))
+		return nil, errors.New(strings.TrimPrefix(rec.result, "ERROR: "))
 	}
-	return rec.result, nil
+	reportPriorDegraded(ctx, rec.degraded)
+	reportRecordedLimit(ctx, rec.limit)
+	if rec.content != nil {
+		return rec.content, nil
+	}
+	return []llmkit.Block{llmkit.Text(rec.result)}, nil
 }
 
 func argsString(args json.RawMessage) string {

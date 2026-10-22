@@ -75,7 +75,11 @@ Use `ToolHealthError` when the failure is infrastructure — a missing container
 
 Tools run one call at a time by default. `WithParallelTools` runs a turn's calls concurrently. Concurrent `Run` calls on one Runner are always allowed. A `Tool.Run` implementation must therefore be safe for concurrent calls.
 
-When to use: give the model capabilities it cannot have on its own — read files, call APIs, run queries. Implement the two-method `Tool` interface when the schema is not a plain struct; use `Func` otherwise. Decode arguments inside a hand-written `Tool.Run` with `agent.UnmarshalArgs`.
+When to use: give the model capabilities it cannot have on its own — read files, call APIs, run queries. Implement the two-method `Tool` interface when the schema is not a plain struct; use `Func` otherwise. Decode arguments inside a hand-written `Tool.Run` with `agent.UnmarshalArgs`. `Tool.Run` returns `[]llmkit.Block`; a text-only tool returns `[]llmkit.Block{llmkit.Text(s)}`, and `Func` does that wrapping for its string handler. The Runner keeps the returned slice, so do not modify it after returning. An error renders as `ERROR: <err>` from the error alone; blocks returned beside an error are discarded.
+
+A tool may return image and document blocks beside text, such as a screenshot. The Runner sends a media block in a tool result only when the client's `Capabilities.ToolResultMedia` is true (Anthropic, Gemini 3) and the block is portable: inline `Data`, a `MediaType` of `image/png`, `image/jpeg`, `image/webp` or `application/pdf`, and the matching kind (image or document). The Runner replaces every other media block with a text marker: a URL-sourced block, an unlisted type, and every media block on a profile without the capability. Text blocks are never replaced. The Runner also degrades tool results that `Continue` carries in from another profile, in each request's copy of the history; `Outcome.Messages` keeps the original blocks. `ToolEvent.Degraded` and the `tool_run` event's `degraded` count the replacements. A replay serves a recorded `content` verbatim and places it under the replaying client's profile. Under a profile that carries the recorded media, the replay matches the record. Otherwise the media degrades again, and the replay adds that count to the recorded `degraded`. A reader built before this change ignores `content` and `degraded` and replays `result` as text only.
+
+`WithToolOutputLimit(maxBytes, sink)` bounds each successful tool result entering history; it is off by default. A result is measured as the bytes of its text, media data and URLs, after media degradation. A larger one goes to the `SpillSink` as its blocks after degradation, not as the tool's raw output. The model sees `[tool output spilled: <ref>, <size> bytes]` and, when the head preview of the text is not empty, a newline and that preview (2048 bytes at most, cut on a UTF-8 boundary), all within `maxBytes`. The preview is empty when the result has no text, or when `maxBytes` leaves no room for it after the marker and the newline; the marker then goes alone, with no newline. A media block that was degraded leaves its marker text behind, so such a result still has text. A result whose media was all sent, such as one PNG on a profile with `ToolResultMedia`, has no text, and the marker goes alone. With a nil sink, or when the sink fails, the text is head-truncated to fit and ends with `[tool output truncated: <shown> of <size> bytes shown]`, and media blocks are dropped but counted in the size. A limit smaller than the marker still sends the marker, so the stand-in does not always fit. The `tool_run` event records `original_bytes`, `spill_ref` and, for a failed sink, `spill_error`; with no sink only `original_bytes` is set. Its `result` stays the exact text the model saw. The limit does not apply to errors, denials or timeouts. A panic in the sink is not recovered; it unwinds out of `Run` like a hook panic. A replay serves the recorded result as it was, never calling the sink. When compaction prunes a spilled result, the stub keeps the reference.
 
 ## Limits and outcomes
 
@@ -121,7 +125,7 @@ runner := agent.NewRunner(client, nil, "Answer briefly.",
 	}))
 ```
 
-`req.Messages` is a shallow clone of the loop's history. A policy can filter, append, or reorder messages for this turn only; the loop's history stays unchanged. Every other field — `Thinking`, `Temperature`, `ToolChoice`, `StopSequences`, `TopP`, `TopK`, `Seed` — is the policy's to set, gated by [capabilities](capabilities.md) at the wire.
+`req.Messages` is a shallow clone of the loop's history, except that tool-result media is already replaced by text markers in the clone when `ToolResultMedia` is false or the block is not portable; a message the policy adds is not degraded. A block is portable when it holds inline `image/png`, `image/jpeg`, `image/webp` or `application/pdf` data of the matching kind, whatever the profile. A policy can filter, append, or reorder messages for this turn only; the loop's history stays unchanged. Every other field — `Thinking`, `Temperature`, `ToolChoice`, `StopSequences`, `TopP`, `TopK`, `Seed` — is the policy's to set, gated by [capabilities](capabilities.md) at the wire.
 
 A non-nil error aborts the run before the wire call. The error is wrapped as `agent: request policy at iteration <step>: ...`.
 
@@ -151,6 +155,19 @@ Only `call.Arguments` may be rewritten, and the conversation history keeps the m
 
 When to use: guardrails. Allowlists and denylists, argument rewrites (constrain paths to a workspace), or a human approval step. To rewrite tool results, wrap the `Tool` instead.
 
+#### RepetitionPolicy
+
+`agent.RepetitionPolicy()` is a stock `ToolPolicy` that stops a model looping on the same tool call. It keeps the last 12 calls of the run, denied calls included, and denies a call when the last 2p+1 calls ending at it repeat with period p (p from 1 to 5). `A,A,A` denies the third call, `A,B,A,B,A` the fifth, `A,B,C,A,B,C,A` the seventh. `A,B1,A,B2,A` runs in full. The check spans steps, not only one turn. Denial is per call; there is no latch. Denied calls stay in the window, so after a denial the next call in the same cycle is denied too: `A,B,A,B,A,B` runs the first four calls and denies the last two. A call outside the cycle is allowed: `A,B,A,B,A,C` denies only the fifth call.
+
+Two calls are identical when the tool name matches and the arguments are equal as JSON: key order and whitespace are ignored, and numbers compare by literal text, so `{"n":9007199254740993}` and `{"n":9007199254740992}` differ, as do `1` and `1.0`. Arguments that do not parse compare by raw bytes. The model sees `ERROR: tool <name> denied: repeated identical call: <name> called N times in the last 12 calls without progress`, where N counts the identical calls in the window.
+
+```go
+runner := agent.NewRunner(client, tools, "You are an agent.",
+	agent.WithToolPolicy(agent.RepetitionPolicy()))
+```
+
+State is keyed by run id. Runs with distinct run ids do not affect each other, and a replay normally gets a new run id, so it starts clean. Runs that share a run id share one window, and the calls of the later run are checked against the earlier run's. That covers calls whose context carries no run id, which use one bucket, and any runs that pin the same id with `WithRunID` on one policy instance, a replay that pins the recorded run id included: its calls can then be denied, and the replay diverges. The policy remembers the 1024 most recently used runs. `Continue` starts a new run id, so a continued run's counts start from zero, unless `WithRunID` reuses the id. To combine it with another policy, call both from one `ToolPolicyFunc`.
+
 ## Hooks
 
 `WithHooks` registers a callback struct with one optional callback per live loop event. Every field is independent; a nil func is a no-op, and a zero `Hooks` value is valid. Each `WithHooks` call appends: callbacks fire in registration order, and a nil field in one registration does not suppress another registration's callback.
@@ -161,6 +178,8 @@ When to use: guardrails. Allowlists and denylists, argument rewrites (constrain 
 | `Delta` | once per stream fragment; the Runner streams via `llmkit.Stream` only when set |
 | `ToolStart` / `ToolEnd` | around each `Tool.Run` that is executed; never for a call naming an unregistered tool or a call a `ToolPolicy` denied |
 | `ToolHealth` | when a tool returns a `*ToolHealthError` |
+
+`ToolEnd`'s `ToolEvent` carries `Result`, `Content`, `Degraded`, `IsError` and `Duration`. `Content` shares memory with the history, so a hook observes it and never modifies it.
 
 Compaction, steering, and finalization are not hooks: they are events on the run's observer chain (`compaction`, `steer`, `finalize`) and fields of `Outcome` (`Finalized`). `ToolStart` / `ToolEnd` fire only for executed calls; the run's `tool_run` events also record unknown-tool calls and policy denials (a denial carries `Denied` and `DenyReason`, not a result). A run that ends mid-turn, for any reason including a cancelled context or a panic, can leave requested calls without a `tool_run` event.
 
@@ -252,7 +271,7 @@ Decorator-emitted kinds this table does not list — a provider `attempt`, and t
 |---|---|---|
 | `start` | 0 | the task text and the tool names offered; `parent_run_id` rides here on continued runs |
 | `completion` | turn | the full request–response round-trip (post-policy request, response, usage) or the failure as `err`; one per model turn, span-joined to any provider attempts |
-| `tool_run` | turn | the model's call, the result verbatim as fed to the model; `denied` + `deny_reason` for policy denials, `is_error` for failures; `dispatched_arguments` when a `ToolPolicy` rewrote the arguments `Tool.Run` received (the `call` stays the model's) |
+| `tool_run` | turn | the model's call, the result as the model sees it as text (media blocks sent appear as `[image: <mediatype>, <N> bytes]` markers); `content` (the blocks as placed in history) and `degraded` only when the result held media or a degraded block; `original_bytes` and `spill_ref` (or `spill_error`) when the output limit applied; `denied` + `deny_reason` for policy denials, `is_error` for failures; `dispatched_arguments` when a `ToolPolicy` rewrote the arguments `Tool.Run` received (the `call` stays the model's) |
 | `compaction` | next turn | token totals before/after and the prune count; only when something was actually pruned |
 | `steer` | next turn | a delivered steering message; `follow_up` marks follow-up turns |
 | `finalize` | completed turns; 0 when `status` is `panicked` | how the run ended (`status`, `err`); unless `status` is `panicked`, also the truncation reason when there is one (`truncation_reason`), usage, the run's last text (`final_text`, as `Outcome.FinalText`), and whether forced finalization fired, with the completed-turn count as the `step` itself; a failed completion does not advance the step, so a run whose only completion failed reports step 0; a `panicked` run reports step 0 whatever step its context carries, a nested Runner's parent tool phase included |
@@ -366,6 +385,7 @@ Constructor options apply to every run of a Runner; run options apply to a singl
 | `WithHooks(h Hooks)` | appends; no registration: every callback is a no-op |
 | `WithParallelTools()` | sequential dispatch within a turn |
 | `WithToolTimeout(d time.Duration)` | zero: no per-tool deadline |
+| `WithToolOutputLimit(maxBytes int, sink SpillSink)` | no limit: a tool's result enters history whole |
 | `WithBudgetPool(pool *BudgetPool)` | nil pool: unlimited, no check, no charge |
 | `WithRequestPolicy(p RequestPolicy)` | nil policy: the request goes out as built, no clone |
 | `WithToolPolicy(p ToolPolicy)` | nil policy: every call is allowed |

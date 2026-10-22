@@ -19,12 +19,15 @@ import (
 // on the finalization and repair turns of a RunJSON run and on every turn
 // of a Runner constructed with no tools.
 //
-// req.Messages is a shallow clone of the loop's history. A policy may
-// filter, append, or reorder messages; the change applies to this turn's
-// wire request only, and the loop's history stays unchanged. The Block and
-// ToolCalls slices inside each message are shared with the history: replace
-// a message, do not edit its blocks or tool calls in place. Every other
-// field of req is the policy's to set: Thinking, Temperature, ToolChoice,
+// req.Messages is a shallow clone of the loop's history, except that
+// tool-result media is already replaced by text markers in the clone when
+// ToolResultMedia is false or the block is not portable; a message the policy
+// adds is not degraded. A policy may filter, append, or reorder messages; the
+// change applies to this turn's wire request only, and the loop's history
+// stays unchanged. The Block and ToolCalls
+// slices inside each message are shared with the history: replace a message,
+// do not edit its blocks or tool calls in place. Every other field of req is
+// the policy's to set: Thinking, Temperature, ToolChoice,
 // StopSequences, TopP, TopK, Seed. The adapters gate each field by
 // capability at the wire (see [llmkit.Request]).
 //

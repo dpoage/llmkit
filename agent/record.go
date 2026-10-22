@@ -118,10 +118,10 @@ func steerEvent(ctx context.Context, msg llmkit.Message, followUp bool, step int
 
 // toolRunEvent builds the ToolRun event for one dispatched call: the model's
 // call (never the policy's rewrite; a rewrite rides DispatchedArguments), the
-// textual result exactly as fed to the model, and the error or
-// policy-denial marks. A denial carries Denied and DenyReason with no result
-// — the rendered denial text still rides the conversation as the
-// tool-result message, per [ToolPolicy]'s contract.
+// model-visible result text with its Content, Degraded and output-limit
+// fields, and the error or policy-denial marks. A denial carries Denied and
+// DenyReason with no result — the rendered denial text still rides the
+// conversation as the tool-result message, per [ToolPolicy]'s contract.
 func toolRunEvent(ctx context.Context, call llmkit.ToolCall, res toolResult, step int) llmkit.Event {
 	ev := llmkit.NewEvent(ctx, llmkit.KindToolRun)
 	ev.Step = step
@@ -131,6 +131,11 @@ func toolRunEvent(ctx context.Context, call llmkit.ToolCall, res toolResult, ste
 		tre.DenyReason = res.denyReason
 	} else {
 		tre.Result = res.result
+		tre.Content = res.eventContent()
+		tre.Degraded = res.degraded
+		tre.OriginalBytes = res.originalBytes
+		tre.SpillRef = res.spillRef
+		tre.SpillError = res.spillErr
 		tre.IsError = res.isErr
 	}
 	ev.ToolRun = tre
@@ -241,10 +246,10 @@ func (r *Runner) fireToolStart(ctx context.Context, step int, call llmkit.ToolCa
 
 // fireToolEnd fires every registered [Hooks.ToolEnd], in registration order,
 // with the result exactly as fed to the model.
-func (r *Runner) fireToolEnd(ctx context.Context, step int, call llmkit.ToolCall, result string, isErr bool, d time.Duration) {
+func (r *Runner) fireToolEnd(ctx context.Context, step int, call llmkit.ToolCall, res toolResult, d time.Duration) {
 	for _, h := range r.hooks {
 		if h.ToolEnd != nil {
-			h.ToolEnd(ctx, ToolEvent{Step: step, Call: call, Result: result, IsError: isErr, Duration: d})
+			h.ToolEnd(ctx, ToolEvent{Step: step, Call: call, Result: res.result, Content: res.eventContent(), Degraded: res.degraded, IsError: res.isErr, Duration: d})
 		}
 	}
 }

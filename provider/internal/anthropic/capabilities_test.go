@@ -10,7 +10,8 @@ import (
 // anthropicWant builds the full expected profile for a Claude model. The
 // Messages API surface is shared across the 3+ families (parallel tool
 // calls, prompt caching, synthetic-tool structured output, tool choice,
-// images, documents, stop sequences, top_p, top_k; no seed); per-model the
+// images, documents, tool-result media, stop sequences, top_p, top_k; no
+// seed); per-model the
 // table pins only the window and extended thinking (Claude 3.7+).
 func anthropicWant(window int, thinking bool) llmkit.Capabilities {
 	return llmkit.Capabilities{
@@ -26,6 +27,7 @@ func anthropicWant(window int, thinking bool) llmkit.Capabilities {
 		TopP:              true,
 		TopK:              true,
 		Seed:              false,
+		ToolResultMedia:   true,
 	}
 }
 

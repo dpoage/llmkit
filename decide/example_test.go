@@ -59,9 +59,9 @@ type exTool string
 
 func (t exTool) Def() llmkit.ToolDef { return llmkit.ToolDef{Name: string(t)} }
 
-func (t exTool) Run(context.Context, json.RawMessage) (string, error) {
+func (t exTool) Run(context.Context, json.RawMessage) ([]llmkit.Block, error) {
 	fmt.Println("ran", string(t))
-	return "ok", nil
+	return []llmkit.Block{llmkit.Text("ok")}, nil
 }
 
 // exLog is an in-memory llmkit.Observer and llmkit.Source.

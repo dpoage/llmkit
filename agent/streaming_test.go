@@ -115,6 +115,6 @@ func (stubReadFileTool) Def() llmkit.ToolDef {
 	return llmkit.ToolDef{Name: "read_file", Description: "reads a file"}
 }
 
-func (stubReadFileTool) Run(ctx context.Context, args json.RawMessage) (string, error) {
-	return "file contents", nil
+func (stubReadFileTool) Run(ctx context.Context, args json.RawMessage) ([]llmkit.Block, error) {
+	return textBlocks("file contents"), nil
 }

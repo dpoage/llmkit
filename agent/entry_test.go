@@ -23,8 +23,8 @@ func (t *entryTool) Def() llmkit.ToolDef {
 	return llmkit.ToolDef{Name: t.name, Description: fmt.Sprintf("tool #%d", t.id), Parameters: []byte(`{"type":"object"}`)}
 }
 
-func (t *entryTool) Run(context.Context, json.RawMessage) (string, error) {
-	return fmt.Sprintf("ran #%d", t.id), nil
+func (t *entryTool) Run(context.Context, json.RawMessage) ([]llmkit.Block, error) {
+	return textBlocks(fmt.Sprintf("ran #%d", t.id)), nil
 }
 
 func entryTools(names ...string) []Tool {

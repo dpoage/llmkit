@@ -55,6 +55,8 @@ type Runner struct {
 	// toolPolicy, when non-nil, gates every model-requested tool call (see
 	// WithToolPolicy); nil allows all calls.
 	toolPolicy ToolPolicy
+	// outputLimit is off when its max is zero (see WithToolOutputLimit).
+	outputLimit outputLimit
 }
 
 // Option configures a [Runner] at construction.
@@ -803,6 +805,7 @@ func stitchBlocks(head, cont []llmkit.Block, joinedText string) []llmkit.Block {
 // gate between the no-cap passthrough path and the with-cap native shape
 // guarantee.
 func (r *Runner) complete(ctx context.Context, em runEmitter, messages []llmkit.Message, outcome *Outcome, responseSchema json.RawMessage, final bool) (llmkit.Response, error) {
+	messages, copied := r.wireMessages(messages)
 	req := llmkit.Request{
 		System:    r.systemPrompt,
 		Messages:  messages,
@@ -842,7 +845,9 @@ func (r *Runner) complete(ctx context.Context, em runEmitter, messages []llmkit.
 	// The clone isolates the loop's history from slice-level edits by the
 	// policy; the post-policy slice is what the wire and the transcript see.
 	if r.requestPolicy != nil {
-		req.Messages = slices.Clone(messages)
+		if !copied {
+			req.Messages = slices.Clone(messages)
+		}
 		if err := r.requestPolicy.PrepareRequest(ctx, step, &req); err != nil {
 			return llmkit.Response{}, fmt.Errorf("agent: request policy at iteration %d: %w", step, err)
 		}

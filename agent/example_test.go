@@ -80,7 +80,7 @@ func ExampleFunc() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println(result)
+	fmt.Println(result[0].Text)
 	// Output:
 	// 42
 }

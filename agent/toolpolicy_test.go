@@ -89,12 +89,12 @@ func (t *tpCountingTool) Def() llmkit.ToolDef {
 	}
 }
 
-func (t *tpCountingTool) Run(_ context.Context, args json.RawMessage) (string, error) {
+func (t *tpCountingTool) Run(_ context.Context, args json.RawMessage) ([]llmkit.Block, error) {
 	t.mu.Lock()
 	t.runs++
 	t.lastArgs = args
 	t.mu.Unlock()
-	return t.result, nil
+	return textBlocks(t.result), nil
 }
 
 func (t *tpCountingTool) runCount() int {

@@ -10,6 +10,117 @@ entry below is marked.
 
 ### Added
 
+- `agent`: `WithToolOutputLimit(maxBytes, sink)` bounds each successful tool
+  result entering history; off by default, so existing runs are unchanged. A
+  result over the limit (the bytes of its text, media data and URLs, after
+  media degradation) goes to the `SpillSink` as its blocks, and the model sees
+  `[tool output spilled: <ref>, <size> bytes]` plus a head preview of its text,
+  within the limit. When the preview is empty, because the result has no text
+  or the limit leaves no room for it, the marker goes alone, with no newline.
+  With a nil sink, or when the sink fails, the text is head-truncated and
+  marked `[tool output truncated: <shown> of <size> bytes shown]`, and media
+  blocks are dropped. A limit smaller than the marker still sends the marker.
+  Errors, denials and timeouts are not limited. A sink that panics is not
+  recovered. `ToolRunEvent` gains `OriginalBytes`, `SpillRef` and
+  `SpillError`, omitted when unset; with no sink only
+  `OriginalBytes` is set, and `Result` stays the text the model saw. A replay
+  serves the recorded result without calling the sink, and a compaction stub
+  of a spilled result names its reference.
+- `llmkit`: `ThinkingConfig.Effort` (`ReasoningEffort`: `EffortLow`,
+  `EffortMedium`, `EffortHigh`) and `Capabilities.ReasoningEffort`. OpenAI
+  sends `reasoning_effort` and Google sends `thinkingLevel`. The flag is true
+  for OpenAI `gpt-5`, `o1`, `o3` and `o4-mini` entries and Gemini 3 models,
+  false elsewhere; the Anthropic ceiling excludes it. A `ThinkingConfig` is
+  valid with a positive `BudgetTokens`, or with a zero `BudgetTokens` and an
+  `Effort`. A negative `BudgetTokens` is refused pre-wire wherever `Thinking`
+  or `ReasoningEffort` is true, even with an `Effort`. An `Effort` outside the
+  set is refused on every adapter. Each field the profile reports false is
+  dropped silently. On Google, `Effort` wins over `BudgetTokens` when both
+  survive.
+- `provider`: `Options.StreamIdleTimeout` fails a `Stream` attempt that waits
+  that long for its next delta, measured from the attempt's start and from each
+  delta callback's return. SSE keepalives and chunks that emit no delta do not
+  reset it; an OpenAI-compatible chunk with only `reasoning_details` emits no
+  delta. The attempt fails as a retryable `*llmkit.APIError` (`ErrServer`)
+  naming the idle timeout, or as a terminal one once a delta has reached the
+  caller. Zero (the default) or a negative value disables it, and `Complete`
+  ignores it. A client without native `Stream` runs its whole `Complete` under
+  the timer. Models that reason before answering stream nothing meanwhile, so
+  a short value misfires on them.
+- `llmkit`: `Usage.ReasoningTokens`, the reasoning tokens inside
+  `OutputTokens`: OpenAI's `completion_tokens_details.reasoning_tokens`
+  (`Complete` and `Stream`, with or without a callback) and Gemini's
+  `thoughtsTokenCount`. Anthropic reports no count, so it stays 0. It is an
+  informational subset: `ChargeableTokens` is unchanged and callers must not
+  add it to `OutputTokens`. If an endpoint counts reasoning outside
+  `completion_tokens` and its `total_tokens` is absent or differs from prompt
+  plus completion plus reasoning, the count can exceed `OutputTokens`.
+  `Usage.Add` sums it.
+- `llmkit`: `Usage.Estimated`, true when the endpoint's response carried no
+  usage object: a missing or null `usage` on `Complete` and `Stream` for the
+  OpenAI and OpenAI-compatible adapters, no `usageMetadata` on Gemini. The
+  adapter then estimates, rounding up bytes divided by 4: `InputTokens` from
+  the request body; `OutputTokens` from the response text, every tool call's
+  name and arguments, and the thinking blocks; `ReasoningTokens` from the
+  thinking blocks. Other counts are 0. A present all-zero usage object is
+  reported, not estimated. The Anthropic adapter never sets the flag.
+  `Usage.Add` ORs it. Before this, such endpoints read as zero spend and
+  `agent.Limits.TokenBudget` and `agent.BudgetPool` never tripped; they now
+  see the estimate (llmkit-rli.1.4).
+- `agent`: `RepetitionPolicy()` returns a stock `ToolPolicy` that stops tool
+  loops. It keeps the last 12 calls of a run (denied calls included) and
+  denies a call when the last 2p+1 calls, for some p from 1 to 5, repeat with
+  period p: A,A,A denies the third call, A,B,A,B,A the fifth, and
+  A,B1,A,B2,A none. Two calls are identical when the tool name matches and
+  the arguments are equal as JSON: object key order and whitespace do not
+  matter, and numbers compare by literal text, so `9007199254740993` and
+  `9007199254740992` differ. Arguments that do not parse compare by raw bytes.
+  The denial reads `repeated identical call: <name> called N times in the
+  last 12 calls without progress`. State is kept per run id and shared by every
+  run on the policy, bounded to the 1024 most recently used runs. Runs that
+  share a run id share one window: calls with no run id share one bucket, and
+  runs pinned to the same id with `WithRunID` do too. `Continue` starts a new
+  run id, so a continued run's counts start from zero, unless `WithRunID`
+  reuses the id (llmkit-rli.2.4).
+- `llmkit`: `Capabilities.ToolResultMedia`. A `RoleToolResult` message may now
+  carry image and document blocks, not only text. Anthropic sends them in the
+  `tool_result` content in order; Google (Gemini 3 models) sends `inlineData`
+  parts in `functionResponse.parts` for `image/png`, `image/jpeg`,
+  `image/webp`, `application/pdf` and `text/plain` only. The flag is true for
+  those two and false for every other Google model, OpenAI and
+  `openai-compatible`. On a false profile a tool result carrying media is
+  refused pre-wire with an error wrapping `ErrInvalidRequest` that names the
+  capability. The OpenAI and `openai-compatible` ceiling is false, so an
+  override forcing it true is refused by `provider.New`. Google refuses URL
+  sources and other media types in a tool result pre-wire, and Anthropic
+  refuses an inline document that is not `application/pdf`
+  (llmkit-rli.2.1).
+- `agent`: a tool result's image and document blocks reach the model, or
+  degrade to a marker (llmkit-rli.2.1). The Runner sends a media block in a
+  tool result only when the client's `Capabilities.ToolResultMedia` is true
+  and the block is portable: inline `Data`, a `MediaType` of `image/png`,
+  `image/jpeg`, `image/webp` or `application/pdf`, and the matching kind
+  (image or document). It replaces any other media block, a URL-sourced one
+  included, with a text marker, `[image omitted: this model does not accept
+  images in tool results]` or `[document omitted: this model does not accept
+  documents in tool results]`. That set over-degrades `image/gif` on Anthropic
+  and `text/plain` on Gemini 3. The Runner degrades the results it places
+  itself in history, and the results `Continue` carries in from another
+  profile in each request's copy of the history, so a Runner run on OpenAI or
+  `openai-compatible` completes instead of failing with `ErrInvalidRequest`.
+  A message a `RequestPolicy` adds is not degraded. `ToolRunEvent` and
+  `agent.ToolEvent` keep `Result` as the model-visible text, now with a
+  `[image: <mediatype>, <N> bytes]` (or `[document: ...]`) marker in the
+  position of each media block sent, and gain `Content` (the blocks exactly as
+  placed in history) and `Degraded` (how many blocks were degraded). Both are
+  omitted for a result with no media and no degradation, so text-only events,
+  hooks and transcripts are unchanged. A recorded `ToolRun` with `Content`
+  replays that content into history. Under a profile that carries the
+  recorded media the replay matches the record; otherwise the media degrades
+  again and its count is added to the recorded `Degraded`. A record without
+  `Content` replays its `Result` as before. A reader built before this change
+  ignores `content` and `degraded` and replays `Result` as text only.
+  `EventSchemaVersion` stays 3.
 - `decide`: `Decider`, the backend-neutral interface
   `Ask(ctx, state, qs Questions) (Response, error)`; `*systemone.Client` satisfies it.
   A backend's errors wrap a root `llmkit` sentinel or chain `ctx.Err()`.
@@ -72,50 +183,54 @@ entry below is marked.
   CI does not run it. `systemone.Ask` also has hermetic tests against Kev's
   README response and a captured one; the live suite is now
   `TestLiveDecide/<lane>/<case>`. See `docs/testing.md`.
-- `llmkit`: `ThinkingConfig.Effort` (`ReasoningEffort`: `EffortLow`,
-  `EffortMedium`, `EffortHigh`) and `Capabilities.ReasoningEffort`. OpenAI
-  sends `reasoning_effort` and Google sends `thinkingLevel`. The flag is true
-  for OpenAI `gpt-5`, `o1`, `o3` and `o4-mini` entries and Gemini 3 models,
-  false elsewhere; the Anthropic ceiling excludes it. A `ThinkingConfig` is
-  valid with a positive `BudgetTokens`, or with a zero `BudgetTokens` and an
-  `Effort`. A negative `BudgetTokens` is refused pre-wire wherever `Thinking`
-  or `ReasoningEffort` is true, even with an `Effort`. An `Effort` outside the
-  set is refused on every adapter. Each field the profile reports false is
-  dropped silently. On Google, `Effort` wins over `BudgetTokens` when both
-  survive.
-- `provider`: `Options.StreamIdleTimeout` fails a `Stream` attempt that waits
-  that long for its next delta, measured from the attempt's start and from each
-  delta callback's return. SSE keepalives and chunks that emit no delta do not
-  reset it; an OpenAI-compatible chunk with only `reasoning_details` emits no
-  delta. The attempt fails as a retryable `*llmkit.APIError` (`ErrServer`)
-  naming the idle timeout, or as a terminal one once a delta has reached the
-  caller. Zero (the default) or a negative value disables it, and `Complete`
-  ignores it. A client without native `Stream` runs its whole `Complete` under
-  the timer. Models that reason before answering stream nothing meanwhile, so
-  a short value misfires on them.
-- `llmkit`: `Usage.ReasoningTokens`, the reasoning tokens inside
-  `OutputTokens`: OpenAI's `completion_tokens_details.reasoning_tokens`
-  (`Complete` and `Stream`, with or without a callback) and Gemini's
-  `thoughtsTokenCount`. Anthropic reports no count, so it stays 0. It is an
-  informational subset: `ChargeableTokens` is unchanged and callers must not
-  add it to `OutputTokens`. If an endpoint counts reasoning outside
-  `completion_tokens` and its `total_tokens` is absent or differs from prompt
-  plus completion plus reasoning, the count can exceed `OutputTokens`.
-  `Usage.Add` sums it.
-- `llmkit`: `Usage.Estimated`, true when the endpoint's response carried no
-  usage object: a missing or null `usage` on `Complete` and `Stream` for the
-  OpenAI and OpenAI-compatible adapters, no `usageMetadata` on Gemini. The
-  adapter then estimates, rounding up bytes divided by 4: `InputTokens` from
-  the request body; `OutputTokens` from the response text, every tool call's
-  name and arguments, and the thinking blocks; `ReasoningTokens` from the
-  thinking blocks. Other counts are 0. A present all-zero usage object is
-  reported, not estimated. The Anthropic adapter never sets the flag.
-  `Usage.Add` ORs it. Before this, such endpoints read as zero spend and
-  `agent.Limits.TokenBudget` and `agent.BudgetPool` never tripped; they now
-  see the estimate (llmkit-rli.1.4).
 
 ### Changed
 
+- `llmkit`: the per-role block rule now lets `RoleToolResult` carry text,
+  image and document blocks (it was text only), gated by
+  `Capabilities.ToolResultMedia`. `RoleSystem` stays text only. Before, any
+  non-text block in a tool result was refused on every adapter; now image and
+  document blocks follow the profile, and a thinking block in a tool result is
+  still refused everywhere.
+- `llmkit`: the ceiling refusal text now says the adapter "does not map" the
+  field instead of claiming it has no wire field.
+- **Breaking:** `provider`: Google `Usage.OutputTokens` is now
+  `candidatesTokenCount + thoughtsTokenCount`; it was `candidatesTokenCount`
+  alone, which left Gemini's billed thinking tokens out of the count.
+  `agent.Limits.TokenBudget` and any caller that sums `OutputTokens` now see
+  thinking runs on Gemini 2.5 and 3 models at their real size and trip sooner
+  than before. Runs with no thinking are unchanged. `EventSchemaVersion` is
+  now 3 to mark the meaning change; recorded v2 events still load.
+- `provider`: OpenAI and OpenAI-compatible `Usage.OutputTokens` now include
+  `completion_tokens_details.reasoning_tokens` for xAI-style usage, where
+  `total_tokens` equals prompt plus completion plus reasoning tokens; xAI
+  counts reasoning outside `completion_tokens`. OpenAI-style usage and usage
+  without `total_tokens` are unchanged. `EventSchemaVersion` 3 covers this
+  too.
+- `provider`: on OpenAI `gpt-5` and the `o1`, `o3` and `o4-mini` entries
+  (`ReasoningEffort` true), a `ThinkingConfig` with no positive
+  `BudgetTokens` and no `Effort`, or with a negative `BudgetTokens`, is now
+  refused pre-wire with an error wrapping `ErrInvalidRequest`. Before, the
+  OpenAI adapters dropped every `ThinkingConfig`.
+- **Breaking:** `agent`: `Tool.Run` now returns `([]llmkit.Block, error)`
+  instead of `(string, error)`, so a tool result can carry blocks beyond
+  text (llmkit-rli.2.1). A text-only tool behaves as before. The tool-result
+  message content is the returned blocks, except that the Runner replaces a
+  media block with a marker when `ToolResultMedia` is false or the block is
+  not portable (inline `Data` of `image/png`, `image/jpeg`, `image/webp` or
+  `application/pdf`, with the matching kind; see the `agent` media entry
+  under Added) and, under `WithToolOutputLimit`, an oversized result with a
+  spill or truncation stand-in. `ToolEvent.Result` and the `ToolRun` event's
+  `Result` carry the text blocks in order, with a size marker at each media
+  block sent and an omission marker at each one degraded. A nil or empty
+  result is the empty text result, the same as
+  returning `""` before. An error renders from the error alone, as
+  `ERROR: <err>`; blocks returned beside an error are discarded. The Runner
+  keeps the returned slice and `Outcome.Messages` can hold it, so do not
+  modify it after returning. Migration: wrap the text, so `return s, nil`
+  becomes `return []llmkit.Block{llmkit.Text(s)}, nil`, and `return "", err`
+  becomes `return nil, err`. `agent.Func` is unchanged: its handler still
+  returns a string.
 - **Breaking:** `decide.Config.Observer` is removed, and `systemone.Client`
   emits no events. Drop the field and wrap the client in
   `decide.Observe(client, obs)` for the same `DecisionEvent` per `Ask`;
@@ -142,34 +257,9 @@ entry below is marked.
   `LLMKIT_SYSTEMONE_MODEL`, and `LLMKIT_SYSTEMONE_BASE_URL` instead of the
   `LLMKIT_TYPESAFE_*` names. The live lane keeps `LLMKIT_LIVE_TYPESAFE_*`.
 - CI and the live workflow now run `./decide/...` instead of `./decide/`.
-- `llmkit`: the ceiling refusal text now says the adapter "does not map" the
-  field instead of claiming it has no wire field.
-- **Breaking:** `provider`: Google `Usage.OutputTokens` is now
-  `candidatesTokenCount + thoughtsTokenCount`; it was `candidatesTokenCount`
-  alone, which left Gemini's billed thinking tokens out of the count.
-  `agent.Limits.TokenBudget` and any caller that sums `OutputTokens` now see
-  thinking runs on Gemini 2.5 and 3 models at their real size and trip sooner
-  than before. Runs with no thinking are unchanged. `EventSchemaVersion` is
-  now 3 to mark the meaning change; recorded v2 events still load.
-- `provider`: OpenAI and OpenAI-compatible `Usage.OutputTokens` now include
-  `completion_tokens_details.reasoning_tokens` for xAI-style usage, where
-  `total_tokens` equals prompt plus completion plus reasoning tokens; xAI
-  counts reasoning outside `completion_tokens`. OpenAI-style usage and usage
-  without `total_tokens` are unchanged. `EventSchemaVersion` 3 covers this
-  too.
-- `provider`: on OpenAI `gpt-5` and the `o1`, `o3` and `o4-mini` entries
-  (`ReasoningEffort` true), a `ThinkingConfig` with no positive
-  `BudgetTokens` and no `Effort`, or with a negative `BudgetTokens`, is now
-  refused pre-wire with an error wrapping `ErrInvalidRequest`. Before, the
-  OpenAI adapters dropped every `ThinkingConfig`.
 
 ### Fixed
 
-- `decide`: `Ask` accepted a `Choice` answer whose option was outside the
-  asked set. It now returns `ErrServer` with `StatusCode` 200 and retries
-  it like any `ErrServer`.
-
-||||||| f4bbf40
 - `provider`: OpenAI-compatible reasoning now round-trips (llmkit-rli.1.1).
   `reasoning_content` and OpenRouter-style `reasoning_details` in a response,
   from `Complete` or `Stream` (with or without a callback), surface as one
@@ -189,6 +279,11 @@ entry below is marked.
   `Response.Message()` and recorded transcripts carry a thinking block on
   endpoints that return reasoning, although `Capabilities.Thinking` is false
   there.
+- `decide`: `Ask` accepted a `Choice` answer whose option was outside the
+  asked set. It now returns `ErrServer` with `StatusCode` 200 and retries
+  it like any `ErrServer`.
+
+||||||| f4bbf40
 
 ## [0.6.0] - 2026-09-30
 

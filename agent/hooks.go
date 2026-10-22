@@ -40,15 +40,15 @@ import (
 //     loop goroutine, between BeforeCompletion and AfterCompletion; a
 //     slow hook stalls the stream.
 //   - ToolStart / ToolEnd around each Tool.Run. ToolEnd carries the final
-//     Result, IsError, and measured Duration; ToolStart leaves those zero.
-//     A model naming an unregistered tool never reaches Tool.Run, so neither
-//     hook fires for it; the same goes for a call a [ToolPolicy] denied. The
-//     run's ToolRun events also record unknown-tool calls and policy denials
-//     (a denial carries Denied and DenyReason, not a result). A run that
-//     ends mid-turn, for any reason including a cancelled context or a
-//     panic, can leave requested calls without a ToolRun event. A panicking
-//     Tool.Run is recovered by the harness in BOTH dispatch modes and
-//     ToolEnd fires with the rendered panic result ("ERROR: tool <name>
+//     Result, Content, Degraded, IsError, and measured Duration; ToolStart
+//     leaves those zero. A model naming an unregistered tool never reaches
+//     Tool.Run, so neither hook fires for it; the same goes for a call a
+//     [ToolPolicy] denied. The run's ToolRun events also record unknown-tool
+//     calls and policy denials (a denial carries Denied and DenyReason, not a
+//     result). A run that ends mid-turn, for any reason including a cancelled
+//     context or a panic, can leave requested calls without a ToolRun event. A
+//     panicking Tool.Run is recovered by the harness in BOTH dispatch modes
+//     and ToolEnd fires with the rendered panic result ("ERROR: tool <name>
 //     panicked: …", IsError=true). Step matches the tool_run event.
 //   - ToolHealth when a tool returns a *ToolHealthError (a genuine
 //     harness/infra failure) — but not for ordinary model-recoverable tool
@@ -94,8 +94,8 @@ type Hooks struct {
 	Delta func(ctx context.Context, step int, d llmkit.Delta)
 	// ToolStart fires immediately before each Tool.Run.
 	ToolStart func(ctx context.Context, ev ToolEvent)
-	// ToolEnd fires immediately after each Tool.Run, with Result, IsError,
-	// and Duration set.
+	// ToolEnd fires immediately after each Tool.Run, with Result, Content,
+	// Degraded, IsError, and Duration set.
 	ToolEnd func(ctx context.Context, ev ToolEvent)
 	// ToolHealth fires when a tool returns a *ToolHealthError.
 	ToolHealth func(ctx context.Context, tool string, he *ToolHealthError)
@@ -103,9 +103,9 @@ type Hooks struct {
 
 // ToolEvent is one tool call's lifecycle, as delivered to [Hooks.ToolStart]
 // and [Hooks.ToolEnd]. ToolStart sets Step and Call only; ToolEnd additionally
-// sets Result, IsError, and Duration. Consumers do their own tool-name to
-// structured-activity mapping; see [ToolEvent.Call] for how the dispatched
-// call relates to the model's.
+// sets Result, Content, Degraded, IsError, and Duration. Consumers do their
+// own tool-name to structured-activity mapping; see [ToolEvent.Call] for how
+// the dispatched call relates to the model's.
 type ToolEvent struct {
 	// Step is the 1-based transcript step (Event.Step) of the tool-result
 	// event this call produced — the same number the completion hooks
@@ -114,9 +114,19 @@ type ToolEvent struct {
 	// Call is the tool call as dispatched: rewritten by a [ToolPolicy]
 	// when it modified Arguments; otherwise the model's call.
 	Call llmkit.ToolCall
-	// Result is the tool-result text fed back to the model (including the
-	// "ERROR: " prefix on failure).
+	// Result is the model-visible text of the tool result, including the
+	// "ERROR: " prefix on failure: the text blocks in order, a
+	// "[image: <mediatype>, <N> bytes]" (or "[document: ...]") marker in the
+	// position of each media block sent, and an omission marker for each
+	// degraded one.
 	Result string
+	// Content is the result's blocks exactly as placed in history, set only
+	// when they include a media block or Degraded > 0. It shares memory with
+	// history: observe it, never modify it.
+	Content []llmkit.Block
+	// Degraded counts the media blocks replaced by omission markers: all of
+	// them when ToolResultMedia is false, else those that are not portable.
+	Degraded int
 	// IsError reports whether Result is an error rendering.
 	IsError bool
 	// Duration is the measured wall time of Tool.Run.

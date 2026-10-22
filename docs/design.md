@@ -140,11 +140,12 @@ adapter fabricates a context window; an unknown model reports `0`.
 `internal/adapter.Prepare` is shared by all three vendor adapters. It
 validates the messages, defaults `MaxTokens`, decodes tool and response
 schemas, and applies the gate of each wire-gated `Capabilities` field: a
-silent drop, or a refusal (`ToolChoice`, an invalid `ThinkingConfig`). An
-adapter maps a `Prepared` value onto its SDK types without re-applying
-those rules. Each adapter's `New` pins a ceiling naming the wire-gated
-fields (`StructuredOutput`, `Thinking`, `ReasoningEffort`, `ToolChoice`,
-`StopSequences`, `TopP`, `TopK`, `Seed`) it can put on the wire;
+silent drop, or a refusal (`ToolChoice`, an invalid `ThinkingConfig`, media in
+a tool result when `ToolResultMedia` is false). An adapter maps a `Prepared`
+value onto its SDK types without re-applying those rules. Each adapter's
+`New` pins a ceiling naming the nine wire-gated fields (`StructuredOutput`,
+`Thinking`, `ReasoningEffort`, `ToolChoice`, `StopSequences`, `TopP`, `TopK`,
+`Seed`, `ToolResultMedia`) it can put on the wire;
 `internal/adapter.ApplyOverride` refuses a `Spec.Capabilities` override
 that reports a field above the ceiling, so the profile can never claim a
 wire-gated feature the adapter cannot send.

@@ -25,8 +25,8 @@ type rdTool struct {
 }
 
 func (t rdTool) Def() llmkit.ToolDef { return llmkit.ToolDef{Name: t.name} }
-func (t rdTool) Run(_ context.Context, args json.RawMessage) (string, error) {
-	return fmt.Sprintf("%s#%d(%s)", t.name, t.n.Add(1), args), nil
+func (t rdTool) Run(_ context.Context, args json.RawMessage) ([]llmkit.Block, error) {
+	return textBlocks(fmt.Sprintf("%s#%d(%s)", t.name, t.n.Add(1), args)), nil
 }
 
 func rdTools() []Tool {
@@ -524,8 +524,8 @@ func TestReplayDispatch_SharedIDInOneTurn(t *testing.T) {
 type flakyTool struct{}
 
 func (flakyTool) Def() llmkit.ToolDef { return llmkit.ToolDef{Name: "flaky"} }
-func (flakyTool) Run(context.Context, json.RawMessage) (string, error) {
-	return "", errors.New(`unknown tool "flaky"`)
+func (flakyTool) Run(context.Context, json.RawMessage) ([]llmkit.Block, error) {
+	return nil, errors.New(`unknown tool "flaky"`)
 }
 
 // TestReplayDispatch_UnregisteredToolUnderPolicy pins that a call to a tool

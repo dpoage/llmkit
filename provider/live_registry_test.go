@@ -50,6 +50,7 @@ var liveCases = []liveCase{
 	{Name: "tool_choice", Gate: "ToolChoice", Doc: "none forbids calls, required forces one, named forces that name"},
 	{Name: "images", Gate: "Images", Doc: "an inline data-URI image block is accepted"},
 	{Name: "documents", Gate: "Documents", Doc: "an inline PDF block is accepted"},
+	{Name: "tool_result_media", Gate: "ToolResultMedia", Doc: "a tool result carrying an image block round-trips to a final answer"},
 	{Name: "stop_sequences", Gate: "StopSequences", Doc: "generation stops before the guarded sequence with StopEndTurn"},
 	{Name: "top_p", Gate: "TopP", Doc: "a request with TopP set is accepted"},
 	{Name: "seed", Gate: "Seed", Doc: "a request with Seed set is accepted"},

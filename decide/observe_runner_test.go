@@ -43,8 +43,8 @@ func (c *scriptedClient) Complete(context.Context, llmkit.Request) (llmkit.Respo
 type namedTool struct{ name, result string }
 
 func (t namedTool) Def() llmkit.ToolDef { return llmkit.ToolDef{Name: t.name} }
-func (t namedTool) Run(context.Context, json.RawMessage) (string, error) {
-	return t.result, nil
+func (t namedTool) Run(context.Context, json.RawMessage) ([]llmkit.Block, error) {
+	return []llmkit.Block{llmkit.Text(t.result)}, nil
 }
 
 const denyAt = 0.5
