@@ -133,6 +133,9 @@ func (g *googleAdapter) buildRequest(req llmkit.Request) ([]*genai.Content, *gen
 	if err != nil {
 		return nil, nil, err
 	}
+	if isGemini3(g.model) {
+		signForeignCalls(contents)
+	}
 	cfg := &genai.GenerateContentConfig{}
 	if p.System != "" {
 		cfg.SystemInstruction = &genai.Content{
@@ -437,6 +440,41 @@ func googleAssistantParts(m llmkit.Message) ([]*genai.Part, error) {
 // when the server set one, with the declaration name as the discriminator.
 func functionCallKey(id, name string) string {
 	return id + "\x00" + name
+}
+
+// foreignCallSignature is Google's documented bypass for function calls the API did not generate:
+// https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures (FAQ 1).
+const foreignCallSignature = "skip_thought_signature_validator"
+
+// signForeignCalls gives the first unsigned functionCall of each model step in the current turn the bypass.
+// genai's []byte field puts it on the wire base64-encoded (go-genai #711); Google accepting that form is unverified.
+func signForeignCalls(contents []*genai.Content) {
+	turn := -1
+	for i, c := range contents {
+		if c.Role != "user" {
+			continue
+		}
+		for _, p := range c.Parts {
+			if p.FunctionResponse == nil {
+				turn = i
+				break
+			}
+		}
+	}
+	for _, c := range contents[turn+1:] {
+		if c.Role != "model" {
+			continue
+		}
+		for _, p := range c.Parts {
+			if p.FunctionCall == nil {
+				continue
+			}
+			if len(p.ThoughtSignature) == 0 {
+				p.ThoughtSignature = []byte(foreignCallSignature)
+			}
+			break
+		}
+	}
 }
 
 func (g *googleAdapter) toResponse(resp *genai.GenerateContentResponse, wire *adapter.Wire) llmkit.Response {
