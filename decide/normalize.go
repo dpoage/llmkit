@@ -9,8 +9,15 @@ import (
 	"github.com/dpoage/llmkit"
 )
 
-// Normalize validates state and qs and returns the state's marshalled JSON
-// and the questions in the root vocabulary, sorted by ID. state and each
+// Request is a validated state and question set in the root vocabulary.
+type Request struct {
+	State     json.RawMessage
+	Questions []llmkit.DecisionQuestion
+}
+
+// Normalize validates state and qs and returns a Request: State is the
+// state's marshalled JSON and Questions are the questions in the root
+// vocabulary, sorted by ID. state and each
 // Instructions must marshal to a JSON string, object, or array; descriptions
 // (True, False, Options, Levels) also accept null. At least one question is
 // required, each with a non-empty id. Questions validate in sorted id order.
@@ -18,13 +25,13 @@ import (
 // A refusal is an *llmkit.APIError with Kind llmkit.ErrInvalidRequest,
 // StatusCode 0, Provider "decide", and Message "<path>: <problem>". A
 // backend re-tags Provider to its own name.
-func Normalize(state any, qs Questions) (json.RawMessage, []llmkit.DecisionQuestion, error) {
+func Normalize(state any, qs Questions) (Request, error) {
 	stateRaw, err := marshalStructured(state, "state")
 	if err != nil {
-		return nil, nil, err
+		return Request{}, err
 	}
 	if len(qs) == 0 {
-		return nil, nil, invalidRequest("questions", "at least one question is required")
+		return Request{}, invalidRequest("questions", "at least one question is required")
 	}
 	ids := make([]string, 0, len(qs))
 	for id := range qs {
@@ -34,15 +41,15 @@ func Normalize(state any, qs Questions) (json.RawMessage, []llmkit.DecisionQuest
 	out := make([]llmkit.DecisionQuestion, 0, len(ids))
 	for _, id := range ids {
 		if id == "" {
-			return nil, nil, invalidRequest("questions", "question id must be non-empty")
+			return Request{}, invalidRequest("questions", "question id must be non-empty")
 		}
 		dq, err := normalizeQuestion(id, qs[id])
 		if err != nil {
-			return nil, nil, err
+			return Request{}, err
 		}
 		out = append(out, dq)
 	}
-	return stateRaw, out, nil
+	return Request{State: stateRaw, Questions: out}, nil
 }
 
 func normalizeQuestion(id string, q Question) (llmkit.DecisionQuestion, error) {

@@ -425,6 +425,10 @@ question id; nil instructions; a `Choice` without options; a `Score`
 with fewer than two levels; a JSON number or boolean where only text
 kinds are accepted.
 
+`decide.Normalize(state, qs)` returns a `decide.Request` and an error.
+`Request.State` is the state's marshalled JSON; `Request.Questions` holds
+the questions in the root `llmkit.DecisionQuestion` vocabulary, sorted by id.
+
 An unknown model arrives as a 400 in the live lane (observed 2026-09-20).
 The vendor's API doc reserves 422 for validation failures. Both map to
 `ErrInvalidRequest`.

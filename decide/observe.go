@@ -50,7 +50,7 @@ type observedIdentified struct {
 }
 
 func (o *observed) Ask(ctx context.Context, state any, qs Questions) (Response, error) {
-	stateRaw, dqs, nerr := Normalize(state, qs)
+	req, nerr := Normalize(state, qs)
 	if nerr != nil {
 		return o.d.Ask(ctx, state, qs)
 	}
@@ -64,8 +64,8 @@ func (o *observed) Ask(ctx context.Context, state any, qs Questions) (Response, 
 	}
 	de := &llmkit.DecisionEvent{
 		Backend:   id.Provider,
-		State:     stateRaw,
-		Questions: dqs,
+		State:     req.State,
+		Questions: req.Questions,
 	}
 	if err != nil {
 		de.Model = id.Model

@@ -28,7 +28,7 @@ type noulCriteria struct {
 	False json.RawMessage `json:"false,omitempty"`
 }
 
-// marshalRequest renders the request body from decide.Normalize's output.
+// marshalRequest renders the request body from a decide.Request's State and Questions.
 func marshalRequest(stateRaw json.RawMessage, model string, dqs []llmkit.DecisionQuestion) ([]byte, error) {
 	wq := make(map[string]json.RawMessage, len(dqs))
 	for _, dq := range dqs {

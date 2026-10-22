@@ -51,11 +51,11 @@ type answerBody struct {
 // retried. The package doc has the status mapping. Ask emits no event; wrap
 // the Client in [decide.Observe] to record it.
 func (c *Client) Ask(ctx context.Context, state any, questions decide.Questions) (decide.Response, error) {
-	stateRaw, dqs, err := decide.Normalize(state, questions)
+	req, err := decide.Normalize(state, questions)
 	if err != nil {
 		return decide.Response{}, retagProvider(err)
 	}
-	body, err := marshalRequest(stateRaw, c.model, dqs)
+	body, err := marshalRequest(req.State, c.model, req.Questions)
 	if err != nil {
 		return decide.Response{}, err
 	}

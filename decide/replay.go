@@ -77,7 +77,7 @@ type replayer struct {
 }
 
 func (r *replayer) Ask(ctx context.Context, state any, qs Questions) (Response, error) {
-	if _, _, err := Normalize(state, qs); err != nil {
+	if _, err := Normalize(state, qs); err != nil {
 		return Response{}, err
 	}
 	step := llmkit.StepFromContext(ctx)

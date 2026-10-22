@@ -420,6 +420,11 @@ entry below is marked.
   `LLMKIT_SYSTEMONE_MODEL`, and `LLMKIT_SYSTEMONE_BASE_URL` instead of the
   `LLMKIT_TYPESAFE_*` names. The live lane keeps `LLMKIT_LIVE_TYPESAFE_*`.
 - CI and the live workflow now run `./decide/...` instead of `./decide/`.
+- **Breaking:** `decide`: `Normalize(state, qs)` now returns
+  `(decide.Request, error)`; `Request.State` and `Request.Questions` carry
+  what the two results carried. Migrate `stateRaw, dqs, err :=
+  decide.Normalize(s, qs)` to `req, err := decide.Normalize(s, qs)`, then use
+  `req.State` and `req.Questions`.
 
 ### Fixed
 
