@@ -52,7 +52,8 @@ func TestRunner_UsagelessReasoningTripsTokenBudget(t *testing.T) {
 		t.Run(fmt.Sprintf("stream=%v", streamed), func(t *testing.T) {
 			var requests atomic.Int64
 			client := usagelessClient(t, usagelessReasoningServer(t, &requests))
-			opts := []Option{WithLimits(Limits{TokenBudget: 500, MaxIterations: 5})}
+			// One turn: the next request resends the reasoning, whose input estimate alone exceeds the budget.
+			opts := []Option{WithLimits(Limits{TokenBudget: 500, MaxIterations: 1})}
 			if streamed {
 				opts = append(opts, WithHooks(Hooks{Delta: func(context.Context, int, llmkit.Delta) {}}))
 			}
