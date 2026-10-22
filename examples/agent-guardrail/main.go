@@ -103,20 +103,20 @@ func guard(ctx context.Context, out io.Writer, client llmkit.Client, d decide.De
 	ws := newWorkspace(out)
 	runner := newRunner(client, d, ws.tools(), out, pool, threshold)
 
-	fmt.Fprintf(out, "task: %s\n", task)
+	_, _ = fmt.Fprintf(out, "task: %s\n", task)
 	outcome, err := runner.Run(ctx, task)
 	var incomplete *agent.IncompleteError
 	switch {
 	case errors.As(err, &incomplete):
 		outcome = incomplete.Outcome
-		fmt.Fprintf(out, "stopped: %s (no final answer)\n", incomplete.Reason)
+		_, _ = fmt.Fprintf(out, "stopped: %s (no final answer)\n", incomplete.Reason)
 	case err != nil:
 		return fmt.Errorf("run: %w", err)
 	default:
-		fmt.Fprintf(out, "final: %s\n", outcome.FinalText)
+		_, _ = fmt.Fprintf(out, "final: %s\n", outcome.FinalText)
 	}
-	fmt.Fprintf(out, "files: %s\n", strings.Join(ws.files(), ", "))
-	fmt.Fprintf(out, "spend: %d tokens (LLM and decisions) over %d turn(s)\n", pool.Spent(), outcome.Iterations)
+	_, _ = fmt.Fprintf(out, "files: %s\n", strings.Join(ws.files(), ", "))
+	_, _ = fmt.Fprintf(out, "spend: %d tokens (LLM and decisions) over %d turn(s)\n", pool.Spent(), outcome.Iterations)
 	return nil
 }
 
@@ -166,10 +166,10 @@ func toolPolicy(d decide.Decider, threshold float64, out io.Writer) agent.ToolPo
 			return err
 		}
 		if belief >= threshold {
-			fmt.Fprintf(out, "policy: DENIED %s (belief %.2f >= %.2f)\n", call.Name, belief, threshold)
+			_, _ = fmt.Fprintf(out, "policy: DENIED %s (belief %.2f >= %.2f)\n", call.Name, belief, threshold)
 			return fmt.Errorf("blocked: belief %.2f that the call deletes or overwrites data outside the workspace", belief)
 		}
-		fmt.Fprintf(out, "policy: allowed %s (belief %.2f)\n", call.Name, belief)
+		_, _ = fmt.Fprintf(out, "policy: allowed %s (belief %.2f)\n", call.Name, belief)
 		return nil
 	})
 }
@@ -200,7 +200,7 @@ func requestPolicy(d decide.Decider, out io.Writer) agent.RequestPolicy {
 		if choice.Choice == "injection" {
 			return errors.New("request blocked: the latest user turn was classified as injection")
 		}
-		fmt.Fprintf(out, "policy: user turn classified %s\n", choice.Choice)
+		_, _ = fmt.Fprintf(out, "policy: user turn classified %s\n", choice.Choice)
 		return nil
 	})
 }
@@ -239,7 +239,7 @@ type readArgs struct {
 
 func (w *workspace) tools() []agent.Tool {
 	rm := agent.Func("rm", "removes a file or directory", func(_ context.Context, a rmArgs) (string, error) {
-		fmt.Fprintf(w.out, "tool: rm ran on %s\n", a.Path)
+		_, _ = fmt.Fprintf(w.out, "tool: rm ran on %s\n", a.Path)
 		if _, ok := w.state[a.Path]; !ok {
 			return "", fmt.Errorf("no such path: %s", a.Path)
 		}
@@ -247,7 +247,7 @@ func (w *workspace) tools() []agent.Tool {
 		return "removed " + a.Path, nil
 	})
 	read := agent.Func("read_file", "reads a file", func(_ context.Context, a readArgs) (string, error) {
-		fmt.Fprintf(w.out, "tool: read_file ran on %s\n", a.Path)
+		_, _ = fmt.Fprintf(w.out, "tool: read_file ran on %s\n", a.Path)
 		content, ok := w.state[a.Path]
 		if !ok {
 			return "", fmt.Errorf("no such path: %s", a.Path)
