@@ -1,8 +1,8 @@
-package decide_test
+package systemone_test
 
 // Hermetic replay of the recorded decide fixtures: for every file under
-// decide/testdata, an httptest server serves the recorded exchanges in
-// order and the recorded Ask is re-issued through decide.New. The
+// decide/systemone/testdata, an httptest server serves the recorded exchanges in
+// order and the recorded Ask is re-issued through systemone.New. The
 // re-issued request must equal the recorded one — method, path, and body
 // compared as parsed JSON; headers excluded — and the outcome must equal
 // the recording: the whole normalized decide.Response, or the sentinel
@@ -24,7 +24,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/dpoage/llmkit/decide"
+	"github.com/dpoage/llmkit/decide/systemone"
 	"github.com/dpoage/llmkit/internal/livetest"
 )
 
@@ -114,14 +114,14 @@ func replayDecideFixture(t *testing.T, f *livetest.DecideFixture) {
 	}))
 	defer srv.Close()
 
-	cl, err := decide.New(decide.Config{
+	cl, err := systemone.New(systemone.Config{
 		Secret:     "llmkit-replay-placeholder",
 		Model:      f.Model,
 		BaseURL:    srv.URL,
 		HTTPClient: srv.Client(),
 	})
 	if err != nil {
-		t.Fatalf("decide.New: %v", err)
+		t.Fatalf("systemone.New: %v", err)
 	}
 	resp, err := cl.Ask(context.Background(), f.State, questions)
 

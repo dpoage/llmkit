@@ -1,4 +1,4 @@
-package decide
+package systemone
 
 import (
 	"fmt"
@@ -12,15 +12,15 @@ import (
 )
 
 const (
-	// defaultBaseURL is the TypeSafe production endpoint root. Config.BaseURL
-	// overrides it per client (for tests and gateways); "/v1/systemone" is
-	// appended in both cases.
+	// defaultBaseURL is the TypeSafe production endpoint root, the default
+	// host. Config.BaseURL overrides it; "/v1/systemone" is appended in both
+	// cases.
 	defaultBaseURL = "https://api.typesafe.ai"
 
 	// systemOnePath is appended to the base URL for every Ask.
 	systemOnePath = "/v1/systemone"
 
-	// defaultMaxAttempts is the decide default for Retry.MaxAttempts. Jev
+	// defaultMaxAttempts is the default for Retry.MaxAttempts. Jev
 	// answers in under a second, so three attempts keep the worst case tight.
 	defaultMaxAttempts = 3
 
@@ -31,23 +31,23 @@ const (
 	defaultRequestTimeout = 30 * time.Second
 
 	// providerName tags every error and usage event from this package.
-	providerName = "typesafe"
+	providerName = "systemone"
 )
 
-// Config configures a TypeSafe System One client. New validates it.
+// Config configures a System One client. New validates it.
 type Config struct {
-	// Secret is the TypeSafe credential, sent as "Authorization: Bearer".
+	// Secret is the host credential, sent as "Authorization: Bearer".
 	// Required: a non-empty value without surrounding whitespace (the same
-	// rule as provider.Spec.Secret). New never echoes it, logs it, or reads
-	// it from the environment.
+	// rule as provider.Spec.Secret), even for a host that ignores auth. New
+	// never echoes it, logs it, or reads it from the environment.
 	Secret string
 
-	// Model is the Jev model id or alias to ask ("jev-1.13.0",
-	// "jev-latest", ...). Required; there is no default alias. The response
-	// reports the versioned id actually used.
+	// Model is the model id or alias to ask ("jev-1.13.0", "jev-latest",
+	// "kev-latest", ...). Required; there is no default alias. A host may
+	// report a versioned id or echo the alias.
 	Model string
 
-	// BaseURL overrides the vendor endpoint root. Empty selects
+	// BaseURL overrides the host endpoint root. Empty selects
 	// "https://api.typesafe.ai". It must be an http or https URL with a
 	// host (the scheme is case-insensitive) and no '#' anywhere, an empty
 	// fragment included; New refuses anything else. The request path
@@ -64,7 +64,7 @@ type Config struct {
 	HTTPClient *http.Client
 
 	// Retry tunes the shared retry policy. New completes it field-wise
-	// from decide's defaults (3 attempts, 30s per-attempt RequestTimeout;
+	// from the package defaults (3 attempts, 30s per-attempt RequestTimeout;
 	// BaseDelay, MaxDelay, Jitter from [retry.Default]). MaxAttempts,
 	// BaseDelay, MaxDelay, and RequestTimeout resolve when <= 0; Jitter
 	// resolves when == 0 (an explicit 0 is unset, like every other zero
@@ -75,7 +75,7 @@ type Config struct {
 	// Observer is optional. A non-nil Observer receives exactly one
 	// [llmkit.DecisionEvent] per Ask that passes pre-wire validation —
 	// success or failure; a caller's already-cancelled ctx emits one
-	// with Err set and zero wire hits; a buildRequest refusal emits
+	// with Err set and zero wire hits; a validation refusal emits
 	// nothing — on the Ask's context.
 	Observer llmkit.Observer
 }
@@ -91,19 +91,19 @@ func New(cfg Config) (*Client, error) {
 	// the same refusal provider.New applies to Spec.Secret. The error
 	// never echoes Secret.
 	if trimmed := strings.TrimSpace(cfg.Secret); trimmed == "" || trimmed != cfg.Secret {
-		return nil, fmt.Errorf("decide: Secret must be a non-empty value with no leading or trailing whitespace: %w", llmkit.ErrInvalidRequest)
+		return nil, fmt.Errorf("systemone: Secret must be a non-empty value with no leading or trailing whitespace: %w", llmkit.ErrInvalidRequest)
 	}
 	if cfg.Model == "" {
-		return nil, fmt.Errorf("decide: model is required: %w", llmkit.ErrInvalidRequest)
+		return nil, fmt.Errorf("systemone: model is required: %w", llmkit.ErrInvalidRequest)
 	}
 	if !(cfg.Retry.Jitter >= 0 && cfg.Retry.Jitter <= 1) {
-		return nil, fmt.Errorf("decide: retry jitter must be in [0, 1], got %v: %w", cfg.Retry.Jitter, llmkit.ErrInvalidRequest)
+		return nil, fmt.Errorf("systemone: retry jitter must be in [0, 1], got %v: %w", cfg.Retry.Jitter, llmkit.ErrInvalidRequest)
 	}
 	base := cfg.BaseURL
 	if base == "" {
 		base = defaultBaseURL
 	}
-	root, err := adapter.ParseBaseURL("decide: BaseURL", base)
+	root, err := adapter.ParseBaseURL("systemone: BaseURL", base)
 	if err != nil {
 		return nil, err
 	}
@@ -117,9 +117,9 @@ func New(cfg Config) (*Client, error) {
 	}, nil
 }
 
-// Client evaluates questions against a state with TypeSafe's Jev (System
-// One) API. Construct with [New]; a *Client is safe for concurrent use and
-// its fields are immutable afterwards.
+// Client evaluates questions against a state over the System One wire. It
+// satisfies [decide.Decider]. Construct with [New]; a *Client is safe for
+// concurrent use and its fields are immutable afterwards.
 type Client struct {
 	apiKey   string
 	model    string
@@ -141,7 +141,7 @@ func (c Config) httpClient() *http.Client {
 	return &http.Client{}
 }
 
-// defaultRetry is decide's retry policy baseline: [retry.Default] with
+// defaultRetry is the retry policy baseline: [retry.Default] with
 // MaxAttempts set to 3 and RequestTimeout to 30s (Jev answers in under
 // a second, so a shorter budget keeps the worst case tight);
 // BaseDelay, MaxDelay, and Jitter come from retry.Default as-is.
@@ -152,7 +152,7 @@ func defaultRetry() retry.Config {
 	return d
 }
 
-// retryPolicy completes cfg.Retry with decide's defaults via
+// retryPolicy completes cfg.Retry with the package defaults via
 // [retry.Config.Or]: MaxAttempts, BaseDelay, MaxDelay, and RequestTimeout
 // resolve when <= 0; Jitter resolves when == 0 (an explicit 0 is
 // unset, like every other zero field).

@@ -35,7 +35,7 @@ import (
 	"time"
 
 	"github.com/dpoage/llmkit"
-	"github.com/dpoage/llmkit/decide"
+	"github.com/dpoage/llmkit/decide/systemone"
 	"github.com/dpoage/llmkit/provider"
 )
 
@@ -290,11 +290,11 @@ func (s *Session) Client(ctx context.Context, t testing.TB, tr *Transport, mutat
 }
 
 // DecideClient builds the typesafe lane's decide client through
-// decide.New, with the recording transport injected via Config.HTTPClient
+// systemone.New, with the recording transport injected via Config.HTTPClient
 // and the run-wide token tally as Config.Observer. mutate, when non-nil,
 // adjusts the Config last.
-func (s *Session) DecideClient(ctx context.Context, t testing.TB, tr *Transport, mutate func(*decide.Config)) *decide.Client {
-	cfg := decide.Config{
+func (s *Session) DecideClient(ctx context.Context, t testing.TB, tr *Transport, mutate func(*systemone.Config)) *systemone.Client {
+	cfg := systemone.Config{
 		Secret:     s.Key,
 		Model:      s.Model,
 		BaseURL:    s.BaseURL,
@@ -304,9 +304,9 @@ func (s *Session) DecideClient(ctx context.Context, t testing.TB, tr *Transport,
 	if mutate != nil {
 		mutate(&cfg)
 	}
-	cl, err := decide.New(cfg)
+	cl, err := systemone.New(cfg)
 	if err != nil {
-		t.Fatalf("livetest: decide.New for lane %s: %v", s.Lane.Name, err)
+		t.Fatalf("livetest: systemone.New for lane %s: %v", s.Lane.Name, err)
 		return nil
 	}
 	return cl

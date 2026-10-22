@@ -1,10 +1,10 @@
 //go:build live
 
-// Live acceptance suite for the decide package: TypeSafe's Jev (System One)
-// decision API through decide.New. Every case asserts structural invariants
+// Live acceptance suite for the systemone package: TypeSafe's Jev (System One)
+// decision API through systemone.New. Every case asserts structural invariants
 // only (ranges, argmax consistency, legend alignment, usage accounting); exact
 // probabilities are the vendor's business. Fixtures are recorded under
-// -update into decide/testdata/<case>.json and replayed hermetically by
+// -update into decide/systemone/testdata/<case>.json and replayed hermetically by
 // fixture_replay_test.go.
 //
 // Environment (see docs/testing.md):
@@ -16,11 +16,11 @@
 // A keyless lane skips at the lane level, naming its variable. TypeSafe
 // bills input tokens only; the whole lane costs a handful. Run with
 //
-//	go test -tags live -count=1 ./decide/ -v
+//	go test -tags live -count=1 ./decide/systemone/ -v
 //
 // adding -update to re-record fixtures. Keys are never logged; raw body
 // logs go through livetest's redacting logger.
-package decide_test
+package systemone_test
 
 import (
 	"context"
@@ -34,6 +34,7 @@ import (
 
 	llmkit "github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/decide"
+	"github.com/dpoage/llmkit/decide/systemone"
 	"github.com/dpoage/llmkit/internal/livetest"
 )
 
@@ -103,7 +104,7 @@ type decideCase struct {
 	t         *testing.T
 	sess      *livetest.Session
 	tr        *livetest.Transport
-	cl        *decide.Client
+	cl        *systemone.Client
 	ctx       context.Context
 	caseName  string
 	model     string
@@ -121,10 +122,10 @@ func newDecideCase(t *testing.T, sess *livetest.Session, name string) *decideCas
 // variant returns a sibling case with a mutated Config and its own
 // transport/input log. The effective model is captured for the fixture, so
 // mutating Config.Model records the model actually sent.
-func (dc *decideCase) variant(mutate func(*decide.Config)) *decideCase {
+func (dc *decideCase) variant(mutate func(*systemone.Config)) *decideCase {
 	ctx, _ := livetest.Ctx(dc.t)
 	v := &decideCase{t: dc.t, sess: dc.sess, tr: livetest.NewTransport(dc.sess.Key), ctx: ctx, caseName: dc.caseName, model: dc.model}
-	v.cl = dc.sess.DecideClient(ctx, dc.t, v.tr, func(c *decide.Config) {
+	v.cl = dc.sess.DecideClient(ctx, dc.t, v.tr, func(c *systemone.Config) {
 		mutate(c)
 		v.model = c.Model
 	})
@@ -301,7 +302,7 @@ func caseStructuredState(t *testing.T, sess *livetest.Session) {
 
 func caseErrorBadKey(t *testing.T, sess *livetest.Session) {
 	base := newDecideCase(t, sess, "error_bad_key")
-	bad := base.variant(func(c *decide.Config) { c.Secret = badKey })
+	bad := base.variant(func(c *systemone.Config) { c.Secret = badKey })
 	_, err := bad.ask(ticketState, ticketQuestions())
 	if !errors.Is(err, llmkit.ErrAuth) {
 		t.Fatalf("error = %v, want ErrAuth", err)
@@ -314,7 +315,7 @@ func caseErrorBadKey(t *testing.T, sess *livetest.Session) {
 // it to ErrInvalidRequest whatever the exact status.
 func caseErrorBadModel(t *testing.T, sess *livetest.Session) {
 	base := newDecideCase(t, sess, "error_bad_model")
-	bad := base.variant(func(c *decide.Config) { c.Model = badModel })
+	bad := base.variant(func(c *systemone.Config) { c.Model = badModel })
 	_, err := bad.ask(ticketState, ticketQuestions())
 	var ae *llmkit.APIError
 	if !errors.As(err, &ae) {
@@ -340,12 +341,12 @@ func (c *decisionCapture) Observe(_ context.Context, ev llmkit.Event) {
 }
 
 // caseUsageRecorded pins the success shape live: exactly one
-// DecisionEvent per successful Ask, Backend "typesafe", Model the
+// DecisionEvent per successful Ask, Backend "systemone", Model the
 // response's reported model, Usage matching the response.
 func caseUsageRecorded(t *testing.T, sess *livetest.Session) {
 	base := newDecideCase(t, sess, "usage_recorded")
 	obs := &decisionCapture{}
-	via := base.variant(func(c *decide.Config) { c.Observer = llmkit.Observers(obs, livetest.DefaultTally()) })
+	via := base.variant(func(c *systemone.Config) { c.Observer = llmkit.Observers(obs, livetest.DefaultTally()) })
 	resp, err := via.ask(ticketState, ticketQuestions())
 	if err != nil {
 		t.Fatalf("ask: %v", err)
@@ -361,8 +362,8 @@ func caseUsageRecorded(t *testing.T, sess *livetest.Session) {
 		t.Fatalf("event = %+v, want a KindDecision payload", ev)
 	}
 	de := ev.Decision
-	if de.Backend != "typesafe" {
-		t.Fatalf("Backend = %q, want typesafe", de.Backend)
+	if de.Backend != "systemone" {
+		t.Fatalf("Backend = %q, want systemone", de.Backend)
 	}
 	if de.Model != resp.Model {
 		t.Fatalf("Model = %q, want the response's reported model %q", de.Model, resp.Model)

@@ -90,4 +90,4 @@ jobs:
 
       - name: run live suite
         if: steps.creds.outputs.available == 'true'
-        run: go test -tags live -count=1 -v ./provider/ ./agent/ ./examples/... ./decide/
+        run: go test -tags live -count=1 -v ./provider/ ./agent/ ./examples/... ./decide/...

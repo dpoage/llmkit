@@ -1,16 +1,39 @@
 # Decide
 
-The `decide` package evaluates decisions with TypeSafe's Jev decision
-model (the System One API). One `Client.Ask` call sends a state plus a
-set of typed questions and returns calibrated beliefs and probability
-distributions.
+Decisions are two packages:
 
-Jev is not a chat model. It has no messages, no tools, no streaming, and
-no text output. The package does not implement `llmkit.Client`; it does
-not go through `provider.New`. See
+- `decide` is the vocabulary: the `Noul`, `Choice`, and `Score` questions,
+  `Questions`, `Response` with its accessors, `Check`, `Normalize`, and the
+  `Decider` interface. It holds no HTTP code and names no backend.
+- `decide/systemone` is the System One wire backend. `systemone.Client`
+  satisfies `decide.Decider`. One `Client.Ask` call sends a state plus a
+  set of typed questions to a System One host and returns calibrated
+  beliefs and probability distributions. The default host is TypeSafe's
+  Jev decision model.
+
+A decision model is not a chat model. It has no messages, no tools, no
+streaming, and no text output. Neither package implements `llmkit.Client`;
+neither goes through `provider.New`. See
 [decision models are not Clients](design.md#decision-models-are-not-clients)
-for that decision. The API reference is canonical:
-[pkg.go.dev/github.com/dpoage/llmkit/decide](https://pkg.go.dev/github.com/dpoage/llmkit/decide).
+for that decision. The API references are canonical:
+[decide](https://pkg.go.dev/github.com/dpoage/llmkit/decide) and
+[decide/systemone](https://pkg.go.dev/github.com/dpoage/llmkit/decide/systemone).
+
+## Hosts
+
+Every host that speaks the System One envelope at `POST /v1/systemone`
+works behind `Config.BaseURL`. The default host is TypeSafe at
+`https://api.typesafe.ai`. The hosts differ as follows:
+
+| | TypeSafe Jev | Kev ([github.com/jaredpalmer/kev](https://github.com/jaredpalmer/kev)) |
+|---|---|---|
+| Reported model | The versioned id (`jev-1.13.0` for `jev-latest`). | The requested alias, echoed (`kev-latest`). |
+| Billing | Input tokens only; output tokens are free. | Open weights (Apache-2.0); you run the server. |
+| Instructions-less questions, 1-level scores | `decide.Normalize` refuses both. | The host accepts both, but `decide.Normalize` refuses both before the request. |
+| `GET /v1/models` | Not exposed. | Exposed. The client does not call it. |
+| Probabilities | As reported. | Reported at 4 decimals. |
+| Extra response fields | None known. | `latency_ms`, ignored by the client. |
+| Auth | `Authorization: Bearer` key. | A local `kev.serve` needs no auth, but `systemone.New` still requires a non-empty `Secret`. |
 
 ## Constructing a client
 
@@ -21,12 +44,12 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/dpoage/llmkit/decide"
+	"github.com/dpoage/llmkit/decide/systemone"
 )
 
 func main() {
-	client, err := decide.New(decide.Config{
-		Secret: os.Getenv("LLMKIT_TYPESAFE_API_KEY"),
+	client, err := systemone.New(systemone.Config{
+		Secret: os.Getenv("LLMKIT_SYSTEMONE_API_KEY"),
 		Model:  "jev-latest",
 	})
 	if err != nil {
@@ -45,20 +68,20 @@ placeholder key. An invalid field returns an error wrapping
 | Field | Required | Effect and default |
 |---|---|---|
 | `Secret` | Yes | Non-empty, no surrounding whitespace (the same rule as `provider.Spec.Secret`). |
-| `Model` | Yes | A versioned id (`jev-1.13.0`) or alias (`jev-latest`, `jev-preview`). There is no default alias. |
-| `BaseURL` | No | Endpoint root for tests and gateways, without `/v1`. Default: `https://api.typesafe.ai`. `New` refuses a `BaseURL` that is not an `http` or `https` URL with a host (the scheme is case-insensitive) or that contains `#` anywhere, an empty fragment included, with `ErrInvalidRequest`; the error never echoes the URL or its userinfo. The path `/v1/systemone` is appended to the URL's path (trailing `/` characters dropped) and a query is kept after it: `https://gw.example/x?api-version=1` requests `/x/v1/systemone?api-version=1`. The path is not cleaned: `//` and dot segments are not collapsed or resolved. A URL that parses but cannot be dialed (`http://localhost:99999`) is accepted and fails at request time as a retryable transport error. |
+| `Model` | Yes | A model id or alias the host serves: `jev-1.13.0`, `jev-latest`, `jev-preview`, `kev-latest`. There is no default alias. |
+| `BaseURL` | No | Endpoint root of the System One host (TypeSafe, a Kev server, a gateway, a test server), without `/v1`. Default: `https://api.typesafe.ai`. `New` refuses a `BaseURL` that is not an `http` or `https` URL with a host (the scheme is case-insensitive) or that contains `#` anywhere, an empty fragment included, with `ErrInvalidRequest`; the error never echoes the URL or its userinfo. The path `/v1/systemone` is appended to the URL's path (trailing `/` characters dropped) and a query is kept after it: `https://gw.example/x?api-version=1` requests `/x/v1/systemone?api-version=1`. The path is not cleaned: `//` and dot segments are not collapsed or resolved. A URL that parses but cannot be dialed (`http://localhost:99999`) is accepted and fails at request time as a retryable transport error. |
 | `HTTPClient` | No | Used as-is, including its `Timeout`. Default: a plain client with no `http.Client.Timeout`, so the per-attempt `RequestTimeout` is the only bound. |
 | `Retry` | No | Resolved at construction via `retry.Config.Or`: 3 attempts, 30 s per-attempt timeout, `BaseDelay` (500 ms), `MaxDelay` (30 s), and `Jitter` (20%) from `retry.Default`. An explicit `Jitter` of 0 resolves like every other unset field; pin `Retry.Rand` for the resolved defaults with no jitter. |
-| `Observer` | No | Receives one [`llmkit.DecisionEvent`](https://pkg.go.dev/github.com/dpoage/llmkit#DecisionEvent) per `Ask` that passes pre-wire validation (success or failure; a caller's already-cancelled ctx emits one with `Err` set and zero wire hits; a `buildRequest` refusal emits nothing), via its `Observe(ctx, llmkit.Event)` method. Default: nil (no events). |
+| `Observer` | No | Receives one [`llmkit.DecisionEvent`](https://pkg.go.dev/github.com/dpoage/llmkit#DecisionEvent) per `Ask` that passes pre-wire validation (success or failure; a caller's already-cancelled ctx emits one with `Err` set and zero wire hits; a validation refusal emits nothing), via its `Observe(ctx, llmkit.Event)` method. Default: nil (no events). |
 
 ## The three question types
 
-`Question` is a sealed interface with three implementations. The wire `type`
-discriminator comes from the Go type; callers never write it. The state,
+`decide.Question` is a sealed interface with three implementations. The wire
+`type` discriminator comes from the Go type; callers never write it. The state,
 instructions, and descriptions accept a Go string, anything that marshals to a
 JSON object, or a JSON array. JSON null is allowed for descriptions and
-criteria. The client rejects a JSON number or boolean before sending the
-request.
+criteria. `decide.Normalize` rejects a JSON number or boolean before the client
+sends the request.
 
 ### Noul
 
@@ -75,11 +98,12 @@ import (
 	"os"
 
 	"github.com/dpoage/llmkit/decide"
+	"github.com/dpoage/llmkit/decide/systemone"
 )
 
 func main() {
-	client, err := decide.New(decide.Config{
-		Secret: os.Getenv("LLMKIT_TYPESAFE_API_KEY"),
+	client, err := systemone.New(systemone.Config{
+		Secret: os.Getenv("LLMKIT_SYSTEMONE_API_KEY"),
 		Model:  "jev-latest",
 	})
 	if err != nil {
@@ -100,7 +124,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	fmt.Println(resp.Nouls["refund"]) // belief in [0, 1]
+	belief, err := resp.Noul("refund") // belief in [0, 1]
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Println(belief)
 }
 ```
 
@@ -118,11 +147,12 @@ import (
 	"os"
 
 	"github.com/dpoage/llmkit/decide"
+	"github.com/dpoage/llmkit/decide/systemone"
 )
 
 func main() {
-	client, err := decide.New(decide.Config{
-		Secret: os.Getenv("LLMKIT_TYPESAFE_API_KEY"),
+	client, err := systemone.New(systemone.Config{
+		Secret: os.Getenv("LLMKIT_SYSTEMONE_API_KEY"),
 		Model:  "jev-latest",
 	})
 	if err != nil {
@@ -146,7 +176,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	ans := resp.Choices["route"]
+	ans, err := resp.Choice("route")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	fmt.Println(ans.Choice, ans.Confidence)
 	for option, p := range ans.Probabilities {
 		fmt.Println(option, p)
@@ -168,11 +202,12 @@ import (
 	"os"
 
 	"github.com/dpoage/llmkit/decide"
+	"github.com/dpoage/llmkit/decide/systemone"
 )
 
 func main() {
-	client, err := decide.New(decide.Config{
-		Secret: os.Getenv("LLMKIT_TYPESAFE_API_KEY"),
+	client, err := systemone.New(systemone.Config{
+		Secret: os.Getenv("LLMKIT_SYSTEMONE_API_KEY"),
 		Model:  "jev-latest",
 	})
 	if err != nil {
@@ -198,7 +233,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	ans := resp.Scores["urgency"]
+	ans, err := resp.Score("urgency")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	fmt.Println(ans.Score)
 	for i, level := range ans.Levels {
 		fmt.Println(level, ans.Probabilities[i])
@@ -220,11 +259,12 @@ import (
 	"os"
 
 	"github.com/dpoage/llmkit/decide"
+	"github.com/dpoage/llmkit/decide/systemone"
 )
 
 func main() {
-	client, err := decide.New(decide.Config{
-		Secret: os.Getenv("LLMKIT_TYPESAFE_API_KEY"),
+	client, err := systemone.New(systemone.Config{
+		Secret: os.Getenv("LLMKIT_SYSTEMONE_API_KEY"),
 		Model:  "jev-latest",
 	})
 	if err != nil {
@@ -259,10 +299,23 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Println(resp.Model, resp.Usage.InputTokens) // versioned id, billed input
-	fmt.Println(resp.Nouls["refund"])               // belief in [0, 1]
-	fmt.Println(resp.Choices["route"].Choice)
-	fmt.Println(resp.Scores["urgency"].Score)
+	fmt.Println(resp.Model, resp.Usage.InputTokens) // reported model id, input tokens
+	refund, err := resp.Noul("refund")              // belief in [0, 1]
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	route, err := resp.Choice("route")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	urgency, err := resp.Score("urgency")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Println(refund, route.Choice, urgency.Score)
 }
 ```
 
@@ -281,7 +334,7 @@ A map stays nil when the `Ask` included no question of that kind.
 
 `ScoreAnswer` carries `Probabilities` index-aligned with `Levels`. Both
 follow the server's legend order, from `"0"` to `"n-1"` with `n` equal
-to the levels asked for. `decide` passes them through verbatim: it
+to the levels asked for. The client passes them through verbatim: it
 renormalizes nothing and recomputes no argmax.
 
 ### Accessors
@@ -303,7 +356,7 @@ if errors.Is(err, decide.ErrNotAsked) {
 answer per asked id, in the map of its question's kind; a `Choice` answer
 that names one of the asked options; a `Score` answer whose `Levels` and
 `Probabilities` each have one entry per asked level, or none. The error
-names the offending id. `Ask` applies it to every answer set it decodes.
+names the offending id. `systemone.Client.Ask` applies it to every answer set it decodes.
 
 ### Backends that report no distribution
 
@@ -328,11 +381,12 @@ date on the page; verified 2026-09-19).
 
 ## Errors
 
-Every error from `Ask` is an `*llmkit.APIError` with `Provider` `"typesafe"`,
+Every error from `Ask` is an `*llmkit.APIError` with `Provider` `"systemone"`
+(a validation refusal from `decide.Normalize` is re-tagged from `"decide"`),
 except the caller's cancellation or a deadline it set, which is an error
 chaining the context error: `errors.Is(err, ctx.Err())`, never retryable.
 Match an `*llmkit.APIError`'s `Kind` with `errors.Is`. The status mapping mirrors
-[providers](providers.md#error-normalization); the decide-specific rows are
+[providers](providers.md#error-normalization); the System One rows are
 marked:
 
 | HTTP status | `llmkit` kind | Retried by `Ask` |
@@ -342,14 +396,14 @@ marked:
 | 413 | `ErrContextTooLong` | No |
 | 400 with a context-length message ("prompt is too long", "context length", ...) | `ErrContextTooLong` | No |
 | 400, other | `ErrInvalidRequest` | No |
-| 422 | `ErrInvalidRequest` | No (decide row) |
+| 422 | `ErrInvalidRequest` | No (System One row) |
 | 529 | `ErrOverloaded` | Yes (same `Retry-After` rules as 429) |
 | Any other status 500 or above | `ErrServer` | Yes |
 | Any other 4xx (404, 409, ...) | `ErrInvalidRequest` | No |
-| Any other non-200 status below 400 (a 3xx, an unexpected 2xx) | `ErrServer` | Yes (decide row: no vendor `Type` to classify from) |
+| Any other non-200 status below 400 (a 3xx, an unexpected 2xx) | `ErrServer` | Yes (System One row: no host `Type` to classify from) |
 | Transport failure (timeout, connection reset) | `ErrServer` (`StatusCode` 0) | Yes |
 | Redirect-policy failure (the client stopped after 10 redirects, or the `CheckRedirect` of `Config.HTTPClient` returned an error) | `ErrInvalidRequest` (`StatusCode` 0) | No; terminal |
-| 200 body that violates the answer contract | `ErrServer` (`StatusCode` 200) | Yes (decide row: retried like any `ErrServer`) |
+| 200 body that violates the answer contract | `ErrServer` (`StatusCode` 200) | Yes (System One row: retried like any `ErrServer`) |
 
 A 200 response that violates the answer contract is a server contract
 violation. The client returns `ErrServer` with `StatusCode` 200 and retries
@@ -362,7 +416,7 @@ sparse legend. These checks stay `ErrServer` and retried; the kit has no
 non-retryable kind for a 200 answer violation.
 
 A refused pre-wire request also returns `ErrInvalidRequest` before any
-network call. The client rejects: nil state; empty questions; empty
+network call. `decide.Normalize` rejects: nil state; empty questions; empty
 question id; nil instructions; a `Choice` without options; a `Score`
 with fewer than two levels; a JSON number or boolean where only text
 kinds are accepted.
@@ -390,12 +444,12 @@ validation returns `ErrInvalidRequest`. A per-attempt `RequestTimeout`
 expiring under a live parent is not a parent cancellation and is retried
 like any other `ErrServer`.
 
-For a non-200 status, `APIError.Message` carries the vendor body text; for a
+For a non-200 status, `APIError.Message` carries the host body text; for a
 transport or redirect failure, it carries the error's text. A `Message` of
 either kind longer than 200 bytes is cut at the last rune boundary at or
 before byte 200 and gets `...` appended. llmkit never places the API key
 into an error, and `Ask` masks an echo of the `Secret` or the `BaseURL`
-password in the error it returns; the `decide` package documentation gives
+password in the error it returns; the `decide/systemone` package documentation gives
 the forms covered.
 
 ## Usage and observability
@@ -406,19 +460,19 @@ page; verified 2026-09-19). `Response.Usage` reports both counts.
 
 A non-nil `Config.Observer` receives exactly one `llmkit.DecisionEvent`
 per `Ask` that passes pre-wire validation — success or failure, never
-for a `buildRequest` refusal. A caller's already-cancelled ctx emits
+for a validation refusal. A caller's already-cancelled ctx emits
 one event with `Err` set and zero wire hits. On success: `Backend`
-`"typesafe"`, `Model` the versioned id the server reported, `Usage`,
+`"systemone"`, `Model` the model id the host reported, `Usage`,
 `State` and `Questions` as validated, `Answers` — each of
 `Questions`/`Answers` sorted by ID. On failure: `Err` set, `Answers`
-nil, `Model` the requested alias. `decide` never mints a span; the
+nil, `Model` the requested alias. `systemone` never mints a span; the
 event rides whatever Run/Span/Step the `Ask`'s `ctx` already carries.
 
-## Vendor limits and jaggedness
+## TypeSafe limits and jaggedness
 
 - A request may total at most 64k tokens, and state plus the longest question
-  at most 32k. `decide` does not count tokens; oversized requests surface as
-  vendor 4xx errors. ([Models](https://docs.typesafe.ai/models.md); no vendor
+  at most 32k. `systemone` does not count tokens; oversized requests surface as
+  host 4xx errors. ([Models](https://docs.typesafe.ai/models.md); no vendor
   review date; verified 2026-09-19)
 - Input is text only: string, JSON object, or array of text values. No image,
   audio, or video. ([Models](https://docs.typesafe.ai/models.md); verified
@@ -468,28 +522,30 @@ itself without credentials. Lane variables:
 Run the lane:
 
 ```bash
-go test -tags live -count=1 ./decide/ -v
+go test -tags live -count=1 ./decide/systemone/ -v
 ```
 
 A keyless run skips with a message naming `LLMKIT_LIVE_TYPESAFE_API_KEY`, and
 the package prints one `LIVE_TOKENS` total line at exit. Add `-update` to
-re-record the fixtures under `decide/testdata/`; treat that as a deliberate
+re-record the fixtures under `decide/systemone/testdata/`; treat that as a deliberate
 local operation. The lane cases and the skip rules follow
 [testing](testing.md).
 
-The recorded fixtures replay hermetically: `decide/fixture_replay_test.go`
+The recorded fixtures replay hermetically: `decide/systemone/fixture_replay_test.go`
 runs in plain `go test ./...` with no tag, no network, and no credentials.
 
 `examples/decide` is the runnable one-Ask program:
 
 ```bash
-export LLMKIT_TYPESAFE_API_KEY="..."
-export LLMKIT_TYPESAFE_MODEL=jev-latest
+export LLMKIT_SYSTEMONE_API_KEY="..."
+export LLMKIT_SYSTEMONE_MODEL=jev-latest
 go run ./examples/decide
 ```
 
-It reads `LLMKIT_TYPESAFE_API_KEY` and `LLMKIT_TYPESAFE_MODEL` (both
-required) and `LLMKIT_TYPESAFE_BASE_URL` (optional). Without the required
+It reads `LLMKIT_SYSTEMONE_API_KEY` and `LLMKIT_SYSTEMONE_MODEL` (both
+required) and `LLMKIT_SYSTEMONE_BASE_URL` (optional; set it to target a
+Kev server or a gateway). The live lane variables keep the `LLMKIT_LIVE_TYPESAFE_*`
+names. Without the required
 variables it prints its usage and exits 1 without touching the network.
 
 CI runs the lane in the nightly Live workflow, which reads the repo secret

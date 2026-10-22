@@ -11,7 +11,7 @@ entry below is marked.
 ### Added
 
 - `decide`: `Decider`, the backend-neutral interface
-  `Ask(ctx, state, qs Questions) (Response, error)`; `*Client` satisfies it.
+  `Ask(ctx, state, qs Questions) (Response, error)`; `*systemone.Client` satisfies it.
   A backend's errors wrap a root `llmkit` sentinel or chain `ctx.Err()`.
 - `decide`: `Check(qs, resp)` reports whether a `Response` answers a
   `Questions` set exactly, and `Response.Noul`, `Choice`, and `Score`
@@ -22,6 +22,33 @@ entry below is marked.
   reports no distribution leaves `Probabilities` (and `Levels`) nil and
   `Confidence` 0, and must not fabricate them. The System One client still
   requires the legend and probabilities.
+- `decide`: `Normalize(state, qs)` validates a state and questions and returns
+  them in the root `llmkit.DecisionQuestion` vocabulary, sorted by id, so a
+  backend renders its own request from one validated form. `decide.DecisionAnswers`
+  converts a `Response` to `llmkit.DecisionAnswer`.
+
+### Changed
+
+- **Breaking:** the System One client moved out of `decide` into the new
+  package `decide/systemone`; `decide` is now the backend-neutral decision
+  vocabulary and holds no HTTP code. `decide.New`, `decide.Config`, and
+  `decide.Client` are now `systemone.New`, `systemone.Config`, and
+  `systemone.Client` (same fields, same defaults, same validation; the
+  default `BaseURL` stays `https://api.typesafe.ai`). The package is named for
+  the wire protocol, so any host that speaks System One works through
+  `Config.BaseURL`. Migrate by changing the import to
+  `github.com/dpoage/llmkit/decide/systemone`, the constructor call, and the
+  `*decide.Client` type; `decide.Questions`, `decide.Noul`, `decide.Choice`,
+  `decide.Score`, and `decide.Response` do not change.
+- **Breaking:** `APIError.Provider` on every error from the client, and
+  `DecisionEvent.Backend` on its events, are now `"systemone"` instead of
+  `"typesafe"`. Construction errors now start with `systemone:` instead of
+  `decide:`. A question the client refuses before the wire carries `Provider`
+  `"systemone"`; `decide.Normalize` itself tags it `"decide"`.
+- **Breaking:** `examples/decide` reads `LLMKIT_SYSTEMONE_API_KEY`,
+  `LLMKIT_SYSTEMONE_MODEL`, and `LLMKIT_SYSTEMONE_BASE_URL` instead of the
+  `LLMKIT_TYPESAFE_*` names. The live lane keeps `LLMKIT_LIVE_TYPESAFE_*`.
+- CI and the live workflow now run `./decide/...` instead of `./decide/`.
 
 ### Fixed
 

@@ -1,4 +1,4 @@
-package decide
+package systemone
 
 import (
 	"context"
@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/decide"
 	"github.com/dpoage/llmkit/retry"
 )
 
@@ -66,11 +67,11 @@ func (c *capture) snapshot() (body []byte, auth, ctype, method, path string) {
 	return c.body, c.auth, c.ctype, c.method, c.path
 }
 
-func mixedQuestions() Questions {
-	return Questions{
-		"belief":  Noul{Instructions: "Is the sky blue today?"},
-		"pick":    Choice{Instructions: "Pick a color.", Options: map[string]any{"blue": "the sky", "red": "a stop sign"}},
-		"quality": Score{Instructions: "Rate the answer.", Levels: []any{"bad", "ok", "good"}},
+func mixedQuestions() decide.Questions {
+	return decide.Questions{
+		"belief":  decide.Noul{Instructions: "Is the sky blue today?"},
+		"pick":    decide.Choice{Instructions: "Pick a color.", Options: map[string]any{"blue": "the sky", "red": "a stop sign"}},
+		"quality": decide.Score{Instructions: "Rate the answer.", Levels: []any{"bad", "ok", "good"}},
 	}
 }
 
@@ -116,8 +117,8 @@ func TestAsk_GoldenRequestEnvelope(t *testing.T) {
 
 	c := newTestClient(t, srv.URL, fastRetry)
 	state := map[string]any{"transcript": []string{"user: hi", "agent: hello"}}
-	questions := Questions{
-		"truth": Noul{Instructions: "Is 2+2 equal to 4?", True: "yes", False: "no"},
+	questions := decide.Questions{
+		"truth": decide.Noul{Instructions: "Is 2+2 equal to 4?", True: "yes", False: "no"},
 	}
 	if _, err := c.Ask(context.Background(), state, questions); err != nil {
 		t.Fatalf("Ask: %v", err)
@@ -183,7 +184,7 @@ func TestAsk_UnaskedKindsAreNil(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestClient(t, srv.URL, fastRetry)
-	resp, err := c.Ask(context.Background(), "s", Questions{"b": Noul{Instructions: "i"}})
+	resp, err := c.Ask(context.Background(), "s", decide.Questions{"b": decide.Noul{Instructions: "i"}})
 	if err != nil {
 		t.Fatalf("Ask: %v", err)
 	}
@@ -231,7 +232,7 @@ func TestAsk_StatusMapping(t *testing.T) {
 			defer srv.Close()
 
 			c := newTestClient(t, srv.URL, retry.Config{MaxAttempts: 1})
-			_, err := c.Ask(context.Background(), "s", Questions{"q": Noul{Instructions: "i"}})
+			_, err := c.Ask(context.Background(), "s", decide.Questions{"q": decide.Noul{Instructions: "i"}})
 			if err == nil {
 				t.Fatal("expected an error")
 			}
@@ -248,8 +249,8 @@ func TestAsk_StatusMapping(t *testing.T) {
 			if len(apiErr.Message) > 200+len("...") {
 				t.Errorf("len(Message) = %d, want at most 200 plus the ellipsis", len(apiErr.Message))
 			}
-			if apiErr.Provider != "typesafe" {
-				t.Errorf("Provider = %q, want typesafe", apiErr.Provider)
+			if apiErr.Provider != "systemone" {
+				t.Errorf("Provider = %q, want systemone", apiErr.Provider)
 			}
 			if hits.Load() != 1 {
 				t.Errorf("hits = %d, want 1 (MaxAttempts 1)", hits.Load())
@@ -316,7 +317,7 @@ func TestAsk_TransportFailureIsErrServer(t *testing.T) {
 	srv.Close() // dead endpoint: every dial fails
 
 	c := newTestClient(t, url, retry.Config{MaxAttempts: 1})
-	_, err := c.Ask(context.Background(), "s", Questions{"q": Noul{Instructions: "i"}})
+	_, err := c.Ask(context.Background(), "s", decide.Questions{"q": decide.Noul{Instructions: "i"}})
 	if err == nil {
 		t.Fatal("expected a transport error")
 	}
@@ -330,8 +331,8 @@ func TestAsk_TransportFailureIsErrServer(t *testing.T) {
 	if apiErr.StatusCode != 0 {
 		t.Errorf("StatusCode = %d, want 0 (transport failure)", apiErr.StatusCode)
 	}
-	if apiErr.Provider != "typesafe" {
-		t.Errorf("Provider = %q, want typesafe", apiErr.Provider)
+	if apiErr.Provider != "systemone" {
+		t.Errorf("Provider = %q, want systemone", apiErr.Provider)
 	}
 }
 
@@ -352,7 +353,7 @@ func TestAsk_ParentCancellationTerminal(t *testing.T) {
 	}()
 
 	c := newTestClient(t, srv.URL, retry.Config{MaxAttempts: 5, BaseDelay: time.Millisecond, RequestTimeout: 10 * time.Second})
-	_, err := c.Ask(ctx, "s", Questions{"q": Noul{Instructions: "i"}})
+	_, err := c.Ask(ctx, "s", decide.Questions{"q": decide.Noul{Instructions: "i"}})
 	close(release) // unblock the held handler so srv.Close can finish
 	if err == nil {
 		t.Fatal("expected a cancellation error")
@@ -386,7 +387,7 @@ func TestAsk_PerAttemptTimeoutRetried(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestClient(t, srv.URL, retry.Config{MaxAttempts: 2, BaseDelay: time.Millisecond, Jitter: 0, RequestTimeout: 30 * time.Millisecond})
-	_, err := c.Ask(context.Background(), "s", Questions{"q": Noul{Instructions: "i"}})
+	_, err := c.Ask(context.Background(), "s", decide.Questions{"q": decide.Noul{Instructions: "i"}})
 	if err == nil {
 		t.Fatal("expected a timeout error")
 	}
@@ -421,7 +422,7 @@ func TestAsk_ParentDeadlineDuringBackoffTerminal(t *testing.T) {
 	defer cancel()
 
 	c := newTestClient(t, srv.URL, retry.Config{MaxAttempts: 3, BaseDelay: 300 * time.Millisecond, MaxDelay: 300 * time.Millisecond, Jitter: 0})
-	_, err := c.Ask(ctx, "s", Questions{"q": Noul{Instructions: "i"}})
+	_, err := c.Ask(ctx, "s", decide.Questions{"q": decide.Noul{Instructions: "i"}})
 	if err == nil {
 		t.Fatal("expected a deadline error")
 	}
@@ -444,8 +445,8 @@ func TestAsk_LegendOrderingFollowsIndex(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestClient(t, srv.URL, fastRetry)
-	resp, err := c.Ask(context.Background(), "s", Questions{
-		"quality": Score{Instructions: "rate", Levels: []any{"bad", "ok", "good"}},
+	resp, err := c.Ask(context.Background(), "s", decide.Questions{
+		"quality": decide.Score{Instructions: "rate", Levels: []any{"bad", "ok", "good"}},
 	})
 	if err != nil {
 		t.Fatalf("Ask: %v", err)
@@ -531,14 +532,14 @@ func TestAsk_ResponseValidation(t *testing.T) {
 			wantInErrMsg: "usage",
 		},
 	}
-	questionsFor := func(name string) Questions {
+	questionsFor := func(name string) decide.Questions {
 		switch name {
 		case "sparse legend", "sparse probabilities", "legend size mismatch":
-			return Questions{"quality": Score{Instructions: "rate", Levels: []any{"bad", "ok", "good"}}}
+			return decide.Questions{"quality": decide.Score{Instructions: "rate", Levels: []any{"bad", "ok", "good"}}}
 		case "missing noul value":
-			return Questions{"b": Noul{Instructions: "i"}}
+			return decide.Questions{"b": decide.Noul{Instructions: "i"}}
 		case "missing choice value":
-			return Questions{"p": Choice{Instructions: "i", Options: map[string]any{"a": "x"}}}
+			return decide.Questions{"p": decide.Choice{Instructions: "i", Options: map[string]any{"a": "x"}}}
 		default:
 			return mixedQuestions()
 		}
@@ -563,8 +564,8 @@ func TestAsk_ResponseValidation(t *testing.T) {
 			if apiErr.StatusCode != http.StatusOK {
 				t.Errorf("StatusCode = %d, want 200", apiErr.StatusCode)
 			}
-			if apiErr.Provider != "typesafe" {
-				t.Errorf("Provider = %q, want typesafe", apiErr.Provider)
+			if apiErr.Provider != "systemone" {
+				t.Errorf("Provider = %q, want systemone", apiErr.Provider)
 			}
 			if !strings.Contains(apiErr.Message, tt.wantInErrMsg) {
 				t.Errorf("Message = %q, want it to name %s", apiErr.Message, tt.wantInErrMsg)
@@ -574,7 +575,7 @@ func TestAsk_ResponseValidation(t *testing.T) {
 }
 
 // TestAsk_ObserverEmitsOneDecisionEventOnSuccess pins the success shape:
-// exactly one DecisionEvent per successful Ask, Backend "typesafe", Model
+// exactly one DecisionEvent per successful Ask, Backend "systemone", Model
 // the response's reported model (not the requested alias), Usage, and
 // Answers and Questions sorted by ID.
 func TestAsk_ObserverEmitsOneDecisionEventOnSuccess(t *testing.T) {
@@ -597,8 +598,8 @@ func TestAsk_ObserverEmitsOneDecisionEventOnSuccess(t *testing.T) {
 		t.Fatalf("Kind=%q Decision=%+v, want KindDecision with a payload", ev.Kind, ev.Decision)
 	}
 	de := ev.Decision
-	if de.Backend != "typesafe" {
-		t.Errorf("Backend = %q, want typesafe", de.Backend)
+	if de.Backend != "systemone" {
+		t.Errorf("Backend = %q, want systemone", de.Backend)
 	}
 	// The ledger records the versioned id the server reported, not the alias sent.
 	if de.Model != "jev-1.13.0" {
@@ -699,14 +700,14 @@ func TestAsk_NoObserverEmitsNothing(t *testing.T) {
 // an unsorted conversion no realistic chance of matching by
 // map-iteration luck.
 func TestAsk_DecisionEventRoundTrip(t *testing.T) {
-	questions := Questions{
-		"zeta":  Noul{Instructions: "Is it raining?", True: "wet streets", False: map[string]any{"streets": "dry"}},
-		"alpha": Choice{Instructions: "Pick a color.", Options: map[string]any{"blue": "the sky", "red": map[string]any{"hex": "#f00"}}},
-		"mid":   Score{Instructions: map[string]any{"rubric": "quality"}, Levels: []any{"bad", "ok", "good"}},
+	questions := decide.Questions{
+		"zeta":  decide.Noul{Instructions: "Is it raining?", True: "wet streets", False: map[string]any{"streets": "dry"}},
+		"alpha": decide.Choice{Instructions: "Pick a color.", Options: map[string]any{"blue": "the sky", "red": map[string]any{"hex": "#f00"}}},
+		"mid":   decide.Score{Instructions: map[string]any{"rubric": "quality"}, Levels: []any{"bad", "ok", "good"}},
 	}
 	extra := []string{"k", "c", "x", "e", "q", "b", "w", "g", "t"}
 	for _, id := range extra {
-		questions[id] = Noul{Instructions: "extra " + id}
+		questions[id] = decide.Noul{Instructions: "extra " + id}
 	}
 	answers := []string{
 		`"zeta":{"type":"noul","noul":0.25}`,
@@ -723,7 +724,7 @@ func TestAsk_DecisionEventRoundTrip(t *testing.T) {
 	belief := func(v float64) *float64 { return &v }
 	raw := func(s string) json.RawMessage { return json.RawMessage(s) }
 	want := &llmkit.DecisionEvent{
-		Backend: "typesafe",
+		Backend: "systemone",
 		Model:   "jev-1.13.0",
 		State:   raw(`{"doc":"sky","n":1}`),
 		Usage:   llmkit.Usage{InputTokens: 120, OutputTokens: 15},
@@ -820,7 +821,7 @@ func TestAsk_SecretNeverInErrorStrings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	_, askErr := c.Ask(context.Background(), nil, Questions{"q": Noul{Instructions: "i"}})
+	_, askErr := c.Ask(context.Background(), nil, decide.Questions{"q": decide.Noul{Instructions: "i"}})
 	run(t, askErr)
 
 	// Vendor 401 (a body, but never the credential).
@@ -829,7 +830,7 @@ func TestAsk_SecretNeverInErrorStrings(t *testing.T) {
 	}))
 	defer srv1.Close()
 	c1 := newTestClient(t, srv1.URL, retry.Config{MaxAttempts: 1})
-	_, err = c1.Ask(context.Background(), "s", Questions{"q": Noul{Instructions: "i"}})
+	_, err = c1.Ask(context.Background(), "s", decide.Questions{"q": decide.Noul{Instructions: "i"}})
 	run(t, err)
 
 	// Transport failure.
@@ -837,14 +838,14 @@ func TestAsk_SecretNeverInErrorStrings(t *testing.T) {
 	deadURL := dead.URL
 	dead.Close()
 	c2 := newTestClient(t, deadURL, retry.Config{MaxAttempts: 1})
-	_, err = c2.Ask(context.Background(), "s", Questions{"q": Noul{Instructions: "i"}})
+	_, err = c2.Ask(context.Background(), "s", decide.Questions{"q": decide.Noul{Instructions: "i"}})
 	run(t, err)
 
 	// Response contract violation.
 	srv3 := httptest.NewServer(okHandler(`{"model":"m","answers":{},"usage":{}}`))
 	defer srv3.Close()
 	c3 := newTestClient(t, srv3.URL, retry.Config{MaxAttempts: 1})
-	_, err = c3.Ask(context.Background(), "s", Questions{"q": Noul{Instructions: "i"}})
+	_, err = c3.Ask(context.Background(), "s", decide.Questions{"q": decide.Noul{Instructions: "i"}})
 	run(t, err)
 }
 
@@ -1032,7 +1033,7 @@ func TestAsk_SubBadRequestStatusIsErrServerRetried(t *testing.T) {
 			defer srv.Close()
 
 			c := newTestClient(t, srv.URL, fastRetry)
-			_, err := c.Ask(context.Background(), "s", Questions{"q": Noul{Instructions: "i"}})
+			_, err := c.Ask(context.Background(), "s", decide.Questions{"q": decide.Noul{Instructions: "i"}})
 			if err == nil {
 				t.Fatal("expected an error")
 			}

@@ -17,10 +17,10 @@ type Questions map[string]Question
 
 // Response is the normalized result of one Ask.
 type Response struct {
-	// Model is the versioned id the server actually used; it can differ from
-	// a requested alias ("jev-latest" -> "jev-1.13.0"). Ledger on this.
+	// Model is the model id the backend reports using; it can differ from
+	// the requested alias. Ledger on this.
 	Model string
-	// Usage is token consumption. TypeSafe bills input tokens only.
+	// Usage is token consumption as the backend reports it.
 	Usage llmkit.Usage
 	// Nouls holds one entry per Noul question. nil when no Nouls were asked.
 	Nouls map[string]float64
