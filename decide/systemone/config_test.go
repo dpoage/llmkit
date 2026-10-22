@@ -1,4 +1,4 @@
-package decide
+package systemone
 
 import (
 	"errors"
