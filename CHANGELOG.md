@@ -64,19 +64,20 @@ entry below is marked.
 
 ### Changed
 
-- **Breaking:** `systemone.Config.Observer` is removed, and `systemone.Client`
-  no longer emits events. Wrap the client in `decide.Observe(client, obs)` for
-  the same `DecisionEvent` per `Ask`; `Backend` and `Model` come from the
-  client's `Identity()`. An already-cancelled context still emits one event
-  with `Err` set; a validation refusal still emits nothing.
+- **Breaking:** `decide.Config.Observer` is removed, and `systemone.Client`
+  emits no events. Drop the field and wrap the client in
+  `decide.Observe(client, obs)` for the same `DecisionEvent` per `Ask`;
+  `Backend` and `Model` come from the client's `Identity()`. An
+  already-cancelled context still emits one event with `Err` set; a
+  validation refusal still emits nothing.
 - **Breaking:** the System One client moved out of `decide` into the new
   package `decide/systemone`; `decide` is now the backend-neutral decision
   vocabulary and holds no HTTP code. `decide.New`, `decide.Config`, and
   `decide.Client` are now `systemone.New`, `systemone.Config`, and
-  `systemone.Client` (same fields, same defaults, same validation; the
-  default `BaseURL` stays `https://api.typesafe.ai`). The package is named for
-  the wire protocol, so any host that speaks System One works through
-  `Config.BaseURL`. Migrate by changing the import to
+  `systemone.Client` (the same fields except `Observer`, same defaults, same
+  validation; the default `BaseURL` stays `https://api.typesafe.ai`). The
+  package is named for the wire protocol, so any host that speaks System One
+  works through `Config.BaseURL`. Migrate by changing the import to
   `github.com/dpoage/llmkit/decide/systemone`, the constructor call, and the
   `*decide.Client` type; `decide.Questions`, `decide.Noul`, `decide.Choice`,
   `decide.Score`, and `decide.Response` do not change.
