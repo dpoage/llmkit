@@ -79,6 +79,8 @@ client, err := provider.New(context.Background(), spec, provider.Options{})
 
 No `BaseURL` targets the vendor default, `generativelanguage.googleapis.com`.
 
+Gemini 3 rejects replayed function calls that carry no thought signature. When a history that did not come from Gemini (for example an Anthropic tool loop) is sent to a `gemini-3` model, the first unsigned function call of each assistant step in the current turn gets Google's documented bypass signature `skip_thought_signature_validator`; signatures Gemini produced are sent back unchanged, and other Gemini models are unaffected. The Go SDK sends the bypass base64-encoded, and the hermetic tests cannot confirm that Google accepts that form.
+
 ## Base URL rules
 
 `Spec.BaseURL` overrides the endpoint for tests, proxies, and self-hosted gateways. Empty means the vendor default host. No SDK base-URL environment variable or profile file changes the host. `TypeOpenAICompatible` requires the field unconditionally — it has no vendor default.
