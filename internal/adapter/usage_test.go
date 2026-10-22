@@ -45,6 +45,32 @@ func TestEstimateUsage_CeilBytesOverFour(t *testing.T) {
 	}
 }
 
+func TestEstimateUsage_CountsThinkingBlocks(t *testing.T) {
+	text := llmkit.Block{Kind: llmkit.BlockText, Text: "abcde"}
+	thought := llmkit.Block{Kind: llmkit.BlockThinking, Text: "123456789", Raw: []byte(`{"reasoning_content":"123456789"}`)}
+	details := llmkit.Block{Kind: llmkit.BlockThinking, Raw: []byte(`{"reasoning_details":[{"t":1}]}`)} // 31 bytes
+	call := llmkit.ToolCall{Name: "fn", Arguments: []byte(`{}`)}
+	cases := []struct {
+		name                string
+		resp                llmkit.Response
+		wantOut, wantReason int64
+	}{
+		{"text only", llmkit.Response{Text: "abcde", Blocks: []llmkit.Block{text}}, 2, 0},
+		{"reasoning text", llmkit.Response{Blocks: []llmkit.Block{thought}}, 3, 3},
+		{"reasoning raw only", llmkit.Response{Blocks: []llmkit.Block{details}}, 8, 8},
+		{"both", llmkit.Response{Text: "abcde", ToolCalls: []llmkit.ToolCall{call}, Blocks: []llmkit.Block{thought, details, text}}, 3 + 10, 10},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := EstimateUsage(nil, c.resp)
+			want := llmkit.Usage{OutputTokens: c.wantOut, ReasoningTokens: c.wantReason, Estimated: true}
+			if got != want {
+				t.Errorf("EstimateUsage = %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
 func TestWire_RequestBytesCountsLastRequestBody(t *testing.T) {
 	var redirected bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
