@@ -201,13 +201,16 @@ func setCompletionErr(ce *llmkit.CompletionEvent, err error) {
 // emitCompletion emits the Completion event for one logical completion,
 // success or failure (Err set, zero Response). ctx must be the ctx the client
 // saw, so the event's SpanID matches the one the client (and any Attempt
-// events it emitted) carried. Provider and Model come from the client's own
-// Identity, never from arguments to the emitter.
+// events it emitted) carried. Provider and Model are resp.Served when the call
+// succeeded and it is set, else the client's own Identity.
 func (r *Runner) emitCompletion(ctx context.Context, em runEmitter, step int, start time.Time, req llmkit.Request, resp llmkit.Response, err error) {
 	ev := llmkit.NewEvent(ctx, llmkit.KindCompletion)
 	ev.Step = step
 	ev.Duration = time.Since(start)
 	identity := llmkit.IdentityOf(r.client)
+	if err == nil && resp.Served != (llmkit.Identity{}) {
+		identity = resp.Served
+	}
 	ce := &llmkit.CompletionEvent{Request: req, Response: resp, Provider: identity.Provider, Model: identity.Model}
 	setCompletionErr(ce, err)
 	ev.Completion = ce

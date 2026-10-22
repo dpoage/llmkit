@@ -79,6 +79,10 @@ client, err := provider.New(context.Background(), spec, provider.Options{})
 
 No `BaseURL` targets the vendor default, `generativelanguage.googleapis.com`.
 
+Gemini 3 and Gemini 4 models reject a replayed function call that carries no thought signature. When a history that did not come from Gemini (for example an Anthropic tool loop) is sent to a model named `gemini-3` or `gemini-4`, alone or followed by `-` or `.` and more text, the adapter gives the FIRST function call of each assistant step in the current turn Google's documented bypass signature `skip_thought_signature_validator`, if that call has no signature. Later calls in the same step get none. Signatures Gemini produced are sent back unchanged, and models outside the two series are unaffected. Reasoning-effort mapping (`thinkingLevel`) stays `gemini-3` only.
+
+The Go SDK types the signature as `[]byte`, so the bypass goes on the wire base64-encoded. Whether Google accepts that form is unverified: the hermetic tests cannot confirm it, and the evidence conflicts. `langchain-google` issues #1570 and #1972 report Vertex rejecting the base64 form; `pydantic-ai` sends the same bytes through the Python SDK and reports that it works on the Gemini API. The bead `llmkit-ws9` tracks a live check.
+
 ## Base URL rules
 
 `Spec.BaseURL` overrides the endpoint for tests, proxies, and self-hosted gateways. Empty means the vendor default host. No SDK base-URL environment variable or profile file changes the host. `TypeOpenAICompatible` requires the field unconditionally — it has no vendor default.
@@ -138,9 +142,9 @@ The stack composes over streaming too: retry stops once a delta reaches the call
 | Field | Effect | Default |
 |---|---|---|
 | `Retry` | Retry policy for the retry stage. Unset fields (≤ 0; `Jitter` == 0) are completed field-wise from `retry.Default` via `retry.Config.Or`; every field you set is kept — `Retry{BaseDelay: 2s}` sleeps a 2 s-based schedule, `Retry{MaxAttempts: 2}` keeps the 500 ms base. | `retry.Default` fills every unset field: 4 attempts, 500 ms base delay, 30 s cap, 20% jitter, 5 m per-attempt timeout |
-| `Observer` | Receives one `llmkit.AttemptEvent` per provider attempt (failures included) from the retry stage, AND one `llmkit.CompletionEvent` per logical completion whose context the stack claims (a `New`/`Wrap` client run under the agent `Runner` sees an already-claimed context and receives `Attempt` events only), both tagged with the resolved `llmkit.Identity`. | nil (no events) |
+| `Observer` | Receives one `llmkit.AttemptEvent` per provider attempt (failures included) from the retry stage, AND one `llmkit.CompletionEvent` per logical completion whose context the stack claims (a `New`/`Wrap` client run under the agent `Runner` sees an already-claimed context and receives `Attempt` events only). Both are tagged with the resolved `llmkit.Identity`, except that a successful call whose response sets `Response.Served` tags its `Completion` with `Served` instead. | nil (no events) |
 | `StreamIdleTimeout` | Stream only: fails an attempt that waits this long for its next delta, counted from the attempt's start and from each delta callback's return (time inside your callback never counts). SSE keepalive comments and chunks that emit no delta do not reset it; an OpenAI-compatible chunk that carries only `reasoning_details` emits no delta. The attempt fails as a retryable `*llmkit.APIError` (`ErrServer`) naming the idle timeout; once a delta has reached the caller the error is terminal, like any failure after a delivered delta. `Complete` ignores it. A client without native `Stream` runs its whole `Complete` under the timer. Hidden-reasoning models (OpenAI Chat Completions reasoning models, Gemini without thought summaries) stream nothing while they reason, so a short value misfires on them and each retry re-bills the input. | 0 (disabled; a negative value also disables); `Retry`'s per-attempt `RequestTimeout` is the only bound |
-| `Provider` | Overrides the `Identity.Provider` tag on emitted events. | `string(spec.Type)` for `New`; `llmkit.IdentityOf(c).Provider` for `Wrap` |
+| `Provider` | Overrides the `Identity.Provider` tag on emitted events. A successful `Completion` whose response sets `Response.Served` takes `Provider` and `Model` from `Served` instead. | `string(spec.Type)` for `New`; `llmkit.IdentityOf(c).Provider` for `Wrap` |
 | `HTTPClient` | Overrides the transport the SDKs use; for `httptest` and proxies. Headers its `Transport` adds reach the wire. `Wrap` ignores this field — it decorates an already-built client and the inner adapter and its transport are kept: a `New` client built with HTTPClient `o1` keeps `o1` across every `Wrap`. | a plain `http.Client` per adapter over `http.DefaultTransport` (never `http.DefaultClient`); `Retry`'s per-attempt timeout bounds each attempt |
 
 ## Wrapping a foreign client
@@ -181,7 +185,42 @@ client, err := provider.New(ctx, spec, provider.Options{Observer: obs})
 
 Because the observer's outermost stage sits above the serializer, a `Completion` event shows the truncated response your loop sees, while the retry stage's `Attempt` events show the raw adapter response.
 
-If the same client runs inside an `agent.Runner`, the Runner is the emitter that owns the turn's `Completion` (with `Step` set, tagged with the client's `Identity`); `Options.Observer` still receives the `Attempt` events when set. An extra `llmkit.Observe` around a Runner-run client receives the context the Runner already claimed, so it never records a second `Completion`.
+If the same client runs inside an `agent.Runner`, the Runner is the emitter that owns the turn's `Completion` (with `Step` set; `Provider` and `Model` follow the rule below); `Options.Observer` still receives the `Attempt` events when set. An extra `llmkit.Observe` around a Runner-run client receives the context the Runner already claimed, so it never records a second `Completion`.
+
+A `Completion` event from `llmkit.Observe` or the Runner names `Response.Served` as its `Provider`/`Model` when the call succeeded and the response set it; a failed call, or a response with a zero `Served`, names the client's `Identity`.
+
+## Fallback
+
+`provider.Fallback(primary, fallbacks...)` returns a client that calls `primary` and, when it fails retryably, each fallback in order until one serves. Members are any `llmkit.Client`, usually `provider.New` or `provider.Wrap` stacks, each with its own retry and `Observer`. A nil member panics at construction.
+
+```go
+primary, _ := provider.New(ctx, anthropicSpec, provider.Options{Observer: obs})
+backup, _ := provider.New(ctx, compatSpec, provider.Options{Observer: obs})
+fb := llmkit.Observe(provider.Fallback(primary, backup), obs)
+```
+
+When a member is tried, and what comes back:
+
+- **Fall-through rule.** The next member runs only when `llmkit.Classify` calls the error retryable (`ErrRateLimited`, `ErrServer`, `ErrOverloaded`) AND the caller's context is live. `ErrAuth`, `ErrInvalidRequest`, `ErrContextTooLong`, a plain non-`APIError` and any context error return at once, and no later member runs.
+- **Stream.** `Stream` falls through only before the first delta reaches your callback; after that any error is terminal. A member without native `Stream` is driven through `llmkit.Stream`.
+- **All members fail.** The LAST member's error is the single wrapped error, so `errors.Is` and `errors.As` see exactly its chain; earlier members' errors appear in the message only. The primary's `ErrOverloaded` does not satisfy `errors.Is` when the last member returned `ErrServer`. The same holds for a terminal error from a later member.
+- **`Response.Served`.** The serving member's `llmkit.Identity`, set only when the member left it empty, so `Fallback(Fallback(a, b), c)` reports `b` when `b` served. A member that is itself a `Fallback` is never stamped. A member with no Identity (a `provider.Wrap` of a foreign client with a zero Identity and no `Options.Provider`) leaves `Served` the zero value rather than naming the failed primary. In that case, including the flat `Fallback(anthropic, Wrap(foreign))`, `llmkit.Observe` and the Runner name the client's own `Identity`, which is the primary's, on a `Completion` that carries the anonymous secondary's usage. If a wrapper such as `provider.Wrap` hides a `Fallback` that is a member of an outer `Fallback`, and the inner serving member is anonymous, the outer `Fallback` stamps the wrapper's `Identity`: the inner primary's, with `Options.Provider` replacing the provider tag when set. For `Fallback(Wrap(Fallback(a, b), Options{Provider: "cfg"}), c)` with an anonymous `b`, `Served` is `{cfg, a's model}`. Give every member an Identity to avoid these cases. `Identity()` and `Capabilities()` are the primary's, unchanged.
+
+### Wiring
+
+Never `provider.Wrap` a `Fallback`: the outer stack retries the whole chain (multiplying every member's retries) and names the primary on its `Attempt` events and on the `Completion` of a failed call; a successful call's `Completion` still names `Response.Served` when set. Observe the chain with `llmkit.Observe(fb, obs)` and give each member its own `Options.Observer` to receive its `Attempt` events. Under the agent `Runner` the Runner owns the `Completion`; members still emit `Attempt` events.
+
+### Budget contract
+
+There is no fall-through timeout. A member's retry budget (`MaxAttempts` × `RequestTimeout`, plus backoff and any `Retry-After`) must fit inside the caller's deadline, or a stalled member consumes the deadline and later members never run: the call returns the context error. Under `retry.Default` that budget is about 21 minutes, so set each member's `Retry` explicitly when you bound the caller's context.
+
+### History across providers
+
+The request goes to every member unmodified: Fallback never copies, edits, or strips the history.
+
+- Thinking blocks carry the tag of the adapter that produced them. A serving member whose tag differs drops them from the wire; a member with the same tag (anthropic to anthropic, two models on one compat host) receives them.
+- A serving fallback applies its own request preparation, which may drop or refuse a feature its capabilities lack. `Capabilities()` reports the primary's, so the primary's requests are never degraded by a weaker fallback.
+- Tool-result media is refused per role on every member at this version.
 
 ## Error normalization
 

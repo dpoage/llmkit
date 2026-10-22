@@ -10,22 +10,6 @@ entry below is marked.
 
 ### Added
 
-- `agent`: `WithToolOutputLimit(maxBytes, sink)` bounds each successful tool
-  result entering history; off by default, so existing runs are unchanged. A
-  result over the limit (the bytes of its text, media data and URLs, after
-  media degradation) goes to the `SpillSink` as its blocks, and the model sees
-  `[tool output spilled: <ref>, <size> bytes]` plus a head preview of its text,
-  within the limit. When the preview is empty, because the result has no text
-  or the limit leaves no room for it, the marker goes alone, with no newline.
-  With a nil sink, or when the sink fails, the text is head-truncated and
-  marked `[tool output truncated: <shown> of <size> bytes shown]`, and media
-  blocks are dropped. A limit smaller than the marker still sends the marker.
-  Errors, denials and timeouts are not limited. A sink that panics is not
-  recovered. `ToolRunEvent` gains `OriginalBytes`, `SpillRef` and
-  `SpillError`, omitted when unset; with no sink only
-  `OriginalBytes` is set, and `Result` stays the text the model saw. A replay
-  serves the recorded result without calling the sink, and a compaction stub
-  of a spilled result names its reference.
 - `llmkit`: `ThinkingConfig.Effort` (`ReasoningEffort`: `EffortLow`,
   `EffortMedium`, `EffortHigh`) and `Capabilities.ReasoningEffort`. OpenAI
   sends `reasoning_effort` and Google sends `thinkingLevel`. The flag is true
@@ -67,6 +51,37 @@ entry below is marked.
   `Usage.Add` ORs it. Before this, such endpoints read as zero spend and
   `agent.Limits.TokenBudget` and `agent.BudgetPool` never tripped; they now
   see the estimate (llmkit-rli.1.4).
+- `provider`: `Fallback(primary, fallbacks...)` returns a client that tries
+  each member in order and moves on only when `llmkit.Classify` calls the
+  error retryable and the caller's context is live; `Stream` moves on only
+  before the first delta. When every member fails, the last member's error is
+  the single wrapped error and earlier errors appear in the message only.
+  `Capabilities()` and `Identity()` are the primary's. Never `provider.Wrap` a
+  `Fallback`; observe it with `llmkit.Observe`. Each member's retry budget must
+  fit inside the caller's deadline, or later members never run. Thinking
+  blocks pass to a member with the same provider tag and drop for a different
+  one. See `docs/providers.md`.
+- `llmkit`: `Response.Served`, the `Identity` of the backend that produced the
+  response (JSON key `served`, omitted when zero). `provider.Fallback` sets it
+  to the serving member's identity when the response left it empty, except for
+  a member that is itself a `Fallback`. `Identity`, which was not serialized
+  before, gains the JSON keys `provider` and `model` (llmkit-rli.1.6).
+- `agent`: `WithToolOutputLimit(maxBytes, sink)` bounds each successful tool
+  result entering history; off by default, so existing runs are unchanged. A
+  result over the limit (the bytes of its text, media data and URLs, after
+  media degradation) goes to the `SpillSink` as its blocks, and the model sees
+  `[tool output spilled: <ref>, <size> bytes]` plus a head preview of its text,
+  within the limit. When the preview is empty, because the result has no text
+  or the limit leaves no room for it, the marker goes alone, with no newline.
+  With a nil sink, or when the sink fails, the text is head-truncated and
+  marked `[tool output truncated: <shown> of <size> bytes shown]`, and media
+  blocks are dropped. A limit smaller than the marker still sends the marker.
+  Errors, denials and timeouts are not limited. A sink that panics is not
+  recovered. `ToolRunEvent` gains `OriginalBytes`, `SpillRef` and
+  `SpillError`, omitted when unset; with no sink only
+  `OriginalBytes` is set, and `Result` stays the text the model saw. A replay
+  serves the recorded result without calling the sink, and a compaction stub
+  of a spilled result names its reference.
 - `agent`: `RepetitionPolicy()` returns a stock `ToolPolicy` that stops tool
   loops. It keeps the last 12 calls of a run (denied calls included) and
   denies a call when the last 2p+1 calls, for some p from 1 to 5, repeat with
@@ -270,6 +285,36 @@ entry below is marked.
 
 ### Changed
 
+- `llmkit`: the ceiling refusal text now says the adapter "does not map" the
+  field instead of claiming it has no wire field.
+- **Breaking:** `provider`: Google `Usage.OutputTokens` is now
+  `candidatesTokenCount + thoughtsTokenCount`; it was `candidatesTokenCount`
+  alone, which left Gemini's billed thinking tokens out of the count.
+  `agent.Limits.TokenBudget` and any caller that sums `OutputTokens` now see
+  thinking runs on Gemini 2.5 and 3 models at their real size and trip sooner
+  than before. Runs with no thinking are unchanged. `EventSchemaVersion` is
+  now 3 to mark the meaning change; recorded v2 events still load.
+- `provider`: OpenAI and OpenAI-compatible `Usage.OutputTokens` now include
+  `completion_tokens_details.reasoning_tokens` for xAI-style usage, where
+  `total_tokens` equals prompt plus completion plus reasoning tokens; xAI
+  counts reasoning outside `completion_tokens`. OpenAI-style usage and usage
+  without `total_tokens` are unchanged. `EventSchemaVersion` 3 covers this
+  too.
+- `provider`: on OpenAI `gpt-5` and the `o1`, `o3` and `o4-mini` entries
+  (`ReasoningEffort` true), a `ThinkingConfig` with no positive
+  `BudgetTokens` and no `Effort`, or with a negative `BudgetTokens`, is now
+  refused pre-wire with an error wrapping `ErrInvalidRequest`. Before, the
+  OpenAI adapters dropped every `ThinkingConfig`.
+- `llmkit`, `agent`: when a successful response sets `Response.Served`, the
+  `Completion` event from `llmkit.Observe` and from the agent `Runner` takes
+  `Provider` and `Model` from it instead of from the client's `IdentityOf`;
+  `Options.Provider` does not override it. A failed call and a zero `Served`
+  keep the client's identity, so only responses that set `Served` (today, those
+  of `provider.Fallback`) change. Replaying a record whose responses carry
+  `served` through `agent.ReplayClient` now names the served member on each
+  replayed `Completion`; before, replayed `Completion` events had empty
+  `Provider` and `Model`, and a record without `served` still replays that way
+  (llmkit-rli.1.6).
 - `agent`: the history size estimate behind `HistoryTokenBudget` and
   `EstimateHistoryTokens` now prices thinking and media blocks, so
   `HistoryTokenBudget` may fire earlier or later for histories that carry
@@ -330,26 +375,6 @@ entry below is marked.
   non-text block in a tool result was refused on every adapter; now image and
   document blocks follow the profile, and a thinking block in a tool result is
   still refused everywhere.
-- `llmkit`: the ceiling refusal text now says the adapter "does not map" the
-  field instead of claiming it has no wire field.
-- **Breaking:** `provider`: Google `Usage.OutputTokens` is now
-  `candidatesTokenCount + thoughtsTokenCount`; it was `candidatesTokenCount`
-  alone, which left Gemini's billed thinking tokens out of the count.
-  `agent.Limits.TokenBudget` and any caller that sums `OutputTokens` now see
-  thinking runs on Gemini 2.5 and 3 models at their real size and trip sooner
-  than before. Runs with no thinking are unchanged. `EventSchemaVersion` is
-  now 3 to mark the meaning change; recorded v2 events still load.
-- `provider`: OpenAI and OpenAI-compatible `Usage.OutputTokens` now include
-  `completion_tokens_details.reasoning_tokens` for xAI-style usage, where
-  `total_tokens` equals prompt plus completion plus reasoning tokens; xAI
-  counts reasoning outside `completion_tokens`. OpenAI-style usage and usage
-  without `total_tokens` are unchanged. `EventSchemaVersion` 3 covers this
-  too.
-- `provider`: on OpenAI `gpt-5` and the `o1`, `o3` and `o4-mini` entries
-  (`ReasoningEffort` true), a `ThinkingConfig` with no positive
-  `BudgetTokens` and no `Effort`, or with a negative `BudgetTokens`, is now
-  refused pre-wire with an error wrapping `ErrInvalidRequest`. Before, the
-  OpenAI adapters dropped every `ThinkingConfig`.
 - **Breaking:** `agent`: `Tool.Run` now returns `([]llmkit.Block, error)`
   instead of `(string, error)`, so a tool result can carry blocks beyond
   text (llmkit-rli.2.1). A text-only tool behaves as before. The tool-result
@@ -398,6 +423,19 @@ entry below is marked.
 
 ### Fixed
 
+- `provider`: a history that did not come from Gemini (an Anthropic or OpenAI
+  tool loop, for example) no longer fails on `gemini-3` and `gemini-4` models
+  with a 400 "missing a thought_signature". On a model named `gemini-3` or
+  `gemini-4`, alone or followed by `-` or `.`, the Google adapter sets Google's
+  documented bypass `skip_thought_signature_validator` on the first function
+  call of each assistant step in the current turn when that call has no
+  signature; later calls in the step get none. Signatures Gemini produced are
+  unchanged, as are models outside the two series. Reasoning effort
+  (`thinkingLevel`) stays `gemini-3` only. The SDK sends the bypass
+  base64-encoded, and no hermetic test can show that Google accepts that form:
+  langchain-google #1570 and #1972 report Vertex rejecting it, while
+  pydantic-ai reports it working on the Gemini API. llmkit-ws9 tracks a live
+  check (llmkit-rli.1.6).
 - `provider`: OpenAI-compatible reasoning now round-trips (llmkit-rli.1.1).
   `reasoning_content` and OpenRouter-style `reasoning_details` in a response,
   from `Complete` or `Stream` (with or without a callback), surface as one

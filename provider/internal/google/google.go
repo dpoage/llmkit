@@ -134,6 +134,9 @@ func (g *googleAdapter) buildRequest(req llmkit.Request) ([]*genai.Content, *gen
 	if err != nil {
 		return nil, nil, err
 	}
+	if requiresThoughtSignatures(g.model) {
+		signForeignCalls(contents)
+	}
 	cfg := &genai.GenerateContentConfig{}
 	if p.System != "" {
 		cfg.SystemInstruction = &genai.Content{
@@ -476,6 +479,43 @@ func functionCallKey(id, name string) string {
 	return id + "\x00" + name
 }
 
+// foreignCallSignature is Google's documented bypass for a function call the
+// API did not generate (thought-signatures guide, FAQ 1).
+const foreignCallSignature = "skip_thought_signature_validator"
+
+// signForeignCalls sets the bypass on the first functionCall, when unsigned, of each model step
+// in the current turn; other calls get none. The SDK's []byte field sends it base64-encoded
+// (go-genai #711), unverified: langchain-google #1570/#1972 report Vertex rejecting that form,
+// pydantic-ai reports it working on the Gemini API (llmkit-ws9).
+func signForeignCalls(contents []*genai.Content) {
+	turn := -1
+	for i, c := range contents {
+		if c.Role != "user" {
+			continue
+		}
+		for _, p := range c.Parts {
+			if p.FunctionResponse == nil {
+				turn = i
+				break
+			}
+		}
+	}
+	for _, c := range contents[turn+1:] {
+		if c.Role != "model" {
+			continue
+		}
+		for _, p := range c.Parts {
+			if p.FunctionCall == nil {
+				continue
+			}
+			if len(p.ThoughtSignature) == 0 {
+				p.ThoughtSignature = []byte(foreignCallSignature)
+			}
+			break
+		}
+	}
+}
+
 func (g *googleAdapter) toResponse(resp *genai.GenerateContentResponse, wire *adapter.Wire) llmkit.Response {
 	var out llmkit.Response
 	var text string
@@ -752,7 +792,19 @@ func googleCapabilities(model string) llmkit.Capabilities {
 // isGemini3 reports whether model belongs to the Gemini 3 series: the
 // "gemini-3" key followed by end of name, "-" or ".".
 func isGemini3(model string) bool {
-	rest, ok := strings.CutPrefix(model, "gemini-3")
+	return inSeries(model, "gemini-3")
+}
+
+// requiresThoughtSignatures reports whether the model is Gemini 3 or 4, the
+// series Google's thought-signature rule covers. It gates only the bypass;
+// thinking-level mapping stays on isGemini3.
+func requiresThoughtSignatures(model string) bool {
+	return inSeries(model, "gemini-3") || inSeries(model, "gemini-4")
+}
+
+// inSeries reports whether model is key followed by end of name, "-" or ".".
+func inSeries(model, key string) bool {
+	rest, ok := strings.CutPrefix(model, key)
 	return ok && (rest == "" || rest[0] == '-' || rest[0] == '.')
 }
 

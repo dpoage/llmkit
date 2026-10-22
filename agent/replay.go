@@ -25,10 +25,10 @@ var ErrReplayDiverged = errors.New("agent: replay diverged")
 // block for offline evaluation: record a run once into any sink, then replay
 // it deterministically against modified harness code.
 //
-// ReplayClient does not implement [llmkit.IdentifiedClient], so the
-// `Completion` events the agent `Runner` emits for a replayed run
-// carry empty Provider and Model — a replay is served by no
-// provider.
+// ReplayClient does not implement [llmkit.IdentifiedClient]. The `Completion`
+// events the agent `Runner` emits for a replayed run name the recorded
+// Response.Served when the record set it; otherwise Provider and Model are
+// empty.
 //
 // Complete returns the next recorded response. If the record holds N tool
 // runs after the previous completion and before that response, Complete

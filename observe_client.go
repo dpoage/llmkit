@@ -7,8 +7,9 @@ import (
 
 // Observe wraps c so each logical completion — one Complete call or one
 // Stream call, success or failure — whose ctx does not already carry a
-// span emits exactly one Completion event to obs, tagged with
-// [IdentityOf](c). A nil obs returns c unchanged.
+// span emits exactly one Completion event to obs, tagged with the call's
+// Response.Served when it succeeded and set one, else with [IdentityOf](c).
+// A nil obs returns c unchanged.
 //
 // Ownership: Observe reads the ctx's span with [SpanFromContext] before
 // calling the client. A non-empty span means an enclosing emitter (an
@@ -76,12 +77,16 @@ func (o *observingClient) Stream(ctx context.Context, req Request, fn func(Delta
 }
 
 // emit closes one logical completion with exactly one [CompletionEvent],
-// tagged with IdentityOf(o.inner). A failed completion carries the error
+// tagged with resp.Served on success when set, else IdentityOf(o.inner).
+// A failed completion carries the error
 // text and the zero Response, per the [CompletionEvent] contract — even
 // when the inner client returned a partial response alongside the error;
 // the caller still receives that partial response, unchanged.
 func (o *observingClient) emit(ctx context.Context, req Request, resp Response, err error, d time.Duration) {
 	identity := IdentityOf(o.inner)
+	if err == nil && resp.Served != (Identity{}) {
+		identity = resp.Served
+	}
 	ce := &CompletionEvent{
 		Request:  req,
 		Provider: identity.Provider,

@@ -277,9 +277,10 @@ type CompletionEvent struct {
 	// serves a completion with a Purpose as an answer.
 	Purpose string `json:"purpose,omitempty"`
 	// Provider is the provider tag ("anthropic", "openai", ...) or the
-	// caller's own config name — the client's [IdentityOf].Provider.
+	// caller's own config name. On success, a non-zero Response.Served
+	// supplies both Provider and Model; otherwise the client's [IdentityOf].
 	Provider string `json:"provider,omitempty"`
-	// Model is the model identifier — the client's [IdentityOf].Model.
+	// Model is the model identifier, from the same source as Provider.
 	Model string `json:"model,omitempty"`
 }
 
