@@ -284,9 +284,38 @@ follow the server's legend order, from `"0"` to `"n-1"` with `n` equal
 to the levels asked for. `decide` passes them through verbatim: it
 renormalizes nothing and recomputes no argmax.
 
+### Accessors
+
+`Response.Noul(id)`, `Response.Choice(id)`, and `Response.Score(id)` return
+the answer for `id`, or an error wrapping `decide.ErrNotAsked` when `id` was
+not asked as that kind of question. A mistyped id or an id of another kind
+fails loudly; indexing the maps instead reads a zero value, which a
+threshold check treats as a belief of 0.
+
+```go
+belief, err := resp.Noul("urgent")
+if errors.Is(err, decide.ErrNotAsked) {
+	// "urgent" was not a noul question in this Ask.
+}
+```
+
+`decide.Check(qs, resp)` reports whether `resp` answers `qs` exactly: one
+answer per asked id, in the map of its question's kind; a `Choice` answer
+that names one of the asked options; a `Score` answer whose `Levels` and
+`Probabilities` each have one entry per asked level, or none. The error
+names the offending id. `Ask` applies it to every answer set it decodes.
+
+### Backends that report no distribution
+
+`ChoiceAnswer.Probabilities`, `ScoreAnswer.Levels`, and
+`ScoreAnswer.Probabilities` may be nil, and `Confidence` 0, when a backend
+reports no distribution; a backend must not fabricate them. The System One
+client always requires the legend and probabilities from the server and
+rejects a score answer missing either.
+
 ### Confidence and probabilities
 
-Every `Choice` and `Score` answer carries both. `Probabilities` is the
+Every System One `Choice` and `Score` answer carries both. `Probabilities` is the
 full distribution. Its shape — concentrated on one outcome or spread out
 — describes the model's uncertainty. `Confidence` is a vendor-computed
 statistic that collapses that shape into one number in [0, 1]. Threshold
@@ -328,7 +357,9 @@ it like any other `ErrServer` — each retry re-sends the same request, so a
 persistently misbehaving server still exhausts `MaxAttempts` rather than
 failing after one attempt. Violations are: a missing model or usage
 block; a missing or extra answer; an answer type that does not match its
-question; a sparse legend.
+question; a `Choice` answer that names an option that was not asked; a
+sparse legend. These checks stay `ErrServer` and retried; the kit has no
+non-retryable kind for a 200 answer violation.
 
 A refused pre-wire request also returns `ErrInvalidRequest` before any
 network call. The client rejects: nil state; empty questions; empty

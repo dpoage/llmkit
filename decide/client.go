@@ -15,43 +15,6 @@ import (
 	"time"
 )
 
-// Questions indexes one Ask's question set by id. Ids are echoed back in the
-// response's answer maps.
-type Questions map[string]Question
-
-// Response is the normalized result of one Ask.
-type Response struct {
-	// Model is the versioned id the server actually used; it can differ from
-	// a requested alias ("jev-latest" -> "jev-1.13.0"). Ledger on this.
-	Model string
-	// Usage is token consumption. TypeSafe bills input tokens only.
-	Usage llmkit.Usage
-	// Nouls holds one entry per Noul question. nil when no Nouls were asked.
-	Nouls map[string]float64
-	// Choices holds one entry per Choice question. nil when none were asked.
-	Choices map[string]ChoiceAnswer
-	// Scores holds one entry per Score question. nil when none were asked.
-	Scores map[string]ScoreAnswer
-}
-
-// ChoiceAnswer is the answer to a Choice question. Probabilities map option
-// id to probability, passed through exactly as reported.
-type ChoiceAnswer struct {
-	Choice        string
-	Probabilities map[string]float64
-	Confidence    float64
-}
-
-// ScoreAnswer is the answer to a Score question. Levels is the server's
-// legend ordered by index ("0".."n-1", with n equal to the levels asked
-// for), and Probabilities is index-aligned with Levels.
-type ScoreAnswer struct {
-	Score         float64
-	Levels        []string
-	Probabilities []float64
-	Confidence    float64
-}
-
 // wireRequest is the JSON envelope POSTed to /v1/systemone.
 type wireRequest struct {
 	State     json.RawMessage            `json:"state"`
@@ -199,7 +162,8 @@ func (c *Client) attempt(ctx context.Context, redact *adapter.Redactor, body []b
 // parseResponse validates the answer set against the questions and converts
 // it to a Response. A violation of the server's own answer contract — a
 // missing model or usage block, a missing or extra answer, a type that
-// does not match its question, or a sparse legend — is an ErrServer-class
+// does not match its question, a sparse legend, or a Choice outside the
+// asked options (via [Check]) — is an ErrServer-class
 // APIError at the serving status: the server broke the protocol.
 func parseResponse(status int, body []byte, questions Questions) (Response, error) {
 	var wire wireResponse
@@ -267,14 +231,17 @@ func parseResponse(status int, body []byte, questions Questions) (Response, erro
 			return Response{}, serverError(status, fmt.Sprintf("answers[%q]: missing answer for question", id))
 		}
 	}
-
-	return Response{
+	resp := Response{
 		Model:   wire.Model,
 		Usage:   llmkit.Usage{InputTokens: wire.Usage.InputTokens, OutputTokens: wire.Usage.OutputTokens},
 		Nouls:   nonEmptyOrNil(nouls),
 		Choices: nonEmptyOrNil(choices),
 		Scores:  nonEmptyOrNil(scores),
-	}, nil
+	}
+	if err := Check(questions, resp); err != nil {
+		return Response{}, serverError(status, err.Error())
+	}
+	return resp, nil
 }
 
 // denseSlice converts a server map keyed by stringified legend index into
