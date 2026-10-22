@@ -346,8 +346,9 @@ func TestMaybeCompact_EstimatesRequestCopy(t *testing.T) {
 				events = append(events, *ev.Compaction)
 			}
 		})}
-		out, threshold, _ = r.maybeCompact(context.Background(), em, &Outcome{}, msgs, budget, 7)
-		return estimateTokens(wired), out, threshold, events
+		cs := &compactState{budget: budget}
+		out, _ = r.maybeCompact(context.Background(), em, &Outcome{}, msgs, cs, 7)
+		return estimateTokens(wired), out, cs.budget, events
 	}
 
 	t.Run("degraded-media-false", func(t *testing.T) {
@@ -420,8 +421,9 @@ func (h *compactHarness) compact(threshold int64) (out []llmkit.Message, next in
 			events = append(events, *ev.Compaction)
 		}
 	})}
-	out, next, _ = r.maybeCompact(context.Background(), em, &Outcome{}, h.msgs, threshold, 1)
-	return out, next, events
+	cs := &compactState{budget: threshold}
+	out, _ = r.maybeCompact(context.Background(), em, &Outcome{}, h.msgs, cs, 1)
+	return out, cs.budget, events
 }
 
 func resultByID(msgs []llmkit.Message, id string) llmkit.Message {
