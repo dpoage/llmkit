@@ -125,7 +125,7 @@ runner := agent.NewRunner(client, nil, "Answer briefly.",
 	}))
 ```
 
-`req.Messages` is a shallow clone of the loop's history, except that non-portable tool-result media is already replaced by text markers in the clone; a message the policy adds is not degraded. Portable media is inline `image/png`, `image/jpeg`, `image/webp` or `application/pdf` data of the matching kind, on a profile with `ToolResultMedia`. A policy can filter, append, or reorder messages for this turn only; the loop's history stays unchanged. Every other field — `Thinking`, `Temperature`, `ToolChoice`, `StopSequences`, `TopP`, `TopK`, `Seed` — is the policy's to set, gated by [capabilities](capabilities.md) at the wire.
+`req.Messages` is a shallow clone of the loop's history, except that tool-result media is already replaced by text markers in the clone when `ToolResultMedia` is false or the block is not portable; a message the policy adds is not degraded. A block is portable when it holds inline `image/png`, `image/jpeg`, `image/webp` or `application/pdf` data of the matching kind, whatever the profile. A policy can filter, append, or reorder messages for this turn only; the loop's history stays unchanged. Every other field — `Thinking`, `Temperature`, `ToolChoice`, `StopSequences`, `TopP`, `TopK`, `Seed` — is the policy's to set, gated by [capabilities](capabilities.md) at the wire.
 
 A non-nil error aborts the run before the wire call. The error is wrapped as `agent: request policy at iteration <step>: ...`.
 

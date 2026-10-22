@@ -20,11 +20,11 @@ import (
 // block.
 //
 // The tool-result content is the returned blocks, except that a media block
-// that is not portable becomes a text marker (the rule is on
-// [llmkit.Capabilities.ToolResultMedia]) and, under [WithToolOutputLimit], an
-// oversized result becomes a spill or truncation stand-in. Hooks and events
-// receive the text blocks in order, with a size marker at each media block
-// sent and an omission marker at each one degraded.
+// becomes a text marker when [llmkit.Capabilities.ToolResultMedia] is false
+// or the block is not portable (the rule is on that field) and, under
+// [WithToolOutputLimit], an oversized result becomes a spill or truncation
+// stand-in. Hooks and events receive the text blocks in order, with a size
+// marker at each media block sent and an omission marker at each one degraded.
 //
 // An error from Run is not a loop failure: the harness renders "ERROR: <err>"
 // from the error alone, discarding any blocks returned beside it, and the
