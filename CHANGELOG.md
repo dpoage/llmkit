@@ -62,6 +62,8 @@ entry below is marked.
   `ev.Decision.Usage.ChargeableTokens(1)`. The run stops with
   `agent.TruncBudgetPool` at the first turn boundary after LLM and decision
   spend together reach the limit, so it can overshoot the limit by one turn.
+  A run whose overshooting turn is its last ends normally, without
+  `TruncBudgetPool`.
   `agent.Limits.TokenBudget` does not count decision tokens. No API change;
   the pattern is in `examples/agent-guardrail` and `docs/decide.md`.
 - Live tests: a `kev` lane runs the `decide/systemone` live cases against a

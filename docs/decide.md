@@ -629,7 +629,8 @@ Design points the program follows:
 - **One budget.** `agent.WithBudgetPool(pool)` charges the LLM's completions.
   The observer on `decide.Observe` charges the decider's. The run stops with
   `agent.TruncBudgetPool` at the first turn boundary after combined spend
-  reaches the limit, so it can overshoot the limit by one turn.
+  reaches the limit, so it can overshoot the limit by one turn. A run whose
+  overshooting turn is its last ends normally, without `TruncBudgetPool`.
   `agent.Limits.TokenBudget` counts completions only, so it does not see
   decision tokens.
 - **Replay.** Wrap the decider in `decide.Observe` with a recording sink and
