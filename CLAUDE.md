@@ -96,6 +96,6 @@ Read [docs/design.md](docs/design.md) for the layering and the decision records.
 
 ## Conventions
 
-- Per-role block rule: user messages carry text/image/document blocks; assistant text/thinking; system and tool-result text only — enforced before any wire call. Canonical: `go doc github.com/dpoage/llmkit`.
+- Per-role block rule: user messages carry text/image/document blocks; assistant text/thinking; system text only; tool-result text/image/document, media only where `Capabilities.ToolResultMedia` is true — enforced before any wire call. Canonical: `go doc github.com/dpoage/llmkit`.
 - `Usage.InputTokens` is the total prompt size and includes the cache-read and cache-creation subsets; use `ChargeableTokens` for discounted math. Canonical: `go doc github.com/dpoage/llmkit`.
 - Capabilities enforcement classes live in the field docs in `llmkit.go`; do not restate them here, because nothing guards this file against the code (llmkit-ygq.21). Canonical: `go doc github.com/dpoage/llmkit` and [docs/capabilities.md](docs/capabilities.md).

@@ -35,7 +35,10 @@
 //   - [RoleUser]: text, image, document
 //   - [RoleAssistant]: text and thinking; [Message.ToolCalls] carries tool-use
 //     requests
-//   - [RoleSystem] and [RoleToolResult]: text only
+//   - [RoleSystem]: text only
+//   - [RoleToolResult]: text, image, document — media only where
+//     [Capabilities.ToolResultMedia] is true; a tool result carrying an image
+//     or document on a profile reporting false is refused the same way
 //
 // The constructors panic on inputs no adapter can accept (an image without
 // bytes, a tool result without a call ID). Hand-built [Block] and [Message]
@@ -97,7 +100,7 @@
 //     (StructuredOutput, Thinking, ReasoningEffort, StopSequences, TopP,
 //     TopK, Seed).
 //   - REFUSED PRE-WIRE: the adapter rejects the request with an error wrapping
-//     [ErrInvalidRequest] before the wire call (ToolChoice).
+//     [ErrInvalidRequest] before the wire call (ToolChoice, ToolResultMedia).
 //   - DECORATOR: provider.New installs a wrapping Client that follows the
 //     field (ParallelToolCalls).
 //   - ADVISORY: information for callers; no adapter reads the field
@@ -268,12 +271,15 @@ type Block struct {
 //     that carries thinking blocks re-sends those the adapter owns (see
 //     BlockThinking).
 //   - tool-result: ToolCallID identifies the call being answered, Content
-//     holds the (textual) result, and IsError marks a failed execution.
+//     holds the result (text, and image or document blocks where
+//     [Capabilities.ToolResultMedia] is true), and IsError marks a failed
+//     execution.
 //
 // Per-role block kinds, enforced by every adapter BEFORE any wire call
 // (violations are errors wrapping ErrInvalidRequest): RoleUser carries
-// text/image/document; RoleAssistant carries text/thinking; RoleSystem and
-// RoleToolResult carry text only.
+// text/image/document; RoleAssistant carries text/thinking; RoleSystem
+// carries text only; RoleToolResult carries text/image/document, the media
+// kinds only on a profile whose Capabilities.ToolResultMedia is true.
 type Message struct {
 	Role Role `json:"role"`
 	// Content is the message's content blocks.
@@ -377,6 +383,9 @@ func SystemMessage(s string) Message {
 // given ID. callID must be non-empty: a result naming no call can never be
 // paired with its ToolCall, and building one is a programming error. Use
 // [ToolError] for a failed execution.
+//
+// ToolResult is text-only; media rides a Message literal with image or
+// document blocks, accepted where [Capabilities.ToolResultMedia] is true.
 func ToolResult(callID, text string) Message {
 	if callID == "" {
 		panic("llmkit.ToolResult: empty callID")
@@ -386,7 +395,7 @@ func ToolResult(callID, text string) Message {
 
 // ToolError returns a failed tool-result message answering the call with
 // the given ID: the IsError mark tells the model the execution failed.
-// callID must be non-empty, like [ToolResult].
+// callID must be non-empty, like [ToolResult]; it is text-only likewise.
 func ToolError(callID, text string) Message {
 	if callID == "" {
 		panic("llmkit.ToolError: empty callID")
@@ -683,15 +692,16 @@ func (r Response) Message() Message {
 //     from the wire (no error). Check the field before relying on the
 //     feature. Each provider type has a ceiling naming the wire-gated
 //     fields (StructuredOutput, Thinking, ReasoningEffort, ToolChoice,
-//     StopSequences, TopP, TopK, Seed) it can actually put on the wire; an
-//     effective profile that reports true for a field above the ceiling is
-//     rejected at construction by provider.New with an error wrapping
-//     ErrInvalidRequest, before any network call. Anthropic's ceiling
-//     excludes Seed and ReasoningEffort; OpenAI and openai-compatible's
-//     ceiling excludes Thinking and TopK; Google's ceiling has no excluded
-//     field.
+//     StopSequences, TopP, TopK, Seed, ToolResultMedia) it can actually put
+//     on the wire; an effective profile that reports true for a field above
+//     the ceiling is rejected at construction by provider.New with an error
+//     wrapping ErrInvalidRequest, before any network call. Anthropic's
+//     ceiling excludes Seed and ReasoningEffort; OpenAI and
+//     openai-compatible's ceiling excludes Thinking, TopK and
+//     ToolResultMedia; Google's ceiling has no excluded field.
 //   - Refused pre-wire: the adapter rejects the request with an error
-//     wrapping ErrInvalidRequest before any wire call.
+//     wrapping ErrInvalidRequest before any wire call. ToolResultMedia is
+//     also wire-gated (see the ceiling list above).
 //   - Decorator: provider.New installs a wrapping Client whose behavior
 //     follows the field.
 //   - Advisory: information for callers; no adapter reads the field.
@@ -763,6 +773,12 @@ type Capabilities struct {
 	// [Capabilities.StopSequences]). Example: the Messages API has no seed
 	// parameter, so the Anthropic ceiling forbids Seed=true.
 	Seed bool
+	// Refused pre-wire: a RoleToolResult message carrying an image or
+	// document block, when false, returns an error wrapping ErrInvalidRequest
+	// naming this capability, before the wire call. Wire-gated: true on
+	// Anthropic and Google Gemini 3 models only; the OpenAI and
+	// openai-compatible ceiling is false.
+	ToolResultMedia bool
 }
 
 // Client is the single interface every adapter implements. It is intentionally
