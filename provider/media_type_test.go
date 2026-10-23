@@ -435,7 +435,7 @@ func TestMediaTypeDataURLRows(t *testing.T) {
 	}
 }
 
-// The request reaches the wire with an empty mimeType.
+// A Google URL block with no MediaType reaches the wire with an empty mimeType.
 func TestMediaTypeGoogleURLWithoutMediaType(t *testing.T) {
 	client, rec := mtClient(t, mtGoogleSpec)
 	_, err := client.Complete(context.Background(), mtUserRequest(llmkit.ImageURL("https://example.test/a.png")))

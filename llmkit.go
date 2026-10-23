@@ -749,11 +749,12 @@ type Capabilities struct {
 	ToolChoice bool
 	// Advisory: no adapter reads it. Every table entry and fallback profile
 	// reports true, including text-only models. Image blocks are sent whatever
-	// the field says, subject to the block and media-type refusals.
+	// the field says, unless a block, media-type, or ToolResultMedia refusal
+	// applies.
 	Images bool
 	// Advisory: no adapter reads it; every profile reports true, as for Images.
-	// Document blocks are sent whatever the field says, subject to the block
-	// and media-type refusals.
+	// Document blocks are sent whatever the field says, unless a block,
+	// media-type, or ToolResultMedia refusal applies.
 	Documents bool
 	// Dropped silently when false: the effective profile gates
 	// Request.StopSequences off the wire. A caller-pinned override that
