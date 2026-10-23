@@ -2,6 +2,10 @@ package decide
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -518,5 +522,235 @@ func TestReplay_ConcurrentAsksConsumeEachRecordOnce(t *testing.T) {
 	}
 	if _, err := d.Ask(runCtx(run, 1), "s", q); !errors.Is(err, ErrReplayDiverged) {
 		t.Errorf("Ask past the record: err = %v, want ErrReplayDiverged", err)
+	}
+}
+
+// supportDecider is a scriptDecider that declares an ImageSupport.
+type supportDecider struct {
+	scriptDecider
+	support ImageSupport
+}
+
+func (d *supportDecider) ImageSupport() ImageSupport { return d.support }
+
+func hashOf(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// wrapped is a Decider with the sinks that record it.
+type wrapped struct {
+	d     Decider
+	sinks []*memSource
+}
+
+// observeWrappers returns Observe(d) and Observe(Observe(d), ...), the
+// second recorded by an inner then an outer sink.
+func observeWrappers(d Decider) map[string]wrapped {
+	s1, s2, s3 := &memSource{}, &memSource{}, &memSource{}
+	return map[string]wrapped{
+		"Observe(d)":          {Observe(d, s1), []*memSource{s1}},
+		"Observe(Observe(d))": {Observe(Observe(d, s2), s3), []*memSource{s2, s3}},
+	}
+}
+
+var (
+	obsPNG  = []byte("RAWIMAGEDATA-PNG-0123456789abcdef")
+	obsJPEG = []byte("RAWIMAGEDATA-JPEG-fedcba9876543210")
+)
+
+func obsImageAsk() (state any, qs Questions) {
+	png := llmkit.Image("image/png", obsPNG)
+	jpeg := llmkit.Image("image/jpeg", obsJPEG)
+	return map[string]any{"a": png, "b": jpeg},
+		Questions{"q": Noul{Instructions: []any{"see", jpeg}, True: png}}
+}
+
+func TestObserve_ImageAskRecordsRefsAndMetadataNeverBytes(t *testing.T) {
+	supports := map[string]*ImageSupport{
+		"no ImageSupport (PlaceAll)": nil,
+		"LabelPosition backend":      {Placements: PlaceAll, Label: LabelPosition},
+		"LabelPosition, typed":       {Placements: PlaceAll, MediaTypes: []string{"image/png", "image/jpeg"}, Label: LabelPosition},
+	}
+	pngRef, jpegRef := `\u003cimage:`+hashOf(obsPNG)[:32]+`\u003e`, `\u003cimage:`+hashOf(obsJPEG)[:32]+`\u003e`
+	wantImages := []llmkit.DecisionImage{
+		{SHA256: hashOf(obsPNG), MediaType: "image/png", Placements: []string{"state", "criteria"}},
+		{SHA256: hashOf(obsJPEG), MediaType: "image/jpeg", Placements: []string{"state", "instructions"}},
+	}
+	for name, support := range supports {
+		var d Decider = &scriptDecider{resp: checkResponseFor("q")}
+		if support != nil {
+			d = &supportDecider{scriptDecider: scriptDecider{resp: checkResponseFor("q")}, support: *support}
+		}
+		for wname, w := range observeWrappers(d) {
+			t.Run(name+"/"+wname, func(t *testing.T) {
+				state, qs := obsImageAsk()
+				if _, err := w.d.Ask(runCtx("r", 1), state, qs); err != nil {
+					t.Fatalf("Ask: %v", err)
+				}
+				for i, sink := range w.sinks {
+					evs := sink.snapshot()
+					if len(evs) != 1 {
+						t.Fatalf("sink %d: events = %d, want 1", i, len(evs))
+					}
+					raw, err := json.Marshal(evs[0])
+					if err != nil {
+						t.Fatal(err)
+					}
+					js := string(raw)
+					for _, data := range [][]byte{obsPNG, obsJPEG} {
+						for _, enc := range []string{string(data), base64.StdEncoding.EncodeToString(data), base64.RawStdEncoding.EncodeToString(data), base64.URLEncoding.EncodeToString(data), base64.RawURLEncoding.EncodeToString(data)} {
+							if strings.Contains(js, enc) {
+								t.Errorf("sink %d: event JSON carries image bytes (%q)", i, enc)
+							}
+						}
+					}
+					de := evs[0].Decision
+					if want := `{"a":"` + pngRef + `","b":"` + jpegRef + `"}`; string(de.State) != want {
+						t.Errorf("sink %d: State = %s, want %s", i, de.State, want)
+					}
+					q := de.Questions[0]
+					if want := `["see","` + jpegRef + `"]`; string(q.Instructions) != want {
+						t.Errorf("sink %d: Instructions = %s, want %s", i, q.Instructions, want)
+					}
+					if want := `"` + pngRef + `"`; string(q.True) != want {
+						t.Errorf("sink %d: True = %s, want %s", i, q.True, want)
+					}
+					if !reflect.DeepEqual(de.Images, wantImages) {
+						t.Errorf("sink %d: Images = %+v, want %+v", i, de.Images, wantImages)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestObserve_ImagesEqualRequestMetadataInOrder(t *testing.T) {
+	state, qs := obsImageAsk()
+	req, err := Normalize(state, qs, ImageSupport{Placements: PlaceAll})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := &memSource{}
+	_, _ = Observe(&scriptDecider{resp: checkResponseFor("q")}, sink).Ask(runCtx("r", 1), state, qs)
+	got := sink.snapshot()[0].Decision.Images
+	if len(got) != len(req.Images) || len(got) == 0 {
+		t.Fatalf("Images = %+v, want %d entries", got, len(req.Images))
+	}
+	for i, img := range req.Images {
+		if got[i].SHA256 != img.SHA256 || got[i].MediaType != img.MediaType {
+			t.Errorf("Images[%d] = %+v, want hash %s type %s", i, got[i], img.SHA256, img.MediaType)
+		}
+	}
+}
+
+func TestObserve_BackendRefusingTheImageEmitsNothing(t *testing.T) {
+	tests := []struct {
+		name    string
+		support ImageSupport
+	}{
+		{"zero support", ImageSupport{}},
+		{"placement refused", ImageSupport{Placements: PlaceState}},
+		{"media type refused", ImageSupport{Placements: PlaceAll, MediaTypes: []string{"image/png"}}},
+	}
+	for _, tt := range tests {
+		d := &supportDecider{scriptDecider: scriptDecider{resp: checkResponseFor("q")}, support: tt.support}
+		for wname, w := range observeWrappers(d) {
+			t.Run(tt.name+"/"+wname, func(t *testing.T) {
+				d.calls = 0
+				state, qs := obsImageAsk()
+				if _, err := w.d.Ask(runCtx("r", 1), state, qs); err != nil {
+					t.Fatalf("Ask err = %v, want d's own (nil) untouched", err)
+				}
+				if d.calls != 1 {
+					t.Errorf("d.Ask calls = %d, want 1: a refused Ask still reaches d", d.calls)
+				}
+				for i, sink := range w.sinks {
+					if n := len(sink.snapshot()); n != 0 {
+						t.Errorf("sink %d: events = %d, want 0", i, n)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestObserve_ForwardsImageSupportOnlyWhenInnerHasOne(t *testing.T) {
+	sink := &memSource{}
+	want := ImageSupport{Placements: PlaceState, MediaTypes: []string{"image/png"}, Label: LabelPosition}
+	sd := &supportDecider{support: want}
+	for name, d := range map[string]Decider{
+		"support": Observe(sd, sink),
+		"support+identity": Observe(&struct {
+			*supportDecider
+			identified
+		}{sd, &identDecider{}}, sink),
+		"nested": Observe(Observe(sd, sink), sink),
+	} {
+		is, ok := d.(ImageSupporter)
+		if !ok {
+			t.Errorf("%s: Observe(supporting) does not implement ImageSupport()", name)
+			continue
+		}
+		if got := is.ImageSupport(); !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: ImageSupport() = %+v, want inner's %+v", name, got, want)
+		}
+	}
+	if _, ok := Observe(&scriptDecider{}, sink).(ImageSupporter); ok {
+		t.Error("Observe(plain) implements ImageSupport(); it must not invent one")
+	}
+	if _, ok := Observe(&identDecider{}, sink).(ImageSupporter); ok {
+		t.Error("Observe(identified) implements ImageSupport(); it must not invent one")
+	}
+	both := Observe(&struct {
+		*supportDecider
+		identified
+	}{sd, &identDecider{id: llmkit.Identity{Provider: "p"}}}, sink)
+	if id, ok := both.(identified); !ok || id.Identity().Provider != "p" {
+		t.Error("Observe(identified+supporting) lost Identity()")
+	}
+}
+
+func TestObserve_ImageFreeEventJSONIsUnchanged(t *testing.T) {
+	sink := &memSource{}
+	resp := checkResponse()
+	resp.Model = "m"
+	resp.Usage = llmkit.Usage{InputTokens: 1, OutputTokens: 2}
+	_, _ = Observe(&scriptDecider{resp: resp}, sink).Ask(runCtx("r", 1), "state", checkQuestions())
+	raw, err := json.Marshal(sink.snapshot()[0].Decision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{"model":"m","state":"state","questions":[{"id":"c","kind":"choice","instructions":"i","options":{"no":null,"yes":null}},{"id":"n","kind":"noul","instructions":"i"},{"id":"s","kind":"score","instructions":"i","levels":["lo","mid","hi"]}],"answers":[{"id":"c","choice":"yes","probabilities":{"no":0.1,"yes":0.9},"confidence":0.8},{"id":"n","belief":0.5},{"id":"s","score":0.5,"confidence":0.7,"levels":["lo","mid","hi"],"level_probabilities":[0.2,0.5,0.3]}],"usage":{"input_tokens":1,"output_tokens":2}}`
+	if string(raw) != want {
+		t.Errorf("image-free decision JSON =\n%s\nwant (byte-identical to base)\n%s", raw, want)
+	}
+}
+
+// checkResponseFor answers the single Noul question id.
+func checkResponseFor(id string) Response {
+	return Response{Nouls: map[string]float64{id: 0.5}}
+}
+
+func TestObserve_StateOnlyLabelPositionBackendStillRecordsRefs(t *testing.T) {
+	d := &supportDecider{scriptDecider: scriptDecider{resp: checkResponseFor("q")}, support: ImageSupport{Placements: PlaceState, Label: LabelPosition}}
+	state := map[string]any{"a": llmkit.Image("image/png", obsPNG), "b": llmkit.Image("image/png", obsJPEG)}
+	qs := Questions{"q": Noul{Instructions: "i"}}
+	for name, w := range observeWrappers(d) {
+		t.Run(name, func(t *testing.T) {
+			if _, err := w.d.Ask(runCtx("r", 1), state, qs); err != nil {
+				t.Fatal(err)
+			}
+			for i, sink := range w.sinks {
+				de := sink.snapshot()[0].Decision
+				want := `{"a":"\u003cimage:` + hashOf(obsPNG)[:32] + `\u003e","b":"\u003cimage:` + hashOf(obsJPEG)[:32] + `\u003e"}`
+				if string(de.State) != want {
+					t.Errorf("sink %d: State = %s, want refs %s", i, de.State, want)
+				}
+				if len(de.Images) != 2 || de.Images[0].SHA256 != hashOf(obsPNG) {
+					t.Errorf("sink %d: Images = %+v", i, de.Images)
+				}
+			}
+		})
 	}
 }

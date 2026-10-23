@@ -365,7 +365,8 @@ Label}` is what a backend passes to `Normalize`. The zero value refuses every
 image; empty `MediaTypes` accepts any `image/*`. An image outside the
 placements or media types is refused with `ErrInvalidRequest` and, in
 addition, wraps `decide.ErrImageUnsupported`; an invalid image does not.
-`decide.Observe` and `decide.Replay` normalize with `PlaceAll`. A `Decider`
+`decide.Replay` normalizes with `PlaceAll`, and `decide.Observe` with the
+`Decider`'s own support, as [Images in events](#images-in-events) says. A `Decider`
 declares its support with `ImageSupport() decide.ImageSupport`
 (`decide.ImageSupporter`). `systemone.Client` declares its support from
 `Config.Images` (next section).
@@ -573,7 +574,8 @@ d := decide.Observe(client, sink) // sink is any llmkit.Observer
 An `Ask` that fails `decide.Normalize` is passed to the wrapped `Decider`
 untouched and emits nothing. Every other `Ask` emits exactly one event,
 success or failure, including a caller's already-cancelled ctx (`Err` set,
-zero wire hits). The event carries `State` and `Questions` as validated,
+zero wire hits). The event carries `State` and `Questions` as validated
+(images as references, see [Images in events](#images-in-events)),
 `Answers`, `Usage`, and the `Ask`'s wall time as `Duration`; `Questions`
 and `Answers` are each sorted by ID. On failure `Err` is the error's text,
 `Answers` is nil, and `Usage` is zero. `Observe` returns the wrapped
@@ -587,6 +589,32 @@ alias, on failure. The wrapper implements `Identity()` too when the
 wrapped `Decider` does. A `Decider` without it leaves `Backend` empty.
 `Observe` does not scrub: `Err` is the error text the backend returned, so
 a backend must mask secrets in its errors, as `systemone` does.
+
+#### Images in events
+
+An event never holds image bytes. `State` and `Questions` carry the
+reference `<image:hex>` in the place of each image (the first 16 bytes of the
+SHA-256, as `Image.Ref`), and `DecisionEvent.Images` lists each distinct
+image once, in order of first occurrence: `sha256` (the full hash, lowercase
+hex), `media_type`, and `placements`, from `"state"`, `"instructions"` and
+`"criteria"` in that order. `Images` is absent when the `Ask` has no image.
+Whatever its size, an image adds one reference and one `Images` entry to the
+event. For a state `{"frame": <png>}`, the `state` and `images` of the
+decision are:
+
+```json
+{"state":{"frame":"\u003cimage:039058c6f2c0cb492c533b0a4d14ef77\u003e"},"images":[{"sha256":"039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81","media_type":"image/png","placements":["state"]}]}
+```
+
+`Observe` normalizes with the `ImageSupport` the wrapped `Decider` declares
+(`decide.ImageSupporter`), or `PlaceAll` when it declares none, so an image
+the backend would refuse is a `Normalize` refusal here too: the `Ask` goes
+to the `Decider` untouched, which returns its refusal, and nothing is
+emitted. The label is always the reference, even for a backend that
+labels images `[image N]` on its wire. The wrapper forwards
+`ImageSupport()` as it forwards `Identity()`, so `Observe(Observe(d, a), b)`
+refuses what `Observe(d, a)` does. There is no event schema bump: `images`
+is an added field, and a reader that does not know it ignores it.
 
 ### Replay
 
@@ -608,7 +636,8 @@ Each `Ask` follows these rules:
    `llmkit: decide error: ...`, where the live client's reads
    `llmkit: systemone error: ...`.
 2. The `Ask` matches the earliest unconsumed recorded decision with the same
-   `Step` and the same set of question ids, and consumes it. Two `Ask`s of
+   `Step`, the same set of question ids and the same set of image hashes
+   ([below](#replaying-image-decisions)), and consumes it. Two `Ask`s of
    one step with different id sets match whichever order they arrive in.
 3. No match returns an error wrapping `decide.ErrReplayDiverged` that names
    the step.
@@ -619,16 +648,39 @@ Each `Ask` follows these rules:
    of each asked question, probabilities included) and must pass
    `decide.Check`; a failure wraps `ErrReplayDiverged`.
 
-Two limits to know. Replay does not compare the state: an `Ask` that
-judges a different state than the recorded one still gets the recorded
-answer, so compare states yourself if that matters. And it does not report
-recorded decisions the replay never asked for; a replay that stops early is
-not an error here (`ReplayClient.Err` still reports unreached completions
-and tool calls). `decide.ErrReplayDiverged` is a different sentinel from
-`agent.ErrReplayDiverged`; match each with `errors.Is`. Besides the wrapped
-`Decider`'s errors and a `Normalize` refusal, a `Decider` from this package
-returns only errors wrapping `ErrReplayDiverged` or `ErrReplayedFailure`.
-A `Decider` from `Replay` is safe for concurrent use.
+Two limits to know. Replay does not compare the state, only the images in
+it: an `Ask` that judges a different state with the same images still gets
+the recorded answer, so compare states yourself if that matters. And it does
+not report recorded decisions the replay never asked for; a replay that
+stops early is not an error here (`ReplayClient.Err` still reports
+unreached completions and tool calls). `decide.ErrReplayDiverged` is a
+different sentinel from `agent.ErrReplayDiverged`; match each with
+`errors.Is`. Besides the wrapped `Decider`'s errors and a `Normalize`
+refusal, a `Decider` from this package returns only errors wrapping
+`ErrReplayDiverged` or `ErrReplayedFailure`. A `Decider` from `Replay` is
+safe for concurrent use.
+
+#### Replaying image decisions
+
+A record's image set is the distinct SHA-256 hashes of its images: those in
+`Images` plus those of any valid image value still inline in its `State` or
+`Questions`. The `Ask`'s set is the hashes of the images `Normalize` finds
+in it. The two must be equal, as sets: order, media type, placement and the
+number of occurrences do not matter, only the bytes. A recording of one image
+answers an `Ask` of the same image under any state shape; a different image,
+an extra or missing image, or an image where the record has none, diverges
+and names the step and the hashes asked.
+
+Logs written by v0.6.0, before images were recorded, hold each image as a
+base64 `Block` in `State` and `Questions` and no `Images`; Replay finds
+those and hashes them, so such a log answers the same image and diverges on
+another. A recorded image value that is not valid (it carries a URL or
+caption, has no data, or does not decode) adds no hash, and neither it nor
+two media types over the same bytes fails `Replay` or a match: an `Ask`
+matches such a record as if the image were not there. A URL or caption image
+in a new `Ask` is a `Normalize` refusal, as live. A binary from before this
+change that replays a log written after it does not check images: it
+compares step and question ids only.
 
 ## Gating an agent
 
