@@ -17,12 +17,21 @@
 // that marshals to a JSON object or array. Descriptions and criteria
 // also accept null. JSON numbers and booleans are refused.
 //
-// [Normalize] validates a state and its questions and returns them in the
-// root vocabulary ([llmkit.DecisionQuestion]), sorted by id, as raw JSON.
-// A backend renders its own request from that output. A refusal is an
-// [*llmkit.APIError] with Kind [llmkit.ErrInvalidRequest], StatusCode 0,
-// Provider "decide", and a "<path>: <problem>" message; the backend
-// re-tags Provider to its own name.
+// [Normalize] validates a state and questions and returns a [Request]: the
+// state and questions in the root vocabulary ([llmkit.DecisionQuestion]),
+// sorted by id, and the images found in them. A refusal is an
+// [*llmkit.APIError] with Kind [llmkit.ErrInvalidRequest].
+//
+// # Images
+//
+// A state, an instructions value, or a description may hold an image: a
+// JSON object that decodes as an [llmkit.Block] of kind "image" using only
+// Block's member names, however built. [Normalize] replaces each image with
+// a label and returns it once in [Request.Images].
+//
+// A backend declares what it carries as an [ImageSupport] through
+// [ImageSupporter]. The zero value refuses every image, and an image the
+// support does not carry is refused with [ErrImageUnsupported].
 //
 // # Answers
 //
@@ -56,14 +65,15 @@
 // Runner turn the event carries the run's RunID and the turn's Step. A
 // Decider that implements Identity() llmkit.Identity (the systemone Client
 // does) tags the event's Backend and Model, and the wrapper forwards the
-// method. An Ask that fails [Normalize] emits nothing.
+// method. An Ask that fails [Normalize] emits nothing. State, Questions and
+// Images record each image as a reference, hash, media type and placements.
 //
 // [Replay] is the other half: it builds a Decider from the Decision events
 // an [llmkit.Source] holds for a run. Each Ask consumes the earliest
-// recorded decision with the same Step and the same question ids and
-// returns the recorded answers, with no backend call. Paired with the agent
-// package's replay client, a recorded run whose ToolPolicy asked a Decider
-// replays offline with the same denials. Replay does not compare the state
-// and does not report recorded decisions the replay never asked for; see
-// [Replay].
+// recorded decision with the same Step, the same question ids and the same
+// set of image hashes and returns the recorded answers, with no backend
+// call. Paired with the agent package's replay client, a recorded run whose
+// ToolPolicy asked a Decider replays offline with the same denials. Replay
+// does not compare the state beyond its images and does not report recorded
+// decisions the replay never asked for; see [Replay].
 package decide

@@ -1,10 +1,12 @@
 //go:build live
 
 // Live acceptance suite for the systemone package: the System One wire
-// through systemone.New, against two lanes. The typesafe lane is TypeSafe's
-// Jev; the kev lane is a local Kev server. Every case asserts structural
-// invariants only (ranges, argmax consistency, legend alignment, usage
-// accounting); exact probabilities are the backend's business. Fixtures are
+// through systemone.New, against three lanes. The typesafe lane is TypeSafe's
+// Jev; the kev lane is a local Kev server; the workersai lane is Cloudflare
+// Workers AI through systemone.NewWorkersAI. Every case asserts structural
+// invariants (ranges, argmax consistency, legend alignment, usage
+// accounting) and, for image cases, that answers follow the image; exact
+// probabilities are the backend's business. Fixtures are
 // recorded for the typesafe lane only, under -update, into
 // decide/systemone/testdata/<case>.json and replayed hermetically by
 // fixture_replay_test.go.
@@ -17,6 +19,9 @@
 //	LLMKIT_LIVE_KEV_BASE_URL       (required for kev, e.g. http://127.0.0.1:8009)
 //	LLMKIT_LIVE_KEV_MODEL          (optional, default kev-latest)
 //	LLMKIT_LIVE_KEV_API_KEY        (optional, default local)
+//	LLMKIT_LIVE_WORKERSAI_API_KEY    (required for workersai)
+//	LLMKIT_LIVE_WORKERSAI_ACCOUNT_ID (required for workersai)
+//	LLMKIT_LIVE_WORKERSAI_MODEL      (optional, default clef-flash)
 //
 // A lane missing a required variable skips at the lane level, naming it.
 // TypeSafe bills input tokens only; the whole lane costs a handful. Run with
@@ -28,9 +33,13 @@
 package systemone_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"image"
+	"image/color"
+	"image/png"
 	"math"
 	"os"
 	"path/filepath"
@@ -115,6 +124,9 @@ type decideCase struct {
 	model     string
 	state     any
 	questions decide.Questions
+	// imageDialect is the Config.Images the case ran under, "assets" or
+	// "array"; empty for none. The fixture records it for replay.
+	imageDialect string
 }
 
 func newDecideCase(t *testing.T, sess *livetest.Session, name string) *decideCase {
@@ -161,12 +173,13 @@ func (dc *decideCase) finish(resp decide.Response, err error) {
 		dc.t.Fatalf("case %s: no wire exchanges recorded; pre-wire validation must fail the case, not finish it", dc.caseName)
 	}
 	f := &livetest.DecideFixture{
-		Case:      dc.caseName,
-		Lane:      dc.sess.Lane.Name,
-		Model:     dc.model,
-		State:     state,
-		Questions: qs,
-		Exchanges: dc.tr.Exchanges(),
+		Case:         dc.caseName,
+		Lane:         dc.sess.Lane.Name,
+		Model:        dc.model,
+		ImageDialect: dc.imageDialect,
+		State:        state,
+		Questions:    qs,
+		Exchanges:    dc.tr.Exchanges(),
 		Normalized: livetest.DecideNormalized{
 			ErrKind: livetest.ErrKindOf(err),
 		},
@@ -201,6 +214,7 @@ var liveLanes = []liveLane{
 			{"error_bad_key", caseErrorBadKey},
 			{"error_bad_model", caseErrorBadModel},
 			{"usage_recorded", caseUsageRecorded},
+			{"image_placement", caseImagePlacement},
 		},
 	},
 	{
@@ -212,6 +226,17 @@ var liveLanes = []liveLane{
 			{"mixed_questions", caseMixedQuestions},
 			{"structured_state", caseStructuredState},
 			{"usage_recorded", caseUsageRecorded},
+		},
+	},
+	{
+		// No error_bad_key or error_bad_model: both are hermetic envelope
+		// cases; no fixtures are recorded for this lane.
+		name:    livetest.WorkersAILane.Name,
+		resolve: livetest.ResolveDecideWorkersAI,
+		cases: []liveCase{
+			{"mixed_questions", caseMixedQuestions},
+			{"structured_state", caseStructuredState},
+			{"image_labels", caseImageLabels},
 		},
 	},
 }
@@ -430,4 +455,104 @@ func caseUsageRecorded(t *testing.T, sess *livetest.Session) {
 		t.Fatalf("Usage = %+v does not match the response's %+v", de.Usage, resp.Usage)
 	}
 	via.finish(resp, err)
+}
+
+// solidPNG returns a w x h image/png block of one colour.
+func solidPNG(t *testing.T, w, h int, c color.RGBA) llmkit.Block {
+	t.Helper()
+	im := image.NewRGBA(image.Rect(0, 0, w, h))
+	for i := 0; i < len(im.Pix); i += 4 {
+		im.Pix[i], im.Pix[i+1], im.Pix[i+2], im.Pix[i+3] = c.R, c.G, c.B, c.A
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, im); err != nil {
+		t.Fatalf("encode png: %v", err)
+	}
+	return llmkit.Image("image/png", buf.Bytes())
+}
+
+// caseImagePlacement asks three questions about two states differing only
+// in photo colour; every answer must flip, so an ignored image fails.
+func caseImagePlacement(t *testing.T, sess *livetest.Session) {
+	red, blue := color.RGBA{R: 220, A: 255}, color.RGBA{B: 220, A: 255}
+	instr := solidPNG(t, 300, 300, blue)
+	options := map[string]any{"red": solidPNG(t, 320, 320, red), "blue": solidPNG(t, 320, 320, blue)}
+	questions := func() decide.Questions {
+		return decide.Questions{
+			"photo_red": decide.Noul{Instructions: "Is `photo` a solid red image?"},
+			"same_as_instructions": decide.Noul{
+				Instructions: []any{"Is `photo` the same colour as this image:", instr, "?"},
+			},
+			"which": decide.Choice{Instructions: "Which option's image has the same colour as `photo`?", Options: options},
+		}
+	}
+	ask := func(name string, photo llmkit.Block) decide.Response {
+		dc := newDecideCase(t, sess, name).variant(func(c *systemone.Config) { c.Images = systemone.ImagesAssets })
+		dc.imageDialect = "assets"
+		resp, err := dc.ask(map[string]any{"photo": photo}, questions())
+		if err != nil {
+			t.Fatalf("%s: ask: %v", name, err)
+		}
+		dc.finish(resp, err)
+		return resp
+	}
+	r1 := ask("image_placement_red", solidPNG(t, 280, 280, red))
+	r2 := ask("image_placement_blue", solidPNG(t, 280, 280, blue))
+	t.Logf("red photo:  photo_red=%.3f same_as_instructions=%.3f which=%s %v", r1.Nouls["photo_red"], r1.Nouls["same_as_instructions"], r1.Choices["which"].Choice, r1.Choices["which"].Probabilities)
+	t.Logf("blue photo: photo_red=%.3f same_as_instructions=%.3f which=%s %v", r2.Nouls["photo_red"], r2.Nouls["same_as_instructions"], r2.Choices["which"].Choice, r2.Choices["which"].Probabilities)
+	if got := r1.Nouls["photo_red"]; got <= 0.5 {
+		t.Errorf("red photo: photo_red = %.3f, want > 0.5", got)
+	}
+	if got := r1.Nouls["same_as_instructions"]; got >= 0.5 {
+		t.Errorf("red photo: same_as_instructions = %.3f, want < 0.5 (instructions image is blue)", got)
+	}
+	if got := r1.Choices["which"].Choice; got != "red" {
+		t.Errorf("red photo: which = %q, want red", got)
+	}
+	if got := r2.Nouls["photo_red"]; got >= 0.5 {
+		t.Errorf("blue photo: photo_red = %.3f, want < 0.5", got)
+	}
+	if got := r2.Nouls["same_as_instructions"]; got <= 0.5 {
+		t.Errorf("blue photo: same_as_instructions = %.3f, want > 0.5 (instructions image is blue)", got)
+	}
+	if got := r2.Choices["which"].Choice; got != "blue" {
+		t.Errorf("blue photo: which = %q, want blue", got)
+	}
+}
+
+// caseImageLabels asks about both images of a state by [image N] label,
+// twice with their positions swapped; an ignored image or label fails.
+func caseImageLabels(t *testing.T, sess *livetest.Session) {
+	red, blue := color.RGBA{R: 220, A: 255}, color.RGBA{B: 220, A: 255}
+	questions := func() decide.Questions {
+		return decide.Questions{
+			"first_red":  decide.Noul{Instructions: "Is [image 1] a solid red image?"},
+			"second_red": decide.Noul{Instructions: "Is [image 2] a solid red image?"},
+		}
+	}
+	ask := func(name string, left, right llmkit.Block) decide.Response {
+		dc := newDecideCase(t, sess, name)
+		// Keys marshal sorted: "left" is [image 1], "right" is [image 2].
+		resp, err := dc.ask(map[string]any{"left": left, "right": right}, questions())
+		if err != nil {
+			t.Fatalf("%s: ask: %v", name, err)
+		}
+		return resp
+	}
+	r1 := ask("image_labels_red_blue", solidPNG(t, 280, 280, red), solidPNG(t, 280, 280, blue))
+	r2 := ask("image_labels_blue_red", solidPNG(t, 280, 280, blue), solidPNG(t, 280, 280, red))
+	t.Logf("ask 1 (left red, right blue): first_red=%.3f second_red=%.3f", r1.Nouls["first_red"], r1.Nouls["second_red"])
+	t.Logf("ask 2 (left blue, right red): first_red=%.3f second_red=%.3f", r2.Nouls["first_red"], r2.Nouls["second_red"])
+	if got := r1.Nouls["first_red"]; got <= 0.5 {
+		t.Errorf("ask 1: first_red = %.3f, want > 0.5 (image 1 is red)", got)
+	}
+	if got := r1.Nouls["second_red"]; got >= 0.5 {
+		t.Errorf("ask 1: second_red = %.3f, want < 0.5 (image 2 is blue)", got)
+	}
+	if got := r2.Nouls["first_red"]; got >= 0.5 {
+		t.Errorf("ask 2: first_red = %.3f, want < 0.5 (image 1 is blue)", got)
+	}
+	if got := r2.Nouls["second_red"]; got <= 0.5 {
+		t.Errorf("ask 2: second_red = %.3f, want > 0.5 (image 2 is red)", got)
+	}
 }

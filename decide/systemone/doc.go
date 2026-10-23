@@ -43,6 +43,40 @@
 // Retries). Questions, answers, and the validation rules are the
 // vocabulary of package decide.
 //
+// # Images
+//
+// [Config.Images] picks the image shape the host reads; see [ImageDialect].
+// The zero value, [ImagesNone], refuses every image before the request: a
+// host that ignores the shape sent answers as if the image were absent
+// (Kev ignores "assets" and reports no error).
+//
+// [ImagesAssets] (TypeSafe, H2O) adds a top-level "assets" object keyed by
+// each image's ref, {"type":"image","format":"png"|"jpg","data_base64":...},
+// and the header "TypeSafe-Danger-Zone-Images: true". [ImagesArray] (Codiv,
+// SGLang) adds a top-level "images" array of data URLs and writes "[image
+// N]", N the 1-based array position, where an image was in the state. A
+// media type or placement the dialect does not carry is refused by
+// [decide.Normalize] with the image's path, before any request.
+//
+// # Workers AI
+//
+// [NewWorkersAI] builds a [Client] for Cloudflare's hosted System One
+// models ("clef", "clef-flash", "clef-omni"). It POSTs the same body, with
+// images always in the [ImagesArray] shape and no danger-zone header, to
+// <BaseURL>/client/v4/accounts/<AccountID>/ai/run/@cf/cloudflare/<Model>.
+//
+// Cloudflare wraps the answer: a 200 body is {"result": <System One
+// response>, "success": true, "errors": []}, and Ask parses "result". A 200
+// with "success": false, or a null or missing "result", is an ErrServer
+// naming the errors. A non-200 status maps to a Kind as in Errors, and its
+// Message lists each envelope error as "code <n>: <message>"; a body that is
+// not the envelope, or has no errors, is the Message after surrounding
+// whitespace is trimmed and an over-long body is cut to the package's
+// message cap; a body that is empty or only whitespace gives "HTTP <status>".
+//
+// Cloudflare caps a request at 4 images, 4 MiB each and 8 MiB in all, and
+// has further limits; the package checks none of them.
+//
 // # Errors
 //
 // Every error from [Client.Ask] is an [*llmkit.APIError] with Provider
@@ -144,8 +178,10 @@
 //     longest question at most 32k. The package does not count tokens.
 //     Oversized requests surface as host 4xx errors
 //     (ErrInvalidRequest or ErrContextTooLong).
-//   - State and every question field are text-only: no images, no
-//     tools, and no generated prose.
+//   - State and every question field are text and images: no tools and
+//     no generated prose. TypeSafe takes images at 280 to 1568 px a side,
+//     78,400 to 2,458,624 px in all, 16 MiB each and 32 MiB per request, on
+//     Jev 1.13 and later; the package checks none of it, pixels included.
 //   - Model aliases move on a host that versions its models: TypeSafe's
 //     "jev-latest" and "jev-preview" point at a versioned id that can
 //     change between releases. Response.Model reports the id the host
@@ -171,6 +207,7 @@
 //     same rule as provider.Spec.Secret);
 //   - an empty Model;
 //   - a Retry.Jitter outside [0, 1], NaN included;
+//   - a Config.Images that is not an [ImageDialect] constant;
 //   - a BaseURL that is not an http or https URL with a host (the scheme
 //     is case-insensitive), or that contains '#' anywhere, an empty
 //     fragment included.
@@ -182,6 +219,13 @@
 // path: "https://gw.example/x?api-version=1" requests
 // "/x/v1/systemone?api-version=1". The path is not cleaned: "//" and dot
 // segments in BaseURL are not collapsed or resolved.
+//
+// [NewWorkersAI] applies the same Secret, Retry and BaseURL rules, and
+// also refuses an AccountID that is not exactly 32 lowercase hexadecimal
+// characters and a Model that does not match ^[a-z0-9][a-z0-9.-]*$, so
+// neither can alter the request path. No such error echoes the Secret or
+// the AccountID; an Ask error may include the AccountID, an identifier and
+// not a credential.
 //
 // New performs no network I/O and no environment lookups, so construction
 // is hermetic.

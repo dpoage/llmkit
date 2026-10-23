@@ -35,6 +35,10 @@ works behind `Config.BaseURL`. The default host is TypeSafe at
 | Probabilities | As reported. | Reported at 4 decimals. |
 | Extra response fields | None known. | `latency_ms`, ignored by the client. |
 | Auth | `Authorization: Bearer` key. | A local `kev.serve` needs no auth, but `systemone.New` still requires a non-empty `Secret`. |
+| Images | `Config.Images = ImagesAssets` (Jev 1.13+); see [Images on System One](#images-on-system-one). | Kev ignores `assets` without an error; leave `Config.Images` unset so an image is refused before the request. |
+
+Cloudflare Workers AI serves the Clef models at a different route and in
+a different envelope; see [Workers AI](#workers-ai).
 
 ## Constructing a client
 
@@ -319,6 +323,164 @@ func main() {
 }
 ```
 
+## Images
+
+A state, an `Instructions` value, or a description (`True`, `False`, an
+`Options` value, a `Levels` entry) may hold an image. `decide.Normalize` finds
+it in the JSON that `encoding/json` produces, replaces it with a label, and
+returns it once in `Request.Images`; the backend sends the bytes its own way.
+
+**What counts as an image.** Any JSON object that decodes as an
+`llmkit.Block` of kind `"image"` and uses only `Block`'s member names. Names
+match as `encoding/json` matches them (case-insensitive, escapes decoded; a
+repeated member takes its last value) and `kind` must equal `"image"` exactly.
+It does not matter how the object got there: an `llmkit.Image` block, a
+`Message` whose content holds one, a `json.RawMessage`, or a map. An object
+with any other member (`{"kind":"image","caption":"x"}`) or another kind is
+left as it was, with one exception: an object with a member that is not a
+`Block` field, `kind` `"image"`, and a `data` that is neither null nor `""` is
+refused (`member "caption" is not an llmkit.Block field`), because its bytes
+would otherwise reach the host as text. This covers a struct that embeds
+`llmkit.Block` and adds a field. Block-shaped data you did not mean as an
+image is an image; there is no escape. An image is replaced whole; nothing
+inside it is scanned.
+
+**A valid image** has inline `Data` and a `MediaType` that begins `image/`;
+`URL`, `Text`, `Title`, `Provider` and `Raw` are empty (an empty `"text":""`
+is fine; `"raw":null` is not). An object that is an image by the rule above
+but fails this, including one whose member does not decode, is refused
+naming its path, for example `state["frames"][2]["frame"]: invalid image: no
+inline data`. It is never sent as text. Nothing checks the pixels or sniffs
+the bytes. The same bytes under two media types are refused.
+
+**Labels and order.** `Request.Images` holds the distinct images (deduplicated
+by bytes) in order of first occurrence: the state in document order, then each
+question in sorted id order, instructions before criteria (true, false,
+options by sorted key, levels by index). Each `Image` has `Ref`
+(`<image:` and the first 16 bytes of the SHA-256 in lowercase hex, `>`),
+`SHA256`, `MediaType`, `Data`, and `Placements`, the union of the places it
+occurs in: `PlaceState`, `PlaceInstructions`, `PlaceCriteria`. `Request.State`
+and `Request.Questions` carry each image's label in its place: its `Ref`, or
+`[image N]` (N from 1, the index in `Request.Images`) under `LabelPosition`. A
+string of yours that equals a label is never rewritten.
+
+**What a backend carries.** `decide.ImageSupport{Placements, MediaTypes,
+Label}` is what a backend passes to `Normalize`. The zero value refuses every
+image; empty `MediaTypes` accepts any `image/*`. An image outside the
+placements or media types is refused with `ErrInvalidRequest` and, in
+addition, wraps `decide.ErrImageUnsupported`; an invalid image does not.
+`decide.Replay` normalizes with `PlaceAll`, and `decide.Observe` with the
+`Decider`'s own support, as [Images in events](#images-in-events) says. A `Decider`
+declares its support with `ImageSupport() decide.ImageSupport`
+(`decide.ImageSupporter`). `systemone.Client` declares its support from
+`Config.Images` (next section).
+
+### Images on System One
+
+`systemone.Config.Images` picks the shape the host reads. The zero value,
+`ImagesNone`, refuses every image before the request, with an error that
+names `Config.Images` and no HTTP hit. A host that does not read the shape
+sent can answer without the image and report no error (Kev ignores `assets`
+this way), so the client will not guess.
+`New` refuses any value that is not a constant.
+
+| Host | `Config.Images` | Carries |
+|---|---|---|
+| TypeSafe, H2O | `ImagesAssets` | Any placement; `image/png`, `image/jpeg`. |
+| Codiv, SGLang | `ImagesArray` | State only; `image/png`, `image/jpeg`, `image/webp`. |
+| Cloudflare Workers AI | `NewWorkersAI` (always `ImagesArray`) | State only; `image/png`, `image/jpeg`, `image/webp`; limits include 4 images, 4 MiB each, 8 MiB in all. |
+| Kev | `ImagesNone` (unset) | Nothing: Kev ignores `assets` without an error. |
+| OpenRouter, Fireworks | `ImagesNone` (unset) | Nothing: no shape here fits. OpenRouter ignores `assets`, answers 400 to a top-level `images`, and reads `image_url` parts, which this client does not send. Fireworks answers 400 to `images`. |
+
+**`ImagesAssets`.** The body gains a top-level `assets` object keyed by each
+image's ref (`<image:hex>`). The state and the questions carry the ref in the
+image's place. Each value is `{"type":"image","format":"png"|"jpg",
+"data_base64":"..."}`, with standard padded base64 and no `data:` prefix;
+`image/jpeg` is `jpg`. A request with an image also sends the header
+`TypeSafe-Danger-Zone-Images: true`; one without sends neither the key nor the
+header, and its bytes are those of an image-free `ImagesNone` request.
+
+**`ImagesArray`.** The body gains a top-level `images` array of
+`data:<media type>;base64,<data>` strings. The state carries `[image N]` where
+an image was, N counting from 1 in order of first occurrence and naming the
+same position in `images`; equal bytes share one number. There are no refs and
+no header. An image in an instruction or a criterion is refused, because the
+host reads images by position and has no place to name one there. A user
+string equal to a ref or to `[image 1]` is left as it is.
+
+Both dialects refuse a media type they do not carry (`image/webp` under
+`ImagesAssets`, `image/gif` under `ImagesArray`), naming the image's path, with
+no HTTP hit; the error wraps `decide.ErrImageUnsupported` and
+`llmkit.ErrInvalidRequest`. Pixels are not checked client-side, and the
+media type is the one the caller set, never sniffed from the bytes. Multipart
+upload is not implemented.
+
+`ImagesArray` is run live by `TestLiveDecide/workersai/image_labels` on
+Cloudflare Workers AI (next section); hermetic tests pin its wire for the other
+hosts. `ImagesAssets` is run live by `TestLiveDecide/typesafe/image_placement`.
+
+## Workers AI
+
+Cloudflare serves the System One models Clef, Clef Flash and Clef Omni through
+Workers AI. `systemone.NewWorkersAI` builds the same `*systemone.Client` for it:
+
+```go
+client, err := systemone.NewWorkersAI(systemone.WorkersAIConfig{
+	Secret:    os.Getenv("CLOUDFLARE_API_TOKEN"),
+	AccountID: os.Getenv("CLOUDFLARE_ACCOUNT_ID"), // 32 lowercase hex characters
+	Model:     "clef-flash",
+})
+```
+
+| Field | Required | Rule |
+|---|---|---|
+| `Secret` | Yes | The Cloudflare API token, with the same rule as `Config.Secret`. |
+| `AccountID` | Yes | Exactly 32 lowercase hexadecimal characters. Anything else is refused, so the id cannot alter the request path. |
+| `Model` | Yes | The model name under `@cf/cloudflare`, matching `^[a-z0-9][a-z0-9.-]*$`: `clef`, `clef-flash`, `clef-omni`. |
+| `BaseURL` | No | Default `https://api.cloudflare.com`; the same rules as `Config.BaseURL`. |
+| `HTTPClient`, `Retry` | No | As in `Config`. |
+
+`NewWorkersAI` refuses a bad config with `ErrInvalidRequest`, with no network
+I/O, and its errors echo neither the `Secret` nor the `AccountID`. An `Ask`
+error may include the `AccountID` (a transport error holds the request URL),
+an identifier and not a credential. The client POSTs the System One body,
+with `Authorization: Bearer`, to
+`<BaseURL>/client/v4/accounts/<AccountID>/ai/run/@cf/cloudflare/<Model>`. Its
+`Identity` is Provider `systemone` and the `Model` you passed.
+
+**Responses.** Cloudflare wraps the answer: a 200 body is
+`{"result": {model, answers, usage}, "success": true, "errors": [], "messages": []}`,
+and `Ask` parses `result` exactly as it parses a System One body. A 200 whose
+`success` is `false`, or whose `result` is `null` or missing, is an `ErrServer`
+naming Cloudflare's errors (retried like any contract violation). A non-200
+body is `{"result": null, "success": false, "errors": [{"code", "message"}]}`.
+The `Kind` comes from the HTTP status, by the table in [Errors](#errors), and
+the `Message` lists each error as `code <n>: <message>` (a body that is not
+that envelope, or whose `errors` list is empty, is the `Message` after
+surrounding whitespace is trimmed and an over-long body is cut to the
+package's message cap; a body that is empty or only whitespace gives
+`HTTP <status>`), with
+the `Secret` masked and the usual 200-byte cap. Codes seen:
+
+| HTTP status | Cloudflare code | Kind |
+|---|---|---|
+| 401 | (any) | `ErrAuth` |
+| 429 | 3036 | `ErrRateLimited` |
+| 400 | 5007 | `ErrInvalidRequest` |
+
+**Images.** The client always uses the `ImagesArray` shape and sends no
+`TypeSafe-Danger-Zone-Images` header. Cloudflare reads the `images` array and
+prepends it to the state; the state names each image as `[image N]`, N from 1
+in order of first occurrence. Ask about an image by that label in the question
+text: `Is [image 1] a solid red image?`. The state only: an image in an
+instruction or a criterion is refused before the request. PNG, JPEG and WebP;
+at most 4 images, 4 MiB each and 8 MiB in all, among Cloudflare's limits. The
+client checks none of them, so a violation comes back as a host 4xx.
+
+**Free tier.** Workers AI has a free allocation (10,000 neurons a day when
+this was written) that covers the live lane's handful of Clef image calls.
+Cloudflare sets the allocation and may change it.
+
 ## Reading the answers
 
 `Response` splits the answers by question kind:
@@ -423,7 +585,13 @@ A refused pre-wire request also returns `ErrInvalidRequest` before any
 network call. `decide.Normalize` rejects: nil state; empty questions; empty
 question id; nil instructions; a `Choice` without options; a `Score`
 with fewer than two levels; a JSON number or boolean where only text
-kinds are accepted.
+kinds are accepted; an invalid image, and an image the backend's
+`ImageSupport` does not carry (see [Images](#images)).
+
+`decide.Normalize(state, qs, support)` returns a `decide.Request` and an error.
+`Request.State` is the state's marshalled JSON; `Request.Questions` holds
+the questions in the root `llmkit.DecisionQuestion` vocabulary, sorted by id;
+`Request.Images` holds the images found in them.
 
 An unknown model arrives as a 400 in the live lane (observed 2026-09-20).
 The vendor's API doc reserves 422 for validation failures. Both map to
@@ -476,7 +644,8 @@ d := decide.Observe(client, sink) // sink is any llmkit.Observer
 An `Ask` that fails `decide.Normalize` is passed to the wrapped `Decider`
 untouched and emits nothing. Every other `Ask` emits exactly one event,
 success or failure, including a caller's already-cancelled ctx (`Err` set,
-zero wire hits). The event carries `State` and `Questions` as validated,
+zero wire hits). The event carries `State` and `Questions` as validated
+(images as references, see [Images in events](#images-in-events)),
 `Answers`, `Usage`, and the `Ask`'s wall time as `Duration`; `Questions`
 and `Answers` are each sorted by ID. On failure `Err` is the error's text,
 `Answers` is nil, and `Usage` is zero. `Observe` returns the wrapped
@@ -490,6 +659,36 @@ alias, on failure. The wrapper implements `Identity()` too when the
 wrapped `Decider` does. A `Decider` without it leaves `Backend` empty.
 `Observe` does not scrub: `Err` is the error text the backend returned, so
 a backend must mask secrets in its errors, as `systemone` does.
+
+#### Images in events
+
+`State`, `Questions` and `Images` hold no bytes of an image value, as defined
+in [Images](#images). `Err` is the backend's error text, so an error
+that echoes a request body can carry image bytes. Data that is not an image
+value, such as `{"kind":"Image",...}` (capital I), is recorded as marshalled.
+`State` and `Questions` carry the reference
+`<image:hex>` in the place of each image (the first 16 bytes of the SHA-256,
+as `Image.Ref`), and `DecisionEvent.Images` lists each distinct image once,
+in order of first occurrence: `sha256` (the full hash, lowercase hex),
+`media_type`, and `placements`, from `"state"`, `"instructions"` and
+`"criteria"` in that order. `Images` is absent when the `Ask` has no image.
+Whatever its size, an image adds one reference per occurrence and one
+`Images` entry per distinct image to the event. For a state
+`{"frame": <png>}`, the `state` and `images` of the decision are:
+
+```json
+{"state":{"frame":"\u003cimage:039058c6f2c0cb492c533b0a4d14ef77\u003e"},"images":[{"sha256":"039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81","media_type":"image/png","placements":["state"]}]}
+```
+
+`Observe` normalizes with the `ImageSupport` the wrapped `Decider` declares
+(`decide.ImageSupporter`), or `PlaceAll` when it declares none, so an image
+the backend would refuse is a `Normalize` refusal here too: the `Ask` goes
+to the `Decider` untouched, which returns its refusal, and nothing is
+emitted. The label is always the reference, even for a backend that
+labels images `[image N]` on its wire. The wrapper forwards
+`ImageSupport()` as it forwards `Identity()`, so `Observe(Observe(d, a), b)`
+refuses what `Observe(d, a)` does. There is no event schema bump: `images`
+is an added field, and a reader that does not know it ignores it.
 
 ### Replay
 
@@ -511,7 +710,8 @@ Each `Ask` follows these rules:
    `llmkit: decide error: ...`, where the live client's reads
    `llmkit: systemone error: ...`.
 2. The `Ask` matches the earliest unconsumed recorded decision with the same
-   `Step` and the same set of question ids, and consumes it. Two `Ask`s of
+   `Step`, the same set of question ids and the same set of image hashes
+   ([below](#replaying-image-decisions)), and consumes it. Two `Ask`s of
    one step with different id sets match whichever order they arrive in.
 3. No match returns an error wrapping `decide.ErrReplayDiverged` that names
    the step.
@@ -522,16 +722,41 @@ Each `Ask` follows these rules:
    of each asked question, probabilities included) and must pass
    `decide.Check`; a failure wraps `ErrReplayDiverged`.
 
-Two limits to know. Replay does not compare the state: an `Ask` that
-judges a different state than the recorded one still gets the recorded
-answer, so compare states yourself if that matters. And it does not report
-recorded decisions the replay never asked for; a replay that stops early is
-not an error here (`ReplayClient.Err` still reports unreached completions
-and tool calls). `decide.ErrReplayDiverged` is a different sentinel from
-`agent.ErrReplayDiverged`; match each with `errors.Is`. Besides the wrapped
-`Decider`'s errors and a `Normalize` refusal, a `Decider` from this package
-returns only errors wrapping `ErrReplayDiverged` or `ErrReplayedFailure`.
-A `Decider` from `Replay` is safe for concurrent use.
+Two limits to know. Replay does not compare the state, only the images in
+it: an `Ask` that judges a different state with the same images still gets
+the recorded answer, so compare states yourself if that matters. And it does
+not report recorded decisions the replay never asked for; a replay that
+stops early is not an error here (`ReplayClient.Err` still reports
+unreached completions and tool calls). `decide.ErrReplayDiverged` is a
+different sentinel from `agent.ErrReplayDiverged`; match each with
+`errors.Is`. Besides the wrapped `Decider`'s errors and a `Normalize`
+refusal, a `Decider` from this package returns only errors wrapping
+`ErrReplayDiverged` or `ErrReplayedFailure`. A `Decider` from `Replay` is
+safe for concurrent use.
+
+#### Replaying image decisions
+
+A record's image set is the distinct SHA-256 hashes of its images: those in
+`Images` plus those of any valid image value still inline in its `State` or
+`Questions`. The `Ask`'s set is the hashes of the images `Normalize` finds
+in it. The two must be equal, as sets: order, media type, placement and the
+number of occurrences do not matter, only the bytes. A recording of one image
+answers an `Ask` of the same image under any state shape; a different image,
+an extra or missing image, or an image where the record has none, diverges
+and names the step and the hashes asked.
+
+Logs written by v0.6.0, before images were recorded, hold each image as a
+base64 `Block` in `State` and `Questions` and no `Images`; Replay finds
+those and hashes them, so such a log answers the same image and diverges on
+another. A recorded image value that is not valid (it carries a URL or
+caption, has no data, or does not decode) adds no hash and does not fail
+`Replay`; an `Ask` matches such a record as if that image were not there.
+Two media types over the same bytes do not fail `Replay` either, but the
+record holds one hash for them, so only an `Ask` of that image matches. A
+URL or caption image in a new `Ask` is a `Normalize` refusal, as live. A
+binary from before this change that replays a log written after it does not
+check images: it compares step and question ids only. Scanning inline
+images is slow at pathological nesting depth, as `Normalize` is.
 
 ## Gating an agent
 
@@ -643,9 +868,15 @@ Design points the program follows:
   at most 32k. `systemone` does not count tokens; oversized requests surface as
   host 4xx errors. ([Models](https://docs.typesafe.ai/models.md); no vendor
   review date; verified 2026-09-19)
-- Input is text only: string, JSON object, or array of text values. No image,
-  audio, or video. ([Models](https://docs.typesafe.ai/models.md); verified
-  2026-09-19)
+- Images need Jev 1.13 or later, through `Config.Images = systemone.ImagesAssets`
+  (see [Images on System One](#images-on-system-one)). The vendor's limits
+  include 280 to 1568 px a side, 78,400 to 2,458,624 px in all, 16 MiB per
+  image, and 32 MiB for the body and the expanded request; the list is not
+  complete. The vendor labels the feature "Dreamer-ready" and says the limits
+  may change. `systemone` checks none of them, pixels included: a violation
+  comes back as a host 4xx.
+  Audio and video are not accepted.
+  ([Images](https://docs.typesafe.ai/images); verified 2026-10-22)
 - English is the primary training language and where accuracy is best; other
   languages, including CJK scripts, are handled but not equally well.
   ([Models](https://docs.typesafe.ai/models.md); verified 2026-09-19)
@@ -699,6 +930,11 @@ the package prints one `LIVE_TOKENS` total line at exit. Add `-update` to
 re-record the fixtures under `decide/systemone/testdata/`; treat that as a deliberate
 local operation. The lane cases and the skip rules follow
 [testing](testing.md).
+
+The Workers AI lane (`workersai`) reads `LLMKIT_LIVE_WORKERSAI_API_KEY` and
+`LLMKIT_LIVE_WORKERSAI_ACCOUNT_ID` (both required) and
+`LLMKIT_LIVE_WORKERSAI_MODEL` (default `clef-flash`); see
+[Workers AI](#workers-ai).
 
 The recorded fixtures replay hermetically: `decide/systemone/fixture_replay_test.go`
 runs in plain `go test ./...` with no tag, no network, and no credentials.

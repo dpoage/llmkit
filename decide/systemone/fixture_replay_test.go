@@ -3,9 +3,10 @@ package systemone_test
 // Hermetic replay of the recorded decide fixtures: for every file under
 // decide/systemone/testdata, an httptest server serves the recorded exchanges in
 // order and the recorded Ask is re-issued through systemone.New. The
-// re-issued request must equal the recorded one — method, path, and body
-// compared as parsed JSON; headers excluded — and the outcome must equal
-// the recording: the whole normalized decide.Response, or the sentinel
+// re-issued request must equal the recorded one — method, path, body
+// (compared as parsed JSON) and the images header; no other header is
+// checked — and the outcome must equal the recording: the whole
+// normalized decide.Response, or the sentinel
 // error kind. Editing a recorded probability fails this test; so does
 // client wire drift on the request side.
 //
@@ -88,6 +89,12 @@ func replayDecideFixture(t *testing.T, f *livetest.DecideFixture) {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
+		const imagesHeader = "TypeSafe-Danger-Zone-Images"
+		if got, want := r.Header.Get(imagesHeader), ex.Request.Headers[strings.ToLower(imagesHeader)]; got != want {
+			t.Errorf("replay step %d: %s = %q, fixture recorded %q", i+1, imagesHeader, got, want)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Errorf("replay step %d: read request body: %v", i+1, err)
@@ -114,11 +121,17 @@ func replayDecideFixture(t *testing.T, f *livetest.DecideFixture) {
 	}))
 	defer srv.Close()
 
+	dialect := map[string]systemone.ImageDialect{"": systemone.ImagesNone, "assets": systemone.ImagesAssets, "array": systemone.ImagesArray}
+	d, ok := dialect[f.ImageDialect]
+	if !ok {
+		t.Fatalf("fixture records unknown image dialect %q", f.ImageDialect)
+	}
 	cl, err := systemone.New(systemone.Config{
 		Secret:     "llmkit-replay-placeholder",
 		Model:      f.Model,
 		BaseURL:    srv.URL,
 		HTTPClient: srv.Client(),
+		Images:     d,
 	})
 	if err != nil {
 		t.Fatalf("systemone.New: %v", err)

@@ -3,6 +3,7 @@ package systemone
 import (
 	"fmt"
 	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/decide"
 	"github.com/dpoage/llmkit/internal/adapter"
 	"github.com/dpoage/llmkit/retry"
 	"net/http"
@@ -33,6 +34,61 @@ const (
 	// providerName tags every error and usage event from this package.
 	providerName = "systemone"
 )
+
+// ImageDialect selects how a Client carries images. The zero value sends
+// none: a host that ignores the shape sent answers without the image and
+// reports no error, so the Client refuses every image until Config.Images
+// names the shape.
+type ImageDialect uint8
+
+const (
+	// ImagesNone (the zero value) refuses every image before the request.
+	ImagesNone ImageDialect = iota
+
+	// ImagesAssets is the TypeSafe and H2O shape: a top-level "assets"
+	// object keyed by ref, the state and questions naming the ref in the
+	// image's place. image/png and image/jpeg, any placement.
+	ImagesAssets
+
+	// ImagesArray is the Codiv and SGLang shape: a top-level "images"
+	// array of data URLs, the state naming "[image N]" (N = array
+	// position) in the image's place. State only; png, jpeg and webp.
+	ImagesArray
+)
+
+// String returns the constant's name, or "ImageDialect(n)" for any other
+// value.
+func (d ImageDialect) String() string {
+	switch d {
+	case ImagesNone:
+		return "ImagesNone"
+	case ImagesAssets:
+		return "ImagesAssets"
+	case ImagesArray:
+		return "ImagesArray"
+	}
+	return fmt.Sprintf("ImageDialect(%d)", uint8(d))
+}
+
+// support returns the decide.ImageSupport a Client of dialect d normalizes
+// with. d must be a valid dialect.
+func (d ImageDialect) support() decide.ImageSupport {
+	switch d {
+	case ImagesAssets:
+		return decide.ImageSupport{
+			Placements: decide.PlaceAll,
+			MediaTypes: []string{"image/png", "image/jpeg"},
+			Label:      decide.LabelRef,
+		}
+	case ImagesArray:
+		return decide.ImageSupport{
+			Placements: decide.PlaceState,
+			MediaTypes: []string{"image/png", "image/jpeg", "image/webp"},
+			Label:      decide.LabelPosition,
+		}
+	}
+	return decide.ImageSupport{}
+}
 
 // Config configures a System One client. New validates it.
 type Config struct {
@@ -71,15 +127,28 @@ type Config struct {
 	// field — to run the resolved defaults with no jitter, set
 	// Retry.Rand to a function returning 0.5).
 	Retry retry.Config
+
+	// Images selects the image shape the host reads. The zero value,
+	// ImagesNone, refuses every image before the request, naming this
+	// field; see [ImageDialect] for the shapes. New refuses any value that
+	// is not one of the constants.
+	Images ImageDialect
 }
 
 // New validates cfg and returns a Client. It returns an error wrapping
 // llmkit.ErrInvalidRequest for a Secret that is empty, whitespace-only, or
 // whitespace-padded, an empty Model, a Retry.Jitter outside [0, 1] (NaN
-// included), and a BaseURL that is not an http or https URL with a host
-// or that contains '#'. Construction is hermetic: no network I/O, no
-// environment lookups, and no error echoes Secret or any part of BaseURL.
+// included), an Images value that is not an [ImageDialect] constant, and a
+// BaseURL that is not an http or https URL with a host or that contains '#'.
+// Construction is hermetic: no network I/O, no environment lookups, and no
+// error echoes Secret or any part of BaseURL.
 func New(cfg Config) (*Client, error) {
+	return newClient(cfg, systemOnePath)
+}
+
+// newClient is New with the endpoint path supplied by the caller: New passes
+// systemOnePath, [NewWorkersAI] its account route.
+func newClient(cfg Config, path string) (*Client, error) {
 	// Refuse a Secret that is empty or differs from strings.TrimSpace —
 	// the same refusal provider.New applies to Spec.Secret. The error
 	// never echoes Secret.
@@ -92,6 +161,9 @@ func New(cfg Config) (*Client, error) {
 	if !(cfg.Retry.Jitter >= 0 && cfg.Retry.Jitter <= 1) {
 		return nil, fmt.Errorf("systemone: retry jitter must be in [0, 1], got %v: %w", cfg.Retry.Jitter, llmkit.ErrInvalidRequest)
 	}
+	if cfg.Images > ImagesArray {
+		return nil, fmt.Errorf("systemone: Config.Images must be ImagesNone, ImagesAssets or ImagesArray, got %v: %w", cfg.Images, llmkit.ErrInvalidRequest)
+	}
 	base := cfg.BaseURL
 	if base == "" {
 		base = defaultBaseURL
@@ -103,21 +175,28 @@ func New(cfg Config) (*Client, error) {
 	return &Client{
 		apiKey:   cfg.Secret,
 		model:    cfg.Model,
-		endpoint: adapter.JoinEndpoint(root, systemOnePath),
+		endpoint: adapter.JoinEndpoint(root, path),
 		client:   cfg.httpClient(),
 		retry:    cfg.retryPolicy(),
+		images:   cfg.Images,
+		support:  cfg.Images.support(),
 	}, nil
 }
 
 // Client evaluates questions against a state over the System One wire. It
-// satisfies [decide.Decider]. Construct with [New]; a *Client is safe for
-// concurrent use and its fields are immutable afterwards.
+// satisfies [decide.Decider]. Construct with [New] or [NewWorkersAI]; a
+// *Client is safe for concurrent use and its fields are immutable afterwards.
 type Client struct {
 	apiKey   string
 	model    string
-	endpoint *url.URL // BaseURL joined with systemOnePath; never mutated
+	endpoint *url.URL // the endpoint URL; never mutated
 	client   *http.Client
 	retry    retry.Config
+	images   ImageDialect
+	support  decide.ImageSupport // images.support(); never mutated
+	// cloudflare is true for a Client built by [NewWorkersAI]: responses
+	// arrive in the Cloudflare envelope and errors are read from it.
+	cloudflare bool
 }
 
 // httpClient returns the injected client as-is, or a plain client with no

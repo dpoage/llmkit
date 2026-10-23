@@ -233,11 +233,27 @@ entry below is marked.
   `Confidence` 0, and must not fabricate them. The System One client
   requires a Score answer's legend and probabilities, and accepts a Choice
   answer without them (nil `Probabilities`, `Confidence` 0).
-- `decide`: `Normalize(state, qs)` validates a state and questions and returns
-  them in the root `llmkit.DecisionQuestion` vocabulary, sorted by id, so a
-  backend renders its own request from one validated form. It validates
-  questions in sorted id order, so the first refusal is the same on every
-  call; the old client used map order.
+- `decide`: `Normalize(state, qs, support)` validates a state and questions
+  and returns a `Request`: `State` (the state's JSON), `Questions` (the
+  questions in the root `llmkit.DecisionQuestion` vocabulary, sorted by id)
+  and `Images`, so a backend renders its own request from one validated form.
+  It validates questions in sorted id order, and the options of a `Choice` in
+  sorted key order, so the first refusal is the same on every call; the old
+  client used map order. An image is any JSON object in the state, an
+  `Instructions` or a description (`True`, `False`, an option, a level) that
+  decodes as an `llmkit.Block` of kind `"image"` using only `Block`'s member
+  names (`encoding/json` matching: case-insensitive, escapes decoded, last
+  duplicate wins), however it was built; Block-shaped user data counts. Each
+  is replaced by its label, `<image:hex>` or `[image N]`
+  (`ImageSupport.Label`), and returned once in `Request.Images` with its
+  `Ref`, `SHA256`, `MediaType`, `Data` and `Placements` (`PlaceState`,
+  `PlaceInstructions`, `PlaceCriteria`). `ImageSupport{Placements,
+  MediaTypes, Label}` is what a backend carries; the zero value refuses every
+  image, and a `Decider` declares its support with `decide.ImageSupporter`.
+  An invalid image, or one the support does not carry, is refused with
+  `ErrInvalidRequest` naming its JSON path; the second case also wraps
+  `decide.ErrImageUnsupported`. An unset `Config.Images` makes
+  `systemone.Client` refuse every image, naming `Config.Images`.
 - `decide`: `Observe(d Decider, obs llmkit.Observer) Decider` wraps any
   `Decider` and emits one `llmkit.KindDecision` event per `Ask` (RunID and
   Step from the context, sorted questions and answers, usage, duration; a
@@ -258,6 +274,17 @@ entry below is marked.
   `decide.ErrReplayedFailure`. A refusal keeps Provider `"decide"`, so its
   text reads `llmkit: decide error` where the live client's reads
   `llmkit: systemone error`.
+- `llmkit`: `DecisionEvent.Images` and `DecisionImage{SHA256, MediaType,
+  Placements}` record each image of a `decide.Observe`d `Ask`: its hash, media
+  type and placements (`"state"`, `"instructions"`, `"criteria"`), never its
+  bytes. `State` and `Questions` carry `<image:hex>` references in place of
+  each image, so `State` and `Questions` stay small whatever the image size.
+  `Images` is omitted when the `Ask` has no image, so image-free events are
+  unchanged. `EventSchemaVersion` stays 3.
+- `decide`: `Observe` normalizes with the `ImageSupport` the wrapped
+  `Decider` declares (`decide.ImageSupporter`), `PlaceAll` if none, and
+  forwards `ImageSupport()` as it forwards `Identity()`; an image the backend
+  would refuse emits no event, through `Observe(Observe(d))` too.
 - `examples/agent-guardrail`: an `agent.Runner` gated by a `decide.Decider`.
   A `ToolPolicy` asks a Noul and denies a call at or above `--threshold`; a
   `RequestPolicy` asks a Choice and aborts the run on `injection`. It reads
@@ -282,6 +309,46 @@ entry below is marked.
   CI does not run it. `systemone.Ask` also has hermetic tests against Kev's
   README response and a captured one; the live suite is now
   `TestLiveDecide/<lane>/<case>`. See `docs/testing.md`.
+- `decide/systemone`: `Config.Images` (`ImageDialect`: `ImagesNone`, the zero
+  value, `ImagesAssets`, `ImagesArray`) sends images to the host that reads
+  them, and `(*Client).ImageSupport()` reports what the Client carries.
+  `ImagesAssets` (TypeSafe, H2O) adds a top-level `assets` object keyed by ref
+  (`{"type":"image","format":"png"|"jpg","data_base64":...}`) and the header
+  `TypeSafe-Danger-Zone-Images: true`; it carries `image/png` and `image/jpeg`
+  in any placement. `ImagesArray` (Codiv, SGLang) adds a top-level `images`
+  array of data URLs and replaces each state image with `[image N]`; it
+  carries `image/png`, `image/jpeg` and `image/webp` in the state only. With
+  no image the body and headers are unchanged. An unset `Config.Images`
+  still refuses every image before the request, naming `Config.Images`. Kev
+  ignores `assets` without an error and answers as if the image were
+  absent. A media type or placement the dialect does not carry is refused
+  naming the image's path.
+  `New` refuses an `Images` value that is not a constant with
+  `ErrInvalidRequest`. Pixels are not checked client-side; TypeSafe's limits
+  are in `docs/decide.md`. Live case `typesafe/image_placement` asks about a
+  red and a blue photo; every answer flips with the photo.
+- `decide/systemone`: `NewWorkersAI(WorkersAIConfig{Secret, AccountID, Model,
+  BaseURL, HTTPClient, Retry})` returns a `*Client` for Cloudflare Workers AI
+  (Clef, Clef Flash, Clef Omni). It POSTs the System One body, images always
+  in the `ImagesArray` shape and no danger-zone header, to
+  `<BaseURL>/client/v4/accounts/<AccountID>/ai/run/@cf/cloudflare/<Model>`
+  (default `https://api.cloudflare.com`) and parses the `result` of
+  Cloudflare's `{result, success, errors}` envelope. A 200 with
+  `success: false` or no `result` is an `ErrServer`; a non-200 maps to a Kind
+  by status and its Message lists `code <n>: <message>` for each error.
+  `NewWorkersAI` refuses with `ErrInvalidRequest`, hermetically, an
+  `AccountID` that is not 32 lowercase hex characters and a `Model` outside
+  `^[a-z0-9][a-z0-9.-]*$`; no construction error echoes the `Secret` or the
+  `AccountID`. An `Ask` error can carry the `AccountID` (a transport error
+  holds the request URL), an identifier and not a credential.
+  Cloudflare's limits include 4 images, 4 MiB each and 8 MiB in all, and
+  have more; `docs/decide.md` lists these three and the client checks none of
+  them.
+  Live lane `workersai`
+  (`LLMKIT_LIVE_WORKERSAI_API_KEY`, `LLMKIT_LIVE_WORKERSAI_ACCOUNT_ID`,
+  `LLMKIT_LIVE_WORKERSAI_MODEL`, default `clef-flash`) with case
+  `image_labels`: a colour-swapped pair of Asks about `[image 1]` and
+  `[image 2]`. CI does not run it.
 
 ### Changed
 
@@ -438,6 +505,25 @@ entry below is marked.
   `LLMKIT_SYSTEMONE_MODEL`, and `LLMKIT_SYSTEMONE_BASE_URL` instead of the
   `LLMKIT_TYPESAFE_*` names. The live lane keeps `LLMKIT_LIVE_TYPESAFE_*`.
 - CI and the live workflow now run `./decide/...` instead of `./decide/`.
+- **Breaking:** `decide`: an `llmkit.Block` of kind `"image"`, or a `Message`
+  carrying one, in a state, an `Instructions` or a description is now
+  detected as an image. Before, it was sent as base64 text in the state;
+  now `systemone.Client` refuses it with `ErrInvalidRequest` until a dialect
+  carries it.
+- **Breaking:** `decide`: an image Block with `URL`, `Text`, `Title`,
+  `Provider` or `Raw` set, and an image Block with no inline `Data` or a
+  `MediaType` that does not begin `image/`, is refused with `ErrInvalidRequest`
+  naming its path, as is an object with `kind` `"image"`, a `data` that is
+  neither null nor `""`, and a member that is not a Block field (a struct
+  embedding `llmkit.Block` with an added field). Before, it was sent as text.
+- **Breaking:** `decide.Replay` now diverges (`ErrReplayDiverged`) when an
+  `Ask`'s images differ from the recorded decision's, where it used to ignore
+  them: it matches on the SHA-256 set of the images as well as the step and
+  question ids. An old binary replaying a log written after this change does
+  not check images. A log written by v0.6.0 (images inline in `State` and
+  `Questions`) still replays: a valid inline image counts by its hash, and one
+  that carries a URL or caption, has no data, or does not decode counts for
+  nothing.
 - Live `images` and `documents` cases (test-only): the model must now prove it
   saw the media. `images` sends a generated 64x64 solid blue PNG and requires
   "blue" in the answer; `documents` sends a generated one-page PDF whose only
