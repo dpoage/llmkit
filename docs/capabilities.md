@@ -41,6 +41,29 @@ Every `Capabilities` field belongs to exactly one enforcement class. The class t
 
 The field classes above match each field's doc comment in `llmkit.Capabilities`.
 
+## Accepted media types
+
+Whatever `Capabilities.Images` and `Capabilities.Documents` say, the Anthropic, OpenAI (`TypeOpenAI`), and Google adapters check an image or document block's media type against the wire's accepted set before any network call. Two sources are checked against the same set:
+
+- inline bytes: the block's `MediaType`;
+- a `data:` URL in `Block.URL` (scheme matched case-insensitively): the text after `data:` up to the first `;` or `,`. The type is empty when neither character appears, and an empty type is refused.
+
+A type outside the set returns an `*llmkit.APIError` wrapping `ErrInvalidRequest`, with `StatusCode` 0, whose message names the media type; no request is sent. The comparison is exact bytes, so an inline `MediaType` of `image/jpg`, `IMAGE/PNG`, or `image/png; x=y` is refused on all three wires.
+
+| Wire | Block and position | Accepted media types |
+|---|---|---|
+| Anthropic | Image, inline or `data:` URL, in a user turn or a tool result | `image/png`, `image/jpeg`, `image/gif`, `image/webp` |
+| Anthropic | Document, inline or `data:` URL, in a user turn or a tool result | `application/pdf` |
+| OpenAI (`TypeOpenAI`) | Image, inline or `data:` URL, user turn | `image/png`, `image/jpeg`, `image/gif`, `image/webp` |
+| OpenAI (`TypeOpenAI`) | Document, inline, user turn | `application/pdf` |
+| OpenAI-compatible | Inline image or document, or `data:` URL image, user turn | No check, because hosts vary: the inline `MediaType` is written to the wire unchanged and a `data:` URL is forwarded verbatim. The host decides whether to reject a type. |
+| Google | Inline bytes or a `data:` URL, user turn. Any block kind: the wire does not tell images, documents, audio, and video apart. On a `data:` URL block, a non-empty `MediaType` is sent as `fileData.mimeType`, so it must be in this set too. | `image/png`, `image/jpeg`, `image/webp`, `image/heic`, `image/heif`, `application/pdf`, `text/html`, `text/css`, `text/plain`, `text/xml`, `text/csv`, `text/rtf`, `text/javascript`, `application/json`, `audio/wav`, `audio/mp3`, `audio/aiff`, `audio/aac`, `audio/ogg`, `audio/flac`, `audio/mpeg`, `audio/m4a`, `audio/l16`, `audio/opus`, `audio/alaw`, `audio/mulaw`, `audio/webm`, `video/mp4`, `video/mpeg`, `video/mov`, `video/avi`, `video/x-flv`, `video/mpg`, `video/webm`, `video/wmv`, `video/3gpp` |
+| Google | Inline bytes, tool result (any URL source, `data:` included, is refused) | `image/png`, `image/jpeg`, `image/webp`, `application/pdf`, `text/plain` |
+
+Any other URL (`https:`, `gs:`, a Gemini Files API URI) is not checked on any wire, because its type cannot be known before the request. Google sends such a block's `MediaType` unchanged as `fileData.mimeType`; Anthropic and OpenAI write no media type for a URL source. Separate rules still apply to URL sources: both OpenAI types refuse URL-sourced documents, and Google refuses any URL source in a tool result. Anthropic accepts URL-sourced documents in both positions.
+
+Sources: [Anthropic vision](https://platform.claude.com/docs/en/build-with-claude/vision), [OpenAI images](https://developers.openai.com/api/docs/guides/images-vision), [OpenAI file inputs](https://developers.openai.com/api/docs/guides/file-inputs), and the Gemini [image](https://ai.google.dev/gemini-api/docs/image-understanding), [audio](https://ai.google.dev/gemini-api/docs/audio), [video](https://ai.google.dev/gemini-api/docs/video-understanding), and [document](https://ai.google.dev/gemini-api/docs/document-processing) guides. `provider/media_type_test.go` pins every row.
+
 ## ContextWindow zero means unknown
 
 Adapters report `ContextWindow: 0` in two cases. The model has no entry in the adapter's per-model table. The endpoint is an arbitrary `openai-compatible` server.

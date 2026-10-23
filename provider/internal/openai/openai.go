@@ -10,6 +10,7 @@ import (
 	"errors"
 	"maps"
 	"net/http"
+	"strconv"
 
 	"github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/internal/adapter"
@@ -39,6 +40,9 @@ type openaiAdapter struct {
 	// which accepts the subschema form in lenient mode. See
 	// coerceBoolAdditionalProperties.
 	requireBoolAdditionalProps bool
+	// checkMIME refuses inline or data: URL media outside the first-party sets;
+	// off for openai-compatible, where hosts vary and the host's 400 is the check.
+	checkMIME bool
 }
 
 // Options configures an OpenAI adapter.
@@ -134,6 +138,7 @@ func New(model string, opts Options) (llmkit.Client, error) {
 		provider:                   provider,
 		thinkingTag:                thinkingTag(opts.Compatible, opts.BaseURL),
 		requireBoolAdditionalProps: requireBoolAdditionalProps,
+		checkMIME:                  !opts.Compatible,
 	}, nil
 }
 
@@ -197,7 +202,7 @@ func (o *openaiAdapter) buildParams(req llmkit.Request) (openai.ChatCompletionNe
 	if p.System != "" {
 		msgs = append(msgs, openai.SystemMessage(p.System))
 	}
-	converted, err := toOpenAIMessages(o.provider, o.thinkingTag, p.Messages)
+	converted, err := toOpenAIMessages(o.provider, o.checkMIME, o.thinkingTag, p.Messages)
 	if err != nil {
 		return openai.ChatCompletionNewParams{}, err
 	}
@@ -286,14 +291,14 @@ func applyOpenAIToolChoice(params *openai.ChatCompletionNewParams, tc llmkit.Too
 // thinkingTag re-emits its Raw keys on that message (refused when Raw holds
 // none); other thinking blocks are dropped. Prepare's role and block rules
 // already hold; the file part also refuses URL-sourced documents.
-func toOpenAIMessages(provider, thinkingTag string, msgs []llmkit.Message) ([]openai.ChatCompletionMessageParamUnion, error) {
+func toOpenAIMessages(provider string, checkMIME bool, thinkingTag string, msgs []llmkit.Message) ([]openai.ChatCompletionMessageParamUnion, error) {
 	out := make([]openai.ChatCompletionMessageParamUnion, 0, len(msgs))
 	for _, m := range msgs {
 		switch m.Role {
 		case llmkit.RoleSystem:
 			out = append(out, openai.SystemMessage(m.Text()))
 		case llmkit.RoleUser:
-			parts, err := openAIUserParts(provider, m)
+			parts, err := openAIUserParts(provider, checkMIME, m)
 			if err != nil {
 				return nil, err
 			}
@@ -356,15 +361,19 @@ func dataURI(mediaType string, data []byte) string {
 	return "data:" + mediaType + ";base64," + base64.StdEncoding.EncodeToString(data)
 }
 
-// openAIUserParts maps a user message's content blocks onto Chat Completions
-// content parts: image → image_url part (data: URI for inline bytes, URL
-// verbatim), document → file part (file_data as a data: URI). The media
-// source rule (exactly one of Data/URL, MediaType required with Data) is
-// already enforced by adapter.Prepare; the constraint left here is
-// vendor-specific — document URLs are rejected, since the file part has no
-// URL source. A message with no blocks yields one empty text part so an
-// empty user turn still serializes the same wire shape.
-func openAIUserParts(provider string, m llmkit.Message) ([]openai.ChatCompletionContentPartUnionParam, error) {
+// openAIImageMIME is the first-party image_url media types, inline or as a
+// data: URL; exact bytes. https://developers.openai.com/api/docs/guides/images-vision
+var openAIImageMIME = map[string]bool{
+	"image/png":  true,
+	"image/jpeg": true,
+	"image/gif":  true,
+	"image/webp": true,
+}
+
+// openAIUserParts maps a user message's blocks (image → image_url, document →
+// file), refusing URL documents and, with checkMIME, media outside openAIImageMIME
+// or application/pdf (https://developers.openai.com/api/docs/guides/file-inputs).
+func openAIUserParts(provider string, checkMIME bool, m llmkit.Message) ([]openai.ChatCompletionContentPartUnionParam, error) {
 	parts := make([]openai.ChatCompletionContentPartUnionParam, 0, len(m.Content))
 	for _, b := range m.Content {
 		switch b.Kind {
@@ -375,7 +384,14 @@ func openAIUserParts(provider string, m llmkit.Message) ([]openai.ChatCompletion
 		case llmkit.BlockImage:
 			url := b.URL
 			if len(b.Data) > 0 {
+				if checkMIME && !openAIImageMIME[b.MediaType] {
+					return nil, adapter.Refuse(provider,
+						"image block: media type "+b.MediaType+" is not supported by the OpenAI image_url part (image/png, image/jpeg, image/gif, image/webp only)", nil)
+				}
 				url = dataURI(b.MediaType, b.Data)
+			} else if dm, ok := adapter.DataURLMediaType(url); checkMIME && ok && !openAIImageMIME[dm] {
+				return nil, adapter.Refuse(provider,
+					"image block: data: URL media type "+strconv.Quote(dm)+" is not supported by the OpenAI image_url part (image/png, image/jpeg, image/gif, image/webp only)", nil)
 			}
 			parts = append(parts, openai.ChatCompletionContentPartUnionParam{
 				OfImageURL: &openai.ChatCompletionContentPartImageParam{
@@ -386,6 +402,10 @@ func openAIUserParts(provider string, m llmkit.Message) ([]openai.ChatCompletion
 			if b.URL != "" {
 				return nil, adapter.Refuse(provider,
 					"document block: the Chat Completions file part accepts inline data only, not URLs", nil)
+			}
+			if checkMIME && b.MediaType != "application/pdf" {
+				return nil, adapter.Refuse(provider,
+					"document block: media type "+b.MediaType+" is not supported by the OpenAI file part (application/pdf only)", nil)
 			}
 			filename := b.Title
 			if filename == "" {

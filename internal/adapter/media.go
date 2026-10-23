@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/dpoage/llmkit"
 )
@@ -73,6 +74,23 @@ func validateMediaBlock(provider string, b llmkit.Block) error {
 		}
 	}
 	return nil
+}
+
+// DataURLMediaType reports whether url is an RFC 2397 data: URL (scheme
+// matched case-insensitively) and returns its media type: the text after
+// "data:" up to the first ';' or ','. It is empty when neither occurs or the
+// type is omitted; no defaulting, case folding, or trimming is applied.
+func DataURLMediaType(url string) (mediaType string, ok bool) {
+	const scheme = "data:"
+	if len(url) < len(scheme) || !strings.EqualFold(url[:len(scheme)], scheme) {
+		return "", false
+	}
+	rest := url[len(scheme):]
+	i := strings.IndexAny(rest, ";,")
+	if i < 0 {
+		return "", true
+	}
+	return rest[:i], true
 }
 
 // gateToolResultMedia refuses a tool-result message carrying an image or
