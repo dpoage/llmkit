@@ -342,7 +342,8 @@ entry below is marked.
   `AccountID`. An `Ask` error can carry the `AccountID` (a transport error
   holds the request URL), an identifier and not a credential.
   Cloudflare's limits include 4 images, 4 MiB each and 8 MiB in all, and
-  have more; `docs/decide.md` has them and the client checks none of them.
+  have more; `docs/decide.md` lists these three and the client checks none of
+  them.
   Live lane `workersai`
   (`LLMKIT_LIVE_WORKERSAI_API_KEY`, `LLMKIT_LIVE_WORKERSAI_ACCOUNT_ID`,
   `LLMKIT_LIVE_WORKERSAI_MODEL`, default `clef-flash`) with case
