@@ -62,13 +62,11 @@ Because llmkit cannot know what the endpoint supports, this provider uses a cons
 - no thinking
 - no reasoning effort
 
-The profile reports `Images` and `Documents` as `true`, because llmkit cannot know which models take media. Both fields are advisory. This provider type does not check an image or document block's media type: the host receives it unchanged and decides whether to reject it. See [accepted media types](capabilities.md#accepted-media-types).
+The profile reports `Images` and `Documents` as `true`, because llmkit cannot know which models take media. Both fields are advisory. This provider type does not check an image or document block's media type. The adapter writes an inline `MediaType` to the wire unchanged and forwards an image `data:` URL verbatim, and the host decides whether to reject the type. First-party OpenAI checks inline and `data:` URL media against a fixed set; see [accepted media types](capabilities.md#accepted-media-types).
 
 Override the profile with `Spec.Capabilities` — see [capabilities](capabilities.md).
 
 Reasoning an endpoint returns (`reasoning_content`, OpenRouter `reasoning_details`) is surfaced as a thinking block tagged `openai-compatible:<host of BaseURL>` and sent back on later assistant messages, as DeepSeek thinking mode requires. The host in the tag is case- and port-sensitive. If the host changes, the outgoing request drops blocks with the old tag; the history keeps them. First-party OpenAI blocks are tagged `openai`. `Block.Raw` is a canonical JSON re-encoding of the two keys, not the wire bytes. `Block.Text` holds `reasoning_content` only, so it is empty when the endpoint sends only `reasoning_details`.
-
-This type does no media-type check. In a user turn, an inline image or document's `MediaType` is written to the wire unchanged, and so is a `data:` URL image; the host decides whether to reject the type. First-party OpenAI checks inline and `data:` URL media against a fixed set — see [Accepted media types](capabilities.md#accepted-media-types).
 
 ### Google
 

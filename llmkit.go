@@ -200,14 +200,14 @@ type BlockKind string
 const (
 	// BlockText is plain text (the common case).
 	BlockText BlockKind = "text"
-	// BlockImage is an image, carried inline (Data + MediaType) or by reference (URL).
-	// Exactly one of Data and URL is required; adapters refuse any other combination,
-	// or an inline or data: URL media type outside the wire's accepted set (openai-compatible
-	// checks none), with ErrInvalidRequest before any wire call (docs/capabilities.md).
+	// BlockImage is an image, carried inline (Data + MediaType) or by
+	// reference (URL). Exactly one of Data and URL is required. Adapters refuse
+	// any other combination, or an inline or data: URL media type the wire does
+	// not accept (openai-compatible checks none), pre-wire with ErrInvalidRequest.
 	BlockImage BlockKind = "image"
-	// BlockDocument is a document (e.g. PDF), carried and checked like BlockImage.
-	// Wire constraints are refused the same way: Anthropic inline or data: URL
-	// documents must be PDFs, and the OpenAI file part takes inline data only.
+	// BlockDocument is a document (e.g. PDF), carried and checked like
+	// BlockImage. Anthropic inline or data: URL documents must be PDFs, and the
+	// OpenAI file part takes inline data only.
 	BlockDocument BlockKind = "document"
 	// BlockThinking is a provider reasoning block. Provider names the adapter
 	// that produced it; Raw is its replay payload, validated before any wire
@@ -748,14 +748,12 @@ type Capabilities struct {
 	// let the model call tools the caller tried to forbid).
 	ToolChoice bool
 	// Advisory: no adapter reads it. Every table entry and fallback profile
-	// reports true, and per-model modality is not tracked, so text-only
-	// models report true too. Image blocks are sent whatever it says,
-	// subject to the block and media-type refusals; the provider decides
-	// the rest.
+	// reports true, including text-only models. Image blocks are sent whatever
+	// the field says, subject to the block and media-type refusals.
 	Images bool
-	// Advisory: no adapter reads it; every profile reports true, as for
-	// Images. Document blocks are sent whatever it says, subject to the
-	// block and media-type refusals; the provider decides the rest.
+	// Advisory: no adapter reads it; every profile reports true, as for Images.
+	// Document blocks are sent whatever the field says, subject to the block
+	// and media-type refusals.
 	Documents bool
 	// Dropped silently when false: the effective profile gates
 	// Request.StopSequences off the wire. A caller-pinned override that

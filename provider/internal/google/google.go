@@ -374,8 +374,8 @@ func mimeSet(types ...string) map[string]bool {
 	return set
 }
 
-// googleInlineMIME is the user-turn inlineData media types (the wire is
-// kind-blind), also applied to data: URLs; exact bytes. Sources:
+// googleInlineMIME is the set of media types for user-turn inlineData, shared by
+// image and document blocks and applied to data: URLs; exact bytes. Sources:
 // https://ai.google.dev/gemini-api/docs/{image-understanding,audio,video-understanding,document-processing}
 var googleInlineMIME = mimeSet(
 	"image/png", "image/jpeg", "image/webp", "image/heic", "image/heif",

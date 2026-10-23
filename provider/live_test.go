@@ -738,17 +738,16 @@ func caseToolChoice(t *testing.T, lc *liveClient) {
 	lc.finish(resp, err)
 }
 
-// liveDocNonce is the only text in the caseDocuments PDF. A model that answers
-// it saw the document; a model that never received the document cannot.
+// liveDocNonce is the only text in the caseDocuments PDF; a model that answers
+// it saw the document.
 const liveDocNonce = "QUOKKA7319"
 
-// documentMaxTokens leaves room for the model to finish thinking before it
-// answers: observed live runs spent up to 1456 tokens thinking on this case,
-// and at the default cap the thought can consume the whole budget.
+// documentMaxTokens exceeds defaultLiveMaxTokens so a thinking model can finish
+// thinking before it answers.
 const documentMaxTokens = 4096
 
-// imageMaxTokens leaves room for the model to finish thinking before it names
-// the colour; at the default cap a truncated thought is the whole answer.
+// imageMaxTokens exceeds defaultLiveMaxTokens so a thinking model can finish
+// thinking before it names the colour.
 const imageMaxTokens = 2048
 
 func caseImages(t *testing.T, lc *liveClient) {
@@ -771,8 +770,8 @@ func caseImages(t *testing.T, lc *liveClient) {
 	lc.finish(resp, err)
 }
 
-// caseDocuments offers no "nothing attached" answer: the nonce is unguessable,
-// so such an escape adds no discrimination and lets an unsure model bail out.
+// caseDocuments's prompt offers no "nothing attached" answer, so an unsure
+// model cannot bail out.
 func caseDocuments(t *testing.T, lc *liveClient) {
 	resp, err := lc.complete(llmkit.Request{
 		MaxTokens: documentMaxTokens,
@@ -1065,9 +1064,8 @@ func solidPNG(w, h int, c color.RGBA) []byte {
 	return b.Bytes()
 }
 
-// textPDF builds a minimal, valid one-page PDF whose only text is word, which
-// must not contain PDF string metacharacters. The xref offsets are computed,
-// so the bytes are deterministic and fixture-stable.
+// textPDF builds a minimal one-page PDF whose only text is word, which must
+// not contain PDF string metacharacters.
 func textPDF(word string) []byte {
 	stream := fmt.Sprintf("BT /F1 36 Tf 72 720 Td (%s) Tj ET\n", word)
 	objects := []string{

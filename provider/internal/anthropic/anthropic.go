@@ -534,8 +534,8 @@ func anthropicUserBlocks(m llmkit.Message) ([]anthropic.ContentBlockParamUnion, 
 	return blocks, nil
 }
 
-// anthropicImageMIME is the image media types Anthropic accepts, inline or as a
-// data: URL; exact bytes. https://platform.claude.com/docs/en/build-with-claude/vision
+// anthropicImageMIME is the set of image media types Anthropic accepts, inline
+// or as a data: URL; exact bytes. https://platform.claude.com/docs/en/build-with-claude/vision
 var anthropicImageMIME = map[string]bool{
 	"image/png":  true,
 	"image/jpeg": true,

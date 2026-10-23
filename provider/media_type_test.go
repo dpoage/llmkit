@@ -45,7 +45,6 @@ var (
 	mtGoogleSpec = Spec{Type: TypeGoogle, Model: "gemini-3-flash-preview"}
 )
 
-// mtProbeSet is every wire's accepted set plus the extras, deduplicated.
 func mtProbeSet() []string {
 	seen := make(map[string]bool)
 	var out []string
@@ -78,7 +77,6 @@ func (r *mtRecorder) snapshot() (int, map[string]any) {
 	return r.hits, r.body
 }
 
-// mtClient builds a client for spec against a recording fake server.
 func mtClient(t *testing.T, spec Spec) (llmkit.Client, *mtRecorder) {
 	t.Helper()
 	isolateEnv(t, baseURLEnvSources...)
@@ -102,7 +100,6 @@ func mtClient(t *testing.T, spec Spec) (llmkit.Client, *mtRecorder) {
 	return client, rec
 }
 
-// mtList returns v as a slice of objects.
 func mtList(t *testing.T, v any, what string) []map[string]any {
 	t.Helper()
 	raw, _ := v.([]any)
@@ -438,8 +435,7 @@ func TestMediaTypeDataURLRows(t *testing.T) {
 	}
 }
 
-// TestMediaTypeGoogleURLWithoutMediaType pins that a URL block with no
-// MediaType still reaches the wire with an empty mimeType.
+// The request reaches the wire with an empty mimeType.
 func TestMediaTypeGoogleURLWithoutMediaType(t *testing.T) {
 	client, rec := mtClient(t, mtGoogleSpec)
 	_, err := client.Complete(context.Background(), mtUserRequest(llmkit.ImageURL("https://example.test/a.png")))

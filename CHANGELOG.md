@@ -443,8 +443,8 @@ entry below is marked.
   "blue" in the answer; `documents` sends a generated one-page PDF whose only
   text is `QUOKKA7319` and requires that nonce. Both used to pass on any
   non-empty reply, so a dropped image passed. The `documents` prompt offers
-  no "nothing attached" answer, and both cases raise `max_tokens` so the
-  model's thinking does not exhaust the budget. The compat fixtures
+  no "nothing attached" answer, and both cases raise `max_tokens` above the
+  default so a thinking model can finish thinking. The compat fixtures
   `images.json` and `documents.json` are re-recorded. See `docs/testing.md`.
 
 ### Fixed
