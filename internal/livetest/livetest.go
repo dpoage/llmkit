@@ -355,8 +355,9 @@ func (s *Session) Client(ctx context.Context, t testing.TB, tr *Transport, mutat
 
 // DecideClient builds a decision lane's client through systemone.New
 // (systemone.NewWorkersAI for a lane with RequireAccountID, ignoring
-// Images), with tr as Config.HTTPClient, wrapped in decide.Observe with the
-// run-wide token tally. mutate, when non-nil, adjusts the Config last.
+// Images), with an http.Client over tr as Config.HTTPClient, wrapped in
+// decide.Observe with the run-wide token tally. mutate, when non-nil,
+// adjusts the Config last.
 func (s *Session) DecideClient(ctx context.Context, t testing.TB, tr *Transport, mutate func(*systemone.Config)) decide.Decider {
 	cfg := systemone.Config{
 		Secret:     s.Key,

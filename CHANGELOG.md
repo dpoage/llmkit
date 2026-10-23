@@ -278,7 +278,7 @@ entry below is marked.
   Placements}` record each image of a `decide.Observe`d `Ask`: its hash, media
   type and placements (`"state"`, `"instructions"`, `"criteria"`), never its
   bytes. `State` and `Questions` carry `<image:hex>` references in place of
-  each image, so a decision line stays small whatever the image size.
+  each image, so `State` and `Questions` stay small whatever the image size.
   `Images` is omitted when the `Ask` has no image, so image-free events are
   unchanged. `EventSchemaVersion` stays 3.
 - `decide`: `Observe` normalizes with the `ImageSupport` the wrapped
@@ -319,10 +319,10 @@ entry below is marked.
   array of data URLs and replaces each state image with `[image N]`; it
   carries `image/png`, `image/jpeg` and `image/webp` in the state only. With
   no image the body and headers are unchanged. An unset `Config.Images`
-  still refuses every image before the request, naming `Config.Images`; Kev
-  ignores `assets` without an error, so a host that reads no images answers
-  as if the image were absent. A media type or placement the dialect does
-  not carry is refused naming the image's path.
+  still refuses every image before the request, naming `Config.Images`. Kev
+  ignores `assets` without an error and answers as if the image were
+  absent. A media type or placement the dialect does not carry is refused
+  naming the image's path.
   `New` refuses an `Images` value that is not a constant with
   `ErrInvalidRequest`. Pixels are not checked client-side; TypeSafe's limits
   are in `docs/decide.md`. Live case `typesafe/image_placement` asks about a
@@ -341,8 +341,9 @@ entry below is marked.
   `^[a-z0-9][a-z0-9.-]*$`; no construction error echoes the `Secret` or the
   `AccountID`. An `Ask` error can carry the `AccountID` (a transport error
   holds the request URL), an identifier and not a credential.
-  Cloudflare's limits (4 images, 4 MiB each, 8 MiB in all) are in
-  `docs/decide.md` and not checked client-side. Live lane `workersai`
+  Cloudflare's limits include 4 images, 4 MiB each and 8 MiB in all, and
+  have more; `docs/decide.md` has them and the client checks none of them.
+  Live lane `workersai`
   (`LLMKIT_LIVE_WORKERSAI_API_KEY`, `LLMKIT_LIVE_WORKERSAI_ACCOUNT_ID`,
   `LLMKIT_LIVE_WORKERSAI_MODEL`, default `clef-flash`) with case
   `image_labels`: a colour-swapped pair of Asks about `[image 1]` and

@@ -456,7 +456,8 @@ naming Cloudflare's errors (retried like any contract violation). A non-200
 body is `{"result": null, "success": false, "errors": [{"code", "message"}]}`.
 The `Kind` comes from the HTTP status, by the table in [Errors](#errors), and
 the `Message` lists each error as `code <n>: <message>` (a body that is not
-that envelope, or whose `errors` list is empty, is the `Message` as is), with
+that envelope, or whose `errors` list is empty, is the `Message` as is, and
+an empty body gives `HTTP <status>`), with
 the `Secret` masked and the usual 200-byte cap. Codes seen:
 
 | HTTP status | Cloudflare code | Kind |
@@ -659,9 +660,11 @@ a backend must mask secrets in its errors, as `systemone` does.
 
 #### Images in events
 
-An event holds no bytes of an image value, as defined in [Images](#images).
-Data that is not an image value, such as `{"kind":"Image",...}` (capital I),
-is recorded verbatim. `State` and `Questions` carry the reference
+`State`, `Questions` and `Images` hold no bytes of an image value, as defined
+in [Images](#images). `Err` is the backend's error text, so an error
+that echoes a request body can carry image bytes. Data that is not an image
+value, such as `{"kind":"Image",...}` (capital I), is recorded as marshalled.
+`State` and `Questions` carry the reference
 `<image:hex>` in the place of each image (the first 16 bytes of the SHA-256,
 as `Image.Ref`), and `DecisionEvent.Images` lists each distinct image once,
 in order of first occurrence: `sha256` (the full hash, lowercase hex),

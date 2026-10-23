@@ -65,8 +65,8 @@
 // Runner turn the event carries the run's RunID and the turn's Step. A
 // Decider that implements Identity() llmkit.Identity (the systemone Client
 // does) tags the event's Backend and Model, and the wrapper forwards the
-// method. An Ask that fails [Normalize] emits nothing. The event records
-// each image as a reference, hash, media type and placements, not bytes.
+// method. An Ask that fails [Normalize] emits nothing. State, Questions and
+// Images record each image as a reference, hash, media type and placements.
 //
 // [Replay] is the other half: it builds a Decider from the Decision events
 // an [llmkit.Source] holds for a run. Each Ask consumes the earliest

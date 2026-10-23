@@ -41,7 +41,7 @@ type Request struct {
 // placement or media type s does not carry; the zero s refuses every image.
 // An object with Kind "image", a "data" that is neither null nor "" and a
 // member that is not a Block field is refused too. Any other object is left
-// byte for byte and goes out as text. Scanning is slow at pathological
+// as marshalled and goes out as text. Scanning is slow at pathological
 // nesting depth.
 //
 // A refusal is an *llmkit.APIError with Kind llmkit.ErrInvalidRequest,
