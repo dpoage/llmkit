@@ -255,7 +255,12 @@ func TestNormalize_ImageValueDetection(t *testing.T) {
 		image bool
 	}{
 		{"canonical", imgJSON, ref123JSON, true},
-		{"foreign member stays", `{"kind":"image","caption":"x",` + pngMember + `}`, `{"kind":"image","caption":"x",` + pngMember + `}`, false},
+		{"foreign member stays", `{"kind":"image","caption":"x"}`, `{"kind":"image","caption":"x"}`, false},
+		{"foreign member, empty data, stays", `{"kind":"image","data":"","caption":"x"}`, `{"kind":"image","data":"","caption":"x"}`, false},
+		{"foreign member, null data, stays", `{"kind":"image","data":null,"caption":"x"}`, `{"kind":"image","data":null,"caption":"x"}`, false},
+		{"foreign member, kind text, stays", `{"kind":"text","data":"AQID","caption":"x"}`, `{"kind":"text","data":"AQID","caption":"x"}`, false},
+		{"foreign member, last kind text, stays", `{"kind":"image","KIND":"text","data":"AQID","caption":"x"}`, `{"kind":"image","KIND":"text","data":"AQID","caption":"x"}`, false},
+		{"foreign member, last data empty, stays", `{"kind":"image","data":"AQID","DATA":"","caption":"x"}`, `{"kind":"image","data":"AQID","DATA":"","caption":"x"}`, false},
 		{"kind Image stays", `{"kind":"Image",` + pngMember + `}`, `{"kind":"Image",` + pngMember + `}`, false},
 		{"kind text stays", `{"kind":"text","text":"x"}`, `{"kind":"text","text":"x"}`, false},
 		{"case variant names", `{"KIND":"image","DATA":"AQID","Media_Type":"image/png"}`, ref123JSON, true},
@@ -319,6 +324,14 @@ func TestNormalize_RefusesAnInvalidImage(t *testing.T) {
 		{"path of an array element", `{"frames":[0,1,{"frame":{"kind":"image"}}]}`, `state["frames"][2]["frame"]: invalid image: no inline data`},
 		{"path key is quoted", `{"a\"b":{"kind":"image"}}`, `state["a\"b"]: invalid image: no inline data`},
 		{"path of a nested escaped key", `{"\u0061":[[{"kind":"image"}]]}`, `state["a"][0][0]: invalid image: no inline data`},
+		{"foreign member", `{"kind":"image","data":"AQID","media_type":"image/png","caption":"x"}`, `state: invalid image: member "caption" is not an llmkit.Block field`},
+		{"foreign member, data not a string", `{"kind":"image","data":5,"source":"cam"}`, `state: invalid image: member "source" is not an llmkit.Block field`},
+		{"foreign member, escaped names", `{"\u006bind":"image","\u0064ata":"AQID","zzz":1}`, `state: invalid image: member "zzz" is not an llmkit.Block field`},
+		{"foreign member, escaped foreign name", `{"kind":"image","data":"AQID","\u007a":1,"y":2}`, `state: invalid image: member "z" is not an llmkit.Block field`},
+		{"foreign member first, case variants, last duplicate wins", `{"x":1,"KIND":"text","Kind":"image","DATA":"","data":"AQID"}`, `state: invalid image: member "x" is not an llmkit.Block field`},
+		{"foreign member, kelvin kind", `{"\u212aind":"image","data":"AQID","x":1}`, `state: invalid image: member "x" is not an llmkit.Block field`},
+		{"foreign member, nested path", `{"a":[{"kind":"image","data":"AQID","x":1}]}`, `state["a"][0]: invalid image: member "x" is not an llmkit.Block field`},
+		{"foreign member is not descended into", `{"kind":"image","data":"AQID","x":` + imgJSON + `}`, `state: invalid image: member "x" is not an llmkit.Block field`},
 		{"same bytes, two media types", `[` + imgJSON + `,{"kind":"image","data":"AQID","media_type":"image/jpeg"}]`, `state[1]: image has media_type "image/jpeg", but the same bytes at state[0] have "image/png"`},
 	}
 	for _, tt := range tests {
@@ -455,5 +468,29 @@ func TestNormalize_ImageLabelIsMarshalOfTheLabel(t *testing.T) {
 	}
 	if got := fmt.Sprint(req.Images[0].SHA256); got != "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81" {
 		t.Errorf("SHA256 = %s", got)
+	}
+}
+
+func TestNormalize_ForeignMemberImageIsRefusedWhateverTheSupport(t *testing.T) {
+	type captioned struct {
+		llmkit.Block
+		Caption string `json:"caption"`
+	}
+	state := map[string]any{"photo": captioned{Block: llmkit.Image("image/png", []byte{1, 2, 3}), Caption: "x"}}
+	for _, s := range []ImageSupport{{}, {Placements: PlaceAll}, {Placements: PlaceAll, Label: LabelPosition}} {
+		req, err := Normalize(state, oneQuestion("i"), s)
+		if err == nil {
+			t.Fatalf("support %+v: State = %s, want a refusal", s, req.State)
+		}
+		if want := `state["photo"]: invalid image: member "caption" is not an llmkit.Block field`; apiError(t, err).Message != want {
+			t.Errorf("support %+v: Message = %q, want %q", s, apiError(t, err).Message, want)
+		}
+		if errors.Is(err, ErrImageUnsupported) {
+			t.Errorf("support %+v: err wraps ErrImageUnsupported", s)
+		}
+	}
+	_, err := Normalize("s", Questions{"q": Choice{Instructions: "i", Options: map[string]any{"a": state["photo"]}}}, ImageSupport{Placements: PlaceAll})
+	if want := `questions["q"].options["a"]: invalid image: member "caption" is not an llmkit.Block field`; apiError(t, err).Message != want {
+		t.Errorf("criteria: Message = %q, want %q", apiError(t, err).Message, want)
 	}
 }

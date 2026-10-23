@@ -208,9 +208,10 @@ func blockShape() ([]string, reflect.Type) {
 	return names, reflect.StructOf(fields)
 }
 
-// isBlockName reports whether key, a JSON string token with its quotes,
-// names a llmkit.Block member under encoding/json's matching rule.
-func isBlockName(key []byte) bool {
+// blockField returns the index in blockNames of the llmkit.Block member
+// that key, a JSON string token with its quotes, names under encoding/json's
+// matching rule, or -1.
+func blockField(key []byte) int {
 	inner := key[1 : len(key)-1]
 	plain := true
 	for _, c := range inner {
@@ -220,12 +221,12 @@ func isBlockName(key []byte) bool {
 		}
 	}
 	if plain {
-		for _, n := range blockNames {
+		for i, n := range blockNames {
 			if asciiEqualFold(inner, n) {
-				return true
+				return i
 			}
 		}
-		return false
+		return -1
 	}
 	buf := make([]byte, 0, len(key)+8)
 	buf = append(buf, '{')
@@ -233,14 +234,47 @@ func isBlockName(key []byte) bool {
 	buf = append(buf, ":true}"...)
 	probe := reflect.New(blockProbe)
 	if json.Unmarshal(buf, probe.Interface()) != nil {
-		return false
+		return -1
 	}
 	for i := range probe.Elem().NumField() {
 		if probe.Elem().Field(i).Bool() {
-			return true
+			return i
 		}
 	}
-	return false
+	return -1
+}
+
+var kindField, dataField = slices.Index(blockNames, "kind"), slices.Index(blockNames, "data")
+
+// foreignImage returns the decoded name of the first member of the
+// recorded object that is not a Block field when the object otherwise reads
+// as an image carrying bytes: kind "image" and a data member that is
+// neither null nor "".
+func (w *walker) foreignImage(base int) (string, bool) {
+	var kind, data []byte
+	foreign := ""
+	found := false
+	for _, m := range w.members[base:] {
+		switch blockField(m.key) {
+		case -1:
+			if !found {
+				_ = json.Unmarshal(m.key, &foreign)
+				found = true
+			}
+		case kindField:
+			kind = w.src[m.vs:m.ve]
+		case dataField:
+			data = w.src[m.vs:m.ve]
+		}
+	}
+	if !found || data == nil || string(data) == "null" || string(data) == `""` {
+		return "", false
+	}
+	var k string
+	if json.Unmarshal(kind, &k) != nil || k != string(llmkit.BlockImage) {
+		return "", false
+	}
+	return foreign, true
 }
 
 func asciiEqualFold(b []byte, s string) bool {
@@ -344,19 +378,12 @@ func (w *walker) object(start int) (int, error) {
 		return i + 1, nil
 	}
 	base := len(w.members)
-	var (
-		key   []byte
-		vs    int
-		named = true
-	)
+	named := true
 	for {
 		ke := skipValue(src, i)
-		key = src[i:ke]
-		vs = skipWS(src, skipWS(src, ke)+1)
-		if !isBlockName(key) {
-			named = false
-			break
-		}
+		key := src[i:ke]
+		vs := skipWS(src, skipWS(src, ke)+1)
+		named = named && blockField(key) >= 0
 		ve := skipValue(src, vs)
 		w.members = append(w.members, member{key, vs, ve})
 		i = skipWS(src, ve)
@@ -365,38 +392,23 @@ func (w *walker) object(start int) (int, error) {
 		}
 		i = skipWS(src, i+1)
 	}
+	end := i + 1
+	defer func() { w.members = w.members[:base] }()
 	if named {
-		end := i + 1
 		spliced, err := w.image(start, end)
 		if err != nil {
 			return 0, err
 		}
-		if !spliced {
-			if err := w.walkRecorded(base); err != nil {
-				return 0, err
-			}
+		if spliced {
+			return end, nil
 		}
-		w.members = w.members[:base]
-		return end, nil
+	} else if name, ok := w.foreignImage(base); ok {
+		return 0, invalidRequest(w.path(), "invalid image: member "+strconv.Quote(name)+" is not an llmkit.Block field")
 	}
 	if err := w.walkRecorded(base); err != nil {
 		return 0, err
 	}
-	w.members = w.members[:base]
-	for {
-		end, err := w.member(key, vs)
-		if err != nil {
-			return 0, err
-		}
-		i = skipWS(src, end)
-		if src[i] == '}' {
-			return i + 1, nil
-		}
-		i = skipWS(src, i+1)
-		ke := skipValue(src, i)
-		key = src[i:ke]
-		vs = skipWS(src, skipWS(src, ke)+1)
-	}
+	return end, nil
 }
 
 func (w *walker) walkRecorded(base int) error {

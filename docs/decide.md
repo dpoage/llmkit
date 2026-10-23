@@ -333,8 +333,12 @@ repeated member takes its last value) and `kind` must equal `"image"` exactly.
 It does not matter how the object got there: an `llmkit.Image` block, a
 `Message` whose content holds one, a `json.RawMessage`, or a map. An object
 with any other member (`{"kind":"image","caption":"x"}`) or another kind is
-left as it was. Block-shaped data you did not mean as an image is an image;
-there is no escape. An image is replaced whole; nothing inside it is scanned.
+left as it was, with one exception: an object with a member that is not a
+`Block` field, `kind` `"image"`, and a `data` that is neither null nor `""` is
+refused (`member "caption" is not an llmkit.Block field`), because its bytes
+would otherwise reach the host as text. This covers a struct that embeds
+`llmkit.Block` and adds a field. Block-shaped data you did not mean as an
+image is an image; there is no escape. An image is replaced whole; nothing inside it is scanned.
 
 **A valid image** has inline `Data` and a `MediaType` that begins `image/`;
 `URL`, `Text`, `Title`, `Provider` and `Raw` are empty (an empty `"text":""`

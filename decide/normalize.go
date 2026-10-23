@@ -36,9 +36,12 @@ type Request struct {
 // an [llmkit.Block] of Kind "image" with every member name matching a Block
 // JSON field name (case-insensitively, escapes decoded; a repeated member
 // takes its last value), however it was built: a Block, a Message's content,
-// a json.RawMessage, or user data of the same shape. Other objects are left
-// byte for byte. An image value is replaced whole by its label and its inner
-// objects are not scanned.
+// a json.RawMessage, or user data of the same shape. An object with a member
+// that is not a Block field, a "kind" of "image" and a "data" that is
+// neither null nor "" is refused, so image bytes never pass through as text.
+// Other objects are left byte for byte. An image value is replaced whole by
+// its label and its inner objects are not scanned. Scanning is slow at
+// pathological nesting depth.
 //
 // An image must carry inline Data and a MediaType beginning "image/"; URL,
 // Text, Title, Provider and Raw must be empty, and every member must decode.

@@ -444,7 +444,9 @@ entry below is marked.
 - **Breaking:** `decide`: an image Block with `URL`, `Text`, `Title`,
   `Provider` or `Raw` set, and an image Block with no inline `Data` or a
   `MediaType` that does not begin `image/`, is refused with `ErrInvalidRequest`
-  naming its path. Before, it was sent as text.
+  naming its path, as is an object with `kind` `"image"`, a non-empty `data`
+  and a member that is not a Block field (a struct embedding `llmkit.Block`
+  with an added field). Before, it was sent as text.
 
 ### Fixed
 
