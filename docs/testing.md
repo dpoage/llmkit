@@ -154,6 +154,10 @@ The fixtures come from the same secret-free writer as the provider fixtures.
 
 The fixture writer is secret-free by construction: it refuses to write any fixture containing the lane credential or any `sk-` substring. The nightly `Live` workflow runs the suite without `-update`, so the live matrix's assertions against real responses are the vendor-drift gate. Editing a fixture's recorded response text fails the replay test, and so does adapter wire drift on the request side.
 
+## Media live cases assert the answer
+
+The `images` and `documents` live cases prove the model saw the media, not only that it replied. `images` sends a 64x64 solid `#0000FF` PNG and passes only if the answer, with think blocks stripped, names "blue". `documents` sends a one-page PDF whose only text is the nonce `QUOKKA7319` and passes only if the answer contains it. Both files are generated in Go. The `images` prompt tells the model to answer `NO_IMAGE` when nothing is attached. The `documents` prompt has no such escape, so an unsure model cannot bail out. Both cases raise `max_tokens` above the 768 default (images 2048, documents 4096), so a thinking model can finish thinking before it answers.
+
 ## The live registry rule
 
 Contributor rule: any change to an adapter, the agent loop, or an `llmkit.Capabilities` field must name two things. They are its hermetic test and its live case. The registry in `provider/live_registry_test.go` describes a capability's live case; the case body is in the `live`-tagged `provider/live_test.go`.
