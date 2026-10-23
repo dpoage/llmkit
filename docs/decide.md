@@ -456,8 +456,10 @@ naming Cloudflare's errors (retried like any contract violation). A non-200
 body is `{"result": null, "success": false, "errors": [{"code", "message"}]}`.
 The `Kind` comes from the HTTP status, by the table in [Errors](#errors), and
 the `Message` lists each error as `code <n>: <message>` (a body that is not
-that envelope, or whose `errors` list is empty, is the `Message` as is; a body
-that is empty or only whitespace gives `HTTP <status>`), with
+that envelope, or whose `errors` list is empty, is the `Message` after
+surrounding whitespace is trimmed and an over-long body is cut to the
+package's message cap; a body that is empty or only whitespace gives
+`HTTP <status>`), with
 the `Secret` masked and the usual 200-byte cap. Codes seen:
 
 | HTTP status | Cloudflare code | Kind |

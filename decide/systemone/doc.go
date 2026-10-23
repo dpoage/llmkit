@@ -70,8 +70,9 @@
 // with "success": false, or a null or missing "result", is an ErrServer
 // naming the errors. A non-200 status maps to a Kind as in Errors, and its
 // Message lists each envelope error as "code <n>: <message>"; a body that is
-// not the envelope, or has no errors, is the Message as is; a body that is
-// empty or only whitespace gives "HTTP <status>".
+// not the envelope, or has no errors, is the Message after surrounding
+// whitespace is trimmed and an over-long body is cut to the package's
+// message cap; a body that is empty or only whitespace gives "HTTP <status>".
 //
 // Cloudflare caps a request at 4 images, 4 MiB each and 8 MiB in all, and
 // has further limits; the package checks none of them.
