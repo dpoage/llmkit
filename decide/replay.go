@@ -49,7 +49,8 @@ var ErrReplayedFailure = errors.New("decide: replayed failed decision")
 // A record's image hashes are those in its Images plus those of the valid
 // image values left inline in its State and Questions, as logs written
 // before images were recorded hold them. An inline image that is not valid
-// (a URL, a caption, undecodable data) adds no hash and never fails Replay.
+// adds no hash and never fails Replay. Scanning inline images is slow at
+// pathological nesting depth, as [Normalize] is.
 //
 // Replay compares neither the state nor the Backend: a changed state still
 // receives the recorded answer, unless an image differs. Recorded decisions
@@ -115,8 +116,8 @@ func (r *replayer) Ask(ctx context.Context, state any, qs Questions) (Response, 
 	return resp, nil
 }
 
-// take consumes and returns the earliest unconsumed record at step with
-// exactly the question ids ids and image hashes images (both sorted), or nil.
+// take consumes the earliest unconsumed record at step whose sorted question
+// ids and image hashes equal ids and images; nil if none.
 func (r *replayer) take(step int, ids, images []string) *replayRecord {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -138,9 +139,6 @@ func questionIDs(dec *llmkit.DecisionEvent) []string {
 	return ids
 }
 
-// recordImageHashes returns the sorted distinct SHA-256 hex digests of the
-// images dec records: its Images, then every valid image value still inline
-// in its State and Questions.
 func recordImageHashes(dec *llmkit.DecisionEvent) []string {
 	set := map[string]struct{}{}
 	for _, img := range dec.Images {
@@ -167,8 +165,7 @@ func recordImageHashes(dec *llmkit.DecisionEvent) []string {
 }
 
 // inlineImageHashes adds to set the SHA-256 of every valid image value in
-// raw, using Normalize's definition of an image value. Unlike Normalize it
-// never refuses: an invalid image value is skipped, whole.
+// raw, by Normalize's definition. It never refuses: an invalid one is skipped.
 func inlineImageHashes(raw []byte, set map[string]struct{}) {
 	if bytes.IndexByte(raw, '{') < 0 || !json.Valid(raw) {
 		return
@@ -176,7 +173,6 @@ func inlineImageHashes(raw []byte, set map[string]struct{}) {
 	scanImageHashes(raw, skipWS(raw, 0), set)
 }
 
-// scanImageHashes scans the value at i and returns the index after it.
 func scanImageHashes(src []byte, i int, set map[string]struct{}) int {
 	switch src[i] {
 	case '[':
@@ -233,8 +229,6 @@ func scanObjectImageHashes(src []byte, start int, set map[string]struct{}) int {
 	return end
 }
 
-// rebuild converts a recorded decision's answers back into a Response by
-// the kind of each asked question, then checks it against qs.
 func rebuild(dec *llmkit.DecisionEvent, qs Questions) (Response, error) {
 	resp := Response{Model: dec.Model, Usage: dec.Usage}
 	for _, a := range dec.Answers {

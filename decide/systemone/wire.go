@@ -9,9 +9,8 @@ import (
 	"github.com/dpoage/llmkit/decide"
 )
 
-// wireRequest is the JSON envelope POSTed to /v1/systemone. Assets and
-// Images are the two image dialects' top-level members; both are omitted
-// when empty, so an image-free request is the same bytes in every dialect.
+// wireRequest is the JSON body POSTed to the endpoint. Assets and Images
+// are the image dialects' top-level members, omitted when empty.
 type wireRequest struct {
 	State     json.RawMessage            `json:"state"`
 	Model     string                     `json:"model"`
@@ -42,9 +41,8 @@ type noulCriteria struct {
 	False json.RawMessage `json:"false,omitempty"`
 }
 
-// marshalRequest renders the request body from a decide.Request, which
-// already carries each image's label in State and Questions; d decides how
-// req.Images ride along.
+// marshalRequest renders the body from req, whose State and Questions
+// already carry image labels; d decides how req.Images ride along.
 func marshalRequest(req decide.Request, model string, d ImageDialect) ([]byte, error) {
 	wq := make(map[string]json.RawMessage, len(req.Questions))
 	for _, dq := range req.Questions {
@@ -65,9 +63,8 @@ func marshalRequest(req decide.Request, model string, d ImageDialect) ([]byte, e
 	return body, nil
 }
 
-// addImages puts images on w in dialect d's shape. images is non-empty only
-// when decide.Normalize accepted them, so d is Assets or Array and every
-// media type is one d carries; anything else is an error, never a guess.
+// addImages puts images on w in dialect d's shape. decide.Normalize has
+// accepted them, so a media type d does not carry is an error, not a guess.
 func addImages(w *wireRequest, images []decide.Image, d ImageDialect) error {
 	if len(images) == 0 {
 		return nil
@@ -93,7 +90,6 @@ func addImages(w *wireRequest, images []decide.Image, d ImageDialect) error {
 	return nil
 }
 
-// assetFormat maps a media type to the assets "format" member.
 func assetFormat(mediaType string) (string, bool) {
 	switch mediaType {
 	case "image/png":

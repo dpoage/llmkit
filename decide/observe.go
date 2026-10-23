@@ -14,13 +14,12 @@ import (
 // for concurrent use when d and obs are.
 //
 // An Ask that fails [Normalize] goes to d untouched and emits nothing.
-// Normalize runs with the [ImageSupport] d declares (PlaceAll when d
-// declares none), so an image d would refuse emits nothing, and always
-// with [LabelRef]. Every other Ask emits one event: state and questions as
-// Normalize produced them, with "<image:hex>" in place of each image,
-// Images (hash, media type and placements, never bytes), answers, Usage,
-// and Duration. A failed Ask sets Err to the error's text and leaves
-// Answers nil and Usage zero. d scrubs secrets from its errors.
+// Normalize runs with the [ImageSupport] d declares (PlaceAll when none)
+// and [LabelRef], so an image d would refuse emits nothing. Every other Ask
+// emits one event: State and Questions with "<image:hex>" for each image,
+// Images (hash, media type, placements; no bytes), answers, Usage and
+// Duration. A failed Ask sets Err to the error's text and leaves Answers
+// nil and Usage zero. d scrubs secrets from its errors.
 //
 // If d implements interface{ Identity() llmkit.Identity }, the event's
 // Backend is its Provider, Model is the response's model (the Identity's
@@ -54,8 +53,6 @@ type observed struct {
 	obs llmkit.Observer
 }
 
-// The wrappers below embed *observed for Ask and the explicit fields to
-// forward Identity and ImageSupport.
 type observedIdentified struct {
 	*observed
 	identified
@@ -114,8 +111,6 @@ func (o *observed) Ask(ctx context.Context, state any, qs Questions) (Response, 
 	return resp, err
 }
 
-// decisionImages converts images to the root [llmkit.DecisionImage]
-// vocabulary, in order; nil for none.
 func decisionImages(images []Image) []llmkit.DecisionImage {
 	if len(images) == 0 {
 		return nil

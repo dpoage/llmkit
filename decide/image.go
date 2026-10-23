@@ -58,7 +58,8 @@ type ImageSupport struct {
 // declare the [ImageSupport] its Ask normalizes with.
 type ImageSupporter interface{ ImageSupport() ImageSupport }
 
-// Image is one distinct image of a [Request].
+// Image is one distinct image of a [Request]. MediaType begins "image/" and
+// Data holds the image's decoded bytes, not base64.
 type Image struct {
 	// Ref is "<image:" + lowercase hex of the first 16 bytes of the SHA-256
 	// of Data + ">".
@@ -85,9 +86,9 @@ type imageSet struct {
 	index   map[[sha256.Size]byte]int
 }
 
-// rewrite replaces every image value in raw, a part of the request at
-// path in place, with its label, and records the images. A raw without an
-// image is returned as is.
+// rewrite replaces every image value in raw, the part of the request at
+// path, with its label and records the images; a raw without one is
+// returned as is.
 func (s *imageSet) rewrite(raw json.RawMessage, path string, place Placement) (json.RawMessage, error) {
 	if bytes.IndexByte(raw, '{') < 0 {
 		return raw, nil
@@ -102,8 +103,7 @@ func (s *imageSet) rewrite(raw json.RawMessage, path string, place Placement) (j
 	return append(w.out, raw[w.last:]...), nil
 }
 
-// add records one valid image at path and returns its label as a JSON
-// string.
+// add records b and returns its label as a JSON string.
 func (s *imageSet) add(b llmkit.Block, path string, place Placement) ([]byte, error) {
 	sum := sha256.Sum256(b.Data)
 	idx, seen := s.index[sum]
@@ -187,9 +187,8 @@ func checkImage(b llmkit.Block, decodeErr error) string {
 	return ""
 }
 
-// blockNames are llmkit.Block's JSON member names and blockProbe is a
-// struct with the same names and tags whose fields are all bool, so that
-// encoding/json itself decides which member name folds to which field.
+// blockNames are llmkit.Block's JSON member names; blockProbe has the same
+// names and tags with bool fields, so encoding/json decides the name fold.
 var blockNames, blockProbe = blockShape()
 
 func blockShape() ([]string, reflect.Type) {
@@ -208,9 +207,8 @@ func blockShape() ([]string, reflect.Type) {
 	return names, reflect.StructOf(fields)
 }
 
-// blockField returns the index in blockNames of the llmkit.Block member
-// that key, a JSON string token with its quotes, names under encoding/json's
-// matching rule, or -1.
+// blockField returns the index in blockNames of the Block member that key,
+// a quoted JSON string token, names under encoding/json's matching, or -1.
 func blockField(key []byte) int {
 	inner := key[1 : len(key)-1]
 	plain := true
@@ -246,10 +244,8 @@ func blockField(key []byte) int {
 
 var kindField, dataField = slices.Index(blockNames, "kind"), slices.Index(blockNames, "data")
 
-// foreignImage returns the decoded name of the first member of the
-// recorded object that is not a Block field when the object otherwise reads
-// as an image carrying bytes: kind "image" and a data member that is
-// neither null nor "".
+// foreignImage returns the first non-Block member name when the recorded
+// object has kind "image" and a data member that is neither null nor "".
 func (w *walker) foreignImage(base int) (string, bool) {
 	var kind, data []byte
 	foreign := ""
@@ -336,7 +332,6 @@ func (w *walker) path() string {
 	return sb.String()
 }
 
-// value scans the value starting at i and returns the index after it.
 func (w *walker) value(i int) (int, error) {
 	switch w.src[i] {
 	case '{':
@@ -368,9 +363,9 @@ func (w *walker) array(i int) (int, error) {
 	}
 }
 
-// object scans the object at start. It records members while every name
-// is a Block name; if the object then closes and decodes as an image kind
-// it is spliced, otherwise the recorded members are scanned.
+// object scans the object at start. It splices the object when every member
+// name is a Block name and it decodes as an image kind; otherwise it scans
+// the members.
 func (w *walker) object(start int) (int, error) {
 	src := w.src
 	i := skipWS(src, start+1)
@@ -431,8 +426,8 @@ func (w *walker) member(key []byte, vs int) (int, error) {
 	return end, nil
 }
 
-// image splices the object src[start:end], whose member names are all
-// Block names, when it decodes as an image kind.
+// image splices src[start:end], whose member names are all Block names,
+// when it decodes as an image kind.
 func (w *walker) image(start, end int) (bool, error) {
 	var b llmkit.Block
 	decodeErr := json.Unmarshal(w.src[start:end], &b)
@@ -464,7 +459,6 @@ func skipWS(src []byte, i int) int {
 	return i
 }
 
-// skipString returns the index after the string token starting at i.
 func skipString(src []byte, i int) int {
 	for i++; i < len(src); i++ {
 		switch src[i] {
@@ -477,7 +471,6 @@ func skipString(src []byte, i int) int {
 	return len(src)
 }
 
-// skipValue returns the index after the JSON value starting at i.
 func skipValue(src []byte, i int) int {
 	switch src[i] {
 	case '"':

@@ -46,16 +46,17 @@
 // # Images
 //
 // [Config.Images] picks the image shape the host reads; see [ImageDialect].
-// The zero value, [ImagesNone], refuses every image before the request,
-// because Kev, OpenRouter and Fireworks silently drop a shape they do not
-// read. [ImagesAssets] (TypeSafe, H2O) adds a top-level "assets" object
-// keyed by each image's ref, {"type":"image","format":"png"|"jpg",
-// "data_base64":...}, and the header "TypeSafe-Danger-Zone-Images: true".
-// [ImagesArray] (Codiv, SGLang) adds a top-level "images" array of data URLs
-// and writes "[image N]", N the 1-based array position, in the state where
-// an image was. A request without an image has the same bytes under every
-// dialect. A media type or placement the dialect does not carry is refused
-// by [decide.Normalize] with the image's path, before any request.
+// The zero value, [ImagesNone], refuses every image before the request: a
+// host that ignores the shape sent answers as if the image were absent
+// (Kev ignores "assets" and reports no error).
+//
+// [ImagesAssets] (TypeSafe, H2O) adds a top-level "assets" object keyed by
+// each image's ref, {"type":"image","format":"png"|"jpg","data_base64":...},
+// and the header "TypeSafe-Danger-Zone-Images: true". [ImagesArray] (Codiv,
+// SGLang) adds a top-level "images" array of data URLs and writes "[image
+// N]", N the 1-based array position, where an image was in the state. A
+// media type or placement the dialect does not carry is refused by
+// [decide.Normalize] with the image's path, before any request.
 //
 // # Workers AI
 //
@@ -63,14 +64,16 @@
 // models ("clef", "clef-flash", "clef-omni"). It POSTs the same body, with
 // images always in the [ImagesArray] shape and no danger-zone header, to
 // <BaseURL>/client/v4/accounts/<AccountID>/ai/run/@cf/cloudflare/<Model>.
+//
 // Cloudflare wraps the answer: a 200 body is {"result": <System One
 // response>, "success": true, "errors": []}, and Ask parses "result". A 200
 // with "success": false, or a null or missing "result", is an ErrServer
 // naming the errors. A non-200 status maps to a Kind as in Errors, and its
-// Message lists each entry of the envelope's "errors" as "code <n>:
-// <message>"; a body that is not the envelope is the Message as is.
-// Cloudflare caps a request at 4 images, 4 MiB each and 8 MiB in all; the
-// package checks none of it.
+// Message lists each envelope error as "code <n>: <message>"; a body that is
+// not the envelope, or has no errors, is the Message as is.
+//
+// Cloudflare caps a request at 4 images, 4 MiB each and 8 MiB in all, and
+// has further limits; the package checks none of them.
 //
 // # Errors
 //
@@ -218,8 +221,9 @@
 // [NewWorkersAI] applies the same Secret, Retry and BaseURL rules, and
 // also refuses an AccountID that is not exactly 32 lowercase hexadecimal
 // characters and a Model that does not match ^[a-z0-9][a-z0-9.-]*$, so
-// neither can alter the request path. Its errors echo neither the Secret
-// nor the AccountID.
+// neither can alter the request path. No such error echoes the Secret or
+// the AccountID; an Ask error may include the AccountID, an identifier and
+// not a credential.
 //
 // New performs no network I/O and no environment lookups, so construction
 // is hermetic.

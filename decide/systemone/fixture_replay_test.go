@@ -3,9 +3,10 @@ package systemone_test
 // Hermetic replay of the recorded decide fixtures: for every file under
 // decide/systemone/testdata, an httptest server serves the recorded exchanges in
 // order and the recorded Ask is re-issued through systemone.New. The
-// re-issued request must equal the recorded one — method, path, and body
-// compared as parsed JSON; headers excluded — and the outcome must equal
-// the recording: the whole normalized decide.Response, or the sentinel
+// re-issued request must equal the recorded one — method, path, body
+// (compared as parsed JSON) and the images header; no other header is
+// checked — and the outcome must equal the recording: the whole
+// normalized decide.Response, or the sentinel
 // error kind. Editing a recorded probability fails this test; so does
 // client wire drift on the request side.
 //

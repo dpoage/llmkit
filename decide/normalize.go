@@ -10,15 +10,14 @@ import (
 )
 
 // Request is a validated state and question set in the root vocabulary.
-// State and each question's Instructions, True, False, Options values and
-// Levels carry each image's label (see [ImageSupport.Label]) in its place.
+// Each image in State and in the questions' Instructions, True, False,
+// Options values and Levels is replaced by its label ([ImageSupport.Label]).
 type Request struct {
 	State     json.RawMessage
 	Questions []llmkit.DecisionQuestion
 	// Images holds the distinct images, deduplicated by bytes, in order of
 	// first occurrence: the state in document order, then each question in
-	// sorted id order, its instructions before its criteria (true, false,
-	// options by sorted key, levels by index). Nil when there are none.
+	// sorted id order, instructions before criteria. Nil when there are none.
 	Images []Image
 }
 
@@ -27,26 +26,23 @@ type Request struct {
 // vocabulary, sorted by ID. state and each Instructions must marshal to a
 // JSON string, object, or array; descriptions (True, False, Options, Levels)
 // also accept null. At least one question is required, each with a
-// non-empty id. The state and then each question, in sorted id order, are
-// validated and scanned for images in turn, so the first refusal is the same
-// on every call.
+// non-empty id. Questions are validated in sorted id order, so the first
+// refusal is the same on every call.
 //
-// An image value is any JSON object, in the JSON that encoding/json
-// produces for the state, an Instructions or a description, that decodes as
-// an [llmkit.Block] of Kind "image" with every member name matching a Block
-// JSON field name (case-insensitively, escapes decoded; a repeated member
-// takes its last value), however it was built: a Block, a Message's content,
-// a json.RawMessage, or user data of the same shape. An object with a member
-// that is not a Block field, a "kind" of "image" and a "data" that is
-// neither null nor "" is refused, so image bytes never pass through as text.
-// Other objects are left byte for byte. An image value is replaced whole by
-// its label and its inner objects are not scanned. Scanning is slow at
-// pathological nesting depth.
+// An image value is a JSON object that decodes as an [llmkit.Block] of Kind
+// "image" with every member name matching a Block JSON field name
+// (case-insensitively, escapes decoded, a repeated member takes its last
+// value), however it was built. It is replaced whole by its label; its
+// inner objects are not scanned.
 //
 // An image must carry inline Data and a MediaType beginning "image/"; URL,
 // Text, Title, Provider and Raw must be empty, and every member must decode.
 // The same bytes under two media types are refused, as is an image whose
 // placement or media type s does not carry; the zero s refuses every image.
+// An object with Kind "image", a "data" that is neither null nor "" and a
+// member that is not a Block field is refused too. Any other object is left
+// byte for byte and goes out as text. Scanning is slow at pathological
+// nesting depth.
 //
 // A refusal is an *llmkit.APIError with Kind llmkit.ErrInvalidRequest,
 // StatusCode 0, Provider "decide", and Message "<path>: <problem>", where

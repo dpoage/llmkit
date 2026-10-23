@@ -56,9 +56,9 @@ type Lane struct {
 	EnvPrefix string
 	// Type is the provider.Type the lane's clients build through
 	// provider.New. It is empty for the decision lanes (DecideLane,
-	// KevLane): a decide.Decider is not an llmkit.Client, so
-	// ResolveDecide and ResolveDecideKev resolve them and
-	// Session.DecideClient builds their clients.
+	// KevLane, WorkersAILane): a decide.Decider is not an llmkit.Client, so
+	// ResolveDecide, ResolveDecideKev and ResolveDecideWorkersAI resolve
+	// them and Session.DecideClient builds their clients.
 	Type provider.Type
 	// DefaultModel fills Model when <prefix>_MODEL is unset. Empty means the
 	// model is required (the compat lane: an arbitrary endpoint has no
@@ -108,9 +108,8 @@ var KevLane = Lane{
 	RequireBaseURL: true,
 }
 
-// WorkersAILane is the Cloudflare Workers AI decision lane (the System One
-// models behind systemone.NewWorkersAI). It goes through
-// ResolveDecideWorkersAI and Session.DecideClient.
+// WorkersAILane is the Cloudflare Workers AI decision lane, the System One
+// models behind systemone.NewWorkersAI.
 var WorkersAILane = Lane{
 	Name:             "workersai",
 	EnvPrefix:        "LLMKIT_LIVE_WORKERSAI",
@@ -223,9 +222,8 @@ func ResolveDecideKev(t testing.TB) *Session {
 	return &s
 }
 
-// ResolveDecideWorkersAI resolves WorkersAILane from the environment,
-// skipping the test naming each missing variable: the API key and the
-// account id.
+// ResolveDecideWorkersAI resolves WorkersAILane, skipping the test naming
+// each missing variable: the API key and the account id.
 func ResolveDecideWorkersAI(t testing.TB) *Session {
 	s, missing := WorkersAILane.resolve()
 	if len(missing) > 0 {
@@ -355,12 +353,10 @@ func (s *Session) Client(ctx context.Context, t testing.TB, tr *Transport, mutat
 	return cl
 }
 
-// DecideClient builds a decision lane's client (typesafe, kev or workersai)
-// through systemone.New (systemone.NewWorkersAI for a lane with
-// RequireAccountID, which keeps cfg's shared fields and ignores Images),
-// with the recording transport injected via Config.HTTPClient, and wraps it
-// in decide.Observe with the run-wide token tally as the observer. mutate,
-// when non-nil, adjusts the Config last.
+// DecideClient builds a decision lane's client through systemone.New
+// (systemone.NewWorkersAI for a lane with RequireAccountID, ignoring
+// Images), with tr as Config.HTTPClient, wrapped in decide.Observe with the
+// run-wide token tally. mutate, when non-nil, adjusts the Config last.
 func (s *Session) DecideClient(ctx context.Context, t testing.TB, tr *Transport, mutate func(*systemone.Config)) decide.Decider {
 	cfg := systemone.Config{
 		Secret:     s.Key,

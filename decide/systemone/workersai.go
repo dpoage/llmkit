@@ -11,11 +11,8 @@ import (
 	"github.com/dpoage/llmkit/retry"
 )
 
-// defaultWorkersAIBaseURL is the Cloudflare API root, the default for
-// WorkersAIConfig.BaseURL.
 const defaultWorkersAIBaseURL = "https://api.cloudflare.com"
 
-// accountIDLen is the length of a Cloudflare account id: lowercase hex.
 const accountIDLen = 32
 
 // WorkersAIConfig configures a System One client served by Cloudflare
@@ -46,10 +43,10 @@ type WorkersAIConfig struct {
 }
 
 // NewWorkersAI validates cfg and returns a Client for Cloudflare's hosted
-// System One models, POSTing to
-// <BaseURL>/client/v4/accounts/<AccountID>/ai/run/@cf/cloudflare/<Model>.
-// Images always ride in the [ImagesArray] shape. A bad cfg returns an error
-// wrapping llmkit.ErrInvalidRequest that never echoes Secret or AccountID.
+// System One models. Images always ride in the [ImagesArray] shape. A bad
+// cfg returns an error wrapping llmkit.ErrInvalidRequest that never echoes
+// Secret or AccountID. An Ask error may include AccountID: an identifier,
+// not a credential.
 func NewWorkersAI(cfg WorkersAIConfig) (*Client, error) {
 	if !validAccountID(cfg.AccountID) {
 		return nil, fmt.Errorf("systemone: WorkersAIConfig.AccountID must be exactly %d lowercase hexadecimal characters: %w", accountIDLen, llmkit.ErrInvalidRequest)

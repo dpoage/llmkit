@@ -4,8 +4,9 @@
 // through systemone.New, against three lanes. The typesafe lane is TypeSafe's
 // Jev; the kev lane is a local Kev server; the workersai lane is Cloudflare
 // Workers AI through systemone.NewWorkersAI. Every case asserts structural
-// invariants only (ranges, argmax consistency, legend alignment, usage
-// accounting); exact probabilities are the backend's business. Fixtures are
+// invariants (ranges, argmax consistency, legend alignment, usage
+// accounting) and, for image cases, that answers follow the image; exact
+// probabilities are the backend's business. Fixtures are
 // recorded for the typesafe lane only, under -update, into
 // decide/systemone/testdata/<case>.json and replayed hermetically by
 // fixture_replay_test.go.
@@ -470,10 +471,8 @@ func solidPNG(t *testing.T, w, h int, c color.RGBA) llmkit.Block {
 	return llmkit.Image("image/png", buf.Bytes())
 }
 
-// caseImagePlacement asks the same three questions about two states that
-// differ only in the photo's colour. Every answer must flip between the two
-// Asks, so a host that ignores the state image, the instructions image or
-// the option images cannot pass.
+// caseImagePlacement asks three questions about two states differing only
+// in photo colour; every answer must flip, so an ignored image fails.
 func caseImagePlacement(t *testing.T, sess *livetest.Session) {
 	red, blue := color.RGBA{R: 220, A: 255}, color.RGBA{B: 220, A: 255}
 	instr := solidPNG(t, 300, 300, blue)
@@ -521,10 +520,8 @@ func caseImagePlacement(t *testing.T, sess *livetest.Session) {
 	}
 }
 
-// caseImageLabels asks a colour-swapped pair of Asks about both images of a
-// state by their [image N] labels. Within each Ask the two images differ in
-// colour, and the pair swaps their positions, so a host that ignores the
-// images or the labels cannot pass.
+// caseImageLabels asks about both images of a state by [image N] label,
+// twice with their positions swapped; an ignored image or label fails.
 func caseImageLabels(t *testing.T, sess *livetest.Session) {
 	red, blue := color.RGBA{R: 220, A: 255}, color.RGBA{B: 220, A: 255}
 	questions := func() decide.Questions {

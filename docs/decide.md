@@ -35,7 +35,7 @@ works behind `Config.BaseURL`. The default host is TypeSafe at
 | Probabilities | As reported. | Reported at 4 decimals. |
 | Extra response fields | None known. | `latency_ms`, ignored by the client. |
 | Auth | `Authorization: Bearer` key. | A local `kev.serve` needs no auth, but `systemone.New` still requires a non-empty `Secret`. |
-| Images | `Config.Images = ImagesAssets` (Jev 1.13+); see [Images on System One](#images-on-system-one). | Dropped silently; leave `Config.Images` unset so an image is refused before the request. |
+| Images | `Config.Images = ImagesAssets` (Jev 1.13+); see [Images on System One](#images-on-system-one). | Kev ignores `assets` without an error; leave `Config.Images` unset so an image is refused before the request. |
 
 Cloudflare Workers AI serves the Clef models at a different route and in
 a different envelope; see [Workers AI](#workers-ai).
@@ -342,7 +342,8 @@ left as it was, with one exception: an object with a member that is not a
 refused (`member "caption" is not an llmkit.Block field`), because its bytes
 would otherwise reach the host as text. This covers a struct that embeds
 `llmkit.Block` and adds a field. Block-shaped data you did not mean as an
-image is an image; there is no escape. An image is replaced whole; nothing inside it is scanned.
+image is an image; there is no escape. An image is replaced whole; nothing
+inside it is scanned.
 
 **A valid image** has inline `Data` and a `MediaType` that begins `image/`;
 `URL`, `Text`, `Title`, `Provider` and `Raw` are empty (an empty `"text":""`
@@ -378,16 +379,18 @@ declares its support with `ImageSupport() decide.ImageSupport`
 
 `systemone.Config.Images` picks the shape the host reads. The zero value,
 `ImagesNone`, refuses every image before the request, with an error that
-names `Config.Images` and no HTTP hit: Kev, OpenRouter and Fireworks drop
-an image shape they do not read without a word, so the client will not guess.
+names `Config.Images` and no HTTP hit. A host that does not read the shape
+sent can answer without the image and report no error (Kev ignores `assets`
+this way), so the client will not guess.
 `New` refuses any value that is not a constant.
 
 | Host | `Config.Images` | Carries |
 |---|---|---|
 | TypeSafe, H2O | `ImagesAssets` | Any placement; `image/png`, `image/jpeg`. |
 | Codiv, SGLang | `ImagesArray` | State only; `image/png`, `image/jpeg`, `image/webp`. |
-| Cloudflare Workers AI | `NewWorkersAI` (always `ImagesArray`) | State only; `image/png`, `image/jpeg`, `image/webp`; 4 images, 4 MiB each, 8 MiB in all. |
-| Kev, OpenRouter, Fireworks | `ImagesNone` (unset) | Nothing: they silently drop images. |
+| Cloudflare Workers AI | `NewWorkersAI` (always `ImagesArray`) | State only; `image/png`, `image/jpeg`, `image/webp`; limits include 4 images, 4 MiB each, 8 MiB in all. |
+| Kev | `ImagesNone` (unset) | Nothing: Kev ignores `assets` without an error. |
+| OpenRouter, Fireworks | `ImagesNone` (unset) | Nothing: no shape here fits. OpenRouter ignores `assets`, answers 400 to a top-level `images`, and reads `image_url` parts, which this client does not send. Fireworks answers 400 to `images`. |
 
 **`ImagesAssets`.** The body gains a top-level `assets` object keyed by each
 image's ref (`<image:hex>`). The state and the questions carry the ref in the
@@ -438,8 +441,10 @@ client, err := systemone.NewWorkersAI(systemone.WorkersAIConfig{
 | `HTTPClient`, `Retry` | No | As in `Config`. |
 
 `NewWorkersAI` refuses a bad config with `ErrInvalidRequest`, with no network
-I/O, and its errors echo neither the `Secret` nor the `AccountID`. The client
-POSTs the System One body, with `Authorization: Bearer`, to
+I/O, and its errors echo neither the `Secret` nor the `AccountID`. An `Ask`
+error may include the `AccountID` (a transport error holds the request URL),
+an identifier and not a credential. The client POSTs the System One body,
+with `Authorization: Bearer`, to
 `<BaseURL>/client/v4/accounts/<AccountID>/ai/run/@cf/cloudflare/<Model>`. Its
 `Identity` is Provider `systemone` and the `Model` you passed.
 
@@ -451,8 +456,8 @@ naming Cloudflare's errors (retried like any contract violation). A non-200
 body is `{"result": null, "success": false, "errors": [{"code", "message"}]}`.
 The `Kind` comes from the HTTP status, by the table in [Errors](#errors), and
 the `Message` lists each error as `code <n>: <message>` (a body that is not
-that envelope is the `Message` as is), with the `Secret` masked and the usual
-200-byte cap. Codes seen:
+that envelope, or whose `errors` list is empty, is the `Message` as is), with
+the `Secret` masked and the usual 200-byte cap. Codes seen:
 
 | HTTP status | Cloudflare code | Kind |
 |---|---|---|
@@ -466,8 +471,8 @@ prepends it to the state; the state names each image as `[image N]`, N from 1
 in order of first occurrence. Ask about an image by that label in the question
 text: `Is [image 1] a solid red image?`. The state only: an image in an
 instruction or a criterion is refused before the request. PNG, JPEG and WebP;
-at most 4 images, 4 MiB each and 8 MiB in all. The client checks none of those
-limits, so a violation comes back as a host 4xx.
+at most 4 images, 4 MiB each and 8 MiB in all, among Cloudflare's limits. The
+client checks none of them, so a violation comes back as a host 4xx.
 
 **Free tier.** Workers AI has a free allocation (10,000 neurons a day when
 this was written) that covers the live lane's handful of Clef image calls.
@@ -654,15 +659,17 @@ a backend must mask secrets in its errors, as `systemone` does.
 
 #### Images in events
 
-An event never holds image bytes. `State` and `Questions` carry the
-reference `<image:hex>` in the place of each image (the first 16 bytes of the
-SHA-256, as `Image.Ref`), and `DecisionEvent.Images` lists each distinct
-image once, in order of first occurrence: `sha256` (the full hash, lowercase
-hex), `media_type`, and `placements`, from `"state"`, `"instructions"` and
+An event holds no bytes of an image value, as defined in [Images](#images).
+Data that is not an image value, such as `{"kind":"Image",...}` (capital I),
+is recorded verbatim. `State` and `Questions` carry the reference
+`<image:hex>` in the place of each image (the first 16 bytes of the SHA-256,
+as `Image.Ref`), and `DecisionEvent.Images` lists each distinct image once,
+in order of first occurrence: `sha256` (the full hash, lowercase hex),
+`media_type`, and `placements`, from `"state"`, `"instructions"` and
 `"criteria"` in that order. `Images` is absent when the `Ask` has no image.
-Whatever its size, an image adds one reference and one `Images` entry to the
-event. For a state `{"frame": <png>}`, the `state` and `images` of the
-decision are:
+Whatever its size, an image adds one reference per occurrence and one
+`Images` entry per distinct image to the event. For a state
+`{"frame": <png>}`, the `state` and `images` of the decision are:
 
 ```json
 {"state":{"frame":"\u003cimage:039058c6f2c0cb492c533b0a4d14ef77\u003e"},"images":[{"sha256":"039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81","media_type":"image/png","placements":["state"]}]}
@@ -737,12 +744,14 @@ Logs written by v0.6.0, before images were recorded, hold each image as a
 base64 `Block` in `State` and `Questions` and no `Images`; Replay finds
 those and hashes them, so such a log answers the same image and diverges on
 another. A recorded image value that is not valid (it carries a URL or
-caption, has no data, or does not decode) adds no hash, and neither it nor
-two media types over the same bytes fails `Replay` or a match: an `Ask`
-matches such a record as if the image were not there. A URL or caption image
-in a new `Ask` is a `Normalize` refusal, as live. A binary from before this
-change that replays a log written after it does not check images: it
-compares step and question ids only.
+caption, has no data, or does not decode) adds no hash and does not fail
+`Replay`; an `Ask` matches such a record as if that image were not there.
+Two media types over the same bytes do not fail `Replay` either, but the
+record holds one hash for them, so only an `Ask` of that image matches. A
+URL or caption image in a new `Ask` is a `Normalize` refusal, as live. A
+binary from before this change that replays a log written after it does not
+check images: it compares step and question ids only. Scanning inline
+images is slow at pathological nesting depth, as `Normalize` is.
 
 ## Gating an agent
 
@@ -855,11 +864,12 @@ Design points the program follows:
   host 4xx errors. ([Models](https://docs.typesafe.ai/models.md); no vendor
   review date; verified 2026-09-19)
 - Images need Jev 1.13 or later, through `Config.Images = systemone.ImagesAssets`
-  (see [Images on System One](#images-on-system-one)). Each side must be
-  280 to 1568 px, the total 78,400 to 2,458,624 px, each image at most 16 MiB,
-  and the body and the expanded request at most 32 MiB. The vendor labels the
-  feature "Dreamer-ready" and says the limits may change. `systemone` checks
-  none of them, pixels included: a violation comes back as a host 4xx.
+  (see [Images on System One](#images-on-system-one)). The vendor's limits
+  include 280 to 1568 px a side, 78,400 to 2,458,624 px in all, 16 MiB per
+  image, and 32 MiB for the body and the expanded request; the list is not
+  complete. The vendor labels the feature "Dreamer-ready" and says the limits
+  may change. `systemone` checks none of them, pixels included: a violation
+  comes back as a host 4xx.
   Audio and video are not accepted.
   ([Images](https://docs.typesafe.ai/images); verified 2026-10-22)
 - English is the primary training language and where accuracy is best; other

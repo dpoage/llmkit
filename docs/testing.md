@@ -159,7 +159,7 @@ A fixture without the field replays as `strict` when it holds exactly one exchan
 
 The `decide/systemone` package replays the same way. `decide/systemone/fixture_replay_test.go` runs in plain `go test ./...` with no tag, no network, and no credentials.
 
-For every fixture under `decide/systemone/testdata/`, an `httptest` server serves the recorded exchange. The replay re-issues the recorded `Ask` through `systemone.New`. The normalized `Response` — or the recorded error's sentinel, matched with `errors.Is` — must equal the recording.
+For every fixture under `decide/systemone/testdata/`, an `httptest` server serves the recorded exchange. The replay re-issues the recorded `Ask` through `systemone.New`. The request body, as parsed JSON, and the `TypeSafe-Danger-Zone-Images` header must equal the recording; no other request header is checked. The normalized `Response` — or the recorded error's sentinel, matched with `errors.Is` — must equal the recording.
 
 The fixtures come from the same secret-free writer as the provider fixtures.
 

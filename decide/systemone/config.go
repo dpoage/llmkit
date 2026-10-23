@@ -36,8 +36,9 @@ const (
 )
 
 // ImageDialect selects how a Client carries images. The zero value sends
-// none: a host that does not read images silently drops the wrong shape,
-// so the Client refuses every image until Config.Images names the shape.
+// none: a host that ignores the shape sent answers without the image and
+// reports no error, so the Client refuses every image until Config.Images
+// names the shape.
 type ImageDialect uint8
 
 const (
@@ -138,15 +139,15 @@ type Config struct {
 // llmkit.ErrInvalidRequest for a Secret that is empty, whitespace-only, or
 // whitespace-padded, an empty Model, a Retry.Jitter outside [0, 1] (NaN
 // included), an Images value that is not an [ImageDialect] constant, and a
-// BaseURL that is not an http or https URL with a host or that contains '#'. Construction is hermetic: no network I/O, no
-// environment lookups, and no error echoes Secret or any part of BaseURL.
+// BaseURL that is not an http or https URL with a host or that contains '#'.
+// Construction is hermetic: no network I/O, no environment lookups, and no
+// error echoes Secret or any part of BaseURL.
 func New(cfg Config) (*Client, error) {
 	return newClient(cfg, systemOnePath)
 }
 
-// newClient is New with the endpoint path appended to BaseURL supplied by
-// the caller: New passes systemOnePath, [NewWorkersAI] its account route.
-// Every Config rule is checked here, once.
+// newClient is New with the endpoint path supplied by the caller: New passes
+// systemOnePath, [NewWorkersAI] its account route.
 func newClient(cfg Config, path string) (*Client, error) {
 	// Refuse a Secret that is empty or differs from strings.TrimSpace —
 	// the same refusal provider.New applies to Spec.Secret. The error
@@ -183,12 +184,12 @@ func newClient(cfg Config, path string) (*Client, error) {
 }
 
 // Client evaluates questions against a state over the System One wire. It
-// satisfies [decide.Decider]. Construct with [New]; a *Client is safe for
-// concurrent use and its fields are immutable afterwards.
+// satisfies [decide.Decider]. Construct with [New] or [NewWorkersAI]; a
+// *Client is safe for concurrent use and its fields are immutable afterwards.
 type Client struct {
 	apiKey   string
 	model    string
-	endpoint *url.URL // BaseURL joined with systemOnePath; never mutated
+	endpoint *url.URL // the endpoint URL; never mutated
 	client   *http.Client
 	retry    retry.Config
 	images   ImageDialect

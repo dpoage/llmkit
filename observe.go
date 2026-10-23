@@ -482,7 +482,7 @@ type DecisionEvent struct {
 	Backend string `json:"backend,omitempty"`
 	Model   string `json:"model,omitempty"`
 	// State is the state the Ask judged, as raw JSON (string, object, or
-	// array). An image in the state is recorded as its reference
+	// array). An image value in the state is recorded as its reference
 	// ("<image:hex>"), never its bytes; Images carries the metadata. State
 	// is emitted verbatim: an invalid RawMessage fails Marshal for the whole
 	// event, so converters must pre-validate.

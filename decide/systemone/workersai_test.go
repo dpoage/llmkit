@@ -66,7 +66,6 @@ func cfSuccess(result string) string {
 
 var wfQuestions = decide.Questions{"q": decide.Noul{Instructions: "Is [image 1] a solid red image?"}}
 
-// T1: endpoint, body and auth.
 func TestWorkersAI_RequestShape(t *testing.T) {
 	left, right := img("image/png", "left-bytes"), img("image/webp", "right-bytes")
 	states := map[string]any{
@@ -137,7 +136,6 @@ func TestWorkersAI_Identity(t *testing.T) {
 	}
 }
 
-// T2: response unwrap and error extraction.
 func TestWorkersAI_SuccessUnwraps(t *testing.T) {
 	cf := newCFServer(t, http.StatusOK, cfSuccess(wfInner))
 	got, err := workersClient(t, cf.URL).Ask(context.Background(), "s", wfQuestions)
@@ -221,7 +219,6 @@ func TestWorkersAI_ErrorEnvelope(t *testing.T) {
 	}
 }
 
-// T3: construction refuses what could escape the path or leak.
 func TestNewWorkersAI_Validation(t *testing.T) {
 	good := WorkersAIConfig{Secret: testSecret, AccountID: wfAccount, Model: wfModel}
 	with := func(mutate func(*WorkersAIConfig)) WorkersAIConfig {

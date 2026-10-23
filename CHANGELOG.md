@@ -252,8 +252,8 @@ entry below is marked.
   image, and a `Decider` declares its support with `decide.ImageSupporter`.
   An invalid image, or one the support does not carry, is refused with
   `ErrInvalidRequest` naming its JSON path; the second case also wraps
-  `decide.ErrImageUnsupported`. `systemone.Client` carries no image yet and
-  its refusal names `Config.Images`.
+  `decide.ErrImageUnsupported`. An unset `Config.Images` makes
+  `systemone.Client` refuse every image, naming `Config.Images`.
 - `decide`: `Observe(d Decider, obs llmkit.Observer) Decider` wraps any
   `Decider` and emits one `llmkit.KindDecision` event per `Ask` (RunID and
   Step from the context, sorted questions and answers, usage, duration; a
@@ -280,7 +280,7 @@ entry below is marked.
   bytes. `State` and `Questions` carry `<image:hex>` references in place of
   each image, so a decision line stays small whatever the image size.
   `Images` is omitted when the `Ask` has no image, so image-free events are
-  unchanged. `EventSchemaVersion` stays 2.
+  unchanged. `EventSchemaVersion` stays 3.
 - `decide`: `Observe` normalizes with the `ImageSupport` the wrapped
   `Decider` declares (`decide.ImageSupporter`), `PlaceAll` if none, and
   forwards `ImageSupport()` as it forwards `Identity()`; an image the backend
@@ -319,9 +319,10 @@ entry below is marked.
   array of data URLs and replaces each state image with `[image N]`; it
   carries `image/png`, `image/jpeg` and `image/webp` in the state only. With
   no image the body and headers are unchanged. An unset `Config.Images`
-  still refuses every image before the request, naming `Config.Images`
-  (Kev, OpenRouter and Fireworks silently drop images), and a media type or
-  placement the dialect does not carry is refused naming the image's path.
+  still refuses every image before the request, naming `Config.Images`; Kev
+  ignores `assets` without an error, so a host that reads no images answers
+  as if the image were absent. A media type or placement the dialect does
+  not carry is refused naming the image's path.
   `New` refuses an `Images` value that is not a constant with
   `ErrInvalidRequest`. Pixels are not checked client-side; TypeSafe's limits
   are in `docs/decide.md`. Live case `typesafe/image_placement` asks about a
@@ -337,7 +338,9 @@ entry below is marked.
   by status and its Message lists `code <n>: <message>` for each error.
   `NewWorkersAI` refuses with `ErrInvalidRequest`, hermetically, an
   `AccountID` that is not 32 lowercase hex characters and a `Model` outside
-  `^[a-z0-9][a-z0-9.-]*$`; no error echoes the `Secret` or the `AccountID`.
+  `^[a-z0-9][a-z0-9.-]*$`; no construction error echoes the `Secret` or the
+  `AccountID`. An `Ask` error can carry the `AccountID` (a transport error
+  holds the request URL), an identifier and not a credential.
   Cloudflare's limits (4 images, 4 MiB each, 8 MiB in all) are in
   `docs/decide.md` and not checked client-side. Live lane `workersai`
   (`LLMKIT_LIVE_WORKERSAI_API_KEY`, `LLMKIT_LIVE_WORKERSAI_ACCOUNT_ID`,
@@ -508,9 +511,9 @@ entry below is marked.
 - **Breaking:** `decide`: an image Block with `URL`, `Text`, `Title`,
   `Provider` or `Raw` set, and an image Block with no inline `Data` or a
   `MediaType` that does not begin `image/`, is refused with `ErrInvalidRequest`
-  naming its path, as is an object with `kind` `"image"`, a non-empty `data`
-  and a member that is not a Block field (a struct embedding `llmkit.Block`
-  with an added field). Before, it was sent as text.
+  naming its path, as is an object with `kind` `"image"`, a `data` that is
+  neither null nor `""`, and a member that is not a Block field (a struct
+  embedding `llmkit.Block` with an added field). Before, it was sent as text.
 - **Breaking:** `decide.Replay` now diverges (`ErrReplayDiverged`) when an
   `Ask`'s images differ from the recorded decision's, where it used to ignore
   them: it matches on the SHA-256 set of the images as well as the step and
