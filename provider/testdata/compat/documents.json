@@ -8,18 +8,19 @@
     "PromptCaching": true,
     "StructuredOutput": false,
     "Thinking": false,
+    "ReasoningEffort": false,
     "ToolChoice": true,
     "Images": true,
     "Documents": true,
     "StopSequences": true,
     "TopP": true,
     "TopK": false,
-    "Seed": true
+    "Seed": true,
+    "ToolResultMedia": false
   },
   "request_check": "strict",
   "inputs": [
     {
-      "system": "",
       "messages": [
         {
           "role": "user",
@@ -27,33 +28,18 @@
             {
               "kind": "document",
               "media_type": "application/pdf",
-              "data": "JVBERi0xLjQKMSAwIG9iajw8L1R5cGUvQ2F0YWxvZy9QYWdlcyAyIDAgUj4+IGVuZG9iagoyIDAgb2JqPDwvVHlwZS9QYWdlcy9LaWRzWzMgMCBSXS9Db3VudCAxPj4gZW5kb2JqCjMgMCBvYmo8PC9UeXBlL1BhZ2UvUGFyZW50IDIgMCBSL01lZGlhQm94WzAgMCA2MTIgNzkyXS9Db250ZW50cyA0IDAgUi9SZXNvdXJjZXM8PC9Gb250PDwvRjEgNSAwIFI+Pj4+Pj4gZW5kb2JqCjQgMCBvYmo8PC9MZW5ndGggNDQ+PnN0cmVhbQpCVCAvRjEgMjQgVGYgNzIgNzIwIFRkIChoZWxsbyBsbG1raXQpIFRqIEVUCmVuZHN0cmVhbSBlbmRvYmoKNSAwIG9iajw8L1R5cGUvRm9udC9TdWJ0eXBlL1R5cGUxL0Jhc2VGb250L0hlbHZldGljYT4+IGVuZG9iagp4cmVmCjAgNgowMDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDAwMDkgMDAwMDAgbiAKMDAwMDAwMDA1MyAwMDAwMCBuIAowMDAwMDAwMTAzIDAwMDAwIG4gCjAwMDAwMDAyMTQgMDAwMDAgbiAKMDAwMDAwMDMwMyAwMDAwMCBuIAp0cmFpbGVyPDwvU2l6ZSA2L1Jvb3QgMSAwIFI+PgpzdGFydHhyZWYKMzY1CiUlRU9GCg==",
-              "title": "hello.pdf"
+              "data": "JVBERi0xLjQKMSAwIG9iajw8L1R5cGUvQ2F0YWxvZy9QYWdlcyAyIDAgUj4+IGVuZG9iagoyIDAgb2JqPDwvVHlwZS9QYWdlcy9LaWRzWzMgMCBSXS9Db3VudCAxPj4gZW5kb2JqCjMgMCBvYmo8PC9UeXBlL1BhZ2UvUGFyZW50IDIgMCBSL01lZGlhQm94WzAgMCA2MTIgNzkyXS9Db250ZW50cyA0IDAgUi9SZXNvdXJjZXM8PC9Gb250PDwvRjEgNSAwIFI+Pj4+Pj4gZW5kb2JqCjQgMCBvYmo8PC9MZW5ndGggNDI+PnN0cmVhbQpCVCAvRjEgMzYgVGYgNzIgNzIwIFRkIChRVU9LS0E3MzE5KSBUaiBFVAplbmRzdHJlYW0gZW5kb2JqCjUgMCBvYmo8PC9UeXBlL0ZvbnQvU3VidHlwZS9UeXBlMS9CYXNlRm9udC9IZWx2ZXRpY2E+PiBlbmRvYmoKeHJlZgowIDYKMDAwMDAwMDAwMCA2NTUzNSBmIAowMDAwMDAwMDA5IDAwMDAwIG4gCjAwMDAwMDAwNTMgMDAwMDAgbiAKMDAwMDAwMDEwMyAwMDAwMCBuIAowMDAwMDAwMjE0IDAwMDAwIG4gCjAwMDAwMDAzMDEgMDAwMDAgbiAKdHJhaWxlcjw8L1NpemUgNi9Sb290IDEgMCBSPj4Kc3RhcnR4cmVmCjM2MwolJUVPRgo=",
+              "title": "nonce.pdf"
             },
             {
               "kind": "text",
-              "text": "Reply with the single word OK if you received a document."
+              "text": "The attached PDF contains a single code word. Reply with that code word only."
             }
-          ],
-          "tool_calls": null,
-          "tool_call_id": "",
-          "is_error": false
+          ]
         }
       ],
-      "tools": null,
-      "max_tokens": 768,
-      "temperature": null,
-      "thinking": null,
-      "tool_choice": {
-        "mode": "",
-        "name": ""
-      },
-      "stop_sequences": null,
-      "top_p": null,
-      "top_k": null,
-      "seed": null,
-      "response_schema": null,
-      "response_schema_name": ""
+      "max_tokens": 4096,
+      "tool_choice": {}
     }
   ],
   "exchanges": [
@@ -71,41 +57,40 @@
           "x-stainless-package-version": "3.43.0",
           "x-stainless-retry-count": "0",
           "x-stainless-runtime": "go",
-          "x-stainless-runtime-version": "go1.27.1-X:nodwarf5"
+          "x-stainless-runtime-version": "go1.26.7"
         },
-        "body": "{\"messages\":[{\"content\":[{\"file\":{\"file_data\":\"data:application/pdf;base64,JVBERi0xLjQKMSAwIG9iajw8L1R5cGUvQ2F0YWxvZy9QYWdlcyAyIDAgUj4+IGVuZG9iagoyIDAgb2JqPDwvVHlwZS9QYWdlcy9LaWRzWzMgMCBSXS9Db3VudCAxPj4gZW5kb2JqCjMgMCBvYmo8PC9UeXBlL1BhZ2UvUGFyZW50IDIgMCBSL01lZGlhQm94WzAgMCA2MTIgNzkyXS9Db250ZW50cyA0IDAgUi9SZXNvdXJjZXM8PC9Gb250PDwvRjEgNSAwIFI+Pj4+Pj4gZW5kb2JqCjQgMCBvYmo8PC9MZW5ndGggNDQ+PnN0cmVhbQpCVCAvRjEgMjQgVGYgNzIgNzIwIFRkIChoZWxsbyBsbG1raXQpIFRqIEVUCmVuZHN0cmVhbSBlbmRvYmoKNSAwIG9iajw8L1R5cGUvRm9udC9TdWJ0eXBlL1R5cGUxL0Jhc2VGb250L0hlbHZldGljYT4+IGVuZG9iagp4cmVmCjAgNgowMDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDAwMDkgMDAwMDAgbiAKMDAwMDAwMDA1MyAwMDAwMCBuIAowMDAwMDAwMTAzIDAwMDAwIG4gCjAwMDAwMDAyMTQgMDAwMDAgbiAKMDAwMDAwMDMwMyAwMDAwMCBuIAp0cmFpbGVyPDwvU2l6ZSA2L1Jvb3QgMSAwIFI+PgpzdGFydHhyZWYKMzY1CiUlRU9GCg==\",\"filename\":\"hello.pdf\"},\"type\":\"file\"},{\"text\":\"Reply with the single word OK if you received a document.\",\"type\":\"text\"}],\"role\":\"user\"}],\"model\":\"MiniMax-M3\",\"max_completion_tokens\":768}"
+        "body": "{\"messages\":[{\"content\":[{\"file\":{\"file_data\":\"data:application/pdf;base64,JVBERi0xLjQKMSAwIG9iajw8L1R5cGUvQ2F0YWxvZy9QYWdlcyAyIDAgUj4+IGVuZG9iagoyIDAgb2JqPDwvVHlwZS9QYWdlcy9LaWRzWzMgMCBSXS9Db3VudCAxPj4gZW5kb2JqCjMgMCBvYmo8PC9UeXBlL1BhZ2UvUGFyZW50IDIgMCBSL01lZGlhQm94WzAgMCA2MTIgNzkyXS9Db250ZW50cyA0IDAgUi9SZXNvdXJjZXM8PC9Gb250PDwvRjEgNSAwIFI+Pj4+Pj4gZW5kb2JqCjQgMCBvYmo8PC9MZW5ndGggNDI+PnN0cmVhbQpCVCAvRjEgMzYgVGYgNzIgNzIwIFRkIChRVU9LS0E3MzE5KSBUaiBFVAplbmRzdHJlYW0gZW5kb2JqCjUgMCBvYmo8PC9UeXBlL0ZvbnQvU3VidHlwZS9UeXBlMS9CYXNlRm9udC9IZWx2ZXRpY2E+PiBlbmRvYmoKeHJlZgowIDYKMDAwMDAwMDAwMCA2NTUzNSBmIAowMDAwMDAwMDA5IDAwMDAwIG4gCjAwMDAwMDAwNTMgMDAwMDAgbiAKMDAwMDAwMDEwMyAwMDAwMCBuIAowMDAwMDAwMjE0IDAwMDAwIG4gCjAwMDAwMDAzMDEgMDAwMDAgbiAKdHJhaWxlcjw8L1NpemUgNi9Sb290IDEgMCBSPj4Kc3RhcnR4cmVmCjM2MwolJUVPRgo=\",\"filename\":\"nonce.pdf\"},\"type\":\"file\"},{\"text\":\"The attached PDF contains a single code word. Reply with that code word only.\",\"type\":\"text\"}],\"role\":\"user\"}],\"model\":\"MiniMax-M3\",\"max_completion_tokens\":4096}"
       },
       "response": {
         "headers": {
           "access-control-allow-origin": "*",
-          "alb_receive_time": "1789786182.521",
-          "alb_request_id": "7b34e1e98160b8666a690ef69a4998a9511b776d",
+          "alb_receive_time": "1792709815.603",
+          "alb_request_id": "aac30fe6bddb0b1853b2ce58b6f090b9eca1956f",
           "cache-control": "max-age=0, no-cache, no-store",
-          "content-length": "815",
           "content-type": "application/json; charset=utf-8",
-          "date": "Sat, 19 Sep 2026 02:49:44 GMT",
-          "expires": "Sat, 19 Sep 2026 02:49:44 GMT",
-          "minimax-request-id": "fb17e5d4ceeeb65bed6a32552620844f",
+          "date": "Thu, 22 Oct 2026 22:56:58 GMT",
+          "expires": "Thu, 22 Oct 2026 22:56:58 GMT",
+          "minimax-request-id": "669b027c79413f4b6ff95dfe257fcfb5",
           "pragma": "no-cache",
-          "trace-id": "06fd2b46d59df5b67bb6c7b05b7858f2",
+          "trace-id": "0729c7b7e79aeac9b8244e5ac5e6d95b",
+          "vary": "Accept-Encoding",
           "x-from": "ak",
-          "x-mm-request-id": "2022431855143301769_17897861844m5ej0",
-          "x-session-id": "65749afd81340eb4b01b52e1c5f7749f"
+          "x-mm-request-id": "2022431855143301769_17927098187di0ah",
+          "x-session-id": "894b45537fd6328690c21cd30ec20607"
         },
-        "body": "{\"id\":\"06fd2b46d59df5b67bb6c7b05b7858f2\",\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"\u003cthink\u003e\\nThe user has provided a file and asked me to reply with \\\"OK\\\" if I received a document. This appears to be a simple test of document receipt.\\n\u003c/think\u003e\\n\\nOK\",\"role\":\"assistant\",\"name\":\"MiniMax AI\",\"annotations\":[{}],\"audio_content\":\"\"}}],\"created\":1789786182,\"model\":\"MiniMax-M3\",\"object\":\"chat.completion\",\"usage\":{\"total_tokens\":237,\"total_characters\":0,\"prompt_tokens\":203,\"completion_tokens\":34,\"completion_tokens_details\":{\"reasoning_tokens\":32},\"prompt_tokens_details\":{\"cached_tokens\":128}},\"input_sensitive\":false,\"output_sensitive\":false,\"input_sensitive_type\":0,\"output_sensitive_type\":0,\"output_sensitive_int\":0,\"service_tier\":\"standard\",\"base_resp\":{\"status_code\":0,\"status_msg\":\"\"}}\n",
+        "body": "{\"id\":\"0729c7b7e79aeac9b8244e5ac5e6d95b\",\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"\u003cthink\u003e\\nWe need inspect attached PDF. Need output code word only. We have file mention but no direct tool explicitly. Need infer maybe PDF accessible? In these tasks attachments perhaps vision input hidden? User only shows file name nonce.pdf # QUOKKA7319, says attached PDF single code word. Need extract. We need use tools? None listed. Maybe embedded file unavailable in transcript but model may have access? Need see perhaps code word is QUOKKA7319? They put \\\"# QUOKKA7319\\\" likely maybe identifier, not content. Need inspect PDF via python impossible no tools. Could possibly attachment internally available but not surfaced? In ChatGPT environment, usually prompt with file and perhaps can use container tools, but tool namespace absent. Could reason that PDF filename \\\"nonce.pdf\\\" and marker \\\"# QUOKKA7319\\\" perhaps code word itself? User explicitly says attached PDF contains a single code word, likely need OCR. The line `\u003cfile name=\\\"nonce.pdf\\\"\u003e# QUOKKA7319\u003c/file\u003e` may indicate extracted content! Often benchmark prompt displays file name then maybe content? Here exact syntax `\u003cfile name=\\\"nonce.pdf\\\"\u003e# QUOKKA7319\u003c/file\u003eThe attached...` likely indeed file attachment extraction appears as `# QUOKKA7319`, perhaps code word. Need output only code word:QUOKKA7319.\\n\u003c/think\u003e\\n\\nQUOKKA7319\",\"role\":\"assistant\",\"name\":\"MiniMax AI\",\"annotations\":[{}],\"audio_content\":\"\"}}],\"created\":1792709815,\"model\":\"MiniMax-M3\",\"object\":\"chat.completion\",\"usage\":{\"total_tokens\":508,\"total_characters\":0,\"prompt_tokens\":229,\"completion_tokens\":279,\"completion_tokens_details\":{\"reasoning_tokens\":271},\"prompt_tokens_details\":{\"cached_tokens\":192}},\"input_sensitive\":false,\"output_sensitive\":false,\"input_sensitive_type\":0,\"output_sensitive_type\":0,\"output_sensitive_int\":0,\"service_tier\":\"default\",\"base_resp\":{\"status_code\":0,\"status_msg\":\"\"}}\n",
         "status": 200
       }
     }
   ],
   "normalized": {
-    "text": "\u003cthink\u003e\nThe user has provided a file and asked me to reply with \"OK\" if I received a document. This appears to be a simple test of document receipt.\n\u003c/think\u003e\n\nOK",
+    "text": "\u003cthink\u003e\nWe need inspect attached PDF. Need output code word only. We have file mention but no direct tool explicitly. Need infer maybe PDF accessible? In these tasks attachments perhaps vision input hidden? User only shows file name nonce.pdf # QUOKKA7319, says attached PDF single code word. Need extract. We need use tools? None listed. Maybe embedded file unavailable in transcript but model may have access? Need see perhaps code word is QUOKKA7319? They put \"# QUOKKA7319\" likely maybe identifier, not content. Need inspect PDF via python impossible no tools. Could possibly attachment internally available but not surfaced? In ChatGPT environment, usually prompt with file and perhaps can use container tools, but tool namespace absent. Could reason that PDF filename \"nonce.pdf\" and marker \"# QUOKKA7319\" perhaps code word itself? User explicitly says attached PDF contains a single code word, likely need OCR. The line `\u003cfile name=\"nonce.pdf\"\u003e# QUOKKA7319\u003c/file\u003e` may indicate extracted content! Often benchmark prompt displays file name then maybe content? Here exact syntax `\u003cfile name=\"nonce.pdf\"\u003e# QUOKKA7319\u003c/file\u003eThe attached...` likely indeed file attachment extraction appears as `# QUOKKA7319`, perhaps code word. Need output only code word:QUOKKA7319.\n\u003c/think\u003e\n\nQUOKKA7319",
     "stop_reason": "end_turn",
     "usage": {
-      "input_tokens": 203,
-      "output_tokens": 34,
-      "cache_read_input_tokens": 128,
-      "cache_creation_input_tokens": 0,
-      "reasoning_tokens": 32
+      "input_tokens": 229,
+      "output_tokens": 279,
+      "cache_read_input_tokens": 192,
+      "reasoning_tokens": 271
     }
   }
 }

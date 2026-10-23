@@ -347,6 +347,24 @@ entry below is marked.
 
 ### Changed
 
+- **Breaking:** `provider`: the Anthropic, OpenAI, and Google adapters now
+  refuse an image or document whose media type is outside the wire's
+  accepted set, before any request, with an `*llmkit.APIError` that wraps
+  `ErrInvalidRequest`, has `StatusCode` 0, and names the type. The check
+  covers an inline block's `MediaType` and the type of a `data:` URL in
+  `Block.URL` (the text up to the first `;` or `,`; an empty type is
+  refused). Anthropic accepted `image/bmp` and forwarded an image block
+  carrying `application/pdf` until now; both are refused. Anthropic takes
+  `image/png`, `image/jpeg`, `image/gif`, `image/webp` and, for documents,
+  `application/pdf` (user turns and tool results). First-party OpenAI takes
+  the same image set and `application/pdf`. Google takes its inline list for
+  user turns (a `data:` URL block's non-empty `MediaType` included) and its
+  existing tool-result list. The comparison is exact bytes: an inline
+  `image/jpg`, `IMAGE/PNG`, or `image/png; x=y` is refused. Other URLs
+  (`https:`, `gs:`, Gemini Files API URIs) are not checked, and
+  `openai-compatible` does no check. The Anthropic non-PDF document refusal
+  now names the media type. See `docs/capabilities.md`, "Accepted media
+  types". (llmkit-d2e)
 - `llmkit`: the ceiling refusal text now says the adapter "does not map" the
   field instead of claiming it has no wire field.
 - **Breaking:** `provider`: Google `Usage.OutputTokens` is now
@@ -501,6 +519,14 @@ entry below is marked.
   `Questions`) still replays: a valid inline image counts by its hash, and one
   that carries a URL or caption, has no data, or does not decode counts for
   nothing.
+- Live `images` and `documents` cases (test-only): the model must now prove it
+  saw the media. `images` sends a generated 64x64 solid blue PNG and requires
+  "blue" in the answer; `documents` sends a generated one-page PDF whose only
+  text is `QUOKKA7319` and requires that nonce. Both used to pass on any
+  non-empty reply, so a dropped image passed. The `documents` prompt offers
+  no "nothing attached" answer, and both cases raise `max_tokens` above the
+  default so a thinking model can finish thinking. The compat fixtures
+  `images.json` and `documents.json` are re-recorded. See `docs/testing.md`.
 
 ### Fixed
 

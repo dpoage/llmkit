@@ -201,14 +201,13 @@ const (
 	// BlockText is plain text (the common case).
 	BlockText BlockKind = "text"
 	// BlockImage is an image, carried inline (Data + MediaType) or by
-	// reference (URL). Exactly one of Data and URL must be set; adapters
-	// reject any other combination with an error wrapping ErrInvalidRequest
-	// before any wire call.
+	// reference (URL). Exactly one of Data and URL is required. Adapters refuse
+	// any other combination, or an inline or data: URL media type the wire does
+	// not accept (openai-compatible checks none), pre-wire with ErrInvalidRequest.
 	BlockImage BlockKind = "image"
-	// BlockDocument is a document (e.g. PDF), carried like BlockImage.
-	// Provider-specific format constraints (Anthropic accepts base64 PDFs
-	// only; the OpenAI file part accepts inline data only) are rejected
-	// with an error wrapping ErrInvalidRequest before any wire call.
+	// BlockDocument is a document (e.g. PDF), carried and checked like
+	// BlockImage. Anthropic inline or data: URL documents must be PDFs, and the
+	// OpenAI file part takes inline data only.
 	BlockDocument BlockKind = "document"
 	// BlockThinking is a provider reasoning block. Provider names the adapter
 	// that produced it; Raw is its replay payload, validated before any wire
@@ -748,14 +747,14 @@ type Capabilities struct {
 	// the wire call (auto stays allowed — dropping an explicit "none" would
 	// let the model call tools the caller tried to forbid).
 	ToolChoice bool
-	// Advisory: whether BlockImage content is sent on the wire; no adapter
-	// reads it — image blocks are passed through to providers that accept
-	// them (conservatively false profiles on some endpoints still carry
-	// vision models).
+	// Advisory: no adapter reads it. Every table entry and fallback profile
+	// reports true, including text-only models. Image blocks are sent whatever
+	// the field says, unless a block, media-type, or ToolResultMedia refusal
+	// applies.
 	Images bool
-	// Advisory: whether BlockDocument content is sent on the wire; no
-	// adapter reads it — document blocks are passed through to providers
-	// that accept them.
+	// Advisory: no adapter reads it; every profile reports true, as for Images.
+	// Document blocks are sent whatever the field says, unless a block,
+	// media-type, or ToolResultMedia refusal applies.
 	Documents bool
 	// Dropped silently when false: the effective profile gates
 	// Request.StopSequences off the wire. A caller-pinned override that
