@@ -70,14 +70,16 @@
 // Runner turn the event carries the run's RunID and the turn's Step. A
 // Decider that implements Identity() llmkit.Identity (the systemone Client
 // does) tags the event's Backend and Model, and the wrapper forwards the
-// method. An Ask that fails [Normalize] emits nothing.
+// method. An Ask that fails [Normalize] emits nothing. The event records an
+// image as a reference and its hash, media type and placements, never its
+// bytes.
 //
 // [Replay] is the other half: it builds a Decider from the Decision events
 // an [llmkit.Source] holds for a run. Each Ask consumes the earliest
-// recorded decision with the same Step and the same question ids and
-// returns the recorded answers, with no backend call. Paired with the agent
-// package's replay client, a recorded run whose ToolPolicy asked a Decider
-// replays offline with the same denials. Replay does not compare the state
-// and does not report recorded decisions the replay never asked for; see
-// [Replay].
+// recorded decision with the same Step, the same question ids and the same
+// set of image hashes and returns the recorded answers, with no backend
+// call. Paired with the agent package's replay client, a recorded run whose
+// ToolPolicy asked a Decider replays offline with the same denials. Replay
+// does not compare the state beyond its images and does not report recorded
+// decisions the replay never asked for; see [Replay].
 package decide

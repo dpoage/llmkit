@@ -482,12 +482,13 @@ type DecisionEvent struct {
 	Backend string `json:"backend,omitempty"`
 	Model   string `json:"model,omitempty"`
 	// State is the state the Ask judged, as raw JSON (string, object, or
-	// array) — the input half of the call, so a sink can interpret or replay
-	// the decision from this event alone. State is emitted verbatim: an
-	// invalid RawMessage fails Marshal for the whole event, so converters
-	// must pre-validate.
+	// array). An image in the state is recorded as its reference
+	// ("<image:hex>"), never its bytes; Images carries the metadata. State
+	// is emitted verbatim: an invalid RawMessage fails Marshal for the whole
+	// event, so converters must pre-validate.
 	State json.RawMessage `json:"state,omitempty"`
-	// Questions is what was asked, sorted by ID.
+	// Questions is what was asked, sorted by ID. Images in a question
+	// appear as references, as in State.
 	Questions []DecisionQuestion `json:"questions,omitempty"`
 	// Answers is what came back, sorted by question ID.
 	Answers []DecisionAnswer `json:"answers,omitempty"`
@@ -495,6 +496,20 @@ type DecisionEvent struct {
 	Usage Usage `json:"usage"`
 	// Err is the failure, as text; empty on success.
 	Err string `json:"err,omitempty"`
+	// Images lists the distinct images the Ask carried, in order of first
+	// occurrence: content hash, media type, placements. Never the bytes.
+	// Empty when the Ask carried no image, and on records from before images
+	// were recorded, whose State then holds the image values inline.
+	Images []DecisionImage `json:"images,omitempty"`
+}
+
+// DecisionImage is the record of one image in a [DecisionEvent]: the
+// lowercase-hex SHA-256 of its bytes, its media type, and the places it
+// occurred in, from "state", "instructions" and "criteria", in that order.
+type DecisionImage struct {
+	SHA256     string   `json:"sha256"`
+	MediaType  string   `json:"media_type"`
+	Placements []string `json:"placements"`
 }
 
 // DecisionQuestion is one question inside a [DecisionEvent]. ID matches its

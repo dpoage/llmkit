@@ -274,6 +274,17 @@ entry below is marked.
   `decide.ErrReplayedFailure`. A refusal keeps Provider `"decide"`, so its
   text reads `llmkit: decide error` where the live client's reads
   `llmkit: systemone error`.
+- `llmkit`: `DecisionEvent.Images` and `DecisionImage{SHA256, MediaType,
+  Placements}` record each image of a `decide.Observe`d `Ask`: its hash, media
+  type and placements (`"state"`, `"instructions"`, `"criteria"`), never its
+  bytes. `State` and `Questions` carry `<image:hex>` references in place of
+  each image, so a decision line stays small whatever the image size.
+  `Images` is omitted when the `Ask` has no image, so image-free events are
+  unchanged. `EventSchemaVersion` stays 2.
+- `decide`: `Observe` normalizes with the `ImageSupport` the wrapped
+  `Decider` declares (`decide.ImageSupporter`), `PlaceAll` if none, and
+  forwards `ImageSupport()` as it forwards `Identity()`; an image the backend
+  would refuse emits no event, through `Observe(Observe(d))` too.
 - `examples/agent-guardrail`: an `agent.Runner` gated by a `decide.Decider`.
   A `ToolPolicy` asks a Noul and denies a call at or above `--threshold`; a
   `RequestPolicy` asks a Choice and aborts the run on `injection`. It reads
@@ -447,6 +458,14 @@ entry below is marked.
   naming its path, as is an object with `kind` `"image"`, a non-empty `data`
   and a member that is not a Block field (a struct embedding `llmkit.Block`
   with an added field). Before, it was sent as text.
+- **Breaking:** `decide.Replay` now diverges (`ErrReplayDiverged`) when an
+  `Ask`'s images differ from the recorded decision's, where it used to ignore
+  them: it matches on the SHA-256 set of the images as well as the step and
+  question ids. An old binary replaying a log written after this change does
+  not check images. A log written by v0.6.0 (images inline in `State` and
+  `Questions`) still replays: a valid inline image counts by its hash, and one
+  that carries a URL or caption, has no data, or does not decode counts for
+  nothing.
 
 ### Fixed
 

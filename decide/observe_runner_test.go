@@ -3,6 +3,7 @@ package decide_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -214,5 +215,54 @@ func TestObserveReplay_RunnerToolPolicyRecordsAndReplaysWithoutNetwork(t *testin
 	}
 	if got := hits.Load(); got != hitsBefore {
 		t.Errorf("replay wire hits grew from %d to %d, want zero network", hitsBefore, got)
+	}
+}
+
+func TestObserve_ClientThatCarriesNoImageEmitsNothingAndSendsNothing(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"model":"jev-1.13.0","answers":{"q":{"type":"noul","noul":0.5}},"usage":{"input_tokens":1,"output_tokens":0}}`)
+	}))
+	defer srv.Close()
+	client, err := systemone.New(systemone.Config{Secret: "o3-test-secret", Model: "jev-latest", BaseURL: srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	qs := decide.Questions{"q": decide.Noul{Instructions: "i"}}
+	image := map[string]any{"frame": llmkit.Image("image/png", []byte("pixels"))}
+
+	for name, wrap := range map[string]func(llmkit.Observer) decide.Decider{
+		"Observe(client)":          func(o llmkit.Observer) decide.Decider { return decide.Observe(client, o) },
+		"Observe(Observe(client))": func(o llmkit.Observer) decide.Decider { return decide.Observe(decide.Observe(client, o), o) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			hits.Store(0)
+			var mu sync.Mutex
+			var events int
+			obs := llmkit.ObserverFunc(func(context.Context, llmkit.Event) {
+				mu.Lock()
+				defer mu.Unlock()
+				events++
+			})
+			d := wrap(obs)
+			_, err := d.Ask(context.Background(), image, qs)
+			if !errors.Is(err, llmkit.ErrInvalidRequest) {
+				t.Errorf("image Ask err = %v, want ErrInvalidRequest", err)
+			}
+			if !errors.Is(err, decide.ErrImageUnsupported) {
+				t.Errorf("image Ask err = %v, want ErrImageUnsupported", err)
+			}
+			if hits.Load() != 0 || events != 0 {
+				t.Errorf("image Ask: %d wire hits and %d events, want 0 and 0", hits.Load(), events)
+			}
+			if _, err := d.Ask(context.Background(), "text", qs); err != nil {
+				t.Fatalf("image-free Ask: %v", err)
+			}
+			if hits.Load() != 1 || events == 0 {
+				t.Errorf("image-free Ask: %d wire hits and %d events, want 1 and at least 1", hits.Load(), events)
+			}
+		})
 	}
 }

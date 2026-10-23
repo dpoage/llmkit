@@ -13,22 +13,34 @@ import (
 // Step ride the context. A nil obs returns d unchanged. The result is safe
 // for concurrent use when d and obs are.
 //
-// An Ask that fails [Normalize] goes to d untouched and emits nothing. Every
-// other Ask emits one event: state and questions as Normalize produced them,
-// answers, Usage, and Duration. A failed Ask sets Err to the error's text
-// and leaves Answers nil and Usage zero. d scrubs secrets from its errors.
+// An Ask that fails [Normalize] goes to d untouched and emits nothing.
+// Normalize runs with the [ImageSupport] d declares (PlaceAll when d
+// declares none), so an image d would refuse emits nothing, and always
+// with [LabelRef]. Every other Ask emits one event: state and questions as
+// Normalize produced them, with "<image:hex>" in place of each image,
+// Images (hash, media type and placements, never bytes), answers, Usage,
+// and Duration. A failed Ask sets Err to the error's text and leaves
+// Answers nil and Usage zero. d scrubs secrets from its errors.
 //
 // If d implements interface{ Identity() llmkit.Identity }, the event's
 // Backend is its Provider, Model is the response's model (the Identity's
 // when the response names none, and always on failure), and the result
-// forwards Identity. Otherwise Backend is empty.
+// forwards Identity. Otherwise Backend is empty. The result likewise
+// forwards ImageSupport when d declares one.
 func Observe(d Decider, obs llmkit.Observer) Decider {
 	if obs == nil {
 		return d
 	}
 	o := &observed{d: d, obs: obs}
-	if id, ok := d.(identified); ok {
+	id, hasID := d.(identified)
+	is, hasIS := d.(ImageSupporter)
+	switch {
+	case hasID && hasIS:
+		return &observedBoth{observed: o, identified: id, ImageSupporter: is}
+	case hasID:
 		return &observedIdentified{observed: o, identified: id}
+	case hasIS:
+		return &observedSupporting{observed: o, ImageSupporter: is}
 	}
 	return o
 }
@@ -42,15 +54,31 @@ type observed struct {
 	obs llmkit.Observer
 }
 
-// observedIdentified is the Observe result for a Decider that has an
-// Identity; embedding forwards Ask, the explicit field forwards Identity.
+// The wrappers below embed *observed for Ask and the explicit fields to
+// forward Identity and ImageSupport.
 type observedIdentified struct {
 	*observed
 	identified
 }
 
+type observedSupporting struct {
+	*observed
+	ImageSupporter
+}
+
+type observedBoth struct {
+	*observed
+	identified
+	ImageSupporter
+}
+
 func (o *observed) Ask(ctx context.Context, state any, qs Questions) (Response, error) {
-	req, nerr := Normalize(state, qs, ImageSupport{Placements: PlaceAll})
+	support := ImageSupport{Placements: PlaceAll}
+	if is, ok := o.d.(ImageSupporter); ok {
+		support = is.ImageSupport()
+	}
+	support.Label = LabelRef
+	req, nerr := Normalize(state, qs, support)
 	if nerr != nil {
 		return o.d.Ask(ctx, state, qs)
 	}
@@ -66,6 +94,7 @@ func (o *observed) Ask(ctx context.Context, state any, qs Questions) (Response, 
 		Backend:   id.Provider,
 		State:     req.State,
 		Questions: req.Questions,
+		Images:    decisionImages(req.Images),
 	}
 	if err != nil {
 		de.Model = id.Model
@@ -83,6 +112,28 @@ func (o *observed) Ask(ctx context.Context, state any, qs Questions) (Response, 
 	ev.Decision = de
 	o.obs.Observe(ctx, ev)
 	return resp, err
+}
+
+// decisionImages converts images to the root [llmkit.DecisionImage]
+// vocabulary, in order; nil for none.
+func decisionImages(images []Image) []llmkit.DecisionImage {
+	if len(images) == 0 {
+		return nil
+	}
+	out := make([]llmkit.DecisionImage, len(images))
+	for i, img := range images {
+		di := llmkit.DecisionImage{SHA256: img.SHA256, MediaType: img.MediaType, Placements: []string{}}
+		for _, p := range [...]struct {
+			place Placement
+			name  string
+		}{{PlaceState, "state"}, {PlaceInstructions, "instructions"}, {PlaceCriteria, "criteria"}} {
+			if img.Placements&p.place != 0 {
+				di.Placements = append(di.Placements, p.name)
+			}
+		}
+		out[i] = di
+	}
+	return out
 }
 
 // decisionAnswers converts resp's per-kind answer maps to the root
