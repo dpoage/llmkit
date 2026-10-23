@@ -12,6 +12,7 @@ import (
 	"github.com/dpoage/llmkit/retry"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -54,20 +55,21 @@ type answerBody struct {
 // retried. The package doc has the status mapping. Ask emits no event; wrap
 // the Client in [decide.Observe] to record it.
 func (c *Client) Ask(ctx context.Context, state any, questions decide.Questions) (decide.Response, error) {
-	req, err := decide.Normalize(state, questions, c.ImageSupport())
+	req, err := decide.Normalize(state, questions, c.support)
 	if err != nil {
-		return decide.Response{}, retagProvider(err)
+		return decide.Response{}, retagProvider(err, c.images)
 	}
-	body, err := marshalRequest(req.State, c.model, req.Questions)
+	body, err := marshalRequest(req, c.model, c.images)
 	if err != nil {
 		return decide.Response{}, err
 	}
+	imageHeader := c.images == ImagesAssets && len(req.Images) > 0
 	// Every attempt's error is scrubbed of the Secret and the BaseURL
 	// password before retry.Do or the caller sees it.
 	redact := adapter.NewRedactor(c.apiKey, c.endpoint)
 	var resp decide.Response
 	err = retry.Do(ctx, c.retry, llmkit.Classify, func(actx context.Context) error {
-		r, err := c.attempt(actx, redact, body, questions)
+		r, err := c.attempt(actx, redact, body, questions, imageHeader)
 		if err != nil {
 			return redact.Scrub(err)
 		}
@@ -80,21 +82,27 @@ func (c *Client) Ask(ctx context.Context, state any, questions decide.Questions)
 	return resp, nil
 }
 
-// ImageSupport reports what the Client sends: no image. A refusal of an
-// image names Config.Images.
-func (c *Client) ImageSupport() decide.ImageSupport { return decide.ImageSupport{} }
+// ImageSupport reports what the Client's [Config.Images] dialect sends; the
+// zero [ImagesNone] carries no image. Mutating the result does not affect
+// the Client.
+func (c *Client) ImageSupport() decide.ImageSupport {
+	s := c.support
+	s.MediaTypes = slices.Clone(s.MediaTypes)
+	return s
+}
 
 // retagProvider returns err with Provider set to this backend when err is
-// the *llmkit.APIError decide.Normalize returns, naming Config.Images when
-// the refusal is for unsupported images; the caller's value is not mutated.
-func retagProvider(err error) error {
+// the *llmkit.APIError decide.Normalize returns. Under ImagesNone a refusal
+// for unsupported images names Config.Images; the caller's value is not
+// mutated.
+func retagProvider(err error, d ImageDialect) error {
 	var ae *llmkit.APIError
 	if !errors.As(err, &ae) {
 		return err
 	}
 	tagged := *ae
 	tagged.Provider = providerName
-	if errors.Is(err, decide.ErrImageUnsupported) {
+	if d == ImagesNone && errors.Is(err, decide.ErrImageUnsupported) {
 		tagged.Message += "; set Config.Images to send images"
 	}
 	return &tagged
@@ -108,7 +116,8 @@ func (c *Client) Identity() llmkit.Identity {
 
 // attempt performs one HTTP round trip and response parse. body is built
 // once per Ask and reused across attempts; questions is read-only.
-func (c *Client) attempt(ctx context.Context, redact *adapter.Redactor, body []byte, questions decide.Questions) (decide.Response, error) {
+// imageHeader adds the TypeSafe images opt-in header.
+func (c *Client) attempt(ctx context.Context, redact *adapter.Redactor, body []byte, questions decide.Questions, imageHeader bool) (decide.Response, error) {
 	req, err := adapter.NewRequest(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
 	if err != nil {
 		return decide.Response{}, &llmkit.APIError{Kind: llmkit.ErrInvalidRequest, StatusCode: 0, Provider: providerName, Message: fmt.Sprintf("build request: %s", err), Err: err}
@@ -116,6 +125,9 @@ func (c *Client) attempt(ctx context.Context, redact *adapter.Redactor, body []b
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	if imageHeader {
+		req.Header.Set("TypeSafe-Danger-Zone-Images", "true")
+	}
 
 	httpResp, err := c.client.Do(req)
 	if err != nil {

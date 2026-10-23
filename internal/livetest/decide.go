@@ -32,6 +32,9 @@ type DecideFixture struct {
 	Case  string `json:"case"`
 	Lane  string `json:"lane"`
 	Model string `json:"model"`
+	// ImageDialect is the systemone Config.Images the Ask ran under,
+	// "assets" or "array"; empty means none.
+	ImageDialect string `json:"image_dialect,omitempty"`
 	// State is the Ask's state as marshalled JSON (string, object, or
 	// array); replay re-issues it verbatim.
 	State json.RawMessage `json:"state"`

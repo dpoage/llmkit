@@ -298,6 +298,23 @@ entry below is marked.
   CI does not run it. `systemone.Ask` also has hermetic tests against Kev's
   README response and a captured one; the live suite is now
   `TestLiveDecide/<lane>/<case>`. See `docs/testing.md`.
+- `decide/systemone`: `Config.Images` (`ImageDialect`: `ImagesNone`, the zero
+  value, `ImagesAssets`, `ImagesArray`) sends images to the host that reads
+  them, and `(*Client).ImageSupport()` reports what the Client carries.
+  `ImagesAssets` (TypeSafe, H2O) adds a top-level `assets` object keyed by ref
+  (`{"type":"image","format":"png"|"jpg","data_base64":...}`) and the header
+  `TypeSafe-Danger-Zone-Images: true`; it carries `image/png` and `image/jpeg`
+  in any placement. `ImagesArray` (Codiv, SGLang) adds a top-level `images`
+  array of data URLs and replaces each state image with `[image N]`; it
+  carries `image/png`, `image/jpeg` and `image/webp` in the state only. With
+  no image the body and headers are unchanged. An unset `Config.Images`
+  still refuses every image before the request, naming `Config.Images`
+  (Kev, OpenRouter and Fireworks silently drop images), and a media type or
+  placement the dialect does not carry is refused naming the image's path.
+  `New` refuses an `Images` value that is not a constant with
+  `ErrInvalidRequest`. Pixels are not checked client-side; TypeSafe's limits
+  are in `docs/decide.md`. Live case `typesafe/image_placement` asks about a
+  red and a blue photo; every answer flips with the photo.
 
 ### Changed
 

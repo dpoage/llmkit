@@ -136,7 +136,7 @@ func TestMarshalRequest_BytesMatchLegacyEnvelope(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Normalize: %v", err)
 			}
-			body, err := marshalRequest(req.State, tt.model, req.Questions)
+			body, err := marshalRequest(req, tt.model, ImagesNone)
 			if err != nil {
 				t.Fatalf("marshalRequest: %v", err)
 			}

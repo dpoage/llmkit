@@ -43,6 +43,20 @@
 // Retries). Questions, answers, and the validation rules are the
 // vocabulary of package decide.
 //
+// # Images
+//
+// [Config.Images] picks the image shape the host reads; see [ImageDialect].
+// The zero value, [ImagesNone], refuses every image before the request,
+// because Kev, OpenRouter and Fireworks silently drop a shape they do not
+// read. [ImagesAssets] (TypeSafe, H2O) adds a top-level "assets" object
+// keyed by each image's ref, {"type":"image","format":"png"|"jpg",
+// "data_base64":...}, and the header "TypeSafe-Danger-Zone-Images: true".
+// [ImagesArray] (Codiv, SGLang) adds a top-level "images" array of data URLs
+// and writes "[image N]", N the 1-based array position, in the state where
+// an image was. A request without an image has the same bytes under every
+// dialect. A media type or placement the dialect does not carry is refused
+// by [decide.Normalize] with the image's path, before any request.
+//
 // # Errors
 //
 // Every error from [Client.Ask] is an [*llmkit.APIError] with Provider
@@ -144,8 +158,10 @@
 //     longest question at most 32k. The package does not count tokens.
 //     Oversized requests surface as host 4xx errors
 //     (ErrInvalidRequest or ErrContextTooLong).
-//   - State and every question field are text-only: no images, no
-//     tools, and no generated prose.
+//   - State and every question field are text and images: no tools and
+//     no generated prose. TypeSafe takes images at 280 to 1568 px a side,
+//     78,400 to 2,458,624 px in all, 16 MiB each and 32 MiB per request, on
+//     Jev 1.13 and later; the package checks none of it, pixels included.
 //   - Model aliases move on a host that versions its models: TypeSafe's
 //     "jev-latest" and "jev-preview" point at a versioned id that can
 //     change between releases. Response.Model reports the id the host
@@ -171,6 +187,7 @@
 //     same rule as provider.Spec.Secret);
 //   - an empty Model;
 //   - a Retry.Jitter outside [0, 1], NaN included;
+//   - a Config.Images that is not an [ImageDialect] constant;
 //   - a BaseURL that is not an http or https URL with a host (the scheme
 //     is case-insensitive), or that contains '#' anywhere, an empty
 //     fragment included.

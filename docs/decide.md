@@ -35,6 +35,7 @@ works behind `Config.BaseURL`. The default host is TypeSafe at
 | Probabilities | As reported. | Reported at 4 decimals. |
 | Extra response fields | None known. | `latency_ms`, ignored by the client. |
 | Auth | `Authorization: Bearer` key. | A local `kev.serve` needs no auth, but `systemone.New` still requires a non-empty `Secret`. |
+| Images | `Config.Images = ImagesAssets` (Jev 1.13+); see [Images on System One](#images-on-system-one). | Dropped silently; leave `Config.Images` unset so an image is refused before the request. |
 
 ## Constructing a client
 
@@ -366,8 +367,48 @@ placements or media types is refused with `ErrInvalidRequest` and, in
 addition, wraps `decide.ErrImageUnsupported`; an invalid image does not.
 `decide.Observe` and `decide.Replay` normalize with `PlaceAll`. A `Decider`
 declares its support with `ImageSupport() decide.ImageSupport`
-(`decide.ImageSupporter`). `systemone.Client` carries no image yet: its refusal
-names `Config.Images`.
+(`decide.ImageSupporter`). `systemone.Client` declares its support from
+`Config.Images` (next section).
+
+### Images on System One
+
+`systemone.Config.Images` picks the shape the host reads. The zero value,
+`ImagesNone`, refuses every image before the request, with an error that
+names `Config.Images` and no HTTP hit: Kev, OpenRouter and Fireworks drop
+an image shape they do not read without a word, so the client will not guess.
+`New` refuses any value that is not a constant.
+
+| Host | `Config.Images` | Carries |
+|---|---|---|
+| TypeSafe, H2O | `ImagesAssets` | Any placement; `image/png`, `image/jpeg`. |
+| Codiv, SGLang | `ImagesArray` | State only; `image/png`, `image/jpeg`, `image/webp`. |
+| Kev, OpenRouter, Fireworks | `ImagesNone` (unset) | Nothing: they silently drop images. |
+
+**`ImagesAssets`.** The body gains a top-level `assets` object keyed by each
+image's ref (`<image:hex>`). The state and the questions carry the ref in the
+image's place. Each value is `{"type":"image","format":"png"|"jpg",
+"data_base64":"..."}`, with standard padded base64 and no `data:` prefix;
+`image/jpeg` is `jpg`. A request with an image also sends the header
+`TypeSafe-Danger-Zone-Images: true`; one without sends neither the key nor the
+header, and its bytes are those of an image-free `ImagesNone` request.
+
+**`ImagesArray`.** The body gains a top-level `images` array of
+`data:<media type>;base64,<data>` strings. The state carries `[image N]` where
+an image was, N counting from 1 in order of first occurrence and naming the
+same position in `images`; equal bytes share one number. There are no refs and
+no header. An image in an instruction or a criterion is refused, because the
+host reads images by position and has no place to name one there. A user
+string equal to a ref or to `[image 1]` is left as it is.
+
+Both dialects refuse a media type they do not carry (`image/webp` under
+`ImagesAssets`, `image/gif` under `ImagesArray`), naming the image's path, with
+no HTTP hit; the error wraps `decide.ErrImageUnsupported` and
+`llmkit.ErrInvalidRequest`. Pixels are not checked client-side, and the
+media type is the one the caller set, never sniffed from the bytes. Multipart
+upload is not implemented.
+
+`ImagesArray` has no live lane (no Codiv or SGLang key); hermetic tests pin
+its wire. `ImagesAssets` is run live by `TestLiveDecide/typesafe/image_placement`.
 
 ## Reading the answers
 
@@ -699,9 +740,14 @@ Design points the program follows:
   at most 32k. `systemone` does not count tokens; oversized requests surface as
   host 4xx errors. ([Models](https://docs.typesafe.ai/models.md); no vendor
   review date; verified 2026-09-19)
-- Input is text only: string, JSON object, or array of text values. No image,
-  audio, or video. ([Models](https://docs.typesafe.ai/models.md); verified
-  2026-09-19)
+- Images need Jev 1.13 or later, through `Config.Images = systemone.ImagesAssets`
+  (see [Images on System One](#images-on-system-one)). Each side must be
+  280 to 1568 px, the total 78,400 to 2,458,624 px, each image at most 16 MiB,
+  and the body and the expanded request at most 32 MiB. The vendor labels the
+  feature "Dreamer-ready" and says the limits may change. `systemone` checks
+  none of them, pixels included: a violation comes back as a host 4xx.
+  Audio and video are not accepted.
+  ([Images](https://docs.typesafe.ai/images); verified 2026-10-22)
 - English is the primary training language and where accuracy is best; other
   languages, including CJK scripts, are handled but not equally well.
   ([Models](https://docs.typesafe.ai/models.md); verified 2026-09-19)

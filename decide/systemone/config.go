@@ -3,6 +3,7 @@ package systemone
 import (
 	"fmt"
 	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/decide"
 	"github.com/dpoage/llmkit/internal/adapter"
 	"github.com/dpoage/llmkit/retry"
 	"net/http"
@@ -33,6 +34,60 @@ const (
 	// providerName tags every error and usage event from this package.
 	providerName = "systemone"
 )
+
+// ImageDialect selects how a Client carries images. The zero value sends
+// none: a host that does not read images silently drops the wrong shape,
+// so the Client refuses every image until Config.Images names the shape.
+type ImageDialect uint8
+
+const (
+	// ImagesNone (the zero value) refuses every image before the request.
+	ImagesNone ImageDialect = iota
+
+	// ImagesAssets is the TypeSafe and H2O shape: a top-level "assets"
+	// object keyed by ref, the state and questions naming the ref in the
+	// image's place. image/png and image/jpeg, any placement.
+	ImagesAssets
+
+	// ImagesArray is the Codiv and SGLang shape: a top-level "images"
+	// array of data URLs, the state naming "[image N]" (N = array
+	// position) in the image's place. State only; png, jpeg and webp.
+	ImagesArray
+)
+
+// String returns the constant's name, or "ImageDialect(n)" for any other
+// value.
+func (d ImageDialect) String() string {
+	switch d {
+	case ImagesNone:
+		return "ImagesNone"
+	case ImagesAssets:
+		return "ImagesAssets"
+	case ImagesArray:
+		return "ImagesArray"
+	}
+	return fmt.Sprintf("ImageDialect(%d)", uint8(d))
+}
+
+// support returns the decide.ImageSupport a Client of dialect d normalizes
+// with. d must be a valid dialect.
+func (d ImageDialect) support() decide.ImageSupport {
+	switch d {
+	case ImagesAssets:
+		return decide.ImageSupport{
+			Placements: decide.PlaceAll,
+			MediaTypes: []string{"image/png", "image/jpeg"},
+			Label:      decide.LabelRef,
+		}
+	case ImagesArray:
+		return decide.ImageSupport{
+			Placements: decide.PlaceState,
+			MediaTypes: []string{"image/png", "image/jpeg", "image/webp"},
+			Label:      decide.LabelPosition,
+		}
+	}
+	return decide.ImageSupport{}
+}
 
 // Config configures a System One client. New validates it.
 type Config struct {
@@ -71,13 +126,19 @@ type Config struct {
 	// field — to run the resolved defaults with no jitter, set
 	// Retry.Rand to a function returning 0.5).
 	Retry retry.Config
+
+	// Images selects the image shape the host reads. The zero value,
+	// ImagesNone, refuses every image before the request, naming this
+	// field; see [ImageDialect] for the shapes. New refuses any value that
+	// is not one of the constants.
+	Images ImageDialect
 }
 
 // New validates cfg and returns a Client. It returns an error wrapping
 // llmkit.ErrInvalidRequest for a Secret that is empty, whitespace-only, or
 // whitespace-padded, an empty Model, a Retry.Jitter outside [0, 1] (NaN
-// included), and a BaseURL that is not an http or https URL with a host
-// or that contains '#'. Construction is hermetic: no network I/O, no
+// included), an Images value that is not an [ImageDialect] constant, and a
+// BaseURL that is not an http or https URL with a host or that contains '#'. Construction is hermetic: no network I/O, no
 // environment lookups, and no error echoes Secret or any part of BaseURL.
 func New(cfg Config) (*Client, error) {
 	// Refuse a Secret that is empty or differs from strings.TrimSpace —
@@ -91,6 +152,9 @@ func New(cfg Config) (*Client, error) {
 	}
 	if !(cfg.Retry.Jitter >= 0 && cfg.Retry.Jitter <= 1) {
 		return nil, fmt.Errorf("systemone: retry jitter must be in [0, 1], got %v: %w", cfg.Retry.Jitter, llmkit.ErrInvalidRequest)
+	}
+	if cfg.Images > ImagesArray {
+		return nil, fmt.Errorf("systemone: Config.Images must be ImagesNone, ImagesAssets or ImagesArray, got %v: %w", cfg.Images, llmkit.ErrInvalidRequest)
 	}
 	base := cfg.BaseURL
 	if base == "" {
@@ -106,6 +170,8 @@ func New(cfg Config) (*Client, error) {
 		endpoint: adapter.JoinEndpoint(root, systemOnePath),
 		client:   cfg.httpClient(),
 		retry:    cfg.retryPolicy(),
+		images:   cfg.Images,
+		support:  cfg.Images.support(),
 	}, nil
 }
 
@@ -118,6 +184,8 @@ type Client struct {
 	endpoint *url.URL // BaseURL joined with systemOnePath; never mutated
 	client   *http.Client
 	retry    retry.Config
+	images   ImageDialect
+	support  decide.ImageSupport // images.support(); never mutated
 }
 
 // httpClient returns the injected client as-is, or a plain client with no

@@ -88,6 +88,12 @@ func replayDecideFixture(t *testing.T, f *livetest.DecideFixture) {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
+		const imagesHeader = "TypeSafe-Danger-Zone-Images"
+		if got, want := r.Header.Get(imagesHeader), ex.Request.Headers[strings.ToLower(imagesHeader)]; got != want {
+			t.Errorf("replay step %d: %s = %q, fixture recorded %q", i+1, imagesHeader, got, want)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Errorf("replay step %d: read request body: %v", i+1, err)
@@ -114,11 +120,17 @@ func replayDecideFixture(t *testing.T, f *livetest.DecideFixture) {
 	}))
 	defer srv.Close()
 
+	dialect := map[string]systemone.ImageDialect{"": systemone.ImagesNone, "assets": systemone.ImagesAssets, "array": systemone.ImagesArray}
+	d, ok := dialect[f.ImageDialect]
+	if !ok {
+		t.Fatalf("fixture records unknown image dialect %q", f.ImageDialect)
+	}
 	cl, err := systemone.New(systemone.Config{
 		Secret:     "llmkit-replay-placeholder",
 		Model:      f.Model,
 		BaseURL:    srv.URL,
 		HTTPClient: srv.Client(),
+		Images:     d,
 	})
 	if err != nil {
 		t.Fatalf("systemone.New: %v", err)
