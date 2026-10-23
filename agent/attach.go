@@ -24,7 +24,7 @@ import (
 // kinds a user turn may carry and return an error wrapping
 // [llmkit.ErrInvalidRequest] before any wire call.
 // [llmkit.Capabilities].Images and Documents are advisory: no adapter reads
-// them, so check them before you attach.
+// them, and every shipped profile reports true.
 func Attach(blocks ...llmkit.Block) RunOption {
 	return func(c *runConfig) {
 		c.attach = append(c.attach, blocks...)

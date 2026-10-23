@@ -49,8 +49,9 @@ type openaiAdapter struct {
 //
 // Compatible selects the openai-compatible profile: conservative capability
 // defaults (no parallel tool calls, no caching, StructuredOutput=false),
-// boolean downgrades for object-valued additionalProperties, and the
-// "openai-compatible" provider label on errors.
+// boolean downgrades for object-valued additionalProperties, the
+// "openai-compatible" provider label on errors, and no media-type check on
+// image or document blocks (the host decides).
 //
 // Capabilities, when non-nil, receives the selected profile and returns the
 // effective one, applied once at construction. Flip a single field in a

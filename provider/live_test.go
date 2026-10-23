@@ -743,8 +743,8 @@ func caseToolChoice(t *testing.T, lc *liveClient) {
 const liveDocNonce = "QUOKKA7319"
 
 // documentMaxTokens leaves room for the model to finish thinking before it
-// answers: live runs have spent over 1400 tokens thinking on this case, and
-// at the default cap the thought can consume the whole budget.
+// answers: observed live runs spent up to 1456 tokens thinking on this case,
+// and at the default cap the thought can consume the whole budget.
 const documentMaxTokens = 4096
 
 // imageMaxTokens leaves room for the model to finish thinking before it names
@@ -1053,8 +1053,8 @@ func tinyPNG() []byte {
 	return b
 }
 
-// solidPNG encodes a w x h PNG filled with c. The encoder is deterministic, so
-// the bytes are identical run to run and the recorded fixture stays stable.
+// solidPNG encodes a w x h PNG filled with c. The bytes are stable for one Go
+// toolchain; another toolchain's image/png or zlib output can differ.
 func solidPNG(w, h int, c color.RGBA) []byte {
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
 	draw.Draw(img, img.Bounds(), image.NewUniform(c), image.Point{}, draw.Src)

@@ -747,14 +747,14 @@ type Capabilities struct {
 	// the wire call (auto stays allowed — dropping an explicit "none" would
 	// let the model call tools the caller tried to forbid).
 	ToolChoice bool
-	// Advisory: whether BlockImage content is sent on the wire; no adapter
-	// reads it — image blocks are passed through to providers that accept
-	// them (conservatively false profiles on some endpoints still carry
-	// vision models).
+	// Advisory: no adapter reads it. Every table entry and fallback profile
+	// reports true, and per-model modality is not tracked, so text-only
+	// models report true too. Image blocks are sent whatever it says; the
+	// provider decides, except where an adapter refuses the media type.
 	Images bool
-	// Advisory: whether BlockDocument content is sent on the wire; no
-	// adapter reads it — document blocks are passed through to providers
-	// that accept them.
+	// Advisory: no adapter reads it; every profile reports true, as for
+	// Images. Document blocks are sent whatever it says, subject to the
+	// block and media-type refusals; the provider decides the rest.
 	Documents bool
 	// Dropped silently when false: the effective profile gates
 	// Request.StopSequences off the wire. A caller-pinned override that
