@@ -141,6 +141,13 @@ type Config struct {
 // BaseURL that is not an http or https URL with a host or that contains '#'. Construction is hermetic: no network I/O, no
 // environment lookups, and no error echoes Secret or any part of BaseURL.
 func New(cfg Config) (*Client, error) {
+	return newClient(cfg, systemOnePath)
+}
+
+// newClient is New with the endpoint path appended to BaseURL supplied by
+// the caller: New passes systemOnePath, [NewWorkersAI] its account route.
+// Every Config rule is checked here, once.
+func newClient(cfg Config, path string) (*Client, error) {
 	// Refuse a Secret that is empty or differs from strings.TrimSpace —
 	// the same refusal provider.New applies to Spec.Secret. The error
 	// never echoes Secret.
@@ -167,7 +174,7 @@ func New(cfg Config) (*Client, error) {
 	return &Client{
 		apiKey:   cfg.Secret,
 		model:    cfg.Model,
-		endpoint: adapter.JoinEndpoint(root, systemOnePath),
+		endpoint: adapter.JoinEndpoint(root, path),
 		client:   cfg.httpClient(),
 		retry:    cfg.retryPolicy(),
 		images:   cfg.Images,
@@ -186,6 +193,9 @@ type Client struct {
 	retry    retry.Config
 	images   ImageDialect
 	support  decide.ImageSupport // images.support(); never mutated
+	// cloudflare is true for a Client built by [NewWorkersAI]: responses
+	// arrive in the Cloudflare envelope and errors are read from it.
+	cloudflare bool
 }
 
 // httpClient returns the injected client as-is, or a plain client with no

@@ -74,6 +74,9 @@ type Lane struct {
 	// DefaultKey fills Key when <prefix>_API_KEY is unset, making the key
 	// optional (a local server needs no auth).
 	DefaultKey string
+	// RequireAccountID makes <prefix>_ACCOUNT_ID required (the workersai
+	// lane's Cloudflare account).
+	RequireAccountID bool
 }
 
 var lanes = []Lane{
@@ -105,6 +108,16 @@ var KevLane = Lane{
 	RequireBaseURL: true,
 }
 
+// WorkersAILane is the Cloudflare Workers AI decision lane (the System One
+// models behind systemone.NewWorkersAI). It goes through
+// ResolveDecideWorkersAI and Session.DecideClient.
+var WorkersAILane = Lane{
+	Name:             "workersai",
+	EnvPrefix:        "LLMKIT_LIVE_WORKERSAI",
+	DefaultModel:     "clef-flash",
+	RequireAccountID: true,
+}
+
 // All returns every lane in stable declaration order.
 func All() []Lane { return append([]Lane(nil), lanes...) }
 
@@ -127,6 +140,9 @@ type Session struct {
 	// lane (an arbitrary endpoint has no default) and the kev lane,
 	// optional for lanes with OptionalBaseURL, empty for the rest.
 	BaseURL string
+	// AccountID is the Cloudflare account id, set only for lanes with
+	// RequireAccountID.
+	AccountID string
 }
 
 // resolve reads the lane's environment. The returned slice names each missing
@@ -156,6 +172,12 @@ func (l Lane) resolve() (Session, []string) {
 		}
 	} else if l.OptionalBaseURL {
 		s.BaseURL = os.Getenv(l.EnvPrefix + "_BASE_URL")
+	}
+	if l.RequireAccountID {
+		s.AccountID = os.Getenv(l.EnvPrefix + "_ACCOUNT_ID")
+		if s.AccountID == "" {
+			missing = append(missing, l.EnvPrefix+"_ACCOUNT_ID")
+		}
 	}
 	return s, missing
 }
@@ -196,6 +218,18 @@ func ResolveDecideKev(t testing.TB) *Session {
 	s, missing := KevLane.resolve()
 	if len(missing) > 0 {
 		t.Skipf("live lane %s: skipping — missing %s", KevLane.Name, strings.Join(missing, ", "))
+		return nil
+	}
+	return &s
+}
+
+// ResolveDecideWorkersAI resolves WorkersAILane from the environment,
+// skipping the test naming each missing variable: the API key and the
+// account id.
+func ResolveDecideWorkersAI(t testing.TB) *Session {
+	s, missing := WorkersAILane.resolve()
+	if len(missing) > 0 {
+		t.Skipf("live lane %s: skipping — missing %s", WorkersAILane.Name, strings.Join(missing, ", "))
 		return nil
 	}
 	return &s
@@ -321,10 +355,12 @@ func (s *Session) Client(ctx context.Context, t testing.TB, tr *Transport, mutat
 	return cl
 }
 
-// DecideClient builds a decision lane's client (typesafe or kev) through
-// systemone.New, with the recording transport injected via Config.HTTPClient,
-// and wraps it in decide.Observe with the run-wide token tally as the
-// observer. mutate, when non-nil, adjusts the Config last.
+// DecideClient builds a decision lane's client (typesafe, kev or workersai)
+// through systemone.New (systemone.NewWorkersAI for a lane with
+// RequireAccountID, which keeps cfg's shared fields and ignores Images),
+// with the recording transport injected via Config.HTTPClient, and wraps it
+// in decide.Observe with the run-wide token tally as the observer. mutate,
+// when non-nil, adjusts the Config last.
 func (s *Session) DecideClient(ctx context.Context, t testing.TB, tr *Transport, mutate func(*systemone.Config)) decide.Decider {
 	cfg := systemone.Config{
 		Secret:     s.Key,
@@ -335,9 +371,22 @@ func (s *Session) DecideClient(ctx context.Context, t testing.TB, tr *Transport,
 	if mutate != nil {
 		mutate(&cfg)
 	}
-	cl, err := systemone.New(cfg)
+	var cl *systemone.Client
+	var err error
+	if s.Lane.RequireAccountID {
+		cl, err = systemone.NewWorkersAI(systemone.WorkersAIConfig{
+			Secret:     cfg.Secret,
+			AccountID:  s.AccountID,
+			Model:      cfg.Model,
+			BaseURL:    cfg.BaseURL,
+			HTTPClient: cfg.HTTPClient,
+			Retry:      cfg.Retry,
+		})
+	} else {
+		cl, err = systemone.New(cfg)
+	}
 	if err != nil {
-		t.Fatalf("livetest: systemone.New for lane %s: %v", s.Lane.Name, err)
+		t.Fatalf("livetest: building the %s client: %v", s.Lane.Name, err)
 		return nil
 	}
 	return decide.Observe(cl, DefaultTally())

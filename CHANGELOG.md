@@ -326,6 +326,24 @@ entry below is marked.
   `ErrInvalidRequest`. Pixels are not checked client-side; TypeSafe's limits
   are in `docs/decide.md`. Live case `typesafe/image_placement` asks about a
   red and a blue photo; every answer flips with the photo.
+- `decide/systemone`: `NewWorkersAI(WorkersAIConfig{Secret, AccountID, Model,
+  BaseURL, HTTPClient, Retry})` returns a `*Client` for Cloudflare Workers AI
+  (Clef, Clef Flash, Clef Omni). It POSTs the System One body, images always
+  in the `ImagesArray` shape and no danger-zone header, to
+  `<BaseURL>/client/v4/accounts/<AccountID>/ai/run/@cf/cloudflare/<Model>`
+  (default `https://api.cloudflare.com`) and parses the `result` of
+  Cloudflare's `{result, success, errors}` envelope. A 200 with
+  `success: false` or no `result` is an `ErrServer`; a non-200 maps to a Kind
+  by status and its Message lists `code <n>: <message>` for each error.
+  `NewWorkersAI` refuses with `ErrInvalidRequest`, hermetically, an
+  `AccountID` that is not 32 lowercase hex characters and a `Model` outside
+  `^[a-z0-9][a-z0-9.-]*$`; no error echoes the `Secret` or the `AccountID`.
+  Cloudflare's limits (4 images, 4 MiB each, 8 MiB in all) are in
+  `docs/decide.md` and not checked client-side. Live lane `workersai`
+  (`LLMKIT_LIVE_WORKERSAI_API_KEY`, `LLMKIT_LIVE_WORKERSAI_ACCOUNT_ID`,
+  `LLMKIT_LIVE_WORKERSAI_MODEL`, default `clef-flash`) with case
+  `image_labels`: a colour-swapped pair of Asks about `[image 1]` and
+  `[image 2]`. CI does not run it.
 
 ### Changed
 

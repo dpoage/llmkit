@@ -48,12 +48,11 @@ type answerBody struct {
 	Confidence    float64            `json:"confidence"`
 }
 
-// Ask sends state and questions to <BaseURL>/v1/systemone as one logical
+// Ask sends state and questions to the Client's endpoint as one logical
 // request, retrying transient failures; ctx bounds the call. Every error is
 // an *llmkit.APIError with Provider "systemone", except the caller's
 // cancellation or deadline, which chains the context error and is never
-// retried. The package doc has the status mapping. Ask emits no event; wrap
-// the Client in [decide.Observe] to record it.
+// retried. Ask emits no event; wrap the Client in [decide.Observe] for one.
 func (c *Client) Ask(ctx context.Context, state any, questions decide.Questions) (decide.Response, error) {
 	req, err := decide.Normalize(state, questions, c.support)
 	if err != nil {
@@ -144,6 +143,9 @@ func (c *Client) attempt(ctx context.Context, redact *adapter.Redactor, body []b
 
 	if httpResp.StatusCode != http.StatusOK {
 		msg := string(respBody)
+		if c.cloudflare {
+			msg = cloudflareErrorMessage(respBody)
+		}
 		if strings.TrimSpace(msg) == "" {
 			msg = fmt.Sprintf("HTTP %d", httpResp.StatusCode)
 		}
@@ -155,6 +157,13 @@ func (c *Client) attempt(ctx context.Context, redact *adapter.Redactor, body []b
 			Header:  httpResp.Header,
 			Redact:  redact,
 		})
+	}
+	if c.cloudflare {
+		result, err := unwrapResult(httpResp.StatusCode, respBody)
+		if err != nil {
+			return decide.Response{}, err
+		}
+		respBody = result
 	}
 	return parseResponse(httpResp.StatusCode, respBody, questions)
 }

@@ -37,6 +37,9 @@ works behind `Config.BaseURL`. The default host is TypeSafe at
 | Auth | `Authorization: Bearer` key. | A local `kev.serve` needs no auth, but `systemone.New` still requires a non-empty `Secret`. |
 | Images | `Config.Images = ImagesAssets` (Jev 1.13+); see [Images on System One](#images-on-system-one). | Dropped silently; leave `Config.Images` unset so an image is refused before the request. |
 
+Cloudflare Workers AI serves the Clef models at a different route and in
+a different envelope; see [Workers AI](#workers-ai).
+
 ## Constructing a client
 
 ```go
@@ -383,6 +386,7 @@ an image shape they do not read without a word, so the client will not guess.
 |---|---|---|
 | TypeSafe, H2O | `ImagesAssets` | Any placement; `image/png`, `image/jpeg`. |
 | Codiv, SGLang | `ImagesArray` | State only; `image/png`, `image/jpeg`, `image/webp`. |
+| Cloudflare Workers AI | `NewWorkersAI` (always `ImagesArray`) | State only; `image/png`, `image/jpeg`, `image/webp`; 4 images, 4 MiB each, 8 MiB in all. |
 | Kev, OpenRouter, Fireworks | `ImagesNone` (unset) | Nothing: they silently drop images. |
 
 **`ImagesAssets`.** The body gains a top-level `assets` object keyed by each
@@ -408,8 +412,66 @@ no HTTP hit; the error wraps `decide.ErrImageUnsupported` and
 media type is the one the caller set, never sniffed from the bytes. Multipart
 upload is not implemented.
 
-`ImagesArray` has no live lane (no Codiv or SGLang key); hermetic tests pin
-its wire. `ImagesAssets` is run live by `TestLiveDecide/typesafe/image_placement`.
+`ImagesArray` is run live by `TestLiveDecide/workersai/image_labels` on
+Cloudflare Workers AI (next section); hermetic tests pin its wire for the other
+hosts. `ImagesAssets` is run live by `TestLiveDecide/typesafe/image_placement`.
+
+## Workers AI
+
+Cloudflare serves the System One models Clef, Clef Flash and Clef Omni through
+Workers AI. `systemone.NewWorkersAI` builds the same `*systemone.Client` for it:
+
+```go
+client, err := systemone.NewWorkersAI(systemone.WorkersAIConfig{
+	Secret:    os.Getenv("CLOUDFLARE_API_TOKEN"),
+	AccountID: os.Getenv("CLOUDFLARE_ACCOUNT_ID"), // 32 lowercase hex characters
+	Model:     "clef-flash",
+})
+```
+
+| Field | Required | Rule |
+|---|---|---|
+| `Secret` | Yes | The Cloudflare API token, with the same rule as `Config.Secret`. |
+| `AccountID` | Yes | Exactly 32 lowercase hexadecimal characters. Anything else is refused, so the id cannot alter the request path. |
+| `Model` | Yes | The model name under `@cf/cloudflare`, matching `^[a-z0-9][a-z0-9.-]*$`: `clef`, `clef-flash`, `clef-omni`. |
+| `BaseURL` | No | Default `https://api.cloudflare.com`; the same rules as `Config.BaseURL`. |
+| `HTTPClient`, `Retry` | No | As in `Config`. |
+
+`NewWorkersAI` refuses a bad config with `ErrInvalidRequest`, with no network
+I/O, and its errors echo neither the `Secret` nor the `AccountID`. The client
+POSTs the System One body, with `Authorization: Bearer`, to
+`<BaseURL>/client/v4/accounts/<AccountID>/ai/run/@cf/cloudflare/<Model>`. Its
+`Identity` is Provider `systemone` and the `Model` you passed.
+
+**Responses.** Cloudflare wraps the answer: a 200 body is
+`{"result": {model, answers, usage}, "success": true, "errors": [], "messages": []}`,
+and `Ask` parses `result` exactly as it parses a System One body. A 200 whose
+`success` is `false`, or whose `result` is `null` or missing, is an `ErrServer`
+naming Cloudflare's errors (retried like any contract violation). A non-200
+body is `{"result": null, "success": false, "errors": [{"code", "message"}]}`.
+The `Kind` comes from the HTTP status, by the table in [Errors](#errors), and
+the `Message` lists each error as `code <n>: <message>` (a body that is not
+that envelope is the `Message` as is), with the `Secret` masked and the usual
+200-byte cap. Codes seen:
+
+| HTTP status | Cloudflare code | Kind |
+|---|---|---|
+| 401 | (any) | `ErrAuth` |
+| 429 | 3036 | `ErrRateLimited` |
+| 400 | 5007 | `ErrInvalidRequest` |
+
+**Images.** The client always uses the `ImagesArray` shape and sends no
+`TypeSafe-Danger-Zone-Images` header. Cloudflare reads the `images` array and
+prepends it to the state; the state names each image as `[image N]`, N from 1
+in order of first occurrence. Ask about an image by that label in the question
+text: `Is [image 1] a solid red image?`. The state only: an image in an
+instruction or a criterion is refused before the request. PNG, JPEG and WebP;
+at most 4 images, 4 MiB each and 8 MiB in all. The client checks none of those
+limits, so a violation comes back as a host 4xx.
+
+**Free tier.** Workers AI has a free allocation (10,000 neurons a day when
+this was written) that covers the live lane's handful of Clef image calls.
+Cloudflare sets the allocation and may change it.
 
 ## Reading the answers
 
@@ -853,6 +915,11 @@ the package prints one `LIVE_TOKENS` total line at exit. Add `-update` to
 re-record the fixtures under `decide/systemone/testdata/`; treat that as a deliberate
 local operation. The lane cases and the skip rules follow
 [testing](testing.md).
+
+The Workers AI lane (`workersai`) reads `LLMKIT_LIVE_WORKERSAI_API_KEY` and
+`LLMKIT_LIVE_WORKERSAI_ACCOUNT_ID` (both required) and
+`LLMKIT_LIVE_WORKERSAI_MODEL` (default `clef-flash`); see
+[Workers AI](#workers-ai).
 
 The recorded fixtures replay hermetically: `decide/systemone/fixture_replay_test.go`
 runs in plain `go test ./...` with no tag, no network, and no credentials.

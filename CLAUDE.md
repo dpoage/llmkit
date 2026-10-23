@@ -76,6 +76,8 @@ export LLMKIT_LIVE_COMPAT_API_KEY="$MINIMAX_API_KEY"
 export LLMKIT_LIVE_COMPAT_BASE_URL=https://api.minimax.io/v1
 export LLMKIT_LIVE_COMPAT_MODEL=MiniMax-M3
 export LLMKIT_LIVE_COMPAT_CAPS=parallel_tool_calls,prompt_caching
+export LLMKIT_LIVE_WORKERSAI_API_KEY="$WORKERS_API_KEY"
+export LLMKIT_LIVE_WORKERSAI_ACCOUNT_ID="$WORKERS_ACCOUNT_ID"
 go test -tags live -count=1 ./provider/ ./agent/ ./examples/... -v
 ```
 

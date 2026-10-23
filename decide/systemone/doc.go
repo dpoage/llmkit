@@ -57,6 +57,21 @@
 // dialect. A media type or placement the dialect does not carry is refused
 // by [decide.Normalize] with the image's path, before any request.
 //
+// # Workers AI
+//
+// [NewWorkersAI] builds a [Client] for Cloudflare's hosted System One
+// models ("clef", "clef-flash", "clef-omni"). It POSTs the same body, with
+// images always in the [ImagesArray] shape and no danger-zone header, to
+// <BaseURL>/client/v4/accounts/<AccountID>/ai/run/@cf/cloudflare/<Model>.
+// Cloudflare wraps the answer: a 200 body is {"result": <System One
+// response>, "success": true, "errors": []}, and Ask parses "result". A 200
+// with "success": false, or a null or missing "result", is an ErrServer
+// naming the errors. A non-200 status maps to a Kind as in Errors, and its
+// Message lists each entry of the envelope's "errors" as "code <n>:
+// <message>"; a body that is not the envelope is the Message as is.
+// Cloudflare caps a request at 4 images, 4 MiB each and 8 MiB in all; the
+// package checks none of it.
+//
 // # Errors
 //
 // Every error from [Client.Ask] is an [*llmkit.APIError] with Provider
@@ -199,6 +214,12 @@
 // path: "https://gw.example/x?api-version=1" requests
 // "/x/v1/systemone?api-version=1". The path is not cleaned: "//" and dot
 // segments in BaseURL are not collapsed or resolved.
+//
+// [NewWorkersAI] applies the same Secret, Retry and BaseURL rules, and
+// also refuses an AccountID that is not exactly 32 lowercase hexadecimal
+// characters and a Model that does not match ^[a-z0-9][a-z0-9.-]*$, so
+// neither can alter the request path. Its errors echo neither the Secret
+// nor the AccountID.
 //
 // New performs no network I/O and no environment lookups, so construction
 // is hermetic.

@@ -69,6 +69,7 @@ A keyless lane skips with a message naming the lane and its missing variables. E
 | `google` | `LLMKIT_LIVE_GOOGLE_API_KEY` | `LLMKIT_LIVE_GOOGLE_MODEL` | `gemini-2.5-flash-lite` |
 | `typesafe` | `LLMKIT_LIVE_TYPESAFE_API_KEY` | `LLMKIT_LIVE_TYPESAFE_MODEL`, `LLMKIT_LIVE_TYPESAFE_BASE_URL` | `jev-latest` |
 | `kev` | `LLMKIT_LIVE_KEV_BASE_URL` | `LLMKIT_LIVE_KEV_MODEL`, `LLMKIT_LIVE_KEV_API_KEY` (defaults to `local`) | `kev-latest` |
+| `workersai` | `LLMKIT_LIVE_WORKERSAI_API_KEY`, `LLMKIT_LIVE_WORKERSAI_ACCOUNT_ID` | `LLMKIT_LIVE_WORKERSAI_MODEL` | `clef-flash` |
 
 ### Kev lane
 
@@ -93,6 +94,16 @@ LLMKIT_LIVE_KEV_BASE_URL=http://127.0.0.1:8009 go test -tags live -count=1 -run 
 The Kev lane runs `mixed_questions`, `structured_state`, and `usage_recorded`. It skips `error_bad_key` because the server has no auth and `error_bad_model` because it serves any model alias. It asserts that the response echoes the requested alias, where the typesafe lane only requires a non-empty model id. A lane without its required variable skips naming it, so `TestLiveDecide/kev` skips when `LLMKIT_LIVE_KEV_BASE_URL` is unset. The lane records no fixtures under `-update`.
 
 CI does not run the Kev lane. `live.yml` sets no `LLMKIT_LIVE_KEV_BASE_URL`, so the lane skips there. `decide/systemone/kev_test.go` is its hermetic counterpart: it serves the README's response body and a body captured from a local Kev-0.8B (`testdata/kev_ticket.json`) to `systemone.Ask` in plain `go test ./...`.
+
+### Workers AI lane
+
+The `workersai` lane runs the `decide/systemone` live cases against Cloudflare Workers AI through `systemone.NewWorkersAI`. It needs a Cloudflare API token (`LLMKIT_LIVE_WORKERSAI_API_KEY`) and the account id (`LLMKIT_LIVE_WORKERSAI_ACCOUNT_ID`, 32 lowercase hex characters); a missing one skips the lane, naming it. Run it:
+
+```bash
+LLMKIT_LIVE_WORKERSAI_API_KEY=... LLMKIT_LIVE_WORKERSAI_ACCOUNT_ID=... go test -tags live -count=1 -run 'TestLiveDecide/workersai' ./decide/systemone/ -v
+```
+
+The lane runs `mixed_questions`, `structured_state`, and `image_labels`. `image_labels` sends a colour-swapped pair of Asks (a red and a blue 280 px PNG, then the two swapped), asks `Is [image 1] a solid red image?` and `Is [image 2] a solid red image?`, and asserts each belief falls on the side of 0.5 its image's colour implies. A host that ignores the images, or reads the wrong `[image N]`, fails it. The lane records no fixtures under `-update`, and CI does not run it: `live.yml` sets no Workers AI secret, so it skips there. The hermetic counterpart is `decide/systemone/workersai_test.go`.
 
 ### CI workflow
 

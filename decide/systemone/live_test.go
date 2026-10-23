@@ -1,8 +1,9 @@
 //go:build live
 
 // Live acceptance suite for the systemone package: the System One wire
-// through systemone.New, against two lanes. The typesafe lane is TypeSafe's
-// Jev; the kev lane is a local Kev server. Every case asserts structural
+// through systemone.New, against three lanes. The typesafe lane is TypeSafe's
+// Jev; the kev lane is a local Kev server; the workersai lane is Cloudflare
+// Workers AI through systemone.NewWorkersAI. Every case asserts structural
 // invariants only (ranges, argmax consistency, legend alignment, usage
 // accounting); exact probabilities are the backend's business. Fixtures are
 // recorded for the typesafe lane only, under -update, into
@@ -17,6 +18,9 @@
 //	LLMKIT_LIVE_KEV_BASE_URL       (required for kev, e.g. http://127.0.0.1:8009)
 //	LLMKIT_LIVE_KEV_MODEL          (optional, default kev-latest)
 //	LLMKIT_LIVE_KEV_API_KEY        (optional, default local)
+//	LLMKIT_LIVE_WORKERSAI_API_KEY    (required for workersai)
+//	LLMKIT_LIVE_WORKERSAI_ACCOUNT_ID (required for workersai)
+//	LLMKIT_LIVE_WORKERSAI_MODEL      (optional, default clef-flash)
 //
 // A lane missing a required variable skips at the lane level, naming it.
 // TypeSafe bills input tokens only; the whole lane costs a handful. Run with
@@ -221,6 +225,17 @@ var liveLanes = []liveLane{
 			{"mixed_questions", caseMixedQuestions},
 			{"structured_state", caseStructuredState},
 			{"usage_recorded", caseUsageRecorded},
+		},
+	},
+	{
+		// No error_bad_key or error_bad_model: both are hermetic envelope
+		// cases; no fixtures are recorded for this lane.
+		name:    livetest.WorkersAILane.Name,
+		resolve: livetest.ResolveDecideWorkersAI,
+		cases: []liveCase{
+			{"mixed_questions", caseMixedQuestions},
+			{"structured_state", caseStructuredState},
+			{"image_labels", caseImageLabels},
 		},
 	},
 }
@@ -503,5 +518,44 @@ func caseImagePlacement(t *testing.T, sess *livetest.Session) {
 	}
 	if got := r2.Choices["which"].Choice; got != "blue" {
 		t.Errorf("blue photo: which = %q, want blue", got)
+	}
+}
+
+// caseImageLabels asks a colour-swapped pair of Asks about both images of a
+// state by their [image N] labels. Within each Ask the two images differ in
+// colour, and the pair swaps their positions, so a host that ignores the
+// images or the labels cannot pass.
+func caseImageLabels(t *testing.T, sess *livetest.Session) {
+	red, blue := color.RGBA{R: 220, A: 255}, color.RGBA{B: 220, A: 255}
+	questions := func() decide.Questions {
+		return decide.Questions{
+			"first_red":  decide.Noul{Instructions: "Is [image 1] a solid red image?"},
+			"second_red": decide.Noul{Instructions: "Is [image 2] a solid red image?"},
+		}
+	}
+	ask := func(name string, left, right llmkit.Block) decide.Response {
+		dc := newDecideCase(t, sess, name)
+		// Keys marshal sorted: "left" is [image 1], "right" is [image 2].
+		resp, err := dc.ask(map[string]any{"left": left, "right": right}, questions())
+		if err != nil {
+			t.Fatalf("%s: ask: %v", name, err)
+		}
+		return resp
+	}
+	r1 := ask("image_labels_red_blue", solidPNG(t, 280, 280, red), solidPNG(t, 280, 280, blue))
+	r2 := ask("image_labels_blue_red", solidPNG(t, 280, 280, blue), solidPNG(t, 280, 280, red))
+	t.Logf("ask 1 (left red, right blue): first_red=%.3f second_red=%.3f", r1.Nouls["first_red"], r1.Nouls["second_red"])
+	t.Logf("ask 2 (left blue, right red): first_red=%.3f second_red=%.3f", r2.Nouls["first_red"], r2.Nouls["second_red"])
+	if got := r1.Nouls["first_red"]; got <= 0.5 {
+		t.Errorf("ask 1: first_red = %.3f, want > 0.5 (image 1 is red)", got)
+	}
+	if got := r1.Nouls["second_red"]; got >= 0.5 {
+		t.Errorf("ask 1: second_red = %.3f, want < 0.5 (image 2 is blue)", got)
+	}
+	if got := r2.Nouls["first_red"]; got >= 0.5 {
+		t.Errorf("ask 2: first_red = %.3f, want < 0.5 (image 1 is blue)", got)
+	}
+	if got := r2.Nouls["second_red"]; got <= 0.5 {
+		t.Errorf("ask 2: second_red = %.3f, want > 0.5 (image 2 is red)", got)
 	}
 }
