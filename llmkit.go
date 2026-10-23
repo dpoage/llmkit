@@ -749,8 +749,9 @@ type Capabilities struct {
 	ToolChoice bool
 	// Advisory: no adapter reads it. Every table entry and fallback profile
 	// reports true, and per-model modality is not tracked, so text-only
-	// models report true too. Image blocks are sent whatever it says; the
-	// provider decides, except where an adapter refuses the media type.
+	// models report true too. Image blocks are sent whatever it says,
+	// subject to the block and media-type refusals; the provider decides
+	// the rest.
 	Images bool
 	// Advisory: no adapter reads it; every profile reports true, as for
 	// Images. Document blocks are sent whatever it says, subject to the
