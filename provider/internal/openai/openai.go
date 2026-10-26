@@ -44,8 +44,7 @@ type openaiAdapter struct {
 	// checkMIME refuses inline or data: URL media outside the first-party sets;
 	// off for openai-compatible, where the host decides.
 	checkMIME bool
-	// redact masks the configured credential and BaseURL password in every
-	// error the adapter returns.
+	// redact masks the credential in every error the adapter builds.
 	redact *adapter.Redactor
 }
 

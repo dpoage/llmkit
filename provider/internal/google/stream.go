@@ -40,7 +40,9 @@ func (g *googleAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(
 	sawFinish := false
 	var fnErr error
 	// The iterator is pulled so that a panic inside genai is recovered per
-	// next() call, never around the callback absorbChunk runs.
+	// next() call, never around the callback absorbChunk runs. The request
+	// and a non-2xx body are read before the first next(), so a panic
+	// there propagates.
 	next, stop := iter.Pull2(g.client.Models.GenerateContentStream(ctx, g.model, contents, cfg))
 	defer stop()
 	for {
@@ -84,7 +86,7 @@ func (g *googleAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(
 }
 
 // pull returns the next chunk of the genai stream, its error normalized.
-// A panic after a response arrived becomes the error panicError builds.
+// A panic while genai reads the 2xx stream becomes the error panicError builds.
 func (g *googleAdapter) pull(ctx context.Context, next func() (*genai.GenerateContentResponse, error, bool)) (chunk *genai.GenerateContentResponse, ok bool, err error) {
 	returned := false
 	defer func() {

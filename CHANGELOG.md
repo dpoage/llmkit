@@ -353,13 +353,12 @@ entry below is marked.
   2020-12 meta keys through to the wire unchanged on Anthropic, OpenAI,
   OpenAI-compatible, and Google: `$schema`, `$id`, `$defs`, and `$ref`,
   recursive references included, on the tool carrier and the
-  `response_format`/`responseJsonSchema`/synthetic-tool carrier alike. The
-  two pinned rewrites are unchanged and remain the only ones: Anthropic
-  forces the root `"type"` to `"object"`, and OpenAI-compatible rewrites an
-  object-valued `additionalProperties` to `true`. Hermetically pinned by
-  `provider/schema_passthrough_test.go`; live case `schema_meta_keys` runs a
-  tool schema with `$schema`, `$id`, and a recursive `$defs`/`$ref` against
-  the compat lane. (llmkit-rli.1.3)
+  `response_format`/`responseJsonSchema`/synthetic-tool carrier alike. No
+  adapter rewrites these keys; the rewrites that exist for other keywords,
+  such as Anthropic forcing the root `"type"` to `"object"`, are unchanged.
+  Hermetically pinned by `provider/schema_passthrough_test.go`; live case
+  `schema_meta_keys` runs a tool schema with `$schema`, `$id`, and a
+  recursive `$defs`/`$ref` on every lane with credentials. (llmkit-rli.1.3)
 
 ### Changed
 
@@ -546,9 +545,9 @@ entry below is marked.
 
 - **Breaking:** `decide`, `decide/systemone`, `embed`: a `Secret` shorter
   than 8 bytes, as given, is no longer masked anywhere: not as sent, not
-  in its JSON-escaped, Go-quoted or U+FFFD forms. Documented placeholder
-  secrets ("k", "ollama", "x") no longer mask llmkit's own text,
-  hostnames, or cut an error chain over a stray character. The `BaseURL`
+  in its JSON-escaped, Go-quoted or U+FFFD forms. A documented placeholder
+  secret such as "ollama" no longer masks llmkit's own text or hostnames,
+  and no longer cuts an error chain over a stray character. The `BaseURL`
   password and its base64 Basic pair are still masked at any length, and
   the URL-userinfo rule is unchanged. (llmkit-ant)
 
@@ -590,37 +589,43 @@ entry below is marked.
   asked set. It now returns `ErrServer` with `StatusCode` 200 and retries
   it like any `ErrServer`.
 - `provider`: the Anthropic, OpenAI, OpenAI-compatible and Google adapters
-  now mask the configured `Secret` and the `BaseURL` password in every error
+  now mask the configured `Secret` and the `BaseURL` password in the errors
   they return and in the `Err` of observer events. Before, a vendor 4xx, 5xx
   or in-band error body that echoed the API key, a `BaseURL` quoted in a
   transport, cancellation or refusal error, and a `BaseURL` password quoted
   in the request URL reached `APIError.Message`, the `Unwrap` chain and the
-  observer unchanged. The mask is `***` and covers the value as sent,
-  JSON-escaped and Go-quoted. It runs before the 200-byte `Message` cap, on
-  `Complete` and on `Stream`. A `Secret` under 8 bytes is a placeholder and
-  is not masked; the password is masked at any length. Accepted risks: when
-  masking changes an error, the chain is cut, so `errors.As` no longer finds
-  the vendor SDK error type or a `net.Error`; `Kind`, `StatusCode`,
-  `RetryAfter`, `HasRetryAfter` and `Provider` stay, and `errors.Is` still
-  matches the sentinels and the context errors. An error with nothing to mask
-  is unchanged. Observer `Err` text that was persisted before this version
-  may hold a key a vendor echoed: rotate any key a vendor echoed. The error a
-  `Stream` callback returns is never masked. See `docs/providers.md`
-  (llmkit-ant).
+  observer unchanged. The mask is `***`, or three copies of another byte
+  when a value holds `*`. It covers the value as sent, JSON-escaped and
+  Go-quoted, and runs before the 200-byte `Message` cap, on `Complete` and
+  on `Stream`. The userinfo of any `scheme://user[:password]@` URL in an
+  error text is masked too, whether or not it is a configured credential. A
+  `Secret` under 8 bytes is a placeholder and is not masked; the password is
+  masked at any length. Accepted risks: when masking changes an error, the
+  chain is cut, so `errors.As` no longer finds the vendor SDK error type or
+  the `*net.OpError` of a failed dial; `Kind`, `StatusCode`, `RetryAfter`,
+  `HasRetryAfter` and `Provider` stay, and `errors.Is` still matches the
+  sentinels and the context errors. An error whose text holds no credential
+  and no URL userinfo is unchanged. Observer `Err` text that was persisted
+  before this version may hold a key a vendor echoed: rotate any key a
+  vendor echoed. The error a `Stream` callback returns is never masked. See
+  `docs/providers.md` (llmkit-ant).
 - `provider`: the Google adapter no longer panics on a 2xx body the genai SDK
   cannot decode. A body of `null` on `Complete`, or one with malformed
   candidates (`{"candidates":[null]}`, `{"candidates":[1]}`,
   `{"candidates":"x"}`, `{"candidates":{}}`, a `null` before a valid
   candidate) on `Complete` and `Stream`, panicked inside genai, took down the
   caller's process, and passed the retry stage. The adapter now recovers a
-  panic raised by a genai call (`GenerateContent`, and each step of the
-  `GenerateContentStream` iterator) after a response has arrived, and
-  returns an `*llmkit.APIError` of `Kind` `ErrServer` with the response's
-  status (200); the retry stage retries it. A panic raised before any
-  response, such as one from the `Options.HTTPClient` transport, and a panic
-  raised by a `Stream` callback are not recovered and reach the caller
-  unchanged. Every other body keeps its result. The Anthropic and OpenAI
-  adapters were fixed earlier (llmkit-bk8.1.64).
+  panic that genai raises once the transport has returned a response: in
+  `GenerateContent` on `Complete`, and in each step of the
+  `GenerateContentStream` iterator on `Stream`. It returns an
+  `*llmkit.APIError` at the status the transport returned. Its `Kind`
+  follows that status as for any Google error: `ErrServer` for the 2xx
+  bodies above, which the retry stage retries. A panic before any response,
+  such as one from the `Options.HTTPClient` transport, a `Stream` panic while
+  the request is sent or a non-2xx body is read, and a panic raised by a
+  `Stream` callback are not recovered and reach the caller unchanged. Every
+  other body keeps its result. The Anthropic and OpenAI adapters were fixed
+  earlier (llmkit-bk8.1.64).
 
 ||||||| f4bbf40
 

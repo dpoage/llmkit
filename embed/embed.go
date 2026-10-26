@@ -151,11 +151,11 @@
 // The mask is "***" when neither credential holds '*'. The password is
 // masked as a value at any length, so a short one also masks the same
 // characters elsewhere in the server's and the transport's text; a
-// Secret under 8 bytes is not masked at all. Text
-// llmkit writes itself, such as the "llmkit: ollama error (status 500):"
-// prefix or the context error of a cancelled retry, may still contain
-// text that matches a Secret under 8 bytes, for
-// example its characters. The URL username is not a value: only where
+// Secret under 8 bytes is not masked at all. Text llmkit writes itself,
+// such as the "llmkit: ollama error (status 500):" prefix or the context
+// error of a cancelled retry, is not masked: it can match either
+// credential at any length, for example a password "error". The URL
+// username is not a value: only where
 // it appears as URL userinfo
 // ("scheme://user[:password]@") is it replaced. Redaction happens before
 // the 200-byte cap, and classification reads the unredacted text, so the

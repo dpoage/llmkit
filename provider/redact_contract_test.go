@@ -49,10 +49,6 @@ func rxVisible(o rxOutcome, s string) bool {
 	return rxHolds(strings.Join(rxReachable(o.err), "\n")+strings.Join(o.events, "\n"), []string{s})
 }
 
-// TestRedactContract_SecretFloor: a Secret under 8 bytes is a placeholder
-// and stays visible when a vendor echoes it, with the error chain intact; a
-// Secret of 8 bytes is masked with "***". A BaseURL password is masked at
-// any length.
 func TestRedactContract_SecretFloor(t *testing.T) {
 	const short, long, pass = "ollama7", "ollama78", "zq9"
 	for _, c := range rxClients {
@@ -78,10 +74,6 @@ func TestRedactContract_SecretFloor(t *testing.T) {
 	}
 }
 
-// TestRedactContract_MaskingCutsTheChain: when the Redactor changes an
-// error, Kind, StatusCode, RetryAfter and Provider stay, errors.Is still
-// matches the sentinel (and context.Canceled), and errors.As no longer
-// finds the vendor SDK error.
 func TestRedactContract_MaskingCutsTheChain(t *testing.T) {
 	for _, c := range rxClients {
 		for _, stream := range []bool{false, true} {
@@ -156,8 +148,6 @@ func TestRedactContract_MaskingCutsTheChain(t *testing.T) {
 	}
 }
 
-// TestRedactContract_CallerErrorIsNotMasked: the error a Stream callback
-// returns passes through as the caller built it, key text included.
 func TestRedactContract_CallerErrorIsNotMasked(t *testing.T) {
 	bodies := map[string]string{
 		"anthropic": anthropicTextSSE,
@@ -183,9 +173,6 @@ func TestRedactContract_CallerErrorIsNotMasked(t *testing.T) {
 	}
 }
 
-// TestRedactContract_FormsOfTheSecret: the Secret is masked as sent,
-// JSON-escaped (a vendor echo inside a JSON body), and Go-quoted (net/http
-// quoting a BaseURL that holds it).
 func TestRedactContract_FormsOfTheSecret(t *testing.T) {
 	const secret = `ab"c<d>e-0123456789`
 	inner, _ := json.Marshal(secret)
