@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/dpoage/llmkit"
 )
 
 // viewRows returns the column names of a view and its rows as sorted text.
@@ -108,5 +110,30 @@ func TestViews_RunningRunHasNoStatus(t *testing.T) {
 	}
 	if status.Valid || finished.Valid {
 		t.Fatalf("running run has status %v, finished %v", status, finished)
+	}
+}
+
+func TestViews_OneRowPerStartUsesLastFinalize(t *testing.T) {
+	s, log, path := openStore(t)
+	observeAll(s, allKinds("run-two"))
+	last := newEv("run-two", llmkit.KindFinalize)
+	last.Finalize = &llmkit.FinalizeEvent{Status: llmkit.RunFailed, Finalized: true, Err: "late failure"}
+	s.Observe(t.Context(), last)
+	noErrors(t, log)
+
+	db := openRaw(t, path)
+	var n int
+	if err := db.QueryRow("SELECT count(*) FROM runs WHERE run_id = 'run-two'").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("runs holds %d rows for a run with two Finalize events, want 1", n)
+	}
+	var status, errTx string
+	if err := db.QueryRow("SELECT status, err FROM runs WHERE run_id = 'run-two'").Scan(&status, &errTx); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" || errTx != "late failure" {
+		t.Fatalf("runs reports status %q err %q, want the last Finalize's %q %q", status, errTx, "failed", "late failure")
 	}
 }

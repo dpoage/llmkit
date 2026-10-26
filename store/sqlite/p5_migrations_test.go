@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -185,6 +186,49 @@ func fileDigest(t testing.TB, path string) [32]byte {
 	return sha256.Sum256(b)
 }
 
+// openQuiet converts an Open panic into an error, so the refusal tests below
+// report it and still run their file and lock probes.
+func openQuiet(path string) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("Open panicked: %v", r)
+		}
+	}()
+	s, oerr := sqlite.Open(path, nil)
+	if oerr == nil {
+		_ = s.Close()
+	}
+	return oerr
+}
+
+// beginImmediateSucceeds proves a refused Open left no transaction or
+// connection behind: another connection can take the write lock at once.
+func beginImmediateSucceeds(t testing.TB, path string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(1000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if _, err := db.Exec("BEGIN IMMEDIATE"); err != nil {
+		t.Fatalf("a second connection cannot take the write lock after Open refused: %v", err)
+	}
+	if _, err := db.Exec("ROLLBACK"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func noSidecarFiles(t testing.TB, path string) {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("Open left %d files beside the database, want none", len(entries)-1)
+	}
+}
+
 func TestP5_PendingMigrationsRunInOneTransaction(t *testing.T) {
 	cases := map[string]map[string]string{
 		"third statement of one file fails": {
@@ -230,5 +274,114 @@ func TestP5_MigrationFilesMustBeContiguous(t *testing.T) {
 				t.Fatal("Open created the database before validating the migrations")
 			}
 		})
+	}
+}
+
+func TestP5_NegativeUserVersionRefusedBeforeAnyWrite(t *testing.T) {
+	for _, tc := range []struct {
+		version int
+		wal     bool
+	}{
+		{-1, false},
+		{-1, true},
+		{-2147483648, false},
+		{-2147483648, true},
+	} {
+		t.Run(fmt.Sprintf("v%d/wal=%v", tc.version, tc.wal), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "neg.db")
+			raw := openRaw(t, path)
+			if tc.wal {
+				var mode string
+				if err := raw.QueryRow("PRAGMA journal_mode = WAL").Scan(&mode); err != nil || !strings.EqualFold(mode, "wal") {
+					t.Fatalf("witness must be a WAL file, journal_mode = %q (%v)", mode, err)
+				}
+			}
+			if _, err := raw.Exec("PRAGMA user_version = " + strconv.Itoa(tc.version)); err != nil {
+				t.Fatal(err)
+			}
+			if err := raw.Close(); err != nil {
+				t.Fatal(err)
+			}
+			before := fileDigest(t, path)
+
+			err := openQuiet(path)
+			if err == nil {
+				t.Fatal("Open of a negative-version database succeeded")
+			}
+			if got := err.Error(); !strings.Contains(got, strconv.Itoa(tc.version)) {
+				t.Errorf("error does not name the version %d: %s", tc.version, got)
+			}
+			if errors.Is(err, sqlite.ErrSchemaTooNew) {
+				t.Errorf("negative version reported as too new: %s", err)
+			}
+			if after := fileDigest(t, path); after != before {
+				t.Error("Open modified a refused database")
+			}
+			beginImmediateSucceeds(t, path)
+			noSidecarFiles(t, path)
+		})
+	}
+}
+
+func TestP5_ForeignSchemaAtVersion0Refused(t *testing.T) {
+	for name, ddl := range map[string]string{
+		"a table":                "CREATE TABLE theirs (x)",
+		"a view":                 "CREATE VIEW v AS SELECT 1",
+		"an events-shaped table": "CREATE TABLE events (id INTEGER PRIMARY KEY, payload TEXT)",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "foreign.db")
+			raw := openRaw(t, path)
+			if _, err := raw.Exec(ddl); err != nil {
+				t.Fatal(err)
+			}
+			if err := raw.Close(); err != nil {
+				t.Fatal(err)
+			}
+			before := fileDigest(t, path)
+
+			err := openQuiet(path)
+			if err == nil || !strings.Contains(err.Error(), "user_version 0") {
+				t.Fatalf("Open of a foreign version-0 database: %v, want a refusal naming the problem", err)
+			}
+			if after := fileDigest(t, path); after != before {
+				t.Error("Open modified a refused database")
+			}
+			beginImmediateSucceeds(t, path)
+			noSidecarFiles(t, path)
+		})
+	}
+}
+
+func TestP5_DoubleSlashAbsolutePathOpensTheNamedFile(t *testing.T) {
+	dir := t.TempDir()
+	named := "/" + filepath.Join(dir, "dbl.db")
+	s, err := sqlite.Open(named, nil)
+	if err != nil {
+		t.Fatalf("Open %s: %v", named, err)
+	}
+	s.Observe(context.Background(), startEvent("run-dbl"))
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if len(names) != 1 || names[0] != "dbl.db" {
+		t.Fatalf("Open created %v, want only dbl.db", names)
+	}
+	s2, err := sqlite.Open(named, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s2.Close() }()
+	got, err := s2.Events(context.Background(), "run-dbl")
+	if err != nil || len(got) != 1 {
+		t.Fatalf("Events after re-Open: %d events, err %v", len(got), err)
 	}
 }

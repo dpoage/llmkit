@@ -62,7 +62,9 @@ type Store struct {
 // lock, so it may call back into the store.
 //
 // Open fails with an error wrapping [ErrSchemaTooNew], leaving the file
-// untouched, when a newer version of this package wrote it.
+// untouched, when a newer version of this package wrote it. A negative schema
+// version, or a version-0 database that already holds tables or views, is
+// refused the same way: an error, before any write to the file.
 func Open(path string, onErr func(error)) (*Store, error) {
 	return openFS(path, onErr, migrationsFS())
 }
@@ -113,6 +115,18 @@ func (s *Store) init(ctx context.Context, ms []migration) error {
 	if v > latest {
 		return tooNew(v, latest)
 	}
+	if v < 0 {
+		return negativeVersion(v)
+	}
+	if v == 0 {
+		empty, err := schemaEmpty(ctx, s.w)
+		if err != nil {
+			return fmt.Errorf("read schema: %w", err)
+		}
+		if !empty {
+			return errForeignSchema
+		}
+	}
 	if err := enterWAL(ctx, s.w); err != nil {
 		return fmt.Errorf("enter WAL mode: %w", err)
 	}
@@ -131,8 +145,13 @@ func (s *Store) init(ctx context.Context, ms []migration) error {
 	return err
 }
 
+// dsn names exactly path: a literal // after file: would read as a URI
+// authority, so leading slashes are percent-encoded.
 func dsn(path string) string {
 	esc := strings.NewReplacer("%", "%25", "?", "%3f", "#", "%23").Replace(path)
+	for strings.HasPrefix(esc, "/") {
+		esc = "%2F" + esc[1:]
+	}
 	q := url.Values{"_pragma": {fmt.Sprintf("busy_timeout(%d)", busyTimeoutMS)}}
 	return "file:" + esc + "?" + q.Encode()
 }

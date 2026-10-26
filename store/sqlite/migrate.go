@@ -77,8 +77,9 @@ func migrate(ctx context.Context, c *sql.Conn, ms []migration) (err error) {
 	if _, err = c.ExecContext(ctx, beginWrite); err != nil {
 		return fmt.Errorf("sqlite: begin migration: %w", err)
 	}
+	committed := false
 	defer func() {
-		if err != nil {
+		if !committed {
 			_, _ = c.ExecContext(context.WithoutCancel(ctx), "ROLLBACK")
 		}
 	}()
@@ -89,8 +90,12 @@ func migrate(ctx context.Context, c *sql.Conn, ms []migration) (err error) {
 	if cur > latest {
 		return tooNew(cur, latest)
 	}
+	if cur < 0 {
+		return negativeVersion(cur)
+	}
 	if cur == latest {
 		_, err = c.ExecContext(ctx, "COMMIT")
+		committed = err == nil
 		return err
 	}
 	for _, m := range ms[cur:] {
@@ -104,9 +109,28 @@ func migrate(ctx context.Context, c *sql.Conn, ms []migration) (err error) {
 	if _, err = c.ExecContext(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("sqlite: commit migration: %w", err)
 	}
+	committed = true
 	return nil
 }
 
 func tooNew(have, latest int) error {
 	return fmt.Errorf("%w (file version %d, this build supports %d)", ErrSchemaTooNew, have, latest)
+}
+
+// negativeVersion names a user_version no build of this package wrote: it is
+// a signed 32-bit integer, this package only ever sets 0..latest, and
+// ms[cur:] below cur=0 panics.
+func negativeVersion(v int) error {
+	return fmt.Errorf("sqlite: database schema version %d is negative", v)
+}
+
+var errForeignSchema = errors.New("sqlite: database at user_version 0 already holds tables or views; it was not created by this package")
+
+// schemaEmpty reports whether the database holds no user objects; SQLite's
+// own (sqlite_sequence, autoindexes) are prefixed sqlite_.
+func schemaEmpty(ctx context.Context, c *sql.Conn) (bool, error) {
+	var empty bool
+	err := c.QueryRowContext(ctx,
+		"SELECT NOT EXISTS (SELECT 1 FROM sqlite_schema WHERE substr(name, 1, 7) <> 'sqlite_')").Scan(&empty)
+	return empty, err
 }

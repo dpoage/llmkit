@@ -22,8 +22,9 @@ CREATE TABLE messages (
     body TEXT NOT NULL
 ) WITHOUT ROWID;
 
--- runs: one row per Start event, joined to its Finalize event when there is one.
--- status is NULL while a run has no Finalize (running, or the process died).
+-- runs: one row per Start event, joined to the run's last Finalize event
+-- when there is one. status is NULL while a run has no Finalize (running,
+-- or the process died).
 CREATE VIEW runs AS
 SELECT s.run_id                                  AS run_id,
        s.parent_run_id                           AS parent_run_id,
@@ -40,6 +41,7 @@ SELECT s.run_id                                  AS run_id,
        COALESCE(f.payload ->> '$.finalize.usage.output_tokens', 0) AS output_tokens
 FROM events s
 LEFT JOIN events f ON f.run_id = s.run_id AND f.kind = 'finalize'
+    AND f.id = (SELECT MAX(id) FROM events x WHERE x.run_id = s.run_id AND x.kind = 'finalize')
 WHERE s.kind = 'start';
 
 -- spend: one row per Completion and per Decision event, the run's usage ledger.
