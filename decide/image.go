@@ -103,9 +103,24 @@ func (s *imageSet) rewrite(raw json.RawMessage, path string, place Placement) (j
 	return append(w.out, raw[w.last:]...), nil
 }
 
+// inlineImageHashes adds to set the SHA-256 of every valid image value in
+// raw, by Normalize's definition. It never refuses: an invalid one is skipped.
+func inlineImageHashes(raw []byte, set map[string]struct{}) {
+	if bytes.IndexByte(raw, '{') < 0 || !json.Valid(raw) {
+		return
+	}
+	w := &walker{src: raw, collect: set}
+	_, _ = w.value(skipWS(raw, 0))
+}
+
+func hashImage(data []byte) ([sha256.Size]byte, string) {
+	sum := sha256.Sum256(data)
+	return sum, hex.EncodeToString(sum[:])
+}
+
 // add records b and returns its label as a JSON string.
 func (s *imageSet) add(b llmkit.Block, path string, place Placement) ([]byte, error) {
-	sum := sha256.Sum256(b.Data)
+	sum, full := hashImage(b.Data)
 	idx, seen := s.index[sum]
 	if seen && s.images[idx].MediaType != b.MediaType {
 		return nil, invalidRequest(path, fmt.Sprintf("image has media_type %q, but the same bytes at %s have %q", b.MediaType, s.paths[idx], s.images[idx].MediaType))
@@ -117,7 +132,6 @@ func (s *imageSet) add(b llmkit.Block, path string, place Placement) ([]byte, er
 		return nil, unsupportedImage(path, fmt.Sprintf("image media_type %q is not supported by this backend (supported: %s)", b.MediaType, strings.Join(mts, ", ")))
 	}
 	if !seen {
-		full := hex.EncodeToString(sum[:])
 		idx = len(s.images)
 		s.images = append(s.images, Image{
 			Ref:       "<image:" + full[:32] + ">",
@@ -138,15 +152,23 @@ func (s *imageSet) add(b llmkit.Block, path string, place Placement) ([]byte, er
 	return []byte(`"\u003cimage:` + s.images[idx].SHA256[:32] + `\u003e"`), nil
 }
 
+// placementNames is the single Placement→name table, in report order.
+var placementNames = [...]struct {
+	place Placement
+	name  string
+}{
+	{PlaceState, "state"},
+	{PlaceInstructions, "instructions"},
+	{PlaceCriteria, "criteria"},
+}
+
 func placementName(p Placement) string {
-	switch p {
-	case PlaceState:
-		return "state"
-	case PlaceInstructions:
-		return "instructions"
-	default:
-		return "criteria"
+	for _, pn := range placementNames {
+		if pn.place == p {
+			return pn.name
+		}
 	}
+	return placementNames[len(placementNames)-1].name
 }
 
 func unsupportedImage(path, problem string) error {
@@ -292,10 +314,11 @@ func asciiEqualFold(b []byte, s string) bool {
 	return true
 }
 
-// walker scans one marshalled JSON part for image values, splicing labels
-// into out; bytes before last are already in out.
+// walker scans one marshalled JSON part for image values, splicing labels into
+// out (set) or, in collect mode, recording hashes without ever refusing.
 type walker struct {
 	set     *imageSet
+	collect map[string]struct{} // collect mode's hash sink; nil rewrites
 	src     []byte
 	base    string
 	place   Placement
@@ -397,8 +420,10 @@ func (w *walker) object(start int) (int, error) {
 		if spliced {
 			return end, nil
 		}
-	} else if name, ok := w.foreignImage(base); ok {
-		return 0, invalidRequest(w.path(), "invalid image: member "+strconv.Quote(name)+" is not an llmkit.Block field")
+	} else if w.collect == nil {
+		if name, ok := w.foreignImage(base); ok {
+			return 0, invalidRequest(w.path(), "invalid image: member "+strconv.Quote(name)+" is not an llmkit.Block field")
+		}
 	}
 	if err := w.walkRecorded(base); err != nil {
 		return 0, err
@@ -426,15 +451,23 @@ func (w *walker) member(key []byte, vs int) (int, error) {
 	return end, nil
 }
 
-// image splices src[start:end], whose member names are all Block names,
-// when it decodes as an image kind.
+// image splices src[start:end], whose member names are all Block names, when
+// it decodes as an image kind; collect mode hashes or skips it, never descends.
 func (w *walker) image(start, end int) (bool, error) {
 	var b llmkit.Block
 	decodeErr := json.Unmarshal(w.src[start:end], &b)
 	if b.Kind != llmkit.BlockImage {
 		return false, nil
 	}
-	if problem := checkImage(b, decodeErr); problem != "" {
+	problem := checkImage(b, decodeErr)
+	if w.collect != nil {
+		if problem == "" {
+			_, hash := hashImage(b.Data)
+			w.collect[hash] = struct{}{}
+		}
+		return true, nil
+	}
+	if problem != "" {
 		return false, invalidRequest(w.path(), problem)
 	}
 	label, err := w.set.add(b, w.path(), w.place)
