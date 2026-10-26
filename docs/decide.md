@@ -330,10 +330,10 @@ A state, an `Instructions` value, or a description (`True`, `False`, an
 it in the JSON that `encoding/json` produces, replaces it with a label, and
 returns it once in `Request.Images`; the backend sends the bytes its own way.
 
-**What counts as an image.** Any JSON object that decodes as an
-`llmkit.Block` of kind `"image"` and uses only `Block`'s member names. Names
-match as `encoding/json` matches them (case-insensitive, escapes decoded; a
-repeated member takes its last value) and `kind` must equal `"image"` exactly.
+**What counts as an image.** Any JSON object that uses only `Block`'s member
+names and has `kind` `"image"`. Names match as `encoding/json` matches them
+(case-insensitive, escapes decoded; a repeated member takes its last value)
+and `kind` must equal `"image"` exactly.
 It does not matter how the object got there: an `llmkit.Image` block, a
 `Message` whose content holds one, a `json.RawMessage`, or a map. An object
 with any other member (`{"kind":"image","caption":"x"}`) or another kind is
@@ -347,12 +347,13 @@ inside it is scanned.
 
 **A valid image** has inline `Data` and a `MediaType` that begins `image/`;
 `URL`, `Text`, `Title`, `Provider` and `Raw` are empty (an empty `"text":""`
-is fine; `"raw":null` is not). An object that is an image by the rule above
-but fails this, including one whose member does not decode (one nested deeper
-than `encoding/json`'s 10 000 levels does not), is refused naming its path,
-for example `state["frames"][2]["frame"]: invalid image: no inline data`. It
-is never sent as text. Nothing checks the pixels or sniffs the bytes. The same
-bytes under two media types are refused.
+is fine; `"raw":null` is not); and every member decodes. An image more than
+10 000 levels deep, counting the object itself, does not decode, because
+`encoding/json` stops at that depth. An object that is an image by the rule
+above but fails this is refused naming its path, for example
+`state["frames"][2]["frame"]: invalid image: no inline data`. It is never
+sent as text. Nothing checks the pixels or sniffs the bytes. The same bytes
+under two media types are refused.
 
 **Labels and order.** `Request.Images` holds the distinct images (deduplicated
 by bytes) in order of first occurrence: the state in document order, then each

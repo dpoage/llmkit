@@ -86,9 +86,8 @@ type imageSet struct {
 	index   map[[sha256.Size]byte]int
 }
 
-// rewrite replaces every image value in raw, the part of the request at
-// path, with its label and records the images; a raw without one is
-// returned as is.
+// rewrite replaces each image in raw, the request part at path, with its
+// label and records it; a raw with no image is returned as is.
 func (s *imageSet) rewrite(raw json.RawMessage, path string, place Placement) (json.RawMessage, error) {
 	if bytes.IndexByte(raw, '{') < 0 {
 		return raw, nil
@@ -294,10 +293,8 @@ func asciiEqualFold(b []byte, s string) bool {
 	return true
 }
 
-// walker scans one marshalled JSON part for image values in a single pass.
-// Objects that decide their own fate are logged as events and resolved by
-// commit: strict mode splices labels into out, collect mode records hashes
-// and never refuses.
+// walker scans one marshalled JSON part for image values in one pass. Strict
+// mode splices labels into out; collect mode records hashes and never refuses.
 type walker struct {
 	set     *imageSet
 	collect map[string]struct{} // collect mode's hash sink; nil is strict mode
@@ -318,16 +315,14 @@ type pathNode struct {
 	idx    int
 }
 
-// event is an object found to be an image (foreign nil) or, in strict mode, a
-// foreign-member image-kind object that commit refuses (foreign is the first
-// non-Block member name token).
+// event is an image object (foreign nil) or, in strict mode, an image-kind
+// object with a non-Block member (foreign, its name token) that commit refuses.
 type event struct {
 	start, end int
 	node       int
 	foreign    []byte
 }
 
-// run scans the part at the start of w.src and resolves the events.
 func (w *walker) run() error {
 	w.value(skipWS(w.src, 0))
 	return w.commit()
@@ -395,9 +390,8 @@ func (w *walker) array(i int) int {
 	}
 }
 
-// object scans the object at start, each member once. When every member name
-// is a Block name and Kind is "image", or in strict mode when it is a foreign
-// image, the object replaces any events its members logged.
+// object scans the object at start, each member once. An image object, or in
+// strict mode a foreign image, replaces the events its members logged.
 func (w *walker) object(start int) int {
 	src := w.src
 	i := skipWS(src, start+1)
@@ -454,8 +448,7 @@ func isImageKind(tok []byte) bool {
 }
 
 // isForeignImage reports whether an object with a non-Block member (foreign,
-// its first name token) has kind "image" and data neither null nor "". kind
-// and data are the tokens of the last such members.
+// its first name token) has kind "image" and data other than null or "".
 func isForeignImage(foreign, kind, data []byte) bool {
 	if foreign == nil || data == nil || string(data) == "null" || string(data) == `""` || len(kind) == 0 || kind[0] != '"' {
 		return false
@@ -464,9 +457,8 @@ func isForeignImage(foreign, kind, data []byte) bool {
 	return json.Unmarshal(kind, &k) == nil && k == string(llmkit.BlockImage)
 }
 
-// commit resolves the events in document order. An image is decoded here, once,
-// so a decode failure of an "image" Kind object refuses it instead of
-// demoting it to text. Collect mode never returns an error.
+// commit resolves the events in document order. An image that does not decode
+// is refused, never demoted to text; collect mode never returns an error.
 func (w *walker) commit() error {
 	for _, e := range w.events {
 		if e.foreign != nil {

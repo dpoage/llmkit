@@ -16,8 +16,7 @@ func depthShape(open, shut string, depth, size int) []byte {
 	return []byte(strings.Repeat(open, depth) + `"` + strings.Repeat("x", pad) + `"` + strings.Repeat(shut, depth))
 }
 
-// TestWalk_CostIsIndependentOfNestingDepth bounds t(depth 4096)/t(depth 16)
-// at equal input size, depth-16 and depth-4096 samples alternating.
+// Bounds t(depth 4096)/t(depth 16) at equal input size.
 func TestWalk_CostIsIndependentOfNestingDepth(t *testing.T) {
 	const (
 		bound  = 32
@@ -84,7 +83,6 @@ func TestWalk_CostIsIndependentOfNestingDepth(t *testing.T) {
 	}
 }
 
-// nestedArrays returns depth levels of single-element arrays around 1.
 func nestedArrays(depth int) any {
 	var v any = 1
 	for range depth {
@@ -93,8 +91,7 @@ func nestedArrays(depth int) any {
 	return v
 }
 
-// An image-kind object is refused when a member does not decode, including
-// when its subtree is deeper than encoding/json decodes (10 000 levels).
+// Depth 10001 is past encoding/json's decode limit; 9990 is not.
 func TestNormalize_ImageKindObjectWithDeepMemberIsRefused(t *testing.T) {
 	supports := map[string]ImageSupport{
 		"zero":     {},
@@ -126,8 +123,7 @@ func TestNormalize_ImageKindObjectWithDeepMemberIsRefused(t *testing.T) {
 	}
 }
 
-// Replay's scan hashes no image from an image-kind object whose member does
-// not decode, and skips an input deeper than json.Valid accepts.
+// Depth 10001 is past json.Valid's limit; 9990 is not.
 func TestInlineImageHashes_DeepImageKindObjectAddsNothing(t *testing.T) {
 	for _, depth := range []int{9990, 10001} {
 		raw, err := json.Marshal(map[string]any{
