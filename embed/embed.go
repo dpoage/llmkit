@@ -148,12 +148,13 @@
 // That covers a vendor body or error object, a decode error that quotes a
 // value, a transport error that quotes server bytes, and the last
 // attempt's error in the "(last attempt: ...)" text of a cancelled retry.
-// The mask is "***" when neither credential holds '*'. Credentials are
-// masked as values, so a short Secret or password also masks the same
-// characters elsewhere in the server's and the transport's text. Text
+// The mask is "***" when neither credential holds '*'. The password is
+// masked as a value at any length, so a short one also masks the same
+// characters elsewhere in the server's and the transport's text; a
+// Secret under 8 bytes is not masked at all. Text
 // llmkit writes itself, such as the "llmkit: ollama error (status 500):"
 // prefix or the context error of a cancelled retry, may still contain
-// text that matches the Secret or the password, for example the
+// text that matches the password, for example the
 // characters of a short one. The URL username is not a value: only where
 // it appears as URL userinfo
 // ("scheme://user[:password]@") is it replaced. Redaction happens before
