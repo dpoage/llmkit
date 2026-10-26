@@ -68,8 +68,7 @@ func rxJSONErr(fam, msg string, status int) string {
 }
 
 // rxSSEErr is a 200 stream whose data line quotes msg: the family's error
-// event, or for google a non-JSON line (a Gemini error object decodes to
-// "no candidates" and cannot carry msg).
+// event; for google a non-JSON line, as an error object cannot carry msg.
 func rxSSEErr(fam, msg string) string {
 	switch fam {
 	case "anthropic":
@@ -118,9 +117,8 @@ type rxOutcome struct {
 	events []string
 }
 
-// rxCall runs one Complete or Stream through provider.New with two
-// attempts allowed, so a retryable failure puts two Attempt events on the
-// observer.
+// rxCall runs one Complete or Stream with two attempts allowed: a retryable
+// failure puts two Attempt events on the observer.
 func rxCall(ctx context.Context, t *testing.T, c rxClient, stream bool, baseURL string) (out rxOutcome) {
 	t.Helper()
 	obs := &rxObserver{}
@@ -247,7 +245,6 @@ func rxMode(stream bool) string {
 // failure, and two local refusals (a malformed escape after cred).
 var rxPadKinds = []string{"dial", "refuse-2", "refuse-zz"}
 
-// rxEachBody runs the body cells, with cred at each offset of the body.
 func rxEachBody(t *testing.T, cred string, offsets []int, visit rxVisit) {
 	t.Helper()
 	for _, b := range rxBodies {
@@ -334,9 +331,6 @@ func rxSweep() []int {
 	return pads
 }
 
-// TestRedactMatrix_NoCredentialReachable: for every adapter, entry point
-// and cell, no text reachable from the returned error or delivered to the
-// observer holds a 12-byte fragment of the Secret or the BaseURL password.
 func TestRedactMatrix_NoCredentialReachable(t *testing.T) {
 	frags := rxFragments(rxKey, rxPass)
 	rxEachCell(t, rxKey, rxSweep(), func(t *testing.T, cell string, _ rxClient, _ bool, o rxOutcome) {
@@ -346,8 +340,6 @@ func TestRedactMatrix_NoCredentialReachable(t *testing.T) {
 	})
 }
 
-// TestRedactMatrix_UserinfoPassword: a BaseURL password reaches no error
-// text, whether the vendor echoes it or the SDK quotes the URL.
 func TestRedactMatrix_UserinfoPassword(t *testing.T) {
 	frags := rxFragments(rxKey, rxPass)
 	type cell struct {
@@ -395,9 +387,6 @@ func TestRedactMatrix_UserinfoPassword(t *testing.T) {
 	}
 }
 
-// TestRedactMatrix_PadsStraddleTheCap: the dial and refusal pads put the
-// credential across byte 200 of the Message on every client. A clean twin
-// of the same length shows the cut text holding its first 12 bytes only.
 func TestRedactMatrix_PadsStraddleTheCap(t *testing.T) {
 	if len(rxTwin) != len(rxKey) || rxHolds(rxTwin, rxFragments(rxKey, rxPass)) {
 		t.Fatalf("rxTwin must match rxKey in length and share no 12-byte fragment")

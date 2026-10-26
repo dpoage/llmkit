@@ -125,10 +125,6 @@ func TestNoResponseError(t *testing.T) {
 	})
 }
 
-// TestNoResponseError_Redacts: r masks the credential in each branch: the
-// refusal (redacted before the 200-byte cap), a failure after a request
-// went out, and the caller's cancellation. An error with nothing to mask
-// keeps its chain.
 func TestNoResponseError_Redacts(t *testing.T) {
 	const key = "sk-WIREPROBE-0123456789abcdef"
 	r := NewRedactor(key, nil)

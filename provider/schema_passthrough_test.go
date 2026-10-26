@@ -23,13 +23,8 @@ const (
 
 var schemaMetaKeys = map[string]bool{"$schema": true, "$id": true, "$defs": true, "$ref": true}
 
-// TestSchemaMetaKeysPassThrough pins, per ruling D1=B (llmkit-rli.1.3), that
-// every adapter sends $schema/$id/$defs/$ref — recursive $ref included —
-// verbatim on both carriers: ToolDef.Parameters and Request.ResponseSchema
-// (StructuredOutput forced on). Only pinned rewrites exist: anthropic forces
-// root "type":"object" (toAnthropicInputSchema); openai-compatible coerces
-// object-valued additionalProperties to true (coerceBoolAdditionalProperties),
-// and these fixtures carry none.
+// The fixtures carry a root "type":"object", non-empty "properties" and
+// "required", and no additionalProperties, so no adapter rewrite applies.
 func TestSchemaMetaKeysPassThrough(t *testing.T) {
 	fixtures := []struct{ name, raw string }{
 		{"root_meta_keys", schemaMetaFixtureRoot},
@@ -91,12 +86,7 @@ func TestSchemaMetaKeysPassThrough(t *testing.T) {
 	}
 }
 
-// wireSchemaFor locates the JSON Schema object the provider put on the wire:
-// anthropic tools[].input_schema (the user tool, or the synthetic
-// structured-output tool for the response carrier); openai-family
-// tools[].function.parameters / response_format.json_schema.schema; google
-// tools[].functionDeclarations[].parametersJsonSchema /
-// generationConfig.responseJsonSchema.
+// wireSchemaFor returns the JSON Schema object the provider put on the wire.
 func wireSchemaFor(t *testing.T, provider, carrier string, body map[string]any) map[string]any {
 	t.Helper()
 	dig := func(m map[string]any, keys ...string) map[string]any {
@@ -153,8 +143,7 @@ func wireSchemaFor(t *testing.T, provider, carrier string, body map[string]any) 
 	return nil
 }
 
-// collectSchemaMetaPointers records every JSON pointer at which the fixture
-// holds a meta key, recursing into values so nested pointers are covered.
+// collectSchemaMetaPointers records every JSON pointer holding a meta key.
 func collectSchemaMetaPointers(v any, prefix string, out map[string]any) {
 	switch t := v.(type) {
 	case map[string]any:

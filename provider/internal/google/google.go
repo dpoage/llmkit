@@ -23,8 +23,7 @@ type googleAdapter struct {
 	client *genai.Client
 	model  string
 	caps   llmkit.Capabilities
-	// redact masks the configured credential and BaseURL password in every
-	// error the adapter returns.
+	// redact masks the credential in every error the adapter builds.
 	redact *adapter.Redactor
 }
 
@@ -129,8 +128,8 @@ func (g *googleAdapter) Complete(ctx context.Context, req llmkit.Request) (llmki
 }
 
 // generate is Models.GenerateContent with its error normalized. A panic
-// inside genai after a response arrived becomes the error panicError builds;
-// any other panic, such as one from the caller's transport, propagates.
+// after a response status is recorded, such as one raised reading its body,
+// becomes the error panicError builds; one before any response propagates.
 func (g *googleAdapter) generate(ctx context.Context, contents []*genai.Content, cfg *genai.GenerateContentConfig) (resp *genai.GenerateContentResponse, err error) {
 	returned := false
 	defer func() {
@@ -151,8 +150,8 @@ func (g *googleAdapter) generate(ctx context.Context, contents []*genai.Content,
 	return resp, err
 }
 
-// panicError is the error for a panic inside genai: a retryable ErrServer
-// at the status the wire returned, like any 2xx body with no completion.
+// panicError is the APIError for a panic inside genai. Its Kind follows
+// the status the wire recorded, as for any Google error.
 func (g *googleAdapter) panicError(ctx context.Context, p any) error {
 	return adapter.NormalizeSDKError("google", adapter.VendorError{
 		Status:  adapter.WireStatus(ctx),

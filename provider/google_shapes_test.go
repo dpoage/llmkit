@@ -80,12 +80,8 @@ func shapeCheck(t *testing.T, err error, want shapeWant) {
 	}
 }
 
-// TestGoogleShapes_MalformedBodiesNeverPanic: a 2xx body that genai cannot
-// decode into a response returns an error and never panics, on Complete and
-// Stream. A body that panicked inside genai is an ErrServer APIError with
-// the response's status (200); every other body keeps the outcome it had
-// before the guard (a decode failure is status 0, and a null body on Stream
-// is the no-candidates error at status 200).
+// A body that panicked inside genai is an ErrServer APIError at status 200;
+// every other body keeps the outcome it had before the guard.
 func TestGoogleShapes_MalformedBodiesNeverPanic(t *testing.T) {
 	const valid = `{"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"STOP"}`
 	ok200, none := shapeWant{status: 200}, shapeWant{status: 0}
@@ -118,9 +114,7 @@ func TestGoogleShapes_MalformedBodiesNeverPanic(t *testing.T) {
 	}
 }
 
-// TestGoogleShapes_OtherAdaptersKeepTheirOutcome: the bodies that panic in
-// genai decode without a panic on the other adapters; their outcomes stay.
-// A Stream over such a body is a stream that ends early: status 0.
+// On the other adapters a Stream over such a body ends early: status 0.
 func TestGoogleShapes_OtherAdaptersKeepTheirOutcome(t *testing.T) {
 	ok200, none, ok := shapeWant{status: 200}, shapeWant{status: 0}, shapeWant{nilErr: true}
 	bodies := []string{`null`, `[]`, `[null]`, `{"content":[null],"stop_reason":"end_turn"}`, `{"choices":[null]}`}

@@ -22,8 +22,7 @@ type anthropicAdapter struct {
 	client anthropic.Client
 	model  string
 	caps   llmkit.Capabilities
-	// redact masks the configured credential and BaseURL password in every
-	// error the adapter returns.
+	// redact masks the credential in every error the adapter builds.
 	redact *adapter.Redactor
 }
 

@@ -13,8 +13,6 @@ import (
 	"github.com/dpoage/llmkit/internal/adapter"
 )
 
-// fnPanic is the value the callback panics with; the test compares by
-// identity.
 type fnPanic struct{ msg string }
 
 func recoverValue(f func()) (v any) {
@@ -23,9 +21,6 @@ func recoverValue(f func()) (v any) {
 	return nil
 }
 
-// TestStream_CallbackPanicPropagatesUnchanged: the panic guard covers genai
-// calls only. A panic raised by the caller's callback leaves Stream with the
-// value it had, and is not an APIError.
 func TestStream_CallbackPanicPropagatesUnchanged(t *testing.T) {
 	want := &fnPanic{"callback"}
 	base := streamServer(t, map[string]any{
@@ -58,9 +53,6 @@ func holdingServer(t *testing.T) (base string, closed <-chan struct{}) {
 	return base, done
 }
 
-// TestStream_ReleasesTheStreamOnEveryExit: when the callback returns an
-// error or panics, Stream stops the pulled iterator, which closes the
-// response body: the server sees the connection close.
 func TestStream_ReleasesTheStreamOnEveryExit(t *testing.T) {
 	exits := map[string]func(llmkit.Delta) error{
 		"callback error": func(llmkit.Delta) error { return errors.New("stop") },
@@ -81,8 +73,6 @@ func TestStream_ReleasesTheStreamOnEveryExit(t *testing.T) {
 	}
 }
 
-// TestPanicError_MasksTheCredential: the error for a panic inside genai goes
-// through the adapter's Redactor like every other adapter error.
 func TestPanicError_MasksTheCredential(t *testing.T) {
 	const secret = "sk-PANICPROBE-0123456789abcdef"
 	c, err := New(context.Background(), "gemini-test", Options{APIKey: secret, BaseURL: "http://127.0.0.1:1"})
