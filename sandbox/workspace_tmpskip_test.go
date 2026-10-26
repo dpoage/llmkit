@@ -250,13 +250,14 @@ func TestWorkspaceLeavesLlmkitTempDirsOut(t *testing.T) {
 			if r.entry == "gitlink" {
 				tmpdir = filepath.Join(listRoot, "tmp")
 			}
-			if r.tmp == "alias" {
+			switch r.tmp {
+			case "alias":
 				alias := filepath.Join(t.TempDir(), "alias")
 				if err := os.Symlink(tmpdir, alias); err != nil {
 					t.Fatal(err)
 				}
 				tmpdir = alias
-			} else if r.tmp == "eqR" {
+			case "eqR":
 				tmpdir = repoB
 				tmpRel = "."
 			}
