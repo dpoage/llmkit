@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -140,6 +141,18 @@ func TestRedactContract_MaskingCutsTheChain(t *testing.T) {
 				t.Errorf("err = %v; want a plain error chaining context.Canceled, key masked", o.err)
 			}
 		})
+	}
+	for _, c := range rxClients {
+		for _, stream := range []bool{false, true} {
+			t.Run("dial/"+c.name+"/"+rxMode(stream), func(t *testing.T) {
+				o := rxCallWith(t, c, stream, rxKey, "http://"+rxClosedPort(t)+"/"+rxKey)
+				var api *llmkit.APIError
+				var op *net.OpError
+				if !errors.As(o.err, &api) || !errors.Is(o.err, llmkit.ErrServer) || api.StatusCode != 0 || errors.As(o.err, &op) || rxVisible(o, rxKey[:12]) {
+					t.Errorf("err = %v; want ErrServer at status 0, the *net.OpError cut, the key masked", o.err)
+				}
+			})
+		}
 	}
 }
 

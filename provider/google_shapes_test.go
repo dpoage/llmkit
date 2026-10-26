@@ -73,6 +73,8 @@ func shapeCheck(t *testing.T, err error, want shapeWant) {
 	var api *llmkit.APIError
 	if !errors.As(err, &api) || !errors.Is(err, llmkit.ErrServer) || api.StatusCode != want.status {
 		t.Errorf("err = %v; want *llmkit.APIError{ErrServer, status %d}", err, want.status)
+	} else if _, _, retryable := llmkit.Classify(err); !retryable {
+		t.Errorf("err = %v; want a retryable error", err)
 	}
 }
 
