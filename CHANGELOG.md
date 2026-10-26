@@ -575,8 +575,8 @@ entry below is marked.
   log. An 80 KB `{"raw":` chain 9 990 levels deep took seconds. The time is
   now proportional to input size.
 - `decide`: `Normalize` sent an image-kind object to the backend as text,
-  base64 bytes included, when the object was more than 10 000 levels deep,
-  counting itself. `encoding/json` cannot decode that depth, so the object did
+  base64 bytes included, when the object's own nesting, counting itself, went
+  over 10 000 levels. `encoding/json` cannot decode it, so the object did
   not count as an image. `Normalize` now refuses it pre-wire, under every
   `ImageSupport`, as it refuses any image with a member that does not decode
   (`invalid image: member does not decode`).

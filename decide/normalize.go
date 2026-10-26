@@ -30,13 +30,14 @@ type Request struct {
 // refusal is the same on every call.
 //
 // An image value is a JSON object whose member names all match Block JSON
-// field names (case-insensitively, escapes decoded, a repeated member takes
-// its last value) and whose "kind" is "image", however it was built. It is
+// field names (case-insensitively, escapes decoded) and whose last
+// string-valued "kind" member is "image", however it was built. It is
 // replaced whole by its label; its inner objects are not scanned.
 //
 // An image must carry inline Data and a MediaType beginning "image/"; URL,
 // Text, Title, Provider and Raw must be empty, and every member must decode.
-// An image object more than 10 000 levels deep, counting itself, does not
+// An image object whose own nesting, counting itself, is more than 10 000
+// levels, wherever the object sits in the document, does not
 // decode and is refused. The same bytes under two media types are refused, as
 // is an image whose placement or media type s does not carry; the zero s
 // refuses every image. An object whose "kind" is "image", whose "data" is
