@@ -295,11 +295,11 @@ func TestP6_CookbookResults(t *testing.T) {
 
 	t.Run("Q2", func(t *testing.T) {
 		requireRows(t, "Q2", query(t, db, "Q2", sql.Named("run", "r-root")), []string{
-			`1|read|{"p":"a"}|0|0|NULL`,
-			`1|write|{"p":"b"}|1|0|NULL`,
-			`2|rm|{"p":"/"}|0|1|no rm`,
-			`9|rm|{"i":3}|0|1|1ns after T`,
-			`4|read|{}|0|0|NULL`,
+			`1|read|{"p":"a"}|NULL|0|0|NULL`,
+			`1|write|{"p":"b"}|NULL|1|0|NULL`,
+			`2|rm|{"p":"/"}|NULL|0|1|no rm`,
+			`9|rm|{"i":3}|NULL|0|1|1ns after T`,
+			`4|read|{}|NULL|0|0|NULL`,
 		}, false)
 		requireRows(t, "Q2 unknown run", query(t, db, "Q2", sql.Named("run", "nope")), nil, false)
 	})
@@ -314,7 +314,7 @@ func TestP6_CookbookResults(t *testing.T) {
 		sort.SliceStable(recs, func(i, j int) bool { return recs[i].t.Before(recs[j].t) })
 		var want []string
 		for _, r := range recs {
-			want = append(want, fmt.Sprintf("%d|%s|9|rm|%s|%s", r.t.UnixNano(), r.run, r.args, r.reason))
+			want = append(want, fmt.Sprintf("%d|%s|9|rm|%s|NULL|%s", r.t.UnixNano(), r.run, r.args, r.reason))
 		}
 		if len(want) != 3 {
 			t.Fatalf("dataset error: %d denied calls since T, want 3", len(want))

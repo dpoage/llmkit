@@ -2,6 +2,8 @@ package sqlite_test
 
 import (
 	"context"
+	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"reflect"
 	"strings"
@@ -13,7 +15,7 @@ import (
 
 func TestP1_TruncatedArgumentsInAllCarriers(t *testing.T) {
 	t.Skip("needs W0a (ToolCall encoder, llmkit-9pk): json.Marshal rejects truncated arguments on the base; remove this skip after the feature-branch merge")
-	s, log, _ := openStore(t)
+	s, log, path := openStore(t)
 	const run = "run-trunc"
 	bad := json.RawMessage(`{"p":`)
 
@@ -32,6 +34,10 @@ func TestP1_TruncatedArgumentsInAllCarriers(t *testing.T) {
 	tool.ToolRun = &llmkit.ToolRunEvent{Call: llmkit.ToolCall{ID: "c2", Name: "echo", Arguments: bad}, Result: "ok"}
 
 	checkIdentity(t, s, log, run, []llmkit.Event{start, comp, tool})
+
+	// The audit view keeps the bytes the model sent.
+	got := query(t, openRaw(t, path), "Q2", sql.Named("run", run))
+	requireRows(t, "Q2", got, []string{"0|echo|NULL|" + base64.StdEncoding.EncodeToString(bad) + "|0|0|NULL"}, false)
 }
 
 // bigText is at least n bytes of text that needs JSON escaping.

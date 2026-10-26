@@ -238,3 +238,24 @@ func (s *safeBuf) String() string {
 	defer s.mu.Unlock()
 	return string(s.b)
 }
+
+// A second Store on the same file (another connection) sees each event as
+// soon as Observe returns.
+func TestP2_OtherConnectionSeesEventOnReturn(t *testing.T) {
+	writer, log, path := openStore(t)
+	reader, err := sqlite.Open(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reader.Close() }()
+	evs := allKinds("run-other")
+	for i, ev := range evs {
+		writer.Observe(context.Background(), ev)
+		got, err := reader.Events(context.Background(), "run-other")
+		if err != nil {
+			t.Fatalf("after event %d: %v", i, err)
+		}
+		assertIdentical(t, got, evs[:i+1])
+	}
+	noErrors(t, log)
+}

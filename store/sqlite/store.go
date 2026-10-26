@@ -31,13 +31,11 @@ const busyTimeoutMS = 10000
 const (
 	insertMessage = "INSERT OR IGNORE INTO messages (hash, body) VALUES (?, ?)"
 	insertEvent   = "INSERT INTO events (run_id, parent_run_id, span_id, kind, step, time_ns, duration_ns, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-)
-
-var (
-	queryEvents = cookbookQuery("Q6")
 	// fetchMessages takes a JSON array of hashes.
 	fetchMessages = "SELECT hash, body FROM messages WHERE hash IN (SELECT value FROM json_each(?))"
 )
+
+var queryEvents = cookbookQuery("Q6")
 
 var (
 	_ llmkit.Observer = (*Store)(nil)

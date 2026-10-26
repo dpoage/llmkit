@@ -66,7 +66,8 @@ SELECT id                                        AS event_id,
 FROM events
 WHERE kind IN ('completion', 'decision');
 
--- tool_calls: one row per ToolRun event.
+-- tool_calls: one row per ToolRun event. arguments is the call's JSON; when the model
+-- sent bytes that are not JSON it is NULL and arguments_b64 holds them in base64.
 CREATE VIEW tool_calls AS
 SELECT id                                          AS event_id,
        run_id                                      AS run_id,
@@ -76,6 +77,7 @@ SELECT id                                          AS event_id,
        payload ->> '$.tool_run.call.id'            AS call_id,
        payload ->> '$.tool_run.call.name'          AS name,
        payload -> '$.tool_run.call.arguments'      AS arguments,
+       payload ->> '$.tool_run.call.arguments_b64' AS arguments_b64,
        payload ->> '$.tool_run.result'             AS result,
        COALESCE(payload ->> '$.tool_run.is_error', 0) AS is_error,
        COALESCE(payload ->> '$.tool_run.denied', 0)   AS denied,

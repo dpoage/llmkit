@@ -16,13 +16,13 @@ GROUP BY day, provider, model
 ORDER BY day, provider, model;
 
 -- Q2: the tool calls of a run in order. Index: events_run_kind.
-SELECT step, name, arguments, is_error, denied, deny_reason
+SELECT step, name, arguments, arguments_b64, is_error, denied, deny_reason
 FROM tool_calls
 WHERE run_id = :run
 ORDER BY event_id;
 
 -- Q3: denied tool calls across runs since T. Index: events_kind_time.
-SELECT time_ns, run_id, step, name, arguments, deny_reason
+SELECT time_ns, run_id, step, name, arguments, arguments_b64, deny_reason
 FROM tool_calls
 WHERE denied = 1 AND time_ns >= :since_ns
 ORDER BY time_ns;
@@ -34,6 +34,7 @@ WHERE time_ns >= :since_ns AND (score < :threshold OR belief < :threshold)
 ORDER BY time_ns;
 
 -- Q5: lineage of a run: its ancestors (events_run_kind) and descendants (events_parent).
+-- CROSS JOIN keeps the walk driving and runs searched by index; a plain JOIN lets the planner scan.
 WITH RECURSIVE
 up(run_id, parent_run_id) AS (
     SELECT run_id, parent_run_id FROM runs WHERE run_id = :run

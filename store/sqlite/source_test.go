@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/agent"
@@ -133,5 +135,51 @@ func TestOpen_MissingDirectoryFails(t *testing.T) {
 	if s, err := sqlite.Open(filepath.Join(t.TempDir(), "no", "such", "dir.db"), nil); err == nil {
 		_ = s.Close()
 		t.Fatal("Open under a missing directory succeeded")
+	}
+}
+
+// Hand-built events need not be well formed; the store keeps them as they are.
+func TestSource_StoresMalformedEventsAsGiven(t *testing.T) {
+	s, log, path := openStore(t)
+	const run = "run-odd"
+	req := llmkit.Request{Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "one"), llmkit.TextMessage(llmkit.RoleUser, "two")}}
+
+	both := newEv(run, llmkit.KindCompletion)
+	both.Completion = &llmkit.CompletionEvent{Request: req, Response: llmkit.Response{Text: "c"}}
+	both.Attempt = &llmkit.AttemptEvent{Attempt: 1, Request: req}
+	every := newEv(run, llmkit.KindStart)
+	every.Start = &llmkit.StartEvent{Task: "t"}
+	every.Steer = &llmkit.SteerEvent{Message: llmkit.TextMessage(llmkit.RoleUser, "s")}
+	every.Embed = &llmkit.EmbedEvent{Model: "m"}
+	noKind := llmkit.Event{RunID: run}
+	zeroTime := newEv(run, llmkit.KindSteer)
+	zeroTime.Time = time.Time{}
+	zeroTime.Steer = &llmkit.SteerEvent{}
+	far := newEv(run, llmkit.KindSteer)
+	far.Time = time.Date(9999, 12, 31, 23, 59, 59, 999999999, time.UTC)
+	far.Steer = &llmkit.SteerEvent{}
+
+	evs := []llmkit.Event{both, every, noKind, zeroTime, far}
+	observeAll(s, evs)
+	noErrors(t, log)
+	got, err := s.Events(context.Background(), run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertIdentical(t, got, evs)
+
+	rows, err := openRaw(t, path).Query("SELECT time_ns FROM events ORDER BY id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	var ns []int64
+	for rows.Next() {
+		var n int64
+		_ = rows.Scan(&n)
+		ns = append(ns, n)
+	}
+	if ns[3] != math.MinInt64 || ns[4] != math.MaxInt64 {
+		t.Fatalf("time_ns of the year-1 and year-9999 events = %d, %d; want them saturated", ns[3], ns[4])
 	}
 }

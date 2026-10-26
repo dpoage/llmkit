@@ -57,22 +57,24 @@ func encode(ev llmkit.Event) (encoded, error) {
 	var (
 		out encoded
 		se  = storedEvent{Event: ev}
-		err error
 	)
-	switch {
-	case ev.Completion != nil:
-		var req storedRequest
-		if req, out.messages, err = hashRequest(ev.Completion.Request); err != nil {
+	if c := ev.Completion; c != nil {
+		req, msgs, err := hashRequest(c.Request)
+		if err != nil {
 			return encoded{}, err
 		}
-		se.Completion = &storedCompletion{CompletionEvent: *ev.Completion, Request: req}
-	case ev.Attempt != nil:
-		var req storedRequest
-		if req, out.messages, err = hashRequest(ev.Attempt.Request); err != nil {
-			return encoded{}, err
-		}
-		se.Attempt = &storedAttempt{AttemptEvent: *ev.Attempt, Request: req}
+		out.messages = append(out.messages, msgs...)
+		se.Completion = &storedCompletion{CompletionEvent: *c, Request: req}
 	}
+	if a := ev.Attempt; a != nil {
+		req, msgs, err := hashRequest(a.Request)
+		if err != nil {
+			return encoded{}, err
+		}
+		out.messages = append(out.messages, msgs...)
+		se.Attempt = &storedAttempt{AttemptEvent: *a, Request: req}
+	}
+	var err error
 	if out.payload, err = json.Marshal(se); err != nil {
 		return encoded{}, err
 	}
@@ -193,9 +195,9 @@ func unixNanos(t time.Time) int64 {
 	sec := t.Unix()
 	const limit = math.MaxInt64 / int64(time.Second)
 	switch {
-	case sec > limit:
+	case sec >= limit:
 		return math.MaxInt64
-	case sec < -limit:
+	case sec <= -limit:
 		return math.MinInt64
 	}
 	return sec*int64(time.Second) + int64(t.Nanosecond())
