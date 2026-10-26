@@ -178,8 +178,8 @@ b, err := sandbox.NewBwrap(sandbox.WithHostToolchains(res))
   1. `P` is `$HOME` or a direct child of `$HOME`.
   2. The directory in which `exec.LookPath` found the executable (made absolute against the process's working directory if it is relative) is itself named `bin`, its parent is `$HOME` or a direct child of `$HOME`, and that directory resolves through symlinks to `D`.
 
-  The code compares each candidate path and `$HOME` as written and after symlinks resolve. A direct child of `$HOME` can hold credentials beside the toolchain — `~/.cargo/credentials.toml`, `~/.pulumi/credentials.json` — so `PATH=~/.cargo/bin` mounts `~/.cargo/bin`, never `~/.cargo`. That holds when `~/.cargo` is a symlink to another directory, too. A versioned layout deeper below `$HOME` still ascends: `~/.nvm/versions/node/v18/bin` mounts `~/.nvm/versions/node/v18`. An absolute directory entry is not subject to this rule; it mounts the directory it names.
-- The rule compares paths. It does not inspect what a directory holds, so these layouts still ascend, and the mount can include credentials:
+  The code compares each candidate path and `$HOME` as written and after symlinks resolve. A direct child of `$HOME` can hold credentials beside the toolchain — `~/.cargo/credentials.toml`, `~/.pulumi/credentials.json` — so `PATH=~/.cargo/bin` mounts `~/.cargo/bin`, never `~/.cargo`, when the executable there resolves into that `bin/` directory. That holds when `~/.cargo` is a symlink to another directory, too. If the executable is itself a file symlink out of that `bin/` directory (`~/.cargo/bin/cargo -> ../cargo-real`), `D` is `~/.cargo`, condition 2 does not match, and `~/.cargo` mounts. A versioned layout deeper below `$HOME` still ascends: `~/.nvm/versions/node/v18/bin` mounts `~/.nvm/versions/node/v18`. An absolute directory entry is not subject to this rule; it mounts the directory it names.
+- The rule compares paths. It does not inspect what a directory holds, so the layouts below still ascend, and the mount can include credentials:
   - A tool home two or more levels under `$HOME` (`CARGO_HOME=~/.local/share/cargo`), or outside `$HOME`, that `PATH` reaches directly (llmkit-471.1). With `~/.jdk -> /opt/jdk17` and `PATH=/opt/jdk17/bin`, `/opt/jdk17` mounts; `PATH=/opt/cargo/bin` mounts `/opt/cargo`.
   - A file symlink in a `PATH` directory. Condition 2 examines only the directory `PATH` names. With `PATH=~/bin`, `~/bin/cargo -> ~/.cargo/bin/cargo`, and `~/.cargo -> /data/cargo`, `/data/cargo` mounts. A `~/.local/bin/node` that links into a tool home outside `$HOME` ascends to that home, as the shim layout intends.
   - A `PATH` directory not named `bin`. With `PATH=~/cbin` and `~/cbin -> /data/cargo/bin`, `/data/cargo` mounts.
@@ -249,13 +249,13 @@ The package's `ExampleObserve` shows a complete run against the Mock backend.
 
 By default `Exec` copies the repository snapshot into a fresh temporary directory; it never works in the live checkout. With `Spec.Workspace` set, `Exec` uses that caller-owned directory directly instead of copying.
 
-- When `RepoDir` is a git work tree, the copy takes its files from `GitWorktreeFiles`: tracked files plus untracked, non-gitignored files. `.git` never reaches the sandbox. Gitignored content (for example, a stale build directory) does not either, except inside a listed directory (item 3 below). `GitWorktreeFiles` exposes the listing to callers.
+- When `RepoDir` is a git work tree and `git` is on `PATH`, the copy takes its files from `GitWorktreeFiles`: tracked files plus untracked, non-gitignored files. `.git` never reaches the sandbox. Gitignored content (for example, a stale build directory) does not either, except inside a listed directory (item 3 below). `GitWorktreeFiles` exposes the listing to callers.
 - The copy differs from the `GitWorktreeFiles` listing in four ways:
   1. A listed path that is missing on disk, such as a tracked file deleted from the work tree, is not copied.
   2. A listed path that is not a regular file, symlink, or directory (for example, a FIFO that replaced a tracked file) is not copied.
   3. git lists a submodule or an untracked nested repository as one directory. The copy takes that directory's tree unfiltered by git, gitignored content included, without any `.git`.
   4. When `TMPDIR` is `RepoDir` or lies inside it, the copy leaves out the llmkit temp dirs described below, git-listed files included. `GitWorktreeFiles` does not.
-- When `RepoDir` is not a git work tree, `Exec` falls back to a full recursive copy.
+- When `RepoDir` is not a git work tree, or `git` is not on `PATH`, `Exec` falls back to a full recursive copy. That copy includes gitignored content, and still leaves out `.git` and the llmkit temp dirs described below.
 - The copy leaves out its own destination directory, matched by directory identity, so a `TMPDIR` inside `RepoDir` does not copy the workspace into itself. It also leaves out every llmkit temp dir: a directory directly inside this process's `TMPDIR` whose name starts with `llmkit-sandbox-`, `llmkit-wscache-`, or `llmkit-mock-`. The match is by directory identity at copy time, so a `TMPDIR` reached through a symlink alias behaves the same. Whatever created the directory — this run, another run's live workspace, or another instance's workspace cache — the copy leaves it out, git-listed files included.
 - The cost: a repository directory with one of those prefixes directly inside
   an in-repo `TMPDIR` is left out too. A file or symlink with such a name keeps
@@ -265,7 +265,7 @@ By default `Exec` copies the repository snapshot into a fresh temporary director
 - The container backends keep a one-entry pristine cache keyed by repository path, HEAD, and a `git status` hash. A cache hit clones the pristine copy (reflink-first) instead of re-walking the source. `Result.WorkspaceCacheHit` reports which happened. Non-git directories bypass the cache entirely.
 - `MaterializeWorkspace` materializes one caller-owned workspace once. It creates the directory and returns its path. Pass the path as `Spec.Workspace` on repeated `Exec` calls. The caller removes it when done — `Exec` never deletes a caller-supplied workspace.
 
-Every write into a workspace defends against links planted by the snapshot or by an earlier untrusted run:
+The copy of the snapshot into a workspace is not covered by the list below: a tracked directory that an uncommitted symlink replaces on disk can make the git-listed copy write through that link to a host file outside `RepoDir` (known gap, llmkit-627). Each `WriteFiles` write, and each capture read-back, defends against links in the workspace, whether the snapshot or an earlier untrusted run planted them:
 
 1. `WriteFiles` keys pass a lexical check first: absolute paths and `..` escapes are rejected. `CaptureFiles` entries pass the same check before the run on every backend, so an escaping entry is refused instead of silently omitted.
 2. Each write walks every parent component and refuses a symlinked directory. It creates missing directories one at a time — never `MkdirAll`, which would silently walk through a planted link.

@@ -537,8 +537,10 @@ entry below is marked.
 
 - `sandbox`: a workspace no longer receives another repository's content
   through an in-repo `TMPDIR`. Before, when `TMPDIR` sat at or under
-  `RepoDir`, every workspace copy carried each `llmkit-sandbox-`,
-  `llmkit-wscache-`, and `llmkit-mock-` directory directly inside `TMPDIR`:
+  `RepoDir`, a workspace copy carried each `llmkit-sandbox-`,
+  `llmkit-wscache-`, and `llmkit-mock-` directory directly inside `TMPDIR`
+  that git listed or the full-tree walk reached (a gitignored `TMPDIR` kept
+  them out of a git copy):
   one repository's pristine cache, or a live workspace of another run,
   crossed into another repository's workspace. After, every copy path (the
   full-tree walk, the git file-list copy, the gitlink recursion, and the
@@ -601,8 +603,9 @@ entry below is marked.
   compares paths only, so these layouts still ascend: a tool home two or
   more levels under `$HOME` (XDG `CARGO_HOME=~/.local/share/cargo`) or
   outside `$HOME` that `PATH` reaches directly (llmkit-471.1); an
-  executable that a `PATH` directory reaches by a file symlink (`~/bin/cargo`
-  to `~/.cargo/bin/cargo`, with `~/.cargo` a symlink out); a `PATH`
+  executable that is a file symlink out of its `PATH` `bin/` directory
+  (`~/.cargo/bin/cargo` to `../cargo-real`, or `~/bin/cargo` to
+  `~/.cargo/bin/cargo` with `~/.cargo` a symlink out); a `PATH`
   directory not named `bin`; a `PATH` that reaches a `$HOME` child through a
   symlink chain written outside `$HOME`, or through a symlink alias of
   `$HOME` while the child is itself a symlink out, or through a bind mount
