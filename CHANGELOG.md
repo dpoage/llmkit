@@ -571,6 +571,19 @@ entry below is marked.
   asked set. It now returns `ErrServer` with `StatusCode` 200 and retries
   it like any `ErrServer`.
 
+### Security
+
+- `sandbox`: `ResolveHostToolchains` no longer RO-mounts a tool home that
+  sits directly under `$HOME` (llmkit-bk8.7.21). Before, an entry resolving
+  to `~/.cargo/bin/cargo` mounted `~/.cargo` wholesale and exposed
+  `credentials.toml` (registry tokens) to untrusted runs; `~/.pulumi` and a
+  symlinked `~/.cargo` were exposed the same way. The `bin/` ascent to the
+  parent is now refused when the parent is `$HOME` or a direct child of
+  `$HOME`, or when `PATH` reached the `bin/` directory through such a child,
+  so the `bin/` directory mounts alone. Tool homes two or more levels under
+  `$HOME` (XDG `CARGO_HOME=~/.local/share/cargo`) and tool homes outside
+  `$HOME` that `PATH` reaches directly still ascend (llmkit-471.1).
+
 ||||||| f4bbf40
 
 ## [0.6.0] - 2026-09-30
