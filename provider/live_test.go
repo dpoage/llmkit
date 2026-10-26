@@ -251,6 +251,7 @@ var liveCaseBodies = map[string]func(t *testing.T, lc *liveClient){
 	"top_p":                caseTopP,
 	"top_k":                caseTopK,
 	"seed":                 caseSeed,
+	"schema_meta_keys":     caseSchemaMetaKeys,
 }
 
 func caseTextUsage(t *testing.T, lc *liveClient) {
@@ -906,6 +907,60 @@ func caseSeed(t *testing.T, lc *liveClient) {
 	}
 	if strings.TrimSpace(llmkit.StripThinkBlocks(resp.Text)) == "" {
 		t.Fatalf("empty answer: %q", resp.Text)
+	}
+	lc.finish(resp, err)
+}
+
+// caseSchemaMetaKeys pins that a tool Parameters schema carrying 2020-12 meta
+// keys and a recursive $defs/$ref is sent as-is and the endpoint answers it.
+func caseSchemaMetaKeys(t *testing.T, lc *liveClient) {
+	getWeather := llmkit.ToolDef{
+		Name:        "get_weather",
+		Description: "Returns the weather for a city.",
+		Parameters: json.RawMessage(`{
+			"$schema": "https://json-schema.org/draft/2020-12/schema",
+			"$id": "urn:llmkit:test",
+			"type": "object",
+			"properties": {"root": {"$ref": "#/$defs/N"}},
+			"required": ["root"],
+			"$defs": {
+				"N": {
+					"type": "object",
+					"properties": {
+						"name": {"type": "string"},
+						"kids": {"type": "array", "items": {"$ref": "#/$defs/N"}}
+					},
+					"required": ["name"]
+				}
+			}
+		}`),
+	}
+	req := llmkit.Request{
+		Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "Call the get_weather tool with name Toronto and no kids.")},
+		Tools:    []llmkit.ToolDef{getWeather},
+	}
+	forced := lc.caps().ToolChoice
+	if forced {
+		req.ToolChoice = llmkit.ToolChoice{Mode: llmkit.ToolChoiceTool, Name: "get_weather"}
+	}
+	resp, err := lc.complete(req)
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if forced {
+		calls := 0
+		for _, tc := range resp.ToolCalls {
+			if tc.Name != "get_weather" {
+				continue
+			}
+			calls++
+			if !json.Valid(tc.Arguments) {
+				t.Errorf("get_weather arguments not valid JSON: %q", tc.Arguments)
+			}
+		}
+		if calls == 0 {
+			t.Fatalf("tool_choice tool(get_weather) produced no call named get_weather: %+v", resp.ToolCalls)
+		}
 	}
 	lc.finish(resp, err)
 }

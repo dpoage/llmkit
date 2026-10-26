@@ -349,6 +349,17 @@ entry below is marked.
   `LLMKIT_LIVE_WORKERSAI_MODEL`, default `clef-flash`) with case
   `image_labels`: a colour-swapped pair of Asks about `[image 1]` and
   `[image 2]`. CI does not run it.
+- `provider`: tool `Parameters` and `Request.ResponseSchema` pass JSON Schema
+  2020-12 meta keys through to the wire unchanged on Anthropic, OpenAI,
+  OpenAI-compatible, and Google: `$schema`, `$id`, `$defs`, and `$ref`,
+  recursive references included, on the tool carrier and the
+  `response_format`/`responseJsonSchema`/synthetic-tool carrier alike. The
+  two pinned rewrites are unchanged and remain the only ones: Anthropic
+  forces the root `"type"` to `"object"`, and OpenAI-compatible rewrites an
+  object-valued `additionalProperties` to `true`. Hermetically pinned by
+  `provider/schema_passthrough_test.go`; live case `schema_meta_keys` runs a
+  tool schema with `$schema`, `$id`, and a recursive `$defs`/`$ref` against
+  the compat lane. (llmkit-rli.1.3)
 
 ### Changed
 
