@@ -165,7 +165,7 @@ func (r *Runner) limitToolOutput(ctx context.Context, call llmkit.ToolCall, res 
 			res.setText(spillStandIn(ref, size, text, lim.max))
 			return res
 		}
-		res.spillErr = err.Error()
+		res.spillErr = jsonSafeUTF8(err.Error())
 	}
 	res.setText(truncatedStandIn(text, size, lim.max))
 	return res

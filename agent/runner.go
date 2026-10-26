@@ -1005,9 +1005,9 @@ func (r *Runner) complete(ctx context.Context, em runEmitter, messages []llmkit.
 	return resp, nil
 }
 
-// fillEmptyCallIDs replaces every empty tool-call ID in resp with a surrogate
-// unique within history and resp: "llmkit-<run>-s<step>-c<index>", then
-// "-k<n>" for as long as a candidate is already in use.
+// fillEmptyCallIDs replaces every empty tool-call ID in a copy of
+// resp.ToolCalls, never the client's slice, with a surrogate unique within
+// history and resp: "llmkit-<run>-s<step>-c<index>", then "-k<n>" while taken.
 func fillEmptyCallIDs(run llmkit.RunID, step int, history []llmkit.Message, resp *llmkit.Response) {
 	if !slices.ContainsFunc(resp.ToolCalls, func(tc llmkit.ToolCall) bool { return tc.ID == "" }) {
 		return
@@ -1025,8 +1025,9 @@ func fillEmptyCallIDs(run llmkit.RunID, step int, history []llmkit.Message, resp
 			used[tc.ID] = true
 		}
 	}
-	for i := range resp.ToolCalls {
-		if resp.ToolCalls[i].ID != "" {
+	calls := slices.Clone(resp.ToolCalls)
+	for i := range calls {
+		if calls[i].ID != "" {
 			continue
 		}
 		id, k := surrogateCallID(run, step, i, 0), 0
@@ -1035,8 +1036,9 @@ func fillEmptyCallIDs(run llmkit.RunID, step int, history []llmkit.Message, resp
 			id = surrogateCallID(run, step, i, k)
 		}
 		used[id] = true
-		resp.ToolCalls[i].ID = id
+		calls[i].ID = id
 	}
+	resp.ToolCalls = calls
 }
 
 func surrogateCallID(run llmkit.RunID, step, index, k int) string {

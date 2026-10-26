@@ -540,9 +540,12 @@ entry below is marked.
 
 ### Fixed
 
-- `agent`: a tool result, a `Tool.Run` error or a tool panic whose text is not
-  valid UTF-8 now enters history already normalized by encoding/json's rule:
-  each byte that does not start a valid UTF-8 sequence becomes one U+FFFD. The
+- `agent`: every string the tool phase places in history or in the `tool_run`
+  event now enters already normalized by encoding/json's rule when it is not
+  valid UTF-8: each byte that does not start a valid UTF-8 sequence becomes one
+  U+FFFD. That covers each string field of the blocks a tool returns, the text
+  of a `Tool.Run` error, panic or timeout, a `ToolPolicy` denial (its rendered
+  text and `deny_reason`) and a `SpillSink` error (`spill_error`). The
   history, the `tool_run` event and the JSONL record hold the same bytes, the
   next request carries what the model already saw (the provider SDKs encode
   strings the same way), and a replay of a compaction no longer diverges on the
@@ -554,7 +557,8 @@ entry below is marked.
   response intake with `llmkit-<run id>-s<step>-c<index>`, skipping (with a
   `-k<n>` suffix) any ID already in the history, so the history, the
   `completion` and `tool_run` events and the next request agree and the run
-  replays from its record. RISK: a Gemini call without an `id` now carries a
+  replays from its record. The replacement goes into a copy: the client's
+  `Response` is never modified. RISK: a Gemini call without an `id` now carries a
   Runner-made ID in history and on the next wire request (`functionCall.id`
   and `functionResponse.id`); the response is still paired with the declared
   tool name. Non-empty IDs pass unchanged. (llmkit-9y4)

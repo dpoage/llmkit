@@ -80,30 +80,18 @@ func jsonSafeUTF8(s string) string {
 	if utf8.ValidString(s) {
 		return s
 	}
-	var b strings.Builder
-	b.Grow(len(s) + utf8.UTFMax)
-	for i := 0; i < len(s); {
-		if r, size := utf8.DecodeRuneInString(s[i:]); r == utf8.RuneError && size == 1 {
-			b.WriteString("\uFFFD")
-			i++
-			continue
-		} else {
-			b.WriteString(s[i : i+size])
-			i += size
-		}
-	}
-	return b.String()
+	return string([]rune(s))
 }
 
 // renderToolTimeout renders a call that outran [WithToolTimeout].
 func renderToolTimeout(name string, d time.Duration) string {
-	return fmt.Sprintf("ERROR: tool %s timed out after %s", name, d)
+	return jsonSafeUTF8(fmt.Sprintf("ERROR: tool %s timed out after %s", name, d))
 }
 
 // renderToolDenied renders a [ToolPolicy] refusal; reason is the policy
 // error's text, sent to the model verbatim.
 func renderToolDenied(name, reason string) string {
-	return fmt.Sprintf("ERROR: tool %s denied: %s", name, reason)
+	return jsonSafeUTF8(fmt.Sprintf("ERROR: tool %s denied: %s", name, reason))
 }
 
 // renderToolNotRun renders a call skipped because the run's context was
@@ -264,7 +252,7 @@ func isMedia(b llmkit.Block) bool {
 // placeToolBlocks builds the outcome of a successful Tool.Run, degrading each
 // media block the client's profile cannot carry in a tool result.
 func (r *Runner) placeToolBlocks(out []llmkit.Block) toolResult {
-	out = normalizeTextBlocks(out)
+	out = normalizeBlocks(out)
 	if !slices.ContainsFunc(out, isMedia) {
 		return toolResult{result: blocksText(out), content: nonEmptyBlocks(out)}
 	}
@@ -272,18 +260,28 @@ func (r *Runner) placeToolBlocks(out []llmkit.Block) toolResult {
 	return toolResult{result: blocksText(placed), content: placed, degraded: degraded}
 }
 
-// normalizeTextBlocks applies jsonSafeUTF8 to every text, copying only when
-// some text is invalid; the tool's slice is never modified.
-func normalizeTextBlocks(blocks []llmkit.Block) []llmkit.Block {
-	if !slices.ContainsFunc(blocks, func(b llmkit.Block) bool { return !utf8.ValidString(b.Text) }) {
+// normalizeBlocks applies jsonSafeUTF8 to every string field of every block,
+// copying only when one is invalid; the tool's slice is never modified.
+func normalizeBlocks(blocks []llmkit.Block) []llmkit.Block {
+	if !slices.ContainsFunc(blocks, func(b llmkit.Block) bool { return !blockStringsValid(b) }) {
 		return blocks
 	}
 	cp := make([]llmkit.Block, len(blocks))
-	copy(cp, blocks)
-	for i := range cp {
-		cp[i].Text = jsonSafeUTF8(cp[i].Text)
+	for i, b := range blocks {
+		b.Kind = llmkit.BlockKind(jsonSafeUTF8(string(b.Kind)))
+		b.Text = jsonSafeUTF8(b.Text)
+		b.MediaType = jsonSafeUTF8(b.MediaType)
+		b.URL = jsonSafeUTF8(b.URL)
+		b.Title = jsonSafeUTF8(b.Title)
+		b.Provider = jsonSafeUTF8(b.Provider)
+		cp[i] = b
 	}
 	return cp
+}
+
+func blockStringsValid(b llmkit.Block) bool {
+	return utf8.ValidString(string(b.Kind)) && utf8.ValidString(b.Text) && utf8.ValidString(b.MediaType) &&
+		utf8.ValidString(b.URL) && utf8.ValidString(b.Title) && utf8.ValidString(b.Provider)
 }
 
 // degradeToolMedia replaces each media block a tool result cannot carry by its
@@ -470,6 +468,7 @@ func (res *toolResult) setText(s string) {
 // deniedResult renders a [ToolPolicy] refusal: the model-visible denial
 // text plus the Denied mark and the policy's reason for the ToolRun event.
 func deniedResult(name, reason string) toolResult {
+	reason = jsonSafeUTF8(reason)
 	return toolResult{result: renderToolDenied(name, reason), isErr: true, denied: true, denyReason: reason}
 }
 
