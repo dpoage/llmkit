@@ -52,7 +52,7 @@ client, err := provider.New(context.Background(), spec, provider.Options{})
 
 `BaseURL` is required for this type. It has no vendor default, so an empty value would silently target first-party `api.openai.com/v1`. New refuses an empty `BaseURL` with an error wrapping `ErrInvalidRequest`.
 
-The endpoint is often credential-less, so pass any non-empty placeholder as `Secret` — for example the string `"ollama"`. New checks only that the secret is present, not that the backend accepts it.
+The endpoint is often credential-less, so pass a placeholder as `Secret`, for example `"ollama"`. New checks only that the secret is present, not that the backend accepts it. A `Secret` under 8 bytes is a placeholder: llmkit does not mask it, so it stays visible in an error that echoes it. A `Secret` of 8 bytes or more, and the password of a `BaseURL` with userinfo, are masked in every returned error and in the `Err` of every observer event (see [Error normalization](#error-normalization)).
 
 Because llmkit cannot know what the endpoint supports, this provider uses a conservative capability profile:
 
@@ -241,9 +241,13 @@ Adapters map vendor failures onto the sentinel errors in `llmkit`; match them wi
 | Any other 4xx (404, 409, 422, ...) | `ErrInvalidRequest` | No |
 | Google 3xx the client does not follow (302 included) whose body carries no Gemini `error.code` | `ErrServer` (genai exposes no vendor type) | Yes |
 | In-band SSE error event on a committed 200 stream (Anthropic `error.type` / OpenAI body `error.type`) | classified by the vendor type, `StatusCode` 200 | `overloaded_error`/`server_error` → yes; `invalid_request_error` → no; unknown type → `ErrServer` (yes) |
-| Transport failure (dial, reset, per-attempt timeout) | `ErrServer` with `StatusCode` 0, SDK error chained (in `decide` and `embed`, unless masking a `Secret` or `BaseURL` password in it cut the chain). `Message` is the error text capped at 200 bytes on a rune boundary plus `...` | Yes |
+| Transport failure (dial, reset, per-attempt timeout) | `ErrServer` with `StatusCode` 0, SDK error chained (unless masking a `Secret` or `BaseURL` password in it cut the chain). `Message` is the error text capped at 200 bytes on a rune boundary plus `...` | Yes |
 | Redirect-policy failure in `decide` and `embed` (a redirect loop past the client's 10 redirects, or an error from the caller's `http.Client.CheckRedirect`) | `ErrInvalidRequest` with `StatusCode` 0, client error chained unless masking a `Secret` or `BaseURL` password in it cut the chain. The chat adapters do not distinguish it: it is a retried transport failure there | No |
 | Caller's context done (cancelled mid-call or during the retry backoff, or its deadline expired mid-attempt) | Adapters report a cancellation as a plain error chaining `context.Canceled`, never an `*llmkit.APIError`. When the caller's context is done as the retry stage returns, a retryable last error (a 503, or the `ErrServer` transport failure a caller deadline cuts short) is replaced by a plain error chaining `ctx.Err()` that carries its text; a terminal one (a 401, a stream callback's sentinel) is returned as-is | No — the result is never retryable under `llmkit.Classify` |
+
+Every adapter masks the configured `Secret` and the password of a `BaseURL` with userinfo in the errors it returns and in the `Err` of observer events. A `Secret` under 8 bytes is a placeholder and stays visible; the password is masked at any length. Each value is masked as sent, JSON-escaped, and Go-quoted. The mask is `***`, or three copies of another byte when a value holds `*`. Masking runs before the 200-byte `Message` cap, so the cap never leaves the front of a value.
+
+When masking changes an error, the error chain is cut. `Kind`, `StatusCode`, `RetryAfter`, `HasRetryAfter`, and `Provider` stay, and `errors.Is` still matches the sentinel errors and the context errors. `errors.As` no longer finds the vendor SDK error or a `net.Error`. An error that holds no credential comes back unchanged. The error your `Stream` callback returns is never masked.
 
 `Retry-After` is parsed on every status, not only 429/529. On the Anthropic, OpenAI, and openai-compatible adapters, when the response carries the header and it parses, these errors report `HasRetryAfter` with `RetryAfter` set (a present zero means retry immediately): an error with a `StatusCode` of 400 or above, on Complete and Stream; the Complete no-completion error below 400; and an Anthropic SSE `error` event. The errors that do not report it are listed under the `Retry-After` rules below. `llmkit.Classify` is the one retryability rule the table summarizes: cancellation first, then the retryable kinds `ErrRateLimited`/`ErrServer`/`ErrOverloaded`, everything else terminal.
 

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"math"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -21,6 +22,9 @@ type googleAdapter struct {
 	client *genai.Client
 	model  string
 	caps   llmkit.Capabilities
+	// redact masks the configured credential and BaseURL password in every
+	// error the adapter returns.
+	redact *adapter.Redactor
 }
 
 // Options configures a Gemini adapter.
@@ -93,10 +97,13 @@ func New(ctx context.Context, model string, opts Options) (llmkit.Client, error)
 	if err != nil {
 		return nil, adapter.Refuse("google", "failed to construct genai client: "+err.Error(), err)
 	}
+	// An unparseable BaseURL leaves root nil; genai refuses it at request time.
+	root, _ := url.Parse(opts.BaseURL)
 	return &googleAdapter{
 		client: client,
 		model:  model,
 		caps:   caps,
+		redact: adapter.NewRedactor(opts.APIKey, root),
 	}, nil
 }
 
@@ -716,11 +723,12 @@ func (g *googleAdapter) normalizeErr(ctx context.Context, err error) error {
 			Status:  status,
 			Message: apiErr.Message,
 			Err:     err,
+			Redact:  g.redact,
 		})
 	}
 	// No HTTP response: a refusal when nothing was sent, else a transport
 	// failure or the caller's context ending mid-call.
-	return adapter.NoResponseError("google", ctx, err)
+	return adapter.NoResponseError("google", ctx, err, g.redact)
 }
 
 // Sources (vendor docs consulted for this table; every number comes from

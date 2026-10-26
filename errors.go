@@ -34,11 +34,11 @@ var (
 // sentinel errors (accessible via errors.Is / the Kind field), preserves the
 // HTTP status code and any Retry-After hint, and chains the underlying SDK
 // error for debugging. llmkit never inserts the credential or the request
-// body into these fields. The chat adapters pass vendor error text through
-// as the provider sent it, so a provider that echoes credentials into its
-// error output is outside their control. The decide and embed packages
-// mask an echo of their configured Secret or BaseURL password in every
-// error they return; their package documentation gives the forms covered.
+// body into these fields. The chat adapters, decide and embed mask an echo
+// of their configured Secret or BaseURL password in every error they
+// return; a Secret under 8 bytes is a placeholder and stays visible.
+// docs/providers.md and the decide and embed package documentation give
+// the forms covered.
 type APIError struct {
 	// Kind is the sentinel error this maps to (ErrRateLimited, ErrAuth, ...).
 	Kind error
@@ -75,9 +75,9 @@ type APIError struct {
 	Message string
 	// Err is the underlying vendor-SDK error, for Unwrap chaining. It may
 	// carry provider response detail. llmkit never inserts the credential
-	// into it. The chat adapters chain the vendor error as it came; decide
-	// and embed do the same unless they masked a credential, which cuts
-	// the chain (see their package documentation).
+	// into it. Every adapter, decide and embed chains the error as it came,
+	// unless masking a credential cut the chain: Kind, StatusCode and
+	// RetryAfter stay, and errors.As no longer finds the vendor SDK error.
 	Err error
 }
 

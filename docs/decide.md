@@ -620,9 +620,10 @@ For a non-200 status, `APIError.Message` carries the host body text; for a
 transport or redirect failure, it carries the error's text. A `Message` of
 either kind longer than 200 bytes is cut at the last rune boundary at or
 before byte 200 and gets `...` appended. llmkit never places the API key
-into an error, and `Ask` masks an echo of the `Secret` or the `BaseURL`
-password in the error it returns; the `decide/systemone` package documentation gives
-the forms covered.
+into an error, and `Ask` masks an echo of the `Secret` (8 bytes or more) or
+the `BaseURL` password in the error it returns; a shorter `Secret` is a
+placeholder and stays visible. The `decide/systemone` package documentation
+gives the forms covered.
 
 ## Usage and observability
 

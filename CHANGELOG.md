@@ -589,6 +589,24 @@ entry below is marked.
 - `decide`: `Ask` accepted a `Choice` answer whose option was outside the
   asked set. It now returns `ErrServer` with `StatusCode` 200 and retries
   it like any `ErrServer`.
+- `provider`: the Anthropic, OpenAI, OpenAI-compatible and Google adapters
+  now mask the configured `Secret` and the `BaseURL` password in every error
+  they return and in the `Err` of observer events. Before, a vendor 4xx, 5xx
+  or in-band error body that echoed the API key, a `BaseURL` quoted in a
+  transport, cancellation or refusal error, and a `BaseURL` password quoted
+  in the request URL reached `APIError.Message`, the `Unwrap` chain and the
+  observer unchanged. The mask is `***` and covers the value as sent,
+  JSON-escaped and Go-quoted. It runs before the 200-byte `Message` cap, on
+  `Complete` and on `Stream`. A `Secret` under 8 bytes is a placeholder and
+  is not masked; the password is masked at any length. Accepted risks: when
+  masking changes an error, the chain is cut, so `errors.As` no longer finds
+  the vendor SDK error type or a `net.Error`; `Kind`, `StatusCode`,
+  `RetryAfter`, `HasRetryAfter` and `Provider` stay, and `errors.Is` still
+  matches the sentinels and the context errors. An error with nothing to mask
+  is unchanged. Observer `Err` text that was persisted before this version
+  may hold a key a vendor echoed: rotate any key a vendor echoed. The error a
+  `Stream` callback returns is never masked. See `docs/providers.md`
+  (llmkit-ant).
 
 ||||||| f4bbf40
 
