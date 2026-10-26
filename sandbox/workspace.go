@@ -15,6 +15,15 @@ import (
 	"sync"
 )
 
+// os.MkdirTemp prefixes for the scratch dirs this package creates directly
+// under os.TempDir(); one set shared by the creation sites, the watchdog
+// purge glob, and workspaceSkip.
+const (
+	llmkitSandboxPrefix = "llmkit-sandbox-"
+	llmkitWscachePrefix = "llmkit-wscache-"
+	llmkitMockPrefix    = "llmkit-mock-"
+)
+
 // prepareWorkspace copies the repository snapshot at repoDir into a fresh
 // temporary directory and applies any WriteFiles on top. It returns the path
 // to the new workspace; the caller is responsible for removing it.
@@ -29,7 +38,7 @@ func prepareWorkspace(repoDir string, writeFiles map[string][]byte) (string, err
 		return "", fmt.Errorf("sandbox: repo dir %q is not a directory", repoDir)
 	}
 
-	ws, err := os.MkdirTemp("", "llmkit-sandbox-")
+	ws, err := os.MkdirTemp("", llmkitSandboxPrefix)
 	if err != nil {
 		return "", fmt.Errorf("sandbox: create workspace: %w", err)
 	}
@@ -134,7 +143,7 @@ type wsCache struct {
 func (c *wsCache) clone(repoDir, key string) (ws string, hit bool, err error) {
 	c.mu.Lock()
 	if c.dir == "" {
-		dir, mkErr := os.MkdirTemp("", "llmkit-wscache-")
+		dir, mkErr := os.MkdirTemp("", llmkitWscachePrefix)
 		if mkErr != nil {
 			c.mu.Unlock()
 			return "", false, fmt.Errorf("sandbox: create workspace cache dir: %w", mkErr)
@@ -171,7 +180,7 @@ func (c *wsCache) clone(repoDir, key string) (ws string, hit bool, err error) {
 	pristine := c.pristine
 	c.mu.Unlock()
 
-	ws, err = os.MkdirTemp("", "llmkit-sandbox-")
+	ws, err = os.MkdirTemp("", llmkitSandboxPrefix)
 	if err != nil {
 		return "", false, fmt.Errorf("sandbox: create workspace: %w", err)
 	}
@@ -257,7 +266,74 @@ func workspaceCacheKey(repoDir string) (key string, isRepo bool, err error) {
 // a copy-on-write reflink over a full byte copy where the filesystem supports
 // it.
 func cloneTree(src, dst string) error {
-	return copyTreeWith(src, dst, nil, reflinkOrCopy)
+	// Inert skip: a pristine was already filtered when materialized.
+	return copyTreeWith(src, dst, workspaceSkip{}, reflinkOrCopy)
+}
+
+// hasLlmkitTempPrefix reports whether name starts with one of the package's
+// os.MkdirTemp prefixes.
+func hasLlmkitTempPrefix(name string) bool {
+	return strings.HasPrefix(name, llmkitSandboxPrefix) ||
+		strings.HasPrefix(name, llmkitWscachePrefix) ||
+		strings.HasPrefix(name, llmkitMockPrefix)
+}
+
+// workspaceSkip names the directories every workspace copy leaves out: the
+// identity dir, and llmkit temp dirs (see isLlmkitTempDir), whoever created them.
+type workspaceSkip struct {
+	// identity is the copy destination or wsCache dir; nil when there is none.
+	identity fs.FileInfo
+	// tmpRoot is os.TempDir() resolved once at copy time; nil when unstattable.
+	tmpRoot fs.FileInfo
+}
+
+// newWorkspaceSkip resolves the skip decision for one copy. An unstattable
+// TMPDIR disables the temp-dir clause rather than failing the copy.
+func newWorkspaceSkip(identity fs.FileInfo) workspaceSkip {
+	s := workspaceSkip{identity: identity}
+	if tmp, err := os.Stat(os.TempDir()); err == nil {
+		s.tmpRoot = tmp
+	}
+	return s
+}
+
+// dir reports whether the walked directory at path is left out: the identity
+// dir by os.SameFile, or a direct child of os.TempDir() with a package prefix.
+func (s workspaceSkip) dir(path, name string, info fs.FileInfo) bool {
+	if s.identity != nil && os.SameFile(s.identity, info) {
+		return true
+	}
+	return s.isLlmkitTempDir(filepath.Dir(path), name)
+}
+
+// isLlmkitTempDir reports whether the dir named name directly under
+// parentPath is a direct child of os.TempDir() — matched by identity at copy
+// time, so a TMPDIR named through a symlink alias behaves the same — whose
+// name starts with one of the package's os.MkdirTemp prefixes, whoever
+// created it. The accepted cost: a user entry with such a name directly
+// inside an in-repo TMPDIR is left out too.
+func (s workspaceSkip) isLlmkitTempDir(parentPath, name string) bool {
+	if s.tmpRoot == nil || !hasLlmkitTempPrefix(name) {
+		return false
+	}
+	parent, err := os.Stat(parentPath)
+	return err == nil && os.SameFile(s.tmpRoot, parent)
+}
+
+// coversEntry reports whether a listed entry rel under src is left out:
+// an ancestor dir — or the entry itself, when a dir — is an llmkit temp
+// dir. Only the temp-dir clause applies to listed entries: the identity dir
+// carries one of these prefixes under an unchanged TMPDIR, and a TMPDIR
+// changed in-process after that dir was created is not covered.
+func (s workspaceSkip) coversEntry(src, rel string, info fs.FileInfo) bool {
+	dir := src
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		if s.isLlmkitTempDir(dir, part) {
+			return true
+		}
+		dir = filepath.Join(dir, part)
+	}
+	return info.IsDir() && s.isLlmkitTempDir(dir, info.Name())
 }
 
 // copyTreeWith recursively copies the directory tree rooted at src into dst,
@@ -268,12 +344,9 @@ func cloneTree(src, dst string) error {
 // as symlinks (their targets are not followed, which avoids copying outside
 // the tree and preserves repo layout).
 //
-// skip is the identity of the directory to leave out, or nil to leave out
-// nothing: a directory under src that os.SameFile reports as skip is not
-// entered. The match is by device and inode (os.SameFile), not by path, so
-// it holds when the skipped directory was named through a symlink. The root
-// of src itself is never excluded.
-func copyTreeWith(src, dst string, skip fs.FileInfo, copyRegular func(src, dst string, perm fs.FileMode) error) error {
+// skip names the directories to leave out (see workspaceSkip), matched by
+// identity, not by path. The root of src itself is never excluded.
+func copyTreeWith(src, dst string, skip workspaceSkip, copyRegular func(src, dst string, perm fs.FileMode) error) error {
 	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -307,7 +380,7 @@ func copyTreeWith(src, dst string, skip fs.FileInfo, copyRegular func(src, dst s
 				// dst already exists; align its mode with the source root.
 				return os.Chmod(dst, info.Mode().Perm())
 			}
-			if os.SameFile(skip, info) {
+			if skip.dir(path, d.Name(), info) {
 				return filepath.SkipDir
 			}
 			return os.MkdirAll(target, info.Mode().Perm())
@@ -343,8 +416,8 @@ func copyTreeWith(src, dst string, skip fs.FileInfo, copyRegular func(src, dst s
 // otherwise poisons an in-sandbox rebuild), the .git directory, and built
 // vendor caches. When src is not a git repo (or git is unavailable) it falls
 // back to a full recursive copy so non-git checkouts still work. The
-// recursive copies do not enter a directory with dst's identity (see
-// copyTreeWith).
+// recursive copies do not enter a directory with dst's identity or any
+// llmkit temp dir (see workspaceSkip).
 func copyWorkspace(src, dst string) error {
 	skip, err := os.Stat(dst)
 	if err != nil {
@@ -368,7 +441,7 @@ func copyWorkspaceSkipping(src, dst string, skip fs.FileInfo) error {
 	if isRepo {
 		return copyFileListSkipping(src, dst, files, skip)
 	}
-	return copyTreeWith(src, dst, skip, copyFile)
+	return copyTreeWith(src, dst, newWorkspaceSkip(skip), copyFile)
 }
 
 // GitWorktreeFiles returns the repo-relative paths git considers part of the
@@ -422,9 +495,11 @@ func gitStderr(err error) string {
 // gitlink path, which resolves on disk to its checked-out working tree) is
 // recursively copied so vendored-as-submodule dependencies reach the sandbox.
 // A listed path missing on disk (e.g. a tracked-but-deleted file) is skipped
-// rather than aborting the copy. The recursive copy of a directory entry
-// leaves out skip (see copyTreeWith).
+// rather than aborting the copy. An entry under (or being) an llmkit temp
+// dir is left out too (see workspaceSkip), as is the identity dir inside a
+// directory entry's recursive copy.
 func copyFileListSkipping(src, dst string, files []string, skip fs.FileInfo) error {
+	s := newWorkspaceSkip(skip)
 	for _, rel := range files {
 		srcPath := filepath.Join(src, rel)
 		info, err := os.Lstat(srcPath)
@@ -433,6 +508,11 @@ func copyFileListSkipping(src, dst string, files []string, skip fs.FileInfo) err
 				continue
 			}
 			return err
+		}
+
+		// git lists a temp dir's files individually; the walk never sees them.
+		if s.coversEntry(src, rel, info) {
+			continue
 		}
 		target := filepath.Join(dst, rel)
 		// Parent dirs are created 0o755 (traversable/writable for the build)
@@ -457,7 +537,7 @@ func copyFileListSkipping(src, dst string, files []string, skip fs.FileInfo) err
 			if err := os.MkdirAll(target, 0o755); err != nil {
 				return err
 			}
-			if err := copyTreeWith(srcPath, target, skip, copyFile); err != nil {
+			if err := copyTreeWith(srcPath, target, s, copyFile); err != nil {
 				return err
 			}
 		case info.Mode().IsRegular():
