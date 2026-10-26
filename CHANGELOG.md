@@ -543,9 +543,10 @@ entry below is marked.
   crossed into another repository's workspace. After, every copy path (the
   full-tree walk, the git file-list copy, the gitlink recursion, and the
   wsCache pristine materialization) leaves such directories out, whoever
-  created them, listed git files included. A repository entry with one of
-  those prefixes directly inside `TMPDIR` is left out too, and only this
-  process's `TMPDIR` at copy time is consulted (llmkit-bk8.7.25).
+  created them, listed git files included. A repository directory with one of
+  those prefixes directly inside `TMPDIR` is left out too; a file or symlink
+  with such a name, and `TMPDIR` itself, keep copying. Only this process's
+  `TMPDIR` at copy time is consulted (llmkit-bk8.7.25).
 
 - `provider`: a history that did not come from Gemini (an Anthropic or OpenAI
   tool loop, for example) no longer fails on `gemini-3` and `gemini-4` models

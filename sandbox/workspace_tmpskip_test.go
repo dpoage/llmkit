@@ -77,6 +77,26 @@ func TestForeignTmpHelperProcess(t *testing.T) {
 			}
 			listRoot = filepath.Join(ws, "vendor", "gtest")
 		}
+	case "movedCache":
+		// The cache dir is created inside repoB, then TMPDIR moves in-process;
+		// the forced miss re-materializes with the temp clause inert.
+		var c wsCache
+		var ws1 string
+		if ws1, _, err = prepareWorkspaceCached(&c, repoB, nil); err != nil {
+			t.Fatalf("movedCache first clone: %v", err)
+		}
+		_ = os.RemoveAll(ws1)
+		if err = os.WriteFile(filepath.Join(repoB, "b.txt"), []byte("b2\n"), 0o644); err != nil {
+			t.Fatalf("movedCache dirty repo: %v", err)
+		}
+		if err = os.Setenv("TMPDIR", os.Getenv("LLMKIT_FOREIGN_TMP2")); err != nil {
+			t.Fatalf("movedCache set TMPDIR: %v", err)
+		}
+		var hit bool
+		if ws, hit, err = prepareWorkspaceCached(&c, repoB, nil); err == nil && hit {
+			_ = os.RemoveAll(ws)
+			t.Fatalf("movedCache: second clone must be a cache miss")
+		}
 	default:
 		t.Fatalf("unknown mode %q", mode)
 	}
@@ -267,4 +287,154 @@ func TestWorkspaceLeavesLlmkitTempDirsOut(t *testing.T) {
 			diffListings(t, got, want)
 		})
 	}
+}
+
+// runMovedTmpChild re-executes the test binary as TestForeignTmpHelperProcess
+// in movedCache mode: TMPDIR=tmpdir for the first cache use and TMPDIR=tmp2
+// for the second. The wall-clock bound kills a self-copy that grows unchecked.
+func runMovedTmpChild(t *testing.T, repo, tmpdir, tmp2 string) []string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestForeignTmpHelperProcess$", "-test.count=1")
+	cmd.Env = append(os.Environ(),
+		"LLMKIT_FOREIGN_MODE=movedCache",
+		"LLMKIT_FOREIGN_SRC=none",
+		"LLMKIT_FOREIGN_REPO="+repo,
+		"LLMKIT_FOREIGN_REPO_A=",
+		"LLMKIT_FOREIGN_TMP2="+tmp2,
+		"TMPDIR="+tmpdir,
+	)
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("movedCache child did not terminate within 60s")
+	}
+	if err != nil {
+		t.Fatalf("movedCache child failed: %v\n%s", err, out)
+	}
+	var got []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if rest, ok := strings.CutPrefix(line, "FOREIGN "); ok {
+			got = append(got, rest)
+		}
+	}
+	sort.Strings(got)
+	return got
+}
+
+// TestWorkspaceKeepsPrefixedEntriesThatAreNotTempDirs: only a directory
+// directly inside TMPDIR with a prefix is left out. A prefixed file or symlink
+// inside TMPDIR, and a prefixed TMPDIR itself, copy on both entry points.
+func TestWorkspaceKeepsPrefixedEntriesThatAreNotTempDirs(t *testing.T) {
+	type row struct {
+		name  string
+		shape string // filelink | eqR | tmpIsNested
+		git   bool
+		entry string // prepare | cached
+	}
+	rows := []row{
+		{"filelink/git/prepare", "filelink", true, "prepare"},
+		{"filelink/git/cached", "filelink", true, "cached"},
+		{"filelink/nongit/prepare", "filelink", false, "prepare"},
+		{"filelink/nongit/cached", "filelink", false, "cached"},
+		{"eqR/git/prepare", "eqR", true, "prepare"},
+		{"eqR/git/cached", "eqR", true, "cached"},
+		{"eqR/nongit/prepare", "eqR", false, "prepare"},
+		{"eqR/nongit/cached", "eqR", false, "cached"},
+		{"tmpIsNested/git/prepare", "tmpIsNested", true, "prepare"},
+		{"tmpIsNested/git/cached", "tmpIsNested", true, "cached"},
+		{"tmpIsNested/nongit/prepare", "tmpIsNested", false, "prepare"},
+		{"tmpIsNested/nongit/cached", "tmpIsNested", false, "cached"},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			if r.git || r.shape == "tmpIsNested" {
+				if _, err := exec.LookPath("git"); err != nil {
+					t.Skip("git not on PATH")
+				}
+			}
+			if r.shape == "filelink" && runtime.GOOS == "windows" {
+				t.Skip("symlink creation needs privileges on windows")
+			}
+			repo := t.TempDir()
+			mustWrite(t, filepath.Join(repo, "b.txt"), "b\n", 0o644)
+			var tmpdir string
+			switch r.shape {
+			case "filelink":
+				mustMkdir(t, filepath.Join(repo, "tmp"))
+				mustWrite(t, filepath.Join(repo, "tmp", "keep.txt"), "keep\n", 0o644)
+				// Prefixed file and symlink inside TMPDIR: kept.
+				mustWrite(t, filepath.Join(repo, "tmp", "llmkit-sandbox-notes.txt"), "n\n", 0o644)
+				if err := os.Symlink("../b.txt", filepath.Join(repo, "tmp", "llmkit-mock-link")); err != nil {
+					t.Fatal(err)
+				}
+				tmpdir = filepath.Join(repo, "tmp")
+			case "eqR":
+				mustMkdir(t, filepath.Join(repo, "tmp"))
+				mustWrite(t, filepath.Join(repo, "tmp", "keep.txt"), "keep\n", 0o644)
+				mustWrite(t, filepath.Join(repo, "llmkit-wscache-readme.md"), "r\n", 0o644)
+				// A prefixed directory directly inside TMPDIR: left out.
+				mustMkdir(t, filepath.Join(repo, "llmkit-sandbox-userdir"))
+				mustWrite(t, filepath.Join(repo, "llmkit-sandbox-userdir", "u.txt"), "u\n", 0o644)
+				tmpdir = repo
+			case "tmpIsNested":
+				// The outer gitInit runs first so the nested repo stays
+				// untracked and git lists it as "llmkit-sandbox-nested/".
+				if r.git {
+					gitInit(t, repo)
+				}
+				nested := filepath.Join(repo, "llmkit-sandbox-nested")
+				mustMkdir(t, nested)
+				mustWrite(t, filepath.Join(nested, "v.txt"), "v\n", 0o644)
+				gitInit(t, nested) // nested is TMPDIR itself: kept whole
+				tmpdir = nested
+			}
+			if r.git && r.shape != "tmpIsNested" {
+				gitInit(t, repo)
+			}
+			pre, err := treeListing(repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := pre
+			if r.shape == "eqR" {
+				want = nil
+				for _, l := range pre {
+					if strings.HasPrefix(l, "d llmkit-sandbox-userdir") ||
+						strings.HasPrefix(l, "f llmkit-sandbox-userdir/") {
+						continue
+					}
+					want = append(want, l)
+				}
+			}
+			got := runForeignTmpChild(t, r.entry, "none", repo, "", tmpdir)
+			diffListings(t, got, want)
+		})
+	}
+}
+
+// TestWorkspaceNeverCopiesCacheDirAfterTmpdirMove: the wsCache dir sits inside
+// RepoDir; TMPDIR moves in-process before a forced miss, so only the identity
+// clause can keep the re-materialized pristine from walking into the cache.
+func TestWorkspaceNeverCopiesCacheDirAfterTmpdirMove(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	repo := t.TempDir()
+	mustWrite(t, filepath.Join(repo, "b.txt"), "b\n", 0o644)
+	gitInit(t, repo)
+	vend := filepath.Join(repo, "vend")
+	mustMkdir(t, vend)
+	mustWrite(t, filepath.Join(vend, "v.txt"), "v\n", 0o644)
+	// Untracked nested repo: the git file list carries "vend/" as a directory
+	// entry whose recursive copy walks past the cache dir.
+	gitInit(t, vend)
+	tmpdir := filepath.Join(vend, "tmp")
+	mustMkdir(t, tmpdir)
+	want, err := treeListing(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := runMovedTmpChild(t, repo, tmpdir, t.TempDir())
+	diffListings(t, got, want)
 }
