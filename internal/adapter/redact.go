@@ -26,7 +26,7 @@ import (
 // picks:
 //
 //   - Values: the Secret from 8 bytes on, the BaseURL password at any
-//     length, and, only when the BaseURL has a password, the base64
+//     length, and, only for a non-empty BaseURL password, the base64
 //     "user:password" pair net/http sends as a Basic credential, each with its
 //     JSON-escaped and Go-quoted (strconv.Quote, the %q verb) forms. A
 //     value that is not valid UTF-8 also has those forms of its

@@ -596,8 +596,8 @@ entry below is marked.
   transport, cancellation or refusal error, and a `BaseURL` password quoted
   in the request URL reached `APIError.Message`, the `Unwrap` chain and the
   observer unchanged. The mask is `***`. When a value holds `*`, the mask
-  is three copies of a printable byte no value holds, or empty when every
-  printable byte occurs in some value. It covers the value as sent,
+  is three copies of a byte from `!` to `~` that no value holds, or empty
+  when every such byte occurs in some value. It covers the value as sent,
   JSON-escaped and Go-quoted, and runs before the 200-byte `Message` cap,
   on `Complete` and on `Stream`. The userinfo of any
   `scheme://user[:password]@` URL in an error text is masked too, whether
