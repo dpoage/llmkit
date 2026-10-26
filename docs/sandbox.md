@@ -237,9 +237,19 @@ The package's `ExampleObserve` shows a complete run against the Mock backend.
 
 By default `Exec` copies the repository snapshot into a fresh temporary directory; it never works in the live checkout. With `Spec.Workspace` set, `Exec` uses that caller-owned directory directly instead of copying.
 
-- When `RepoDir` is a git work tree, the copy contains exactly what git considers part of the work tree. Tracked files plus untracked, non-gitignored files are included. `.git` and generated gitignored content (for example, a stale build directory) never reach the sandbox. `GitWorktreeFiles` exposes the same listing to callers.
+- When `RepoDir` is a git work tree, the copy contains what git considers part
+  of the work tree: tracked files plus untracked, non-gitignored files. `.git`
+  and generated gitignored content (for example, a stale build directory) never
+  reach the sandbox. `GitWorktreeFiles` exposes that listing to callers. When
+  `TMPDIR` lies inside `RepoDir`, the copy also leaves out the llmkit temp dirs
+  described below, and `GitWorktreeFiles` does not.
 - When `RepoDir` is not a git work tree, `Exec` falls back to a full recursive copy.
-- The copy leaves out its own destination directory, matched by directory identity, so a `TMPDIR` inside `RepoDir` does not copy the workspace into itself.
+- The copy leaves out its own destination directory, matched by directory identity, so a `TMPDIR` inside `RepoDir` does not copy the workspace into itself. It also leaves out every llmkit temp dir: a directory directly inside this process's `TMPDIR` whose name starts with `llmkit-sandbox-`, `llmkit-wscache-`, or `llmkit-mock-`. The match is by directory identity at copy time, so a `TMPDIR` reached through a symlink alias behaves the same. Whatever created the directory — this run, another run's live workspace, or another instance's workspace cache — the copy leaves it out, git-listed files included.
+- The cost: a repository directory with one of those prefixes directly inside
+  an in-repo `TMPDIR` is left out too. A file or symlink with such a name keeps
+  copying. `TMPDIR` itself keeps copying, even when its name carries a prefix.
+  Entries elsewhere in the repository keep copying, prefixed or not.
+- The boundary: the rule reads this process's `TMPDIR` at copy time. Another process's `TMPDIR`, or a `TMPDIR` changed in-process after a cached directory was created, is not covered.
 - The container backends keep a one-entry pristine cache keyed by repository path, HEAD, and a `git status` hash. A cache hit clones the pristine copy (reflink-first) instead of re-walking the source. `Result.WorkspaceCacheHit` reports which happened. Non-git directories bypass the cache entirely.
 - `MaterializeWorkspace` materializes one caller-owned workspace once. It creates the directory and returns its path. Pass the path as `Spec.Workspace` on repeated `Exec` calls. The caller removes it when done — `Exec` never deletes a caller-supplied workspace.
 
