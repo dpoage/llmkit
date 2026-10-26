@@ -45,8 +45,7 @@ var ErrReplayedFailure = errors.New("decide: replayed failed decision")
 // A record's image hashes are those in its Images plus those of the valid
 // image values left inline in its State and Questions, as logs written
 // before images were recorded hold them. An inline image that is not valid
-// adds no hash and never fails Replay. Scanning inline images is slow at
-// pathological nesting depth, as [Normalize] is.
+// adds no hash and never fails Replay.
 //
 // Replay compares neither the state nor the Backend: a changed state still
 // receives the recorded answer, unless an image differs. Recorded decisions

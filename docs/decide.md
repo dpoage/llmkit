@@ -348,10 +348,11 @@ inside it is scanned.
 **A valid image** has inline `Data` and a `MediaType` that begins `image/`;
 `URL`, `Text`, `Title`, `Provider` and `Raw` are empty (an empty `"text":""`
 is fine; `"raw":null` is not). An object that is an image by the rule above
-but fails this, including one whose member does not decode, is refused
-naming its path, for example `state["frames"][2]["frame"]: invalid image: no
-inline data`. It is never sent as text. Nothing checks the pixels or sniffs
-the bytes. The same bytes under two media types are refused.
+but fails this, including one whose member does not decode (one nested deeper
+than `encoding/json`'s 10 000 levels does not), is refused naming its path,
+for example `state["frames"][2]["frame"]: invalid image: no inline data`. It
+is never sent as text. Nothing checks the pixels or sniffs the bytes. The same
+bytes under two media types are refused.
 
 **Labels and order.** `Request.Images` holds the distinct images (deduplicated
 by bytes) in order of first occurrence: the state in document order, then each
@@ -755,8 +756,7 @@ Two media types over the same bytes do not fail `Replay` either, but the
 record holds one hash for them, so only an `Ask` of that image matches. A
 URL or caption image in a new `Ask` is a `Normalize` refusal, as live. A
 binary from before this change that replays a log written after it does not
-check images: it compares step and question ids only. Scanning inline
-images is slow at pathological nesting depth, as `Normalize` is.
+check images: it compares step and question ids only.
 
 ## Gating an agent
 

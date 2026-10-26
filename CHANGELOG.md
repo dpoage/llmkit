@@ -570,6 +570,16 @@ entry below is marked.
 - `decide`: `Ask` accepted a `Choice` answer whose option was outside the
   asked set. It now returns `ErrServer` with `StatusCode` 200 and retries
   it like any `ErrServer`.
+- `decide`: `Normalize` and `Replay` cost no longer grows with nesting depth.
+  Finding the image values in a request or a recorded log took time
+  proportional to input size times depth, so an 80 KB `{"raw":` chain 9 990
+  levels deep took seconds. It is now proportional to input size.
+- `decide`: `Normalize` sent an image-kind object whose subtree nested more
+  than 10 000 levels deep to the backend as text, base64 bytes included,
+  because `encoding/json` cannot decode that depth and the object then did not
+  count as an image. It is now refused pre-wire like any image with a member
+  that does not decode (`invalid image: member does not decode`), under every
+  `ImageSupport`.
 
 ||||||| f4bbf40
 
