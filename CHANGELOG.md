@@ -352,6 +352,13 @@ entry below is marked.
 
 ### Changed
 
+- **Breaking:** `llmkit`: `ToolCall` now has `MarshalJSON` and
+  `UnmarshalJSON`. A struct that embeds `llmkit.ToolCall` anonymously gets
+  the promoted methods, and its own fields vanish from its JSON. Records
+  written with the new `arguments_b64` field (tool-call arguments that are not
+  valid JSON) read as nil `Arguments` in a lenient reader built before this
+  change; one that decodes with `DisallowUnknownFields` returns an error on
+  the field.
 - `agent`: `llmkit.ToolRunEvent.Content` (and `ToolEvent.Content`) is now set
   whenever the blocks placed in history are not exactly one text block: several
   text blocks, any media block, or a degraded one. A result of one text block,
@@ -597,6 +604,37 @@ entry below is marked.
 - `decide`: `Ask` accepted a `Choice` answer whose option was outside the
   asked set. It now returns `ErrServer` with `StatusCode` 200 and retries
   it like any `ErrServer`.
+- `agent`, `llmkit` (llmkit-9pk): a tool call whose model-produced arguments
+  are not valid JSON (truncated output, for example) made every event that
+  carried it fail to encode, so the JSONL sink lost the `completion` and
+  `tool_run` events and `SaveJSONL` failed. `ToolCall` now encodes such
+  arguments as base64 in an `arguments_b64` field and reads them back
+  byte-for-byte; valid-JSON and empty arguments encode exactly as before,
+  with HTML escaping on or off. A record of such a run replays with the tool
+  handed the same bytes.
+- `agent` (llmkit-5cw): `LoadJSONL` and `JSONLSink.Events` no longer refuse a
+  line over 16 MiB (`bufio.Scanner: token too long`); a record holding a
+  large tool result or image loads at any line size.
+- `agent` (llmkit-xuv, llmkit-fmf): the JSONL sink wrote lines nested 10 001
+  or 10 002 levels (a `decision` event's `State` at 9 999 or 10 000 levels,
+  or a tool call's arguments) that `encoding/json` then refused to read,
+  making the whole run unreadable, and dropped a deeper one. The sink and
+  `SaveJSONL` now refuse any line deeper than `encoding/json`'s 10 000-level
+  decode limit without writing it. The sink reports it once through `onErr`,
+  naming the run and the event kind; every other event of the run is
+  written and loads.
+  `SaveJSONL` returns an error naming the event index, run and kind, after
+  writing the events before it. `onErr` messages for every refusal now name
+  the event kind as well as the run.
+- `agent` (llmkit-xuv): the JSONL sink and `SaveJSONL` wrote events their own
+  reader refuses: an event that fails `Event.Validate` (a hand-built
+  `schema_version` 0, or a payload foreign to its kind), and an event whose
+  run id is not valid UTF-8. The run's record then failed to load. Both
+  writers now apply the reader's check first and write nothing for such an
+  event. The sink reports it once through `onErr`, naming the run and kind;
+  for a refused `start` it creates no file, and reports each later event of
+  that run as an event for an unknown run. `SaveJSONL` returns an error
+  naming the event index, run and kind.
 
 ||||||| f4bbf40
 
