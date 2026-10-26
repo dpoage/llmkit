@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -593,4 +594,206 @@ func TestResolveHostToolchains_RelativeEntryIsKernelPath(t *testing.T) {
 		t.Chdir(filepath.Join(r, "c"))
 		check(t, "link/../bin/ft", filepath.Join(r, "far"), "ft-FAR", hostToolchainMountRoot+"/ft/bin")
 	})
+}
+
+// mountExposes reports whether file lies inside the mounted directory.
+func mountExposes(mount, file string) bool {
+	return file == mount || strings.HasPrefix(file, mount+string(filepath.Separator))
+}
+
+func writeCredFile(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("SECRET\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The two rows named "pinned" assert still-ascending layouts on purpose.
+func TestResolveHostToolchainsHomeAscentBoundary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("HOME-tree toolchain layouts assumed POSIX")
+	}
+	for _, tc := range []struct {
+		name  string
+		home  func(h, o string) string
+		setup func(t *testing.T, h, o string)
+		path  func(h, o string) string
+		entry string
+		chdir func(h, o string) string
+		cred  func(h, o string) string
+		want  func(h, o string) string
+	}{
+		{"tool home directly under HOME", nil,
+			func(t *testing.T, h, o string) {
+				writeFakeExe(t, filepath.Join(h, ".cargo", "bin"), "cargo")
+				writeCredFile(t, filepath.Join(h, ".cargo", "credentials.toml"))
+			},
+			func(h, o string) string { return filepath.Join(h, ".cargo", "bin") },
+			"cargo", nil,
+			func(h, o string) string { return filepath.Join(h, ".cargo", "credentials.toml") },
+			func(h, o string) string { return filepath.Join(h, ".cargo", "bin") }},
+		{"go home directly under HOME", nil,
+			func(t *testing.T, h, o string) {
+				writeFakeExe(t, filepath.Join(h, "go", "bin"), "go")
+				writeCredFile(t, filepath.Join(h, "go", "credentials.toml"))
+			},
+			func(h, o string) string { return filepath.Join(h, "go", "bin") },
+			"go", nil,
+			func(h, o string) string { return filepath.Join(h, "go", "credentials.toml") },
+			func(h, o string) string { return filepath.Join(h, "go", "bin") }},
+		{"pulumi home directly under HOME", nil,
+			func(t *testing.T, h, o string) {
+				writeFakeExe(t, filepath.Join(h, ".pulumi", "bin"), "pulumi")
+				writeCredFile(t, filepath.Join(h, ".pulumi", "credentials.json"))
+			},
+			func(h, o string) string { return filepath.Join(h, ".pulumi", "bin") },
+			"pulumi", nil,
+			func(h, o string) string { return filepath.Join(h, ".pulumi", "credentials.json") },
+			func(h, o string) string { return filepath.Join(h, ".pulumi", "bin") }},
+		{"absolute symlink to a HOME-internal tool home", nil,
+			func(t *testing.T, h, o string) {
+				writeFakeExe(t, filepath.Join(h, "data", "cargo", "bin"), "cargo")
+				writeCredFile(t, filepath.Join(h, "data", "cargo", "credentials.toml"))
+				mustSymlink(t, filepath.Join(h, "data", "cargo"), filepath.Join(h, ".cargo"))
+			},
+			func(h, o string) string { return filepath.Join(h, ".cargo", "bin") },
+			"cargo", nil,
+			func(h, o string) string { return filepath.Join(h, "data", "cargo", "credentials.toml") },
+			func(h, o string) string { return filepath.Join(h, "data", "cargo", "bin") }},
+		{"relative symlink to a HOME-internal tool home", nil,
+			func(t *testing.T, h, o string) {
+				writeFakeExe(t, filepath.Join(h, "data", "cargo", "bin"), "cargo")
+				writeCredFile(t, filepath.Join(h, "data", "cargo", "credentials.toml"))
+				mustSymlink(t, "data/cargo", filepath.Join(h, ".cargo"))
+			},
+			func(h, o string) string { return filepath.Join(h, ".cargo", "bin") },
+			"cargo", nil,
+			func(h, o string) string { return filepath.Join(h, "data", "cargo", "credentials.toml") },
+			func(h, o string) string { return filepath.Join(h, "data", "cargo", "bin") }},
+		{"absolute symlink out of HOME", nil,
+			func(t *testing.T, h, o string) {
+				writeFakeExe(t, filepath.Join(o, "cargo", "bin"), "cargo")
+				writeCredFile(t, filepath.Join(o, "cargo", "credentials.toml"))
+				mustSymlink(t, filepath.Join(o, "cargo"), filepath.Join(h, ".cargo"))
+			},
+			func(h, o string) string { return filepath.Join(h, ".cargo", "bin") },
+			"cargo", nil,
+			func(h, o string) string { return filepath.Join(o, "cargo", "credentials.toml") },
+			func(h, o string) string { return filepath.Join(o, "cargo", "bin") }},
+		{"symlink chain out of HOME", nil,
+			func(t *testing.T, h, o string) {
+				writeFakeExe(t, filepath.Join(o, "cargo", "bin"), "cargo")
+				writeCredFile(t, filepath.Join(o, "cargo", "credentials.toml"))
+				mustSymlink(t, filepath.Join(o, "cargo"), filepath.Join(o, "link"))
+				mustSymlink(t, filepath.Join(o, "link"), filepath.Join(h, ".a"))
+			},
+			func(h, o string) string { return filepath.Join(h, ".a", "bin") },
+			"cargo", nil,
+			func(h, o string) string { return filepath.Join(o, "cargo", "credentials.toml") },
+			func(h, o string) string { return filepath.Join(o, "cargo", "bin") }},
+		{"symlinked HOME, PATH through the link",
+			func(h, o string) string { return filepath.Join(h, "linkhome") },
+			func(t *testing.T, h, o string) {
+				writeFakeExe(t, filepath.Join(o, "realhome", ".cargo", "bin"), "cargo")
+				writeCredFile(t, filepath.Join(o, "realhome", ".cargo", "credentials.toml"))
+				mustSymlink(t, filepath.Join(o, "realhome"), filepath.Join(h, "linkhome"))
+			},
+			func(h, o string) string { return filepath.Join(h, "linkhome", ".cargo", "bin") },
+			"cargo", nil,
+			func(h, o string) string { return filepath.Join(o, "realhome", ".cargo", "credentials.toml") },
+			func(h, o string) string { return filepath.Join(o, "realhome", ".cargo", "bin") }},
+		{"symlinked HOME, PATH through the real dir",
+			func(h, o string) string { return filepath.Join(h, "linkhome") },
+			func(t *testing.T, h, o string) {
+				writeFakeExe(t, filepath.Join(o, "realhome", ".cargo", "bin"), "cargo")
+				writeCredFile(t, filepath.Join(o, "realhome", ".cargo", "credentials.toml"))
+				mustSymlink(t, filepath.Join(o, "realhome"), filepath.Join(h, "linkhome"))
+			},
+			func(h, o string) string { return filepath.Join(o, "realhome", ".cargo", "bin") },
+			"cargo", nil,
+			func(h, o string) string { return filepath.Join(o, "realhome", ".cargo", "credentials.toml") },
+			func(h, o string) string { return filepath.Join(o, "realhome", ".cargo", "bin") }},
+		{"relative entry from inside the tool home", nil,
+			func(t *testing.T, h, o string) {
+				writeFakeExe(t, filepath.Join(h, ".cargo", "bin"), "cargo")
+				writeCredFile(t, filepath.Join(h, ".cargo", "credentials.toml"))
+			},
+			func(h, o string) string { return filepath.Join(h, ".cargo", "bin") },
+			"bin/cargo",
+			func(h, o string) string { return filepath.Join(h, ".cargo") },
+			func(h, o string) string { return filepath.Join(h, ".cargo", "credentials.toml") },
+			func(h, o string) string { return filepath.Join(h, ".cargo", "bin") }},
+		{"shimmed nvm layout still ascends", nil,
+			func(t *testing.T, h, o string) {
+				writeFakeExe(t, filepath.Join(h, ".nvm", "versions", "node", "v18", "bin"), "node")
+				if err := os.MkdirAll(filepath.Join(h, ".local", "bin"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				mustSymlink(t, filepath.Join(h, ".nvm", "versions", "node", "v18", "bin", "node"), filepath.Join(h, ".local", "bin", "node"))
+			},
+			func(h, o string) string { return filepath.Join(h, ".local", "bin") },
+			"node", nil, nil,
+			func(h, o string) string { return filepath.Join(h, ".nvm", "versions", "node", "v18") }},
+		{"versioned tool home under HOME ascends", nil,
+			func(t *testing.T, h, o string) {
+				writeFakeExe(t, filepath.Join(h, "tc", "v1", "bin"), "tctool")
+			},
+			func(h, o string) string { return filepath.Join(h, "tc", "v1", "bin") },
+			"tctool", nil, nil,
+			func(h, o string) string { return filepath.Join(h, "tc", "v1") }},
+		{"HOME bin stays the bin dir", nil,
+			func(t *testing.T, h, o string) {
+				writeFakeExe(t, filepath.Join(h, "bin"), "node")
+			},
+			func(h, o string) string { return filepath.Join(h, "bin") },
+			"node", nil, nil,
+			func(h, o string) string { return filepath.Join(h, "bin") }},
+		{"pinned: PATH reaches an external tool home directly", nil,
+			func(t *testing.T, h, o string) {
+				writeFakeExe(t, filepath.Join(o, "jdk17", "bin"), "jdtool")
+				mustSymlink(t, filepath.Join(o, "jdk17"), filepath.Join(h, ".jdk"))
+			},
+			func(h, o string) string { return filepath.Join(o, "jdk17", "bin") },
+			"jdtool", nil, nil,
+			func(h, o string) string { return filepath.Join(o, "jdk17") }},
+		{"pinned: external tool home with no HOME link", nil,
+			func(t *testing.T, h, o string) {
+				writeFakeExe(t, filepath.Join(o, "cargo", "bin"), "cargo")
+			},
+			func(h, o string) string { return filepath.Join(o, "cargo", "bin") },
+			"cargo", nil, nil,
+			func(h, o string) string { return filepath.Join(o, "cargo") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			o, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.setup(t, h, o)
+			if tc.home != nil {
+				t.Setenv("HOME", tc.home(h, o))
+			} else {
+				t.Setenv("HOME", h)
+			}
+			t.Setenv("PATH", tc.path(h, o))
+			if tc.chdir != nil {
+				t.Chdir(tc.chdir(h, o))
+			}
+			res := ResolveHostToolchains([]string{tc.entry})
+			want := tc.want(h, o)
+			if len(res.mounts) != 1 || res.mounts[0].HostPath != want || len(res.Unresolved) != 0 {
+				t.Fatalf("%s: mounts=%+v unresolved=%q; want exactly one mount at %s and no unresolved entry", tc.name, res.mounts, res.Unresolved, want)
+			}
+			if tc.cred != nil && mountExposes(res.mounts[0].HostPath, tc.cred(h, o)) {
+				t.Errorf("%s: mount %s exposes the credential fixture", tc.name, res.mounts[0].HostPath)
+			}
+		})
+	}
 }
