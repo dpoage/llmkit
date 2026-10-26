@@ -345,13 +345,12 @@ func TestToolMedia_BaseRecordLoadsByteForByte(t *testing.T) {
 	}
 }
 
-// TestToolMedia_TextOnlyEventsCarryNoContent: text-only results, single or
-// multi-block, error results and denials serialize with no content or
-// degraded key and a nil Content/Degraded 0 on the hook.
+// TestToolMedia_TextOnlyEventsCarryNoContent: a single text-block result (the
+// empty return included) serializes with no content or degraded key and a nil
+// Content/Degraded 0 on the hook; several text blocks carry Content (R-2).
 func TestToolMedia_TextOnlyEventsCarryNoContent(t *testing.T) {
 	for name, blocks := range map[string][]llmkit.Block{
 		"single": textBlocks("hello"),
-		"multi":  {llmkit.Text("a"), llmkit.Text("b")},
 		"empty":  nil,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -367,6 +366,18 @@ func TestToolMedia_TextOnlyEventsCarryNoContent(t *testing.T) {
 			}
 		})
 	}
+	t.Run("multi text", func(t *testing.T) {
+		blocks := []llmkit.Block{llmkit.Text("a"), llmkit.Text("b")}
+		out, hooks := tmFake(t, true, blocks)
+		if len(hooks) != 1 || !reflect.DeepEqual(hooks[0].Content, blocks) {
+			t.Fatalf("hooks = %+v, want Content %+v", hooks, blocks)
+		}
+		for _, ev := range rdToolRuns(out.Transcript.Record) {
+			if !reflect.DeepEqual(ev.ToolRun.Content, blocks) {
+				t.Errorf("ToolRun Content = %+v, want %+v", ev.ToolRun.Content, blocks)
+			}
+		}
+	})
 }
 
 // TestToolMedia_HookEventRule: ToolEvent carries Content and Degraded per the

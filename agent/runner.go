@@ -976,6 +976,9 @@ func (r *Runner) complete(ctx context.Context, em runEmitter, messages []llmkit.
 	} else {
 		resp, err = r.client.Complete(clientCtx, req)
 	}
+	if err == nil {
+		fillEmptyCallIDs(llmkit.RunFromContext(ctx), step, messages, &resp)
+	}
 	r.fireAfterCompletion(ctx, step, &req, &resp, err)
 	// The Completion event: one per logical completion, success or failure,
 	// emitted after the AfterCompletion hook so the hook family stays
@@ -1000,6 +1003,50 @@ func (r *Runner) complete(ctx context.Context, em runEmitter, messages []llmkit.
 	// folded, so the pre-turn pool check above always sees complete spend.
 	r.budgetPool.Add(resp.Usage.ChargeableTokens(r.limits.CacheReadWeight))
 	return resp, nil
+}
+
+// fillEmptyCallIDs replaces every empty tool-call ID in a copy of
+// resp.ToolCalls, never the client's slice, with a surrogate unique within
+// history and resp: "llmkit-<run>-s<step>-c<index>", then "-k<n>" while taken.
+func fillEmptyCallIDs(run llmkit.RunID, step int, history []llmkit.Message, resp *llmkit.Response) {
+	if !slices.ContainsFunc(resp.ToolCalls, func(tc llmkit.ToolCall) bool { return tc.ID == "" }) {
+		return
+	}
+	used := make(map[string]bool)
+	for _, m := range history {
+		for _, tc := range m.ToolCalls {
+			if tc.ID != "" {
+				used[tc.ID] = true
+			}
+		}
+	}
+	for _, tc := range resp.ToolCalls {
+		if tc.ID != "" {
+			used[tc.ID] = true
+		}
+	}
+	calls := slices.Clone(resp.ToolCalls)
+	for i := range calls {
+		if calls[i].ID != "" {
+			continue
+		}
+		id, k := surrogateCallID(run, step, i, 0), 0
+		for used[id] {
+			k++
+			id = surrogateCallID(run, step, i, k)
+		}
+		used[id] = true
+		calls[i].ID = id
+	}
+	resp.ToolCalls = calls
+}
+
+func surrogateCallID(run llmkit.RunID, step, index, k int) string {
+	id := fmt.Sprintf("llmkit-%s-s%d-c%d", run, step, index)
+	if k > 0 {
+		id += fmt.Sprintf("-k%d", k)
+	}
+	return id
 }
 
 // overBudget reports whether cumulative usage has exceeded the token budget. A
