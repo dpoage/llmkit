@@ -158,8 +158,23 @@ type resumeState struct {
 	caller    Compactor
 	callerPol ToolPolicy
 
-	mu       sync.Mutex
-	diverged error
+	mu         sync.Mutex
+	diverged   error
+	liveActive bool
+}
+
+// goneLive reports whether a live completion has been served; the record
+// never answers a call after that, whatever its ID.
+func (st *resumeState) goneLive() bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.liveActive
+}
+
+func (st *resumeState) markLive() {
+	st.mu.Lock()
+	st.liveActive = true
+	st.mu.Unlock()
 }
 
 // diverge records err, first one wins, and returns the recorded divergence;
@@ -202,6 +217,7 @@ func (c *resumeClient) Complete(ctx context.Context, req llmkit.Request) (llmkit
 	at, prefix := rc.idx, rc.idx < len(rc.responses)
 	rc.mu.Unlock()
 	if !prefix {
+		c.st.markLive()
 		return c.st.live.Complete(ctx, req)
 	}
 	if derr := requestMatches(c.st.strict[at], req); derr != nil {
@@ -228,6 +244,7 @@ func (c *resumeClient) Stream(ctx context.Context, req llmkit.Request, fn func(l
 	prefix := rc.idx < len(rc.responses)
 	rc.mu.Unlock()
 	if !prefix {
+		c.st.markLive()
 		return llmkit.Stream(ctx, c.st.live, req, fn)
 	}
 	return llmkit.Stream(ctx, completeOnly{c}, req, fn)
@@ -271,7 +288,7 @@ func (st *resumeState) lookupCall(ctx context.Context, name string, args json.Ra
 	rc := st.rc
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
-	if id != "" {
+	if id != "" && !st.goneLive() {
 		if g := currentGroup(rc); g != nil {
 			if match := matchByID(g, id, name, args); match >= 0 {
 				rec := &g.calls[match]
@@ -335,7 +352,7 @@ func (p *resumePolicy) Authorize(ctx context.Context, call *llmkit.ToolCall) err
 	rc := p.st.rc
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
-	if id != "" {
+	if id != "" && !p.st.goneLive() {
 		if g := currentGroup(rc); g != nil {
 			for i := range g.denials {
 				if g.denials[i].call.ID == id {

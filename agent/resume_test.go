@@ -1274,3 +1274,65 @@ func requestText(req llmkit.Request) string {
 	}
 	return b.String()
 }
+
+// A live call reusing a recorded call id (providers repeat ids across turns)
+// must reach the caller's policy and tool, never the record.
+func TestResumeLiveCallReusingRecordedIDRunsLive(t *testing.T) {
+	ctx := context.Background()
+	rewrite := WithToolPolicy(ToolPolicyFunc(func(_ context.Context, call *llmkit.ToolCall) error {
+		var q struct {
+			Q string `json:"q"`
+		}
+		if err := json.Unmarshal(call.Arguments, &q); err != nil {
+			return err
+		}
+		call.Arguments = json.RawMessage(fmt.Sprintf(`{"q":%q,"extra":true}`, q.Q))
+		return nil
+	}))
+	origTool := &argTool{name: "echo"}
+	orig := NewRunner(newFakeClient(
+		toolResp("c1", "echo", `{"q":"hi"}`, 100, 10),
+		textResp("done", 80, 8),
+	), []Tool{origTool}, "You test resume.", rewrite)
+	runID := llmkit.RunID("resume-idreuse")
+	origOut, err := orig.Run(ctx, "use echo", WithRunID(runID))
+	if err != nil {
+		t.Fatalf("original run: %v", err)
+	}
+	events := origOut.Transcript.Record
+	cut := 0
+	for i, ev := range events {
+		if ev.Kind == llmkit.KindToolRun {
+			cut = i + 1
+		}
+	}
+	liveTool := &argTool{name: "echo"}
+	live := newFakeClient(
+		toolResp("c1", "echo", `{"q":"live"}`, 100, 10),
+		textResp("done twice", 80, 8),
+	)
+	template := NewRunner(live, []Tool{liveTool}, "You test resume.", rewrite)
+	res, err := NewResume(ctx, &Transcript{Record: events[:cut], RunID: runID}, runID, template)
+	if err != nil {
+		t.Fatalf("NewResume: %v", err)
+	}
+	out, err := res.Run(ctx, "use echo")
+	if err != nil {
+		t.Fatalf("resumed run: %v", err)
+	}
+	if out.FinalText != "done twice" {
+		t.Errorf("FinalText = %q, want %q", out.FinalText, "done twice")
+	}
+	origTool.mu.Lock()
+	got := append([]json.RawMessage(nil), origTool.got...)
+	origTool.mu.Unlock()
+	if len(got) != 1 || string(got[0]) != `{"q":"hi","extra":true}` {
+		t.Errorf("original tool args = %s, want the one recorded rewrite", got)
+	}
+	liveTool.mu.Lock()
+	got = append([]json.RawMessage(nil), liveTool.got...)
+	liveTool.mu.Unlock()
+	if len(got) != 1 || string(got[0]) != `{"q":"live","extra":true}` {
+		t.Errorf("live tool args = %s, want the caller policy's rewrite of the live call's own arguments", got)
+	}
+}
