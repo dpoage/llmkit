@@ -169,6 +169,7 @@
 package llmkit
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -434,19 +435,28 @@ type toolCallWire struct {
 }
 
 // MarshalJSON encodes the call exactly as the plain struct does when
-// Arguments are valid JSON, and carries any other bytes (which
+// Arguments are valid JSON or empty, whatever the calling encoder's HTML
+// escaping and indentation, and carries any other bytes (which
 // json.RawMessage cannot encode) losslessly as base64 in arguments_b64.
 func (tc ToolCall) MarshalJSON() ([]byte, error) {
 	w := toolCallWire{ID: tc.ID, Name: tc.Name}
 	switch {
-	case tc.Arguments == nil:
+	case len(tc.Arguments) == 0:
 	case json.Valid(tc.Arguments):
 		w.Arguments = tc.Arguments
 	default:
 		b64 := base64.StdEncoding.EncodeToString(tc.Arguments)
 		w.ArgumentsB64 = &b64
 	}
-	return json.Marshal(w)
+	// The calling encoder compacts these bytes and applies its own HTML
+	// escaping; escaping here would survive an encoder that has it off.
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(w); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte{'\n'}), nil
 }
 
 // UnmarshalJSON decodes both shapes MarshalJSON writes. arguments_b64 yields
@@ -467,9 +477,6 @@ func (tc *ToolCall) UnmarshalJSON(data []byte) error {
 	raw, err := base64.StdEncoding.DecodeString(*w.ArgumentsB64)
 	if err != nil {
 		return fmt.Errorf("llmkit: tool call arguments_b64: %w", err)
-	}
-	if raw == nil {
-		raw = json.RawMessage{}
 	}
 	tc.ID, tc.Name, tc.Arguments = w.ID, w.Name, raw
 	return nil

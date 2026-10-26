@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"unicode/utf8"
 )
 
 // Transcript is the ordered record of a single [Runner.Run]: the [llmkit]
@@ -64,16 +65,10 @@ func (t *Transcript) Events(_ context.Context, run llmkit.RunID) ([]llmkit.Event
 
 func (t *Transcript) SaveJSONL(w io.Writer) error {
 	bw := bufio.NewWriter(w)
+	le := newLineEncoder(bw)
 	for i := range t.Record {
 		ev := &t.Record[i]
-		line, err := json.Marshal(ev)
-		if err == nil {
-			if d := lineDepth(line); d > maxJSONDepth {
-				err = lineTooDeep(d)
-			} else {
-				_, err = bw.Write(append(line, '\n'))
-			}
-		}
+		err := le.encode(ev)
 		if err != nil {
 			// Best-effort flush the written prefix to w so the partial
 			// transcript is recoverable on the next load.
@@ -119,6 +114,58 @@ func lineTooDeep(d int) error {
 	return fmt.Errorf("line nests %d levels, over encoding/json's %d-level decode limit", d, maxJSONDepth)
 }
 
+// acceptEvent is the rule every record line passes, on read and before every
+// write; a reader would decode an invalid-UTF-8 run id to another id.
+func acceptEvent(ev *llmkit.Event) error {
+	if err := ev.Validate(); err != nil {
+		return err
+	}
+	if !utf8.ValidString(string(ev.RunID)) {
+		return fmt.Errorf("run id %q is not valid UTF-8", ev.RunID)
+	}
+	return nil
+}
+
+// lineEncoder writes events as JSON lines, withholding any line a reader
+// would refuse.
+type lineEncoder struct {
+	enc     *json.Encoder
+	w       io.Writer
+	refused error
+}
+
+func newLineEncoder(w io.Writer) *lineEncoder {
+	le := &lineEncoder{w: w}
+	le.enc = json.NewEncoder(le)
+	return le
+}
+
+// Write receives each whole encoded line from le.enc in one call. A withheld
+// line reports success because the encoder's write errors are sticky.
+func (le *lineEncoder) Write(line []byte) (int, error) {
+	if d := lineDepth(line); d > maxJSONDepth {
+		le.refused = lineTooDeep(d)
+		return len(line), nil
+	}
+	return le.w.Write(line)
+}
+
+func (le *lineEncoder) encode(ev *llmkit.Event) error {
+	if err := acceptEvent(ev); err != nil {
+		return err
+	}
+	return le.encodeAccepted(ev)
+}
+
+// encodeAccepted is encode for an event acceptEvent has already passed.
+func (le *lineEncoder) encodeAccepted(ev *llmkit.Event) error {
+	le.refused = nil
+	if err := le.enc.Encode(ev); err != nil {
+		return err
+	}
+	return le.refused
+}
+
 // LoadJSONL reads a JSONL transcript (as written by [Transcript.SaveJSONL])
 // from r.
 //
@@ -147,7 +194,7 @@ func LoadJSONL(r io.Reader) (*Transcript, error) {
 				if derr := json.Unmarshal(raw, &ev); derr != nil {
 					return nil, fmt.Errorf("agent: decode transcript line %d: %w", line, derr)
 				}
-				if verr := ev.Validate(); verr != nil {
+				if verr := acceptEvent(&ev); verr != nil {
 					return nil, fmt.Errorf("agent: transcript line %d: %w", line, verr)
 				}
 				if ev.RunID != "" {
@@ -189,7 +236,10 @@ func LoadJSONL(r io.Reader) (*Transcript, error) {
 //	                    retired entry — onErr once ("leftover file …; run
 //	                    refused" when the file already exists, "mkdir …" or
 //	                    "open …" otherwise) and the rest of this run's
-//	                    events drop silently.
+//	                    events drop silently. A Start no reader would
+//	                    accept (see below) creates no file and no entry:
+//	                    onErr once, and every later event of the run takes
+//	                    the no-entry path.
 //	Start, entry exists: onErr ("duplicate Start for run …; already
 //	                    recorded or refused") and the entry is poisoned:
 //	                    a live run's fd closes, an already-retired one stays
@@ -198,20 +248,22 @@ func LoadJSONL(r io.Reader) (*Transcript, error) {
 //	                    so no second run can write into it.
 //	Non-Start, no entry: onErr ("event for unknown or closed run") and drop.
 //	                    Every occurrence reports — a harness bug is loud.
-//	Non-Start, live:    written.
+//	Non-Start, live:    written, unless no reader would accept it (onErr;
+//	                    the run stays live).
 //	Finalize:           the entry leaves the table and its fd closes
 //	                    unconditionally (live, refused, poisoned); the
 //	                    Finalize line is written first when the run was
-//	                    live. A later event for the id takes the unknown
-//	                    path.
+//	                    live and a reader would accept it. A later event
+//	                    for the id takes the unknown path.
 //
 // Everything is best-effort and never fails a run: refusals and write
 // failures flow to onErr, run-, kind- and path-qualified so an operator can
 // tell WHICH file stopped being written and which event never reached it. An
-// encode failure, or a line that nests deeper than encoding/json's decode
-// limit (unwritable: no reader could load it back), drops that single line
-// and keeps the run live. onErr may be nil, never runs under a sink lock, and
-// may call back into the sink.
+// event no reader would accept — it fails to encode, fails
+// [llmkit.Event.Validate], carries a run id that is not valid UTF-8, or
+// nests deeper than encoding/json's decode limit — is not written and onErr
+// reports it; past Start, the run stays live. onErr may be nil, never runs
+// under a sink lock, and may call back into the sink.
 //
 // A JSONLSink is safe for concurrent use: events from concurrent runs on one
 // [Runner] multiplex by [llmkit.RunID], each writing under its own lock.
@@ -234,7 +286,7 @@ type jsonlRun struct {
 	mu   sync.Mutex
 	path string
 	file *os.File
-	enc  *json.Encoder
+	enc  *lineEncoder
 }
 
 // write encodes ev into the run's file; a retired run has no encoder and
@@ -245,20 +297,7 @@ func (r *jsonlRun) write(ev *llmkit.Event) error {
 	if r.enc == nil {
 		return nil
 	}
-	return encodeLine(r.enc, ev)
-}
-
-// encodeLine writes ev to enc as one line, first refusing — unwritten — a
-// line that nests past the JSON decode limit, which no reader could load.
-func encodeLine(enc *json.Encoder, ev *llmkit.Event) error {
-	line, err := json.Marshal(ev)
-	if err != nil {
-		return err
-	}
-	if d := lineDepth(line); d > maxJSONDepth {
-		return lineTooDeep(d)
-	}
-	return enc.Encode(ev)
+	return r.enc.encode(ev)
 }
 
 // writeAndRetire writes a live run's last line and retires it in one step
@@ -268,7 +307,7 @@ func (r *jsonlRun) writeAndRetire(ev *llmkit.Event) error {
 	defer r.mu.Unlock()
 	var err error
 	if r.enc != nil {
-		err = encodeLine(r.enc, ev)
+		err = r.enc.encode(ev)
 	}
 	r.retireLocked()
 	return err
@@ -346,6 +385,9 @@ func (s *JSONLSink) admit(ev llmkit.Event, path string) error {
 		prior.retire()
 		return fmt.Errorf("duplicate Start for run %s; already recorded or refused", ev.RunID)
 	}
+	if err := acceptEvent(&ev); err != nil {
+		return err // no entry and no file: the run's later events report as unknown
+	}
 	if err := os.MkdirAll(s.dir, 0o755); err != nil {
 		s.runs[ev.RunID] = &jsonlRun{path: path} // retired: reported once, then silent
 		return fmt.Errorf("mkdir %s: %w", s.dir, err)
@@ -358,8 +400,8 @@ func (s *JSONLSink) admit(ev llmkit.Event, path string) error {
 		}
 		return fmt.Errorf("open %s: %w", path, err)
 	}
-	run := &jsonlRun{path: path, file: f, enc: json.NewEncoder(f)}
-	encErr := encodeLine(run.enc, &ev)
+	run := &jsonlRun{path: path, file: f, enc: newLineEncoder(f)}
+	encErr := run.enc.encodeAccepted(&ev)
 	s.runs[ev.RunID] = run
 	if encErr != nil {
 		// Encode failure drops this line; the run stays live for later events.

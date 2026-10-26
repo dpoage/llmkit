@@ -177,10 +177,10 @@ const (
 //
 // Two wire facts for sink and replay authors: omitempty collapses empty
 // slices and maps to absent (decoding yields nil, not []), and a
-// json.RawMessage payload is carried compacted on the wire. ToolCall
-// arguments that are not valid JSON ride base64 in arguments_b64, never in
-// arguments. Compare decoded payloads semantically (as parsed JSON), not
-// with reflect.DeepEqual.
+// json.RawMessage payload is carried compacted on the wire. Non-empty
+// ToolCall arguments that are not valid JSON ride base64 in arguments_b64,
+// never in arguments. Compare decoded payloads semantically (as parsed
+// JSON), not with reflect.DeepEqual.
 type Event struct {
 	Kind EventKind `json:"kind"`
 	// RunID correlates every event of one run ([WithRun]).

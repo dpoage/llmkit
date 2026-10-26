@@ -383,7 +383,7 @@ func TestReplay_ReportsUnreproducedCompaction(t *testing.T) {
 }
 
 // A record whose requests do not encode as JSON is still verified.
-func TestReplay_VerifiesCompactionWithMalformedArguments(t *testing.T) {
+func TestReplay_VerifiesCompactionWithUnencodableHistory(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		args  string

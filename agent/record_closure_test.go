@@ -270,6 +270,103 @@ func TestClosure_NaNConfidenceIsRefused(t *testing.T) {
 	}, false)
 }
 
+func schemaZero(ev llmkit.Event) llmkit.Event {
+	ev.SchemaVersion = 0
+	return ev
+}
+
+func toolRunWithDecision(run llmkit.RunID) llmkit.Event {
+	ev := closureToolRun(run, nil)
+	ev.Decision = &llmkit.DecisionEvent{Backend: "b"}
+	return ev
+}
+
+func TestClosure_EventsNoReaderAcceptsAreRefused(t *testing.T) {
+	for name, probe := range map[string]func(llmkit.RunID) llmkit.Event{
+		"tool_run with schema_version 0":       func(run llmkit.RunID) llmkit.Event { return schemaZero(closureToolRun(run, nil)) },
+		"tool_run carrying a Decision payload": toolRunWithDecision,
+	} {
+		closureOutcome(t, name, probe, false)
+	}
+}
+
+func TestClosure_RefusedStartLeavesNoFileAndEveryLaterEventReports(t *testing.T) {
+	ctx := context.Background()
+	for name, tc := range map[string]struct {
+		run   llmkit.RunID
+		start func(llmkit.RunID) llmkit.Event
+	}{
+		"schema_version 0":     {"refused-start", func(run llmkit.RunID) llmkit.Event { return schemaZero(closureStart(run)) }},
+		"invalid UTF-8 run id": {"r\xff", closureStart},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cs := newClosureSink(t)
+			observed := []llmkit.Event{tc.start(tc.run), closureToolRun(tc.run, nil), closureFinalize(tc.run)}
+			for _, ev := range observed {
+				cs.sink.Observe(ctx, ev)
+			}
+			errs := cs.errors()
+			if len(errs) != len(observed) {
+				t.Fatalf("onErr called %d times, want %d (one per event): %v", len(errs), len(observed), errs)
+			}
+			for i, err := range errs {
+				if msg := err.Error(); !strings.Contains(msg, "run "+string(tc.run)) || !strings.Contains(msg, "kind "+string(observed[i].Kind)) {
+					t.Errorf("onErr[%d] %q does not name run %q and kind %q", i, msg, tc.run, observed[i].Kind)
+				}
+			}
+			entries, err := os.ReadDir(cs.dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range entries {
+				t.Errorf("refused Start left %s behind", e.Name())
+			}
+			if _, err := cs.sink.Events(ctx, tc.run); !errors.Is(err, llmkit.ErrUnknownRun) {
+				t.Errorf("Events = %v, want ErrUnknownRun", err)
+			}
+		})
+	}
+}
+
+func TestClosure_RefusedFinalizeStillClosesTheRun(t *testing.T) {
+	const run llmkit.RunID = "refused-finalize"
+	ctx := context.Background()
+	cs := newClosureSink(t)
+	written := []llmkit.Event{closureStart(run), closureToolRun(run, nil)}
+	for _, ev := range append(written, schemaZero(closureFinalize(run))) {
+		cs.sink.Observe(ctx, ev)
+	}
+	errs := cs.errors()
+	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "run "+string(run)) || !strings.Contains(errs[0].Error(), "kind finalize") {
+		t.Fatalf("onErr = %v, want one error naming run %q and kind finalize", errs, run)
+	}
+	got, err := cs.sink.Events(ctx, run)
+	if err != nil {
+		t.Fatalf("Events: %v", err)
+	}
+	if len(got) != len(written) {
+		t.Fatalf("Events returned %d events, want %d", len(got), len(written))
+	}
+	for i := range written {
+		requireIdentical(t, fmt.Sprintf("Events[%d]", i), got[i], written[i])
+	}
+	cs.sink.Observe(ctx, closureToolRun(run, nil))
+	if errs := cs.errors(); len(errs) != 2 || !strings.Contains(errs[1].Error(), "unknown or closed run") {
+		t.Errorf("event after the refused Finalize: onErr = %v, want the run closed", errs)
+	}
+}
+
+func TestClosure_BracketsInsideStringsAreNotDepth(t *testing.T) {
+	for name, result := range map[string]string{
+		"10001 [ in a string":        strings.Repeat("[", 10001),
+		"escaped quote then 10001 [": `"` + strings.Repeat("[", 10001),
+	} {
+		closureOutcome(t, name, func(run llmkit.RunID) llmkit.Event {
+			return closureToolRun(run, func(tre *llmkit.ToolRunEvent) { tre.Result = result })
+		}, true)
+	}
+}
+
 func TestClosure_HugeLinesAreWrittenAndLoad(t *testing.T) {
 	const run llmkit.RunID = "huge-run"
 	for _, size := range []int{16<<20 + 1, 64 << 20} {
@@ -322,7 +419,10 @@ func TestClosure_SaveJSONLWritesPrefixAndNamesTheRefusedEvent(t *testing.T) {
 		"unmarshalable decision": closureDecision(run, func(de *llmkit.DecisionEvent) {
 			de.Answers = []llmkit.DecisionAnswer{{ID: "q", Confidence: math.NaN()}}
 		}),
-		"State 10001 decision": closureDecision(run, func(de *llmkit.DecisionEvent) { de.State = deepArray(10001) }),
+		"State 10001 decision":                 closureDecision(run, func(de *llmkit.DecisionEvent) { de.State = deepArray(10001) }),
+		"schema_version 0 tool_run":            schemaZero(closureToolRun(run, nil)),
+		"tool_run carrying a Decision payload": toolRunWithDecision(run),
+		"invalid UTF-8 run id":                 closureToolRun(run+"\xff", nil),
 	}
 	for name, badEv := range bad {
 		t.Run(name, func(t *testing.T) {
@@ -430,7 +530,7 @@ var closureArgsCorpus = []struct {
 }{
 	{"truncated object", `{"p":`, false},
 	{"invalid utf8", string([]byte{0xff, 0xfe, 'a'}), false},
-	{"empty non-nil", "", false},
+	{"empty non-nil (omitted, as nil is)", "", false},
 	{"string literal", `""`, true},
 	{"object", `{"p":"a<b"}`, true},
 }
@@ -478,9 +578,6 @@ func TestClosure_InvalidToolArgumentsRoundTripThroughEveryCarrier(t *testing.T) 
 			}
 			if !tc.valid && !bytes.Equal(read, []byte(tc.args)) {
 				t.Errorf("%s: arguments read back %q, want byte-equal %q", label, read, tc.args)
-			}
-			if !tc.valid && tc.args == "" && read == nil {
-				t.Errorf("%s: empty non-nil arguments read back nil", label)
 			}
 		}
 	}

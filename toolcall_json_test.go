@@ -2,10 +2,14 @@ package llmkit
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -150,22 +154,15 @@ func TestToolCallJSONWireShapes(t *testing.T) {
 		t.Errorf("nil args wire = %s", b)
 	}
 
-	// The empty-but-non-nil payload is non-JSON (json.Valid("") is false);
-	// it round-trips through arguments_b64:"" instead of collapsing to nil.
+	// Empty but non-nil arguments (an OpenAI-compatible "") are omitted, as at base.
 	b, err = json.Marshal(ToolCall{ID: "c1", Name: "echo", Arguments: json.RawMessage{}})
 	if err != nil {
 		t.Fatalf("Marshal empty args: %v", err)
 	}
-	if string(b) != `{"id":"c1","name":"echo","arguments_b64":""}` {
-		t.Errorf("empty args wire = %s", b)
+	if string(b) != `{"id":"c1","name":"echo"}` {
+		t.Errorf("empty args wire = %s, want arguments omitted", b)
 	}
 	var back ToolCall
-	if err := json.Unmarshal(b, &back); err != nil {
-		t.Fatalf("Unmarshal empty args: %v", err)
-	}
-	if back.Arguments == nil || len(back.Arguments) != 0 {
-		t.Errorf("empty args round trip = %v (nil=%t), want non-nil empty", back.Arguments, back.Arguments == nil)
-	}
 
 	// A JSON string literal stays in arguments, as at base.
 	b, err = json.Marshal(ToolCall{ID: "c1", Name: "echo", Arguments: json.RawMessage(`""`)})
@@ -245,5 +242,201 @@ func TestToolCallJSONValidArgumentsMatchBaseEncoding(t *testing.T) {
 	}
 	if got := goldenLines(t); !bytes.Equal(got, want) {
 		t.Errorf("valid-argument encoding drifted from base 2d3c441\n--- got\n%s\n--- want\n%s", got, want)
+	}
+}
+
+// escapeRunes stresses every escaping path: HTML characters, U+2028/9,
+// quotes, backslashes, control bytes and an invalid UTF-8 byte.
+var escapeRunes = []string{"a", "Z", "0", "<", ">", "&", "\u2028", "\u2029", `"`, `\`, "/", "é", "你", "😀", "\t", "\n", "\x01", "\xff"}
+
+func randText(r *rand.Rand) string {
+	var b strings.Builder
+	for range r.IntN(8) {
+		b.WriteString(escapeRunes[r.IntN(len(escapeRunes))])
+	}
+	return b.String()
+}
+
+// randJSONString is a JSON string literal whose text mixes raw and escaped
+// forms of the escapeRunes.
+func randJSONString(r *rand.Rand) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for range r.IntN(8) {
+		switch s := escapeRunes[r.IntN(len(escapeRunes))]; s {
+		case `"`, `\`:
+			b.WriteString(`\` + s)
+		case "\t", "\n", "\x01":
+			fmt.Fprintf(&b, `\u%04x`, s[0])
+		case "<", "\u2028":
+			if r.IntN(2) == 0 {
+				fmt.Fprintf(&b, `\u%04x`, []rune(s)[0])
+			} else {
+				b.WriteString(s)
+			}
+		default:
+			b.WriteString(s)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+func randJSON(r *rand.Rand, depth int) string {
+	ws := func() string { return []string{"", "", " ", "\t", "\n", "\r\n"}[r.IntN(6)] }
+	kind := r.IntN(7)
+	if depth == 0 {
+		kind = 2 + r.IntN(5)
+	}
+	switch kind {
+	case 0:
+		parts := make([]string, r.IntN(4))
+		for i := range parts {
+			parts[i] = ws() + randJSONString(r) + ws() + ":" + ws() + randJSON(r, depth-1) + ws()
+		}
+		return "{" + strings.Join(parts, ",") + ws() + "}"
+	case 1:
+		parts := make([]string, r.IntN(4))
+		for i := range parts {
+			parts[i] = ws() + randJSON(r, depth-1) + ws()
+		}
+		return "[" + strings.Join(parts, ",") + ws() + "]"
+	case 2, 3:
+		return randJSONString(r)
+	case 4:
+		return []string{"0", "-1", "3.25", "1e10", "-0.5E-3"}[r.IntN(5)]
+	default:
+		return []string{"true", "false", "null"}[r.IntN(3)]
+	}
+}
+
+// escapeCorpus is the seeded differential corpus: valid-JSON (or empty)
+// arguments with escape-sensitive ID, Name and Arguments.
+func escapeCorpus(t *testing.T) []ToolCall {
+	t.Helper()
+	out := []ToolCall{
+		{ID: "c1", Name: "t", Arguments: json.RawMessage(`{"q":"a<b"}`)},
+		{ID: "<", Name: "&", Arguments: json.RawMessage(`{"q":"a<b>&c` + "\u2028\u2029" + `"}`)},
+		{ID: "c1", Name: "t", Arguments: json.RawMessage{}},
+	}
+	for _, c := range toolCallArgsCorpus {
+		if c.valid {
+			out = append(out, ToolCall{ID: "c1", Name: "echo", Arguments: json.RawMessage(c.args)})
+		}
+	}
+	r := rand.New(rand.NewPCG(2026, 1026))
+	for range 1000 {
+		pad := []string{"", " ", "\n"}
+		args := pad[r.IntN(3)] + randJSON(r, 3) + pad[r.IntN(3)]
+		if !json.Valid([]byte(args)) {
+			t.Fatalf("generator produced invalid JSON %q", args)
+		}
+		out = append(out, ToolCall{ID: randText(r), Name: randText(r), Arguments: json.RawMessage(args)})
+	}
+	return out
+}
+
+var escapeModes = []struct {
+	name string
+	enc  func(any) ([]byte, error)
+}{
+	{"Marshal", json.Marshal},
+	{"MarshalIndent", func(v any) ([]byte, error) { return json.MarshalIndent(v, "", "  ") }},
+	{"Encoder SetEscapeHTML(false)", func(v any) ([]byte, error) {
+		var b bytes.Buffer
+		enc := json.NewEncoder(&b)
+		enc.SetEscapeHTML(false)
+		err := enc.Encode(v)
+		return b.Bytes(), err
+	}},
+}
+
+// escapeShapes holds tc, and its plain-struct twin, in the five non-Event
+// positions an encoder can meet it.
+var escapeShapes = []struct {
+	name       string
+	tip, plain func(ToolCall) any
+}{
+	{"value", func(tc ToolCall) any { return tc }, func(tc ToolCall) any { return legacyToolCall(tc) }},
+	{"pointer", func(tc ToolCall) any { return &tc }, func(tc ToolCall) any { l := legacyToolCall(tc); return &l }},
+	{"slice", func(tc ToolCall) any { return []ToolCall{tc, tc} }, func(tc ToolCall) any { return []legacyToolCall{legacyToolCall(tc), legacyToolCall(tc)} }},
+	{"struct field", func(tc ToolCall) any {
+		return struct {
+			Call ToolCall `json:"call"`
+		}{tc}
+	}, func(tc ToolCall) any {
+		return struct {
+			Call legacyToolCall `json:"call"`
+		}{legacyToolCall(tc)}
+	}},
+	{"map", func(tc ToolCall) any { return map[string]ToolCall{"k": tc} }, func(tc ToolCall) any { return map[string]legacyToolCall{"k": legacyToolCall(tc)} }},
+}
+
+func TestToolCallJSONMatchesThePlainStructUnderEveryEncoder(t *testing.T) {
+	for _, tc := range escapeCorpus(t) {
+		for _, shape := range escapeShapes {
+			for _, mode := range escapeModes {
+				got, err := mode.enc(shape.tip(tc))
+				if err != nil {
+					t.Fatalf("%s/%s: %v", shape.name, mode.name, err)
+				}
+				want, err := mode.enc(shape.plain(tc))
+				if err != nil {
+					t.Fatalf("%s/%s plain: %v", shape.name, mode.name, err)
+				}
+				if !bytes.Equal(got, want) {
+					t.Fatalf("%s/%s: %+q encodes\n got %s\nwant %s", shape.name, mode.name, tc, got, want)
+				}
+			}
+		}
+	}
+}
+
+// escapeDigests is, per shape and mode, the SHA-256 of every corpus encoding
+// joined by newlines; the Event shape covers all three carriers.
+func escapeDigests(t *testing.T) []byte {
+	t.Helper()
+	corpus := escapeCorpus(t)
+	shapes := []struct {
+		name string
+		of   func(ToolCall) []any
+	}{{"Event", func(tc ToolCall) []any {
+		evs := eventCarriers(tc)
+		return []any{evs[0], evs[1], evs[2]}
+	}}}
+	for _, s := range escapeShapes {
+		shapes = append(shapes, struct {
+			name string
+			of   func(ToolCall) []any
+		}{s.name, func(tc ToolCall) []any { return []any{s.tip(tc)} }})
+	}
+	var out bytes.Buffer
+	for _, shape := range shapes {
+		for _, mode := range escapeModes {
+			h := sha256.New()
+			for _, tc := range corpus {
+				for _, v := range shape.of(tc) {
+					b, err := mode.enc(v)
+					if err != nil {
+						t.Fatalf("%s/%s: %v", shape.name, mode.name, err)
+					}
+					h.Write(b)
+					h.Write([]byte{'\n'})
+				}
+			}
+			fmt.Fprintf(&out, "%s\t%s\t%x\n", shape.name, mode.name, h.Sum(nil))
+		}
+	}
+	return out.Bytes()
+}
+
+// The golden is escapeDigests as computed at base 2d3c441.
+func TestToolCallJSONMatchesBaseUnderEveryEncoder(t *testing.T) {
+	want, err := os.ReadFile(filepath.Join("testdata", "toolcall_escape_base.golden"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := escapeDigests(t); !bytes.Equal(got, want) {
+		t.Errorf("encoding drifted from base 2d3c441\n--- got\n%s--- want\n%s", got, want)
 	}
 }
