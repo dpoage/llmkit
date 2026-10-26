@@ -14,7 +14,6 @@ import (
 )
 
 func TestP1_TruncatedArgumentsInAllCarriers(t *testing.T) {
-	t.Skip("needs W0a (ToolCall encoder, llmkit-9pk): json.Marshal rejects truncated arguments on the base; remove this skip after the feature-branch merge")
 	s, log, path := openStore(t)
 	const run = "run-trunc"
 	bad := json.RawMessage(`{"p":`)
@@ -198,7 +197,6 @@ func TestP1_EmptyToolCallIDs(t *testing.T) {
 }
 
 func TestP1_RunnerEmptyToolCallIDs(t *testing.T) {
-	t.Skip("needs W0b (surrogate IDs at response intake, llmkit-9y4): the Runner panics on an empty tool-call ID on the base; remove this skip after the feature-branch merge")
 	s, log, _ := openStore(t)
 	client := funcClient(func(req llmkit.Request) (llmkit.Response, error) {
 		if toolResults(req) >= 3 {
@@ -239,4 +237,31 @@ func TestP1_PayloadDepthUpToTheStoreLimit(t *testing.T) {
 		DispatchedArguments: nested(998, "[", "]"),
 	}
 	checkIdentity(t, s, log, run, []llmkit.Event{start, dec, deepObj, tool})
+}
+
+func TestP1_RunnerTruncatedArguments(t *testing.T) {
+	s, log, _ := openStore(t)
+	client := funcClient(func(req llmkit.Request) (llmkit.Response, error) {
+		if toolResults(req) >= 1 {
+			return llmkit.Response{Text: "done", StopReason: llmkit.StopEndTurn}, nil
+		}
+		return llmkit.Response{StopReason: llmkit.StopToolUse, ToolCalls: []llmkit.ToolCall{
+			{ID: "t1", Name: "echo", Arguments: json.RawMessage(`{"p":`)},
+		}}, nil
+	})
+	var got json.RawMessage
+	tool := fnTool{name: "echo", run: func(_ context.Context, args json.RawMessage) ([]llmkit.Block, error) {
+		got = args
+		return []llmkit.Block{llmkit.Text("ok")}, nil
+	}}
+	observed := run(t, agent.NewRunner(client, []agent.Tool{tool}, "sys", agent.WithObserver(s)), "truncated")
+	noErrors(t, log)
+	if string(got) != `{"p":` {
+		t.Fatalf("tool received %q", got)
+	}
+	stored, err := s.Events(context.Background(), observed[0].RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertIdentical(t, stored, observed)
 }
