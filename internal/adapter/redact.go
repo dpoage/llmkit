@@ -16,10 +16,11 @@ import (
 )
 
 // Redactor removes one client's credentials from error text. It is the
-// single owner of that rule for decide and embed: NewRedactor builds it
-// from the Secret and the parsed BaseURL, [NormalizeSDKError] applies it
-// through [VendorError.Redact] to a response body, and [Redactor.Scrub]
-// applies it to every error a request attempt returns.
+// single owner of that rule for decide, embed and the chat adapters
+// (anthropic, openai, google): NewRedactor builds it from the Secret and
+// the parsed BaseURL, [NormalizeSDKError] applies it through
+// [VendorError.Redact] to a response body, and [Redactor.Scrub] applies it
+// to an error already built.
 //
 // Two kinds of text are removed, each replaced by the mask [maskFor]
 // picks:

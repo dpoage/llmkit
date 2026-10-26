@@ -402,6 +402,35 @@ func caseErrorBadKey(t *testing.T, lc *liveClient) {
 	if !errors.Is(err, llmkit.ErrAuth) {
 		t.Fatalf("error = %v, want ErrAuth", err)
 	}
+	// No text reachable from the error (Error() down the Unwrap tree, and
+	// every APIError Message) may hold a 12-byte fragment of the bad key.
+	var walk func(error)
+	walk = func(e error) {
+		if e == nil {
+			return
+		}
+		texts := []string{e.Error()}
+		if api, ok := e.(*llmkit.APIError); ok {
+			texts = append(texts, api.Message)
+		}
+		for _, s := range texts {
+			for i := 0; i+12 <= len(badCredential); i++ {
+				if strings.Contains(s, badCredential[i:i+12]) {
+					t.Errorf("error text %q holds a fragment of the bad key", s)
+					return
+				}
+			}
+		}
+		switch u := e.(type) {
+		case interface{ Unwrap() error }:
+			walk(u.Unwrap())
+		case interface{ Unwrap() []error }:
+			for _, c := range u.Unwrap() {
+				walk(c)
+			}
+		}
+	}
+	walk(err)
 	bad.finish(llmkit.Response{}, err)
 }
 

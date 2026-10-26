@@ -589,6 +589,38 @@ entry below is marked.
 - `decide`: `Ask` accepted a `Choice` answer whose option was outside the
   asked set. It now returns `ErrServer` with `StatusCode` 200 and retries
   it like any `ErrServer`.
+- `provider`: the Anthropic, OpenAI, OpenAI-compatible and Google adapters
+  now mask the configured `Secret` and the `BaseURL` password in every error
+  they return and in the `Err` of observer events. Before, a vendor 4xx, 5xx
+  or in-band error body that echoed the API key, a `BaseURL` quoted in a
+  transport, cancellation or refusal error, and a `BaseURL` password quoted
+  in the request URL reached `APIError.Message`, the `Unwrap` chain and the
+  observer unchanged. The mask is `***` and covers the value as sent,
+  JSON-escaped and Go-quoted. It runs before the 200-byte `Message` cap, on
+  `Complete` and on `Stream`. A `Secret` under 8 bytes is a placeholder and
+  is not masked; the password is masked at any length. Accepted risks: when
+  masking changes an error, the chain is cut, so `errors.As` no longer finds
+  the vendor SDK error type or a `net.Error`; `Kind`, `StatusCode`,
+  `RetryAfter`, `HasRetryAfter` and `Provider` stay, and `errors.Is` still
+  matches the sentinels and the context errors. An error with nothing to mask
+  is unchanged. Observer `Err` text that was persisted before this version
+  may hold a key a vendor echoed: rotate any key a vendor echoed. The error a
+  `Stream` callback returns is never masked. See `docs/providers.md`
+  (llmkit-ant).
+- `provider`: the Google adapter no longer panics on a 2xx body the genai SDK
+  cannot decode. A body of `null` on `Complete`, or one with malformed
+  candidates (`{"candidates":[null]}`, `{"candidates":[1]}`,
+  `{"candidates":"x"}`, `{"candidates":{}}`, a `null` before a valid
+  candidate) on `Complete` and `Stream`, panicked inside genai, took down the
+  caller's process, and passed the retry stage. The adapter now recovers a
+  panic raised by a genai call (`GenerateContent`, and each step of the
+  `GenerateContentStream` iterator) after a response has arrived, and
+  returns an `*llmkit.APIError` of `Kind` `ErrServer` with the response's
+  status (200); the retry stage retries it. A panic raised before any
+  response, such as one from the `Options.HTTPClient` transport, and a panic
+  raised by a `Stream` callback are not recovered and reach the caller
+  unchanged. Every other body keeps its result. The Anthropic and OpenAI
+  adapters were fixed earlier (llmkit-bk8.1.64).
 
 ||||||| f4bbf40
 

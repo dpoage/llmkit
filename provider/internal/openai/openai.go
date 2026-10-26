@@ -10,6 +10,7 @@ import (
 	"errors"
 	"maps"
 	"net/http"
+	"net/url"
 	"strconv"
 
 	"github.com/dpoage/llmkit"
@@ -43,6 +44,9 @@ type openaiAdapter struct {
 	// checkMIME refuses inline or data: URL media outside the first-party sets;
 	// off for openai-compatible, where the host decides.
 	checkMIME bool
+	// redact masks the configured credential and BaseURL password in every
+	// error the adapter returns.
+	redact *adapter.Redactor
 }
 
 // Options configures an OpenAI adapter.
@@ -132,6 +136,8 @@ func New(model string, opts Options) (llmkit.Client, error) {
 	if opts.BaseURL != "" {
 		reqOpts = append(reqOpts, option.WithBaseURL(opts.BaseURL))
 	}
+	// An unparseable BaseURL leaves root nil; the SDK refuses it at request time.
+	root, _ := url.Parse(opts.BaseURL)
 	return &openaiAdapter{
 		client:                     openai.NewChatCompletionService(reqOpts...),
 		model:                      model,
@@ -140,6 +146,7 @@ func New(model string, opts Options) (llmkit.Client, error) {
 		thinkingTag:                thinkingTag(opts.Compatible, opts.BaseURL),
 		requireBoolAdditionalProps: requireBoolAdditionalProps,
 		checkMIME:                  !opts.Compatible,
+		redact:                     adapter.NewRedactor(opts.APIKey, root),
 	}, nil
 }
 
@@ -511,6 +518,7 @@ func (o *openaiAdapter) noCompletion(ctx context.Context, cc *openai.ChatComplet
 		Type:    typ,
 		Message: msg,
 		Header:  header,
+		Redact:  o.redact,
 	})
 }
 
@@ -549,6 +557,7 @@ func (o *openaiAdapter) normalizeErr(ctx context.Context, err error) error {
 			Message: apiErr.Error(),
 			Header:  adapter.ResponseHeader(apiErr.Response),
 			Err:     err,
+			Redact:  o.redact,
 		})
 	}
 	// In-band SSE error: the stream was opened on a 2xx response, so the SDK
@@ -565,12 +574,13 @@ func (o *openaiAdapter) normalizeErr(ctx context.Context, err error) error {
 			Type:    typ,
 			Message: msg,
 			Err:     err,
+			Redact:  o.redact,
 		})
 	}
 	// No HTTP response: a refusal when the SDK rejected the call before
 	// sending anything, else a transport failure or the caller's context
 	// ending mid-call.
-	return adapter.NoResponseError(o.provider, ctx, err)
+	return adapter.NoResponseError(o.provider, ctx, err, o.redact)
 }
 
 // sseErrorBody is the error object an OpenAI-compatible server sends inside
