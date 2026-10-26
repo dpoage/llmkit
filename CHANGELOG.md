@@ -597,8 +597,6 @@ entry below is marked.
   `$HOME` (XDG `CARGO_HOME=~/.local/share/cargo`) and tool homes outside
   `$HOME` that `PATH` reaches directly still ascend (llmkit-471.1).
 
-||||||| f4bbf40
-
 ## [0.6.0] - 2026-09-30
 
 ### Added
