@@ -240,10 +240,10 @@ entry below is marked.
   It validates questions in sorted id order, and the options of a `Choice` in
   sorted key order, so the first refusal is the same on every call; the old
   client used map order. An image is any JSON object in the state, an
-  `Instructions` or a description (`True`, `False`, an option, a level) that
-  decodes as an `llmkit.Block` of kind `"image"` using only `Block`'s member
-  names (`encoding/json` matching: case-insensitive, escapes decoded, last
-  duplicate wins), however it was built; Block-shaped user data counts. Each
+  `Instructions` or a description (`True`, `False`, an option, a level) whose
+  member names are all `Block`'s (`encoding/json` matching: case-insensitive,
+  escapes decoded) and whose last string-valued `kind` member is `"image"`,
+  however it was built; Block-shaped user data counts. Each
   is replaced by its label, `<image:hex>` or `[image N]`
   (`ImageSupport.Label`), and returned once in `Request.Images` with its
   `Ref`, `SHA256`, `MediaType`, `Data` and `Placements` (`PlaceState`,
