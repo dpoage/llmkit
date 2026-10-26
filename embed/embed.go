@@ -154,8 +154,8 @@
 // Secret under 8 bytes is not masked at all. Text
 // llmkit writes itself, such as the "llmkit: ollama error (status 500):"
 // prefix or the context error of a cancelled retry, may still contain
-// text that matches the password, for example the
-// characters of a short one. The URL username is not a value: only where
+// text that matches a Secret under 8 bytes, for
+// example its characters. The URL username is not a value: only where
 // it appears as URL userinfo
 // ("scheme://user[:password]@") is it replaced. Redaction happens before
 // the 200-byte cap, and classification reads the unredacted text, so the

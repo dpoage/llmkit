@@ -129,7 +129,7 @@
 // Secret under 8 bytes is not masked at all. Text llmkit writes
 // itself, such as the "llmkit: systemone error (status 500):" prefix or the
 // context error of a cancelled retry, may still contain text that matches
-// the password, for example the characters of a short one. The
+// a Secret under 8 bytes, for example its characters. The
 // URL username is replaced only as userinfo ("scheme://user[:password]@").
 // Redaction runs before the 200-byte cap; classification reads the
 // unredacted text. A redaction cuts the error chain: the *llmkit.APIError
