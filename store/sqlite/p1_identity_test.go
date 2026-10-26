@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -184,23 +185,46 @@ func canonLines(t testing.TB, b []byte) []string {
 // TestP1_ExportRecipeMatchesSinkFile runs the store and the JSONL sink side
 // by side off one Observers chain.
 func TestP1_ExportRecipeMatchesSinkFile(t *testing.T) {
+	runner := func(toolText string) func(*testing.T, llmkit.Observer) []llmkit.Event {
+		return func(t *testing.T, chain llmkit.Observer) []llmkit.Event {
+			tool := fnTool{name: "echo", run: func(context.Context, json.RawMessage) ([]llmkit.Block, error) {
+				return []llmkit.Block{llmkit.Text(toolText)}, nil
+			}}
+			r := agent.NewRunner(loopClient(3), []agent.Tool{tool}, "sys", agent.WithObserver(chain))
+			return run(t, r, "export me")
+		}
+	}
 	cases := map[string]struct {
-		toolText  string
-		canonical bool
+		feed       func(*testing.T, llmkit.Observer) []llmkit.Event
+		wantCanon  bool
+		checkCanon bool
 	}{
-		"canonical":     {toolText: "plain result <b> & \u2028", canonical: true},
-		"invalid utf-8": {toolText: "bad \xff\xfe a bytes", canonical: false},
+		"canonical run": {feed: runner("plain result <b> & \u2028"), wantCanon: true, checkCanon: true},
+		// Whether the Runner already normalizes tool bytes is not this test's question.
+		"tool bytes ff fe": {feed: runner("bad \xff\xfe a bytes")},
+		"invalid UTF-8 in every string field": {
+			feed: func(t *testing.T, chain llmkit.Observer) []llmkit.Event {
+				evs := allKinds("run-export-utf8")
+				for i := range evs {
+					e := &evs[i]
+					for _, p := range []any{e.Start, e.Completion, e.Attempt, e.ToolRun, e.Compaction, e.Steer, e.Finalize, e.Decision, e.Embed, e.Exec} {
+						if p != nil && !reflect.ValueOf(p).IsNil() {
+							poison(reflect.ValueOf(p))
+						}
+					}
+					chain.Observe(context.Background(), *e)
+				}
+				return evs
+			},
+			wantCanon: false, checkCanon: true,
+		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			s, log, _ := openStore(t)
 			dir := t.TempDir()
 			sink := agent.JSONL(dir, log.add)
-			tool := fnTool{name: "echo", run: func(context.Context, json.RawMessage) ([]llmkit.Block, error) {
-				return []llmkit.Block{llmkit.Text(tc.toolText)}, nil
-			}}
-			r := agent.NewRunner(loopClient(3), []agent.Tool{tool}, "sys", agent.WithObserver(llmkit.Observers(sink, s)))
-			observed := run(t, r, "export me")
+			observed := tc.feed(t, llmkit.Observers(sink, s))
 			noErrors(t, log)
 			runID := observed[0].RunID
 
@@ -216,10 +240,10 @@ func TestP1_ExportRecipeMatchesSinkFile(t *testing.T) {
 					allCanon = false
 				}
 			}
-			if allCanon != tc.canonical {
-				t.Fatalf("every observed event canonical = %v, want %v (the case would not test what it names)", allCanon, tc.canonical)
+			if tc.checkCanon && allCanon != tc.wantCanon {
+				t.Fatalf("every observed event canonical = %v, want %v (the case would not test what it names)", allCanon, tc.wantCanon)
 			}
-			if tc.canonical && !bytes.Equal(export, file) {
+			if allCanon && !bytes.Equal(export, file) {
 				t.Fatalf("export is not byte-equal to the sink file\nexport: %s\nfile:   %s", clip(string(export)), clip(string(file)))
 			}
 			if g, w := canonLines(t, export), canonLines(t, file); strings.Join(g, "\n") != strings.Join(w, "\n") {
