@@ -123,7 +123,7 @@ func (m *Mock) CallCount() int {
 var _ Sandbox = (*Mock)(nil)
 
 // MaterializeWorkspace implements Sandbox. It creates a FRESH EMPTY
-// directory (os.MkdirTemp, prefix llmkitMockPrefix) and returns its path —
+// directory (os.MkdirTemp, prefix "llmkit-mock-") and returns its path —
 // never the caller's repoDir, which is accepted but neither read nor
 // required to exist (the Mock runs nothing, so there is nothing to copy
 // into the workspace). The caller owns the returned directory's lifecycle:

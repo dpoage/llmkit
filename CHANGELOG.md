@@ -587,15 +587,33 @@ entry below is marked.
 ### Security
 
 - `sandbox`: `ResolveHostToolchains` no longer RO-mounts a tool home that
-  sits directly under `$HOME` (llmkit-bk8.7.21). Before, an entry resolving
-  to `~/.cargo/bin/cargo` mounted `~/.cargo` wholesale and exposed
-  `credentials.toml` (registry tokens) to untrusted runs; `~/.pulumi` and a
-  symlinked `~/.cargo` were exposed the same way. The `bin/` ascent to the
-  parent is now refused when the parent is `$HOME` or a direct child of
-  `$HOME`, or when `PATH` reached the `bin/` directory through such a child,
-  so the `bin/` directory mounts alone. Tool homes two or more levels under
-  `$HOME` (XDG `CARGO_HOME=~/.local/share/cargo`) and tool homes outside
-  `$HOME` that `PATH` reaches directly still ascend (llmkit-471.1).
+  sits directly under `$HOME` when `PATH` names its `bin/` directory
+  (llmkit-bk8.7.21). Before, an entry resolving to `~/.cargo/bin/cargo`
+  mounted `~/.cargo` wholesale and exposed `credentials.toml` (registry
+  tokens) to untrusted runs; `~/.pulumi` and a symlinked `~/.cargo` were
+  exposed the same way. After, the ascent from a `bin/` directory to its
+  parent is refused when (1) the parent is `$HOME` or a direct child of
+  `$HOME`, or (2) the directory `exec.LookPath` found the executable in is
+  itself named `bin`, its parent is `$HOME` or a direct child of `$HOME`,
+  and that directory resolves through symlinks to the `bin/` directory
+  being ascended from. The `bin/` directory then mounts alone. Paths and
+  `$HOME` are compared as written and after symlinks resolve. The rule
+  compares paths only, so these layouts still ascend: a tool home two or
+  more levels under `$HOME` (XDG `CARGO_HOME=~/.local/share/cargo`) or
+  outside `$HOME` that `PATH` reaches directly (llmkit-471.1); an
+  executable that a `PATH` directory reaches by a file symlink (`~/bin/cargo`
+  to `~/.cargo/bin/cargo`, with `~/.cargo` a symlink out); a `PATH`
+  directory not named `bin`; a `PATH` that reaches a `$HOME` child through a
+  symlink chain written outside `$HOME`, or through a symlink alias of
+  `$HOME` while the child is itself a symlink out, or through a bind mount
+  of `$HOME`; a relative entry resolved from a working directory that is a
+  symlinked tool home; and an unset, empty, or relative
+  `$HOME`. Cost: a `PATH` `bin` directory in `$HOME` or a direct child of
+  it that resolves through symlinks to a toolchain's `bin/` (a
+  single-package `~/.nix-profile` is the known case) now mounts that
+  `bin/` alone. An absolute directory entry such as `/nix/store/<hash>-pkg`
+  mounts the whole package. `docs/sandbox.md` (Host toolchains) shows each
+  layout.
 
 ## [0.6.0] - 2026-09-30
 

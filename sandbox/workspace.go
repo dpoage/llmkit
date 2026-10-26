@@ -16,8 +16,7 @@ import (
 )
 
 // os.MkdirTemp prefixes for the scratch dirs this package creates directly
-// under os.TempDir(); one set shared by the creation sites, the watchdog
-// purge glob, and workspaceSkip.
+// under os.TempDir().
 const (
 	llmkitSandboxPrefix = "llmkit-sandbox-"
 	llmkitWscachePrefix = "llmkit-wscache-"
@@ -270,8 +269,6 @@ func cloneTree(src, dst string) error {
 	return copyTreeWith(src, dst, workspaceSkip{}, reflinkOrCopy)
 }
 
-// hasLlmkitTempPrefix reports whether name starts with one of the package's
-// os.MkdirTemp prefixes.
 func hasLlmkitTempPrefix(name string) bool {
 	return strings.HasPrefix(name, llmkitSandboxPrefix) ||
 		strings.HasPrefix(name, llmkitWscachePrefix) ||
@@ -306,11 +303,9 @@ func (s workspaceSkip) dir(path, name string, info fs.FileInfo) bool {
 	return s.isLlmkitTempDir(filepath.Dir(path), name)
 }
 
-// isLlmkitTempDir reports whether the directory named name directly under
-// parentPath is a direct child of os.TempDir() — by identity at copy time, so
-// a TMPDIR named through a symlink alias behaves the same — with one of the
-// package's os.MkdirTemp prefixes, whoever created it. Only directories match:
-// a prefixed file or symlink directly inside an in-repo TMPDIR keeps copying.
+// isLlmkitTempDir reports whether name under parentPath is a direct child of
+// os.TempDir() (by identity, so a symlinked TMPDIR matches) with an llmkit
+// prefix. Callers pass directories only.
 func (s workspaceSkip) isLlmkitTempDir(parentPath, name string) bool {
 	if s.tmpRoot == nil || !hasLlmkitTempPrefix(name) {
 		return false
@@ -319,11 +314,9 @@ func (s workspaceSkip) isLlmkitTempDir(parentPath, name string) bool {
 	return err == nil && os.SameFile(s.tmpRoot, parent)
 }
 
-// coversEntry reports whether a listed entry rel under src is left out: an
-// ancestor directory, or the entry itself when a directory, is an llmkit temp
-// dir. rel is Cleaned because git lists an untracked nested repo with a
-// trailing slash; the identity clause stays walk-only (an unchanged TMPDIR
-// already covers the identity dir, a changed one is out of scope).
+// coversEntry reports whether a listed entry rel under src is an llmkit temp
+// dir or lies under one. The identity clause stays walk-only: an unchanged
+// TMPDIR already covers the identity dir, a changed one is out of scope.
 func (s workspaceSkip) coversEntry(src, rel string, info fs.FileInfo) bool {
 	parts := strings.Split(filepath.Clean(rel), string(filepath.Separator))
 	dir := src
@@ -344,8 +337,8 @@ func (s workspaceSkip) coversEntry(src, rel string, info fs.FileInfo) bool {
 // as symlinks (their targets are not followed, which avoids copying outside
 // the tree and preserves repo layout).
 //
-// skip names the directories to leave out (see workspaceSkip), matched by
-// identity, not by path. The root of src itself is never excluded.
+// skip names the directories to leave out (see workspaceSkip). The root of src
+// itself is never excluded.
 func copyTreeWith(src, dst string, skip workspaceSkip, copyRegular func(src, dst string, perm fs.FileMode) error) error {
 	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -408,11 +401,12 @@ func copyTreeWith(src, dst string, skip workspaceSkip, copyRegular func(src, dst
 }
 
 // copyWorkspace materializes the repo snapshot at src into dst. When src is a
-// git work tree and git is on PATH, it copies only what git considers part of
-// the work tree — tracked files plus untracked files that are NOT gitignored
-// (`git ls-files --cached --others --exclude-standard`). This omits generated,
-// gitignored content: most importantly a stale out-of-source build tree (e.g.
-// CMake's build/ whose CMakeCache.txt is pinned to a host-absolute path, which
+// git work tree and git is on PATH, it copies the GitWorktreeFiles listing
+// (tracked files plus untracked files that are NOT gitignored, from
+// `git ls-files --cached --others --exclude-standard`), with the differences
+// that doc names. This omits generated, gitignored content: most importantly a
+// stale out-of-source build tree (e.g. CMake's build/ whose CMakeCache.txt is
+// pinned to a host-absolute path, which
 // otherwise poisons an in-sandbox rebuild), the .git directory, and built
 // vendor caches. When src is not a git repo (or git is unavailable) it falls
 // back to a full recursive copy so non-git checkouts still work. The
@@ -447,9 +441,10 @@ func copyWorkspaceSkipping(src, dst string, skip fs.FileInfo) error {
 // GitWorktreeFiles returns the repo-relative paths git considers part of the work
 // tree at src: tracked files plus untracked files that are not gitignored.
 // Callers use it to learn what a sandbox run will see (e.g. whether a work-tree
-// path such as node_modules exists). copyWorkspace materializes this listing
-// with one exception: when os.TempDir() lies inside src, it also leaves out
-// llmkit temp dirs (see workspaceSkip), git-listed files included.
+// path such as node_modules exists). copyWorkspace skips a listed path that is
+// missing on disk or not a regular file, symlink, or directory, copies a listed
+// directory (submodule, untracked nested repo) unfiltered, minus .git, and, when
+// os.TempDir() is src or inside it, drops llmkit temp dirs, listed files included.
 //
 // isRepo is false (with a nil error) only when src is not a git work tree or
 // git is not on PATH — the caller then falls back to its own handling. When
@@ -494,9 +489,9 @@ func gitStderr(err error) string {
 // gitlink path, which resolves on disk to its checked-out working tree) is
 // recursively copied so vendored-as-submodule dependencies reach the sandbox.
 // A listed path missing on disk (e.g. a tracked-but-deleted file) is skipped
-// rather than aborting the copy. An entry under an llmkit temp dir is left out
-// (see workspaceSkip), as is a listed directory that is one; a prefixed file or
-// symlink is not. The identity dir is left out inside directory entries' copies.
+// rather than aborting the copy. An entry that is, or lies under, an llmkit temp
+// dir (see workspaceSkip) is left out; a prefixed file or symlink is not. The
+// identity dir is left out inside directory entries' copies.
 func copyFileListSkipping(src, dst string, files []string, skip fs.FileInfo) error {
 	s := newWorkspaceSkip(skip)
 	for _, rel := range files {

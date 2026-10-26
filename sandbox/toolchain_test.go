@@ -596,7 +596,6 @@ func TestResolveHostToolchains_RelativeEntryIsKernelPath(t *testing.T) {
 	})
 }
 
-// mountExposes reports whether file lies inside the mounted directory.
 func mountExposes(mount, file string) bool {
 	return file == mount || strings.HasPrefix(file, mount+string(filepath.Separator))
 }

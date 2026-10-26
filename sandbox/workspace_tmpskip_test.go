@@ -12,8 +12,7 @@ import (
 	"time"
 )
 
-// TestForeignTmpHelperProcess is the child half of runForeignTmpChild; it is
-// skipped unless the parent exported the mode.
+// TestForeignTmpHelperProcess is the child half of runForeignTmpChild.
 func TestForeignTmpHelperProcess(t *testing.T) {
 	mode := os.Getenv("LLMKIT_FOREIGN_MODE")
 	if mode == "" {
@@ -119,9 +118,8 @@ func TestForeignTmpHelperProcess(t *testing.T) {
 	}
 }
 
-// runForeignTmpChild re-executes the test binary as TestForeignTmpHelperProcess
-// with TMPDIR=tmpdir and returns the workspace listing it printed, under a
-// wall-clock bound so a self-copy loop cannot grow disk without limit.
+// runForeignTmpChild runs the helper test in a child with TMPDIR=tmpdir and returns
+// the workspace listing; the wall-clock bound stops a self-copy loop growing disk.
 func runForeignTmpChild(t *testing.T, mode, src, repoB, repoA, tmpdir string) []string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -159,9 +157,8 @@ func llmkitPrefixedName(name string) bool {
 		strings.HasPrefix(name, "llmkit-mock-")
 }
 
-// dropLlmkitTempDirEntries filters a treeListing of the expectations: entries
-// under a direct child of tmpRel ("." = the listing root itself) whose name
-// carries an llmkit prefix are what the copy must leave out.
+// dropLlmkitTempDirEntries removes entries under an llmkit-prefixed direct child
+// of tmpRel ("." = the listing root), which the copy must leave out.
 func dropLlmkitTempDirEntries(listing []string, tmpRel string) []string {
 	var out []string
 	for _, l := range listing {
@@ -182,8 +179,7 @@ func dropLlmkitTempDirEntries(listing []string, tmpRel string) []string {
 	return out
 }
 
-// TestWorkspaceLeavesLlmkitTempDirsOut: with TMPDIR at or under RepoDir, the
-// workspace listing equals the repo listing minus the llmkit temp dirs.
+// With TMPDIR at or under RepoDir, the workspace is the repo minus llmkit temp dirs.
 func TestWorkspaceLeavesLlmkitTempDirsOut(t *testing.T) {
 	type row struct {
 		name    string
@@ -289,9 +285,8 @@ func TestWorkspaceLeavesLlmkitTempDirsOut(t *testing.T) {
 	}
 }
 
-// runMovedTmpChild re-executes the test binary as TestForeignTmpHelperProcess
-// in movedCache mode: TMPDIR=tmpdir for the first cache use and TMPDIR=tmp2
-// for the second. The wall-clock bound kills a self-copy that grows unchecked.
+// runMovedTmpChild is runForeignTmpChild in movedCache mode: TMPDIR=tmpdir for
+// the first cache use, tmp2 for the second.
 func runMovedTmpChild(t *testing.T, repo, tmpdir, tmp2 string) []string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -322,9 +317,7 @@ func runMovedTmpChild(t *testing.T, repo, tmpdir, tmp2 string) []string {
 	return got
 }
 
-// TestWorkspaceKeepsPrefixedEntriesThatAreNotTempDirs: only a directory
-// directly inside TMPDIR with a prefix is left out. A prefixed file or symlink
-// inside TMPDIR, and a prefixed TMPDIR itself, copy on both entry points.
+// A prefixed file, symlink, or TMPDIR itself copies; only a prefixed directory is left out.
 func TestWorkspaceKeepsPrefixedEntriesThatAreNotTempDirs(t *testing.T) {
 	type row struct {
 		name  string
@@ -413,9 +406,7 @@ func TestWorkspaceKeepsPrefixedEntriesThatAreNotTempDirs(t *testing.T) {
 	}
 }
 
-// TestWorkspaceNeverCopiesCacheDirAfterTmpdirMove: the wsCache dir sits inside
-// RepoDir; TMPDIR moves in-process before a forced miss, so only the identity
-// clause can keep the re-materialized pristine from walking into the cache.
+// After TMPDIR moves, only the identity clause keeps the cache dir out of the copy.
 func TestWorkspaceNeverCopiesCacheDirAfterTmpdirMove(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not on PATH")
