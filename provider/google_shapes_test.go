@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/retry"
@@ -147,5 +149,49 @@ func TestGoogleShapes_OtherAdaptersKeepTheirOutcome(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+type shapeTransportPanic struct{ msg string }
+
+type shapePanicTransport struct {
+	calls atomic.Int32
+	value *shapeTransportPanic
+}
+
+func (p *shapePanicTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	p.calls.Add(1)
+	panic(p.value)
+}
+
+// TestGoogleShapes_TransportPanicPropagates: two attempts are allowed, so a
+// recovered panic would be retried.
+func TestGoogleShapes_TransportPanicPropagates(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(rxMode(stream), func(t *testing.T) {
+			rt := &shapePanicTransport{value: &shapeTransportPanic{"user transport boom"}}
+			c, err := New(context.Background(), Spec{Type: TypeGoogle, Model: "m-test", Secret: "placeholder", BaseURL: "http://127.0.0.1:1"},
+				Options{HTTPClient: &http.Client{Transport: rt}, Retry: retry.Config{MaxAttempts: 2, BaseDelay: time.Millisecond}})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			req := llmkit.Request{Messages: []llmkit.Message{llmkit.TextMessage(llmkit.RoleUser, "hi")}, MaxTokens: 8}
+			var callErr error
+			got := func() (v any) {
+				defer func() { v = recover() }()
+				if stream {
+					_, callErr = llmkit.Stream(context.Background(), c, req, func(llmkit.Delta) error { return nil })
+				} else {
+					_, callErr = c.Complete(context.Background(), req)
+				}
+				return nil
+			}()
+			if got != rt.value {
+				t.Errorf("recovered %v (%T), err %v; want the transport's own panic value", got, got, callErr)
+			}
+			if n := rt.calls.Load(); n != 1 {
+				t.Errorf("transport ran %d times; want 1", n)
+			}
+		})
 	}
 }

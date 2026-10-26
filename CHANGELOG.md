@@ -614,11 +614,13 @@ entry below is marked.
   candidate) on `Complete` and `Stream`, panicked inside genai, took down the
   caller's process, and passed the retry stage. The adapter now recovers a
   panic raised by a genai call (`GenerateContent`, and each step of the
-  `GenerateContentStream` iterator) and returns an `*llmkit.APIError` of
-  `Kind` `ErrServer` with the response's status (200); the retry stage
-  retries it. A panic raised by a `Stream` callback is not recovered and
-  reaches the caller unchanged. Every other body keeps its result. The
-  Anthropic and OpenAI adapters were fixed earlier (llmkit-bk8.1.64).
+  `GenerateContentStream` iterator) after a response has arrived, and
+  returns an `*llmkit.APIError` of `Kind` `ErrServer` with the response's
+  status (200); the retry stage retries it. A panic raised before any
+  response, such as one from the `Options.HTTPClient` transport, and a panic
+  raised by a `Stream` callback are not recovered and reach the caller
+  unchanged. Every other body keeps its result. The Anthropic and OpenAI
+  adapters were fixed earlier (llmkit-bk8.1.64).
 
 ||||||| f4bbf40
 

@@ -129,13 +129,16 @@ func (g *googleAdapter) Complete(ctx context.Context, req llmkit.Request) (llmki
 }
 
 // generate is Models.GenerateContent with its error normalized. A panic
-// inside genai, which a malformed 2xx body can raise, becomes the error
-// panicError builds; nothing outside the genai call is guarded.
+// inside genai after a response arrived becomes the error panicError builds;
+// any other panic, such as one from the caller's transport, propagates.
 func (g *googleAdapter) generate(ctx context.Context, contents []*genai.Content, cfg *genai.GenerateContentConfig) (resp *genai.GenerateContentResponse, err error) {
 	returned := false
 	defer func() {
 		if !returned {
 			if p := recover(); p != nil {
+				if adapter.WireStatus(ctx) == 0 {
+					panic(p)
+				}
 				resp, err = nil, g.panicError(ctx, p)
 			}
 		}

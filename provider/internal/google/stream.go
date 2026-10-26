@@ -84,12 +84,15 @@ func (g *googleAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(
 }
 
 // pull returns the next chunk of the genai stream, its error normalized.
-// A panic inside genai becomes the error panicError builds.
+// A panic after a response arrived becomes the error panicError builds.
 func (g *googleAdapter) pull(ctx context.Context, next func() (*genai.GenerateContentResponse, error, bool)) (chunk *genai.GenerateContentResponse, ok bool, err error) {
 	returned := false
 	defer func() {
 		if !returned {
 			if p := recover(); p != nil {
+				if adapter.WireStatus(ctx) == 0 {
+					panic(p)
+				}
 				chunk, ok, err = nil, false, g.panicError(ctx, p)
 			}
 		}
