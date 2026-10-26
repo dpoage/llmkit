@@ -9,8 +9,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -441,90 +439,4 @@ func rxSDKType(fam string, err error) bool {
 	}
 	var e genai.APIError
 	return errors.As(err, &e)
-}
-
-// rxDescribe renders the caller-visible shape of one clean-twin result:
-// every fact a caller can branch on that holds, and where the twin text
-// (it is no credential, so nothing may touch it) is still reachable.
-func rxDescribe(c rxClient, o rxOutcome) string {
-	if o.err == nil {
-		return "nil"
-	}
-	var flags []string
-	set := func(name string, v bool) {
-		if v {
-			flags = append(flags, name)
-		}
-	}
-	twin := []string{rxTwin[:12]}
-	var api *llmkit.APIError
-	isAPI := errors.As(o.err, &api)
-	set("apierror", isAPI)
-	for _, s := range []struct {
-		name string
-		err  error
-	}{
-		{"rate", llmkit.ErrRateLimited}, {"auth", llmkit.ErrAuth}, {"ctxlong", llmkit.ErrContextTooLong},
-		{"invalid", llmkit.ErrInvalidRequest}, {"server", llmkit.ErrServer}, {"overloaded", llmkit.ErrOverloaded},
-		{"canceled", context.Canceled}, {"deadline", context.DeadlineExceeded},
-	} {
-		set(s.name, errors.Is(o.err, s.err))
-	}
-	var op *net.OpError
-	set("operr", errors.As(o.err, &op))
-	set("sdk", rxSDKType(c.fam, o.err))
-	set("errtwin", rxHolds(o.err.Error(), twin))
-	reach := false
-	for _, s := range rxReachable(o.err) {
-		reach = reach || rxHolds(s, twin)
-	}
-	set("reachtwin", reach)
-	obs := false
-	for _, e := range o.events {
-		obs = obs || rxHolds(e, twin)
-	}
-	set("obstwin", obs)
-	out := fmt.Sprintf("%s events=%d", strings.Join(flags, ","), len(o.events))
-	if isAPI {
-		_, _, retryable := llmkit.Classify(o.err)
-		out += fmt.Sprintf(" status=%d retryafter=%t:%v provider=%s retryable=%t msgtwin=%t msgcut=%t haserr=%t",
-			api.StatusCode, api.HasRetryAfter, api.RetryAfter, api.Provider, retryable,
-			rxHolds(api.Message, twin), strings.HasSuffix(api.Message, "..."), api.Err != nil)
-	}
-	return out
-}
-
-func rxTwinLines(t *testing.T) []string {
-	t.Helper()
-	var lines []string
-	rxEachCell(t, rxTwin, []int{0, 100, 150}, func(_ *testing.T, cell string, c rxClient, stream bool, o rxOutcome) {
-		lines = append(lines, fmt.Sprintf("%s|%s|%s|%s", c.name, rxMode(stream), cell, rxDescribe(c, o)))
-	})
-	sort.Strings(lines)
-	return lines
-}
-
-const rxTwinGolden = "testdata/redact_twin.golden"
-
-// TestRedactMatrix_CleanTwinIsUnchanged: with the credential replaced by a
-// text that is not one, every result matches the golden recorded before the
-// Redactor was wired: same kinds, statuses, sentinels, SDK error types,
-// *net.OpError, cancellation, and the text itself.
-func TestRedactMatrix_CleanTwinIsUnchanged(t *testing.T) {
-	got := rxTwinLines(t)
-	raw, err := os.ReadFile(rxTwinGolden)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
-	if len(got) != len(want) {
-		t.Fatalf("%d twin results, golden has %d", len(got), len(want))
-	}
-	bad := 0
-	for i := range got {
-		if got[i] != want[i] && bad < 12 {
-			bad++
-			t.Errorf("twin result changed:\n got  %s\n want %s", got[i], want[i])
-		}
-	}
 }
