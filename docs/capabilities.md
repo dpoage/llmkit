@@ -125,11 +125,13 @@ A profile with a sampler field false drops that field's wire key even when the c
 Tool `Parameters` and `Request.ResponseSchema` reach the wire with their JSON
 Schema 2020-12 meta keys unchanged: `$schema`, `$id`, `$defs`, and `$ref`,
 recursive references included, on Anthropic, OpenAI, OpenAI-compatible, and
-Google. No adapter rewrites these four keys. Some adapters rewrite other
-keywords. Anthropic forces the schema's root `"type"` to `"object"`, drops
-an empty `required` and a null `properties`, and keeps only the string
-entries of `required`. OpenAI-compatible rewrites a non-boolean
-`additionalProperties` to `true`. `provider/schema_passthrough_test.go`
+Google. No adapter rewrites these four keys themselves, but a schema under
+`$defs` is rewritten like any other: OpenAI-compatible rewrites a
+non-boolean `additionalProperties` to `true` at every depth, `$defs`
+included. Anthropic forces the schema's root `"type"` to `"object"`, and
+rewrites some other values, for example: it drops a null `properties`,
+drops a `required` that is empty, null, or not a list, and keeps only the
+string entries of a `required` list. `provider/schema_passthrough_test.go`
 pins the four keys on both carriers — a tool's `Parameters` and the
 `response_format`, `responseJsonSchema`, or synthetic structured-output
 tool the `StructuredOutput` row above describes.

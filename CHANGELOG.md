@@ -354,8 +354,9 @@ entry below is marked.
   OpenAI-compatible, and Google: `$schema`, `$id`, `$defs`, and `$ref`,
   recursive references included, on the tool carrier and the
   `response_format`/`responseJsonSchema`/synthetic-tool carrier alike. No
-  adapter rewrites these keys; the rewrites that exist for other keywords,
-  such as Anthropic forcing the root `"type"` to `"object"`, are unchanged.
+  adapter rewrites these four keys themselves; the rewrites that exist for
+  other keywords are unchanged, and a subschema under `$defs` is rewritten
+  like any other, for example by OpenAI-compatible `additionalProperties`.
   Hermetically pinned by `provider/schema_passthrough_test.go`; live case
   `schema_meta_keys` runs a tool schema with `$schema`, `$id`, and a
   recursive `$defs`/`$ref` on every lane with credentials. (llmkit-rli.1.3)
@@ -594,20 +595,24 @@ entry below is marked.
   or in-band error body that echoed the API key, a `BaseURL` quoted in a
   transport, cancellation or refusal error, and a `BaseURL` password quoted
   in the request URL reached `APIError.Message`, the `Unwrap` chain and the
-  observer unchanged. The mask is `***`, or three copies of another byte
-  when a value holds `*`. It covers the value as sent, JSON-escaped and
-  Go-quoted, and runs before the 200-byte `Message` cap, on `Complete` and
-  on `Stream`. The userinfo of any `scheme://user[:password]@` URL in an
-  error text is masked too, whether or not it is a configured credential. A
+  observer unchanged. The mask is `***`. When a value holds `*`, the mask
+  is three copies of a printable byte no value holds, or empty when every
+  printable byte occurs in some value. It covers the value as sent,
+  JSON-escaped and Go-quoted, and runs before the 200-byte `Message` cap,
+  on `Complete` and on `Stream`. The userinfo of any
+  `scheme://user[:password]@` URL in an error text is masked too, whether
+  or not it is a configured credential. A
   `Secret` under 8 bytes is a placeholder and is not masked; the password is
   masked at any length. Accepted risks: when masking changes an error, the
   chain is cut, so `errors.As` no longer finds the vendor SDK error type or
   the `*net.OpError` of a failed dial; `Kind`, `StatusCode`, `RetryAfter`,
   `HasRetryAfter` and `Provider` stay, and `errors.Is` still matches the
-  sentinels and the context errors. An error whose text holds no credential
-  and no URL userinfo is unchanged. Observer `Err` text that was persisted
-  before this version may hold a key a vendor echoed: rotate any key a
-  vendor echoed. The error a `Stream` callback returns is never masked. See
+  sentinels and the context errors. An error with nothing to mask is
+  unchanged; a credential in a wrapped error's text or past the 200-byte
+  `Message` cap counts as something to mask. Observer `Err` text that was
+  persisted before this version may hold a key a vendor echoed: rotate any
+  key a vendor echoed. The error a `Stream` callback returns is never
+  masked. See
   `docs/providers.md` (llmkit-ant).
 - `provider`: the Google adapter no longer panics on a 2xx body the genai SDK
   cannot decode. A body of `null` on `Complete`, or one with malformed
