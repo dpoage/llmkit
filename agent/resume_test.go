@@ -1336,3 +1336,40 @@ func TestResumeLiveCallReusingRecordedIDRunsLive(t *testing.T) {
 		t.Errorf("live tool args = %s, want the caller policy's rewrite of the live call's own arguments", got)
 	}
 }
+
+// A dispatched call that reaches the record's tool turn with different
+// arguments diverges: the error wraps ErrResumeMismatch and the next
+// completion fails before any live call.
+func TestResumeToolArgsDivergenceFailsNextCompletion(t *testing.T) {
+	ctx := context.Background()
+	orig := NewRunner(newFakeClient(
+		toolResp("c1", "echo", `{"q":"hi"}`, 100, 10),
+		textResp("done", 80, 8),
+	), []Tool{fixedTool{name: "echo", result: "echo-result"}}, "You test resume.")
+	runID := llmkit.RunID("resume-tooldiverge")
+	origOut, err := orig.Run(ctx, "use echo", WithRunID(runID))
+	if err != nil {
+		t.Fatalf("original run: %v", err)
+	}
+	live := newFakeClient(textResp("never", 1, 1))
+	template := NewRunner(live, []Tool{fixedTool{name: "echo", result: "echo-result"}}, "You test resume.")
+	res, err := NewResume(ctx, &Transcript{Record: origOut.Transcript.Record, RunID: runID}, runID, template)
+	if err != nil {
+		t.Fatalf("NewResume: %v", err)
+	}
+	wrapped, ok := res.runner.tools.byName["echo"].(resumeTool)
+	if !ok {
+		t.Fatalf("the resumed tool set is not wrapped: %T", res.runner.tools.byName["echo"])
+	}
+	dctx, _ := withDispatch(ctx, "c1")
+	_, err = wrapped.Run(dctx, json.RawMessage(`{"q":"tampered"}`))
+	if !errors.Is(err, ErrResumeMismatch) {
+		t.Fatalf("wrapper tool err = %v, want ErrResumeMismatch", err)
+	}
+	if _, err := res.runner.client.Complete(ctx, llmkit.Request{System: "You test resume."}); !errors.Is(err, ErrResumeMismatch) {
+		t.Fatalf("next completion err = %v, want the recorded divergence", err)
+	}
+	if n := live.callCount(); n != 0 {
+		t.Errorf("live client calls = %d, want 0", n)
+	}
+}
