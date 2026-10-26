@@ -295,18 +295,21 @@ func (e emptyIDTool) Run(context.Context, json.RawMessage) ([]llmkit.Block, erro
 	return nil, fmt.Errorf("unexpected tool %q", e.name)
 }
 
-// TestToolResult_EmptyCallIDPanicsAsBase pins that a tool call with an empty
-// ID panics with the c381345 panic value on every tool-result path —
-// success with content, nil, empty, error, panic, denial — sequential and
-// parallel: the block-carrying result keeps llmkit.ToolResult's check.
-func TestToolResult_EmptyCallIDPanicsAsBase(t *testing.T) {
-	cases := []struct{ tool, want string }{
-		{"text", "llmkit.ToolResult: empty callID"},
-		{"nil", "llmkit.ToolResult: empty callID"},
-		{"empty", "llmkit.ToolResult: empty callID"},
-		{"fail", "llmkit.ToolError: empty callID"},
-		{"boom", "llmkit.ToolError: empty callID"},
-		{"denied", "llmkit.ToolError: empty callID"},
+// TestToolResult_EmptyCallIDGetsSurrogate pins that a tool call with an empty
+// ID no longer panics on any tool-result path — success with content, nil,
+// empty, error, panic, denial — sequential and parallel: the run completes and
+// the tool-result message answers the call under its surrogate ID.
+func TestToolResult_EmptyCallIDGetsSurrogate(t *testing.T) {
+	cases := []struct {
+		tool    string
+		wantErr bool
+	}{
+		{"text", false},
+		{"nil", false},
+		{"empty", false},
+		{"fail", true},
+		{"boom", true},
+		{"denied", true},
 	}
 	policy := ToolPolicyFunc(func(_ context.Context, call *llmkit.ToolCall) error {
 		if call.Name == "denied" {
@@ -314,6 +317,7 @@ func TestToolResult_EmptyCallIDPanicsAsBase(t *testing.T) {
 		}
 		return nil
 	})
+	const surrogate = "llmkit-empty-id-s1-c0"
 	for _, parallel := range []bool{false, true} {
 		for _, c := range cases {
 			t.Run(fmt.Sprintf("%s/parallel=%v", c.tool, parallel), func(t *testing.T) {
@@ -323,12 +327,14 @@ func TestToolResult_EmptyCallIDPanicsAsBase(t *testing.T) {
 				}
 				fc := newFakeClient(toolResp("", c.tool, `{}`, 1, 1), textResp("done", 1, 1))
 				r := NewRunner(fc, []Tool{emptyIDTool{c.tool}}, "sys", opts...)
-				defer func() {
-					if got := recover(); got != any(c.want) {
-						t.Errorf("panic = %#v, want %#v", got, c.want)
-					}
-				}()
-				_, _ = r.Run(context.Background(), "task")
+				out, err := r.Run(context.Background(), "task", WithRunID("empty-id"))
+				if err != nil {
+					t.Fatalf("Run: %v", err)
+				}
+				res := toolMessage(t, out.Messages)
+				if res.ToolCallID != surrogate || res.IsError != c.wantErr {
+					t.Errorf("tool result = {ToolCallID:%q IsError:%v}, want {%q %v}", res.ToolCallID, res.IsError, surrogate, c.wantErr)
+				}
 			})
 		}
 	}

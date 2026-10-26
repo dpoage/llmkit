@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dpoage/llmkit"
 )
@@ -60,7 +61,7 @@ func (ts toolSet) lookup(name string) (Tool, bool) {
 // error rather than a normal result. The harness uses this for every error a
 // Tool returns.
 func toolError(err error) string {
-	return "ERROR: " + err.Error()
+	return "ERROR: " + jsonSafeUTF8(err.Error())
 }
 
 // renderUnknownTool renders a call naming a tool the Runner does not have.
@@ -70,7 +71,28 @@ func renderUnknownTool(name string) string {
 
 // renderToolPanic renders a recovered Tool.Run panic.
 func renderToolPanic(name string, panicVal any) string {
-	return fmt.Sprintf("ERROR: tool %s panicked: %v", name, panicVal)
+	return jsonSafeUTF8(fmt.Sprintf("ERROR: tool %s panicked: %v", name, panicVal))
+}
+
+// jsonSafeUTF8 applies encoding/json's string rule: each byte that does not
+// start a valid UTF-8 sequence becomes one U+FFFD (ff fe 'a' -> "\ufffd\ufffda").
+func jsonSafeUTF8(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + utf8.UTFMax)
+	for i := 0; i < len(s); {
+		if r, size := utf8.DecodeRuneInString(s[i:]); r == utf8.RuneError && size == 1 {
+			b.WriteString("\uFFFD")
+			i++
+			continue
+		} else {
+			b.WriteString(s[i : i+size])
+			i += size
+		}
+	}
+	return b.String()
 }
 
 // renderToolTimeout renders a call that outran [WithToolTimeout].
@@ -242,11 +264,26 @@ func isMedia(b llmkit.Block) bool {
 // placeToolBlocks builds the outcome of a successful Tool.Run, degrading each
 // media block the client's profile cannot carry in a tool result.
 func (r *Runner) placeToolBlocks(out []llmkit.Block) toolResult {
+	out = normalizeTextBlocks(out)
 	if !slices.ContainsFunc(out, isMedia) {
 		return toolResult{result: blocksText(out), content: nonEmptyBlocks(out)}
 	}
 	placed, degraded := degradeToolMedia(out, r.client.Capabilities().ToolResultMedia)
 	return toolResult{result: blocksText(placed), content: placed, degraded: degraded}
+}
+
+// normalizeTextBlocks applies jsonSafeUTF8 to every text, copying only when
+// some text is invalid; the tool's slice is never modified.
+func normalizeTextBlocks(blocks []llmkit.Block) []llmkit.Block {
+	if !slices.ContainsFunc(blocks, func(b llmkit.Block) bool { return !utf8.ValidString(b.Text) }) {
+		return blocks
+	}
+	cp := make([]llmkit.Block, len(blocks))
+	copy(cp, blocks)
+	for i := range cp {
+		cp[i].Text = jsonSafeUTF8(cp[i].Text)
+	}
+	return cp
 }
 
 // degradeToolMedia replaces each media block a tool result cannot carry by its
@@ -367,9 +404,9 @@ type toolResult struct {
 }
 
 // eventContent is the Content the ToolRun event and ToolEvent carry: the
-// placed blocks when they hold media or degraded > 0, else nil.
+// placed blocks whenever they are not exactly one text block, else nil.
 func (res toolResult) eventContent() []llmkit.Block {
-	if res.degraded > 0 || slices.ContainsFunc(res.content, isMedia) {
+	if res.degraded > 0 || len(res.content) != 1 || res.content[0].Kind != llmkit.BlockText {
 		return res.content
 	}
 	return nil
