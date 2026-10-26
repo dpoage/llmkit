@@ -350,7 +350,7 @@ func TestFinalization_TurnIsToolLessAndPlainRunSkipsIt(t *testing.T) {
 		WithLimits(Limits{MaxIterations: 1}))
 	tr := NewTranscript()
 	em := runEmitter{tr: tr, obs: llmkit.Observers(tr)}
-	out, err := r.run(context.Background(), em, nil, "task", nil, finalizationPrompt(nil), nil, nil)
+	out, err := r.run(context.Background(), em, nil, "task", nil, finalizationPrompt(nil), nil, nil, llmkit.Usage{})
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}

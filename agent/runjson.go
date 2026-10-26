@@ -139,7 +139,7 @@ func (r *Runner) runJSONBody(ctx context.Context, em runEmitter, prompt, task st
 	// dangling exploration prose that can never parse. The schema is threaded
 	// natively so the finalization turn also benefits from grammar-constrained
 	// output on capable adapters.
-	outcome, err = r.run(ctx, em, cfg.seed, prompt, cfg.attach, finalizationPrompt(schema), schema, cfg.steering)
+	outcome, err = r.run(ctx, em, cfg.seed, prompt, cfg.attach, finalizationPrompt(schema), schema, cfg.steering, cfg.budgetSeed)
 	if err != nil {
 		return outcome, err
 	}

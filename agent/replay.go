@@ -64,9 +64,9 @@ var ErrReplayDiverged = errors.New("agent: replay diverged")
 // A replay tool whose Run is called directly, with no call ID in its
 // context, serves the earliest unconsumed (name, arguments) match in the
 // current step instead. That fallback serves direct calls only, never a
-// Runner-driven replay: a Runner panics on a call with an empty ID when it
-// feeds the call's result back, so no Runner-written record holds one, and
-// a Runner replaying a record dispatches each call with its recorded ID.
+// Runner-driven replay: a Runner replaces a call's empty ID at response
+// intake, so no Runner-written record holds one, and a Runner replaying a
+// record dispatches each call with its recorded ID.
 //
 // Calls a [ToolPolicy] denied in the recorded run are NOT served by the
 // recorded tools: the recorded denial is a policy decision, not a tool
@@ -844,8 +844,8 @@ func (t replayTool) Def() llmkit.ToolDef {
 // ID, the first whose name and arguments fit), and the client records a
 // divergence if the tool's name or the arguments it received do not match
 // the recording, as [ReplayClient] describes. Called directly with no call
-// ID (a Runner panics on an empty call ID, so it never completes a turn
-// with one), Run serves the earliest unconsumed recorded call of the current
+// ID (a Runner replaces an empty call ID at intake, so it never dispatches
+// one), Run serves the earliest unconsumed recorded call of the current
 // step matching both name and arguments. No match records the client's
 // divergence: the returned error wraps [ErrReplayDiverged] naming the
 // recorded step, and the harness renders it as this call's ERROR result.

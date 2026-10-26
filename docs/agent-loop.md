@@ -395,6 +395,58 @@ Call `Err()` after `Run` returns. If you call it during the run, after the clien
 
 When to use: record a run once, then replay it deterministically against modified harness code — the building block for offline evaluation. `EstimateHistoryTokens` exports the size estimate the compaction trigger uses, so replay tooling can report the same numbers as the live loop for the request copy of a history.
 
+## Resume
+
+A run that died mid-flight — a crashed process, a restart, a canceled context —
+can be continued from its record. `agent.NewResume(ctx, src, run, r)` arms that
+resume from any `llmkit.Source`: an in-memory `Transcript`, a `JSONL` sink's
+directory, a store. `r` is a `Runner` configured like the original; every
+option — client, tools, `ToolPolicy`, `Compactor`, limits, hooks, observers,
+pool, request policy — is taken from it, and `r` itself is never modified and
+stays usable for plain runs. `res.Run(ctx, task)` (or `res.RunJSON`) re-runs
+the original task on a copy of it. A `Resume` runs once.
+
+The resumed run is replay-then-live. While the record still holds completions,
+they are served from it — responses, tool results, policy decisions (denials
+with their recorded reason, rewrites with their recorded dispatched arguments)
+and compaction summaries — and every request the Runner sends must be
+json-identical to the recorded request at that position: system prompt, tool
+set, task, messages and every other field. A record holds what the model
+actually saw (the post-policy request), so a deterministic `RequestPolicy` or
+hook reproduces; a time-varying one is refused at the first mismatching
+request. The refusal — `errors.Is(err, ErrResumeMismatch)` — fails the run
+before any live call, and so does a divergence in the tool phase, a tool call
+with no recorded counterpart while the record still holds completions, or a
+request that cannot be encoded for the comparison (the match fails closed).
+`NewResume` itself refuses, before any call, a record that holds a `steer`
+event (recorded steering messages are not re-injected on resume) or no
+completion to replay.
+
+At the record's end the run continues live against the caller's own client,
+tools, policy and compactor; the wrapper forwards the live client's
+`Identity`, and streamed turns use its native `Stream` only once live. Tool
+calls of the cut turn whose results are recorded are served and never re-run;
+calls without a recorded result run live — at-least-once, so a tool with side
+effects must be idempotent or check state. A live `ToolPolicy` sees only live
+calls; a live `Compactor` is never called while the record still owns the
+prefix.
+
+The resumed run re-emits the recorded prefix as its own events under a fresh
+`RunID`, with `ParentRunID` set to the recorded run's id on every event, so a
+sink records the resumed run as a new run linked to its predecessor. Served
+responses carry zeroed usage, so the resumed run's `Finalize` usage, its spend
+ledger and a shared `BudgetPool` count live spend only. The per-run token
+budget does not re-arm: `res.Usage()` — the recorded run's spend, the sum of
+every successful completion's usage including compaction calls — seeds the
+budget check, so prefix plus live spend is compared against
+`Limits.TokenBudget` and a resume stops with `TruncTokenBudget` where the
+uninterrupted run would. The iteration cap keeps counting recorded turns. A
+pool that must also account for the prefix can be pre-charged with
+`pool.Add(res.Usage().ChargeableTokens(w))`.
+
+When to use: resume an interrupted run instead of re-asking the task from
+scratch, and keep the conversation, the spend and the lineage intact.
+
 ## Options
 
 Constructor options apply to every run of a Runner; run options apply to a single `Run` call and can differ per call.

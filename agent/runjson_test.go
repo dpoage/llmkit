@@ -837,7 +837,7 @@ func TestRunJSON_BudgetFinalizeEmptyStillClassified(t *testing.T) {
 		WithBudgetPool(pool))
 	tr2 := NewTranscript()
 	em2 := runEmitter{tr: tr2, obs: llmkit.Observers(tr2)}
-	out, _ := r2.run(context.Background(), em2, nil, "audit", nil, finalizationPrompt(json.RawMessage(`{"type":"object"}`)), nil, nil)
+	out, _ := r2.run(context.Background(), em2, nil, "audit", nil, finalizationPrompt(json.RawMessage(`{"type":"object"}`)), nil, nil, llmkit.Usage{})
 	if !out.Truncated() {
 		t.Error("Outcome.Truncated() = false, want true (budget stop should still mark truncated)")
 	}

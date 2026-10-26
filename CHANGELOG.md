@@ -10,6 +10,27 @@ entry below is marked.
 
 ### Added
 
+- `agent`: `NewResume(ctx, src, run, r)` arms the resume of a recorded run
+  from any `llmkit.Source` (a `Transcript`, the JSONL sink, a store):
+  `res.Run(ctx, task)` / `res.RunJSON(...)` re-run the original task on a
+  copy of the caller's `Runner`, replaying the recorded prefix (completions,
+  tool results, policy decisions and compaction summaries served from the
+  record) and continuing live — the caller's client, tools, `ToolPolicy` and
+  `Compactor` — where the record ends. `res.Usage()` reads the recorded
+  spend before any call: the sum of every successful completion's usage,
+  compaction calls included. Tool calls without a recorded result run live
+  at-least-once; recorded ones never re-run. The resumed run re-emits the
+  prefix under a fresh `RunID` with `ParentRunID` set to the recorded run's.
+  Served responses carry zeroed usage, so the resumed run's `Finalize`
+  usage, its spend and a `BudgetPool` count live spend only, while the
+  per-run token budget is seeded with the recorded usage and does not
+  re-arm. `ErrResumeMismatch` (also returned by `NewResume` for a record
+  holding a steering event or no completion) reports a resumed `Runner`
+  whose system prompt, tool set, task, policies or hooks diverge from the
+  record — every request still covered by the record must match it exactly,
+  and time-varying policies are refused at the first mismatch — always
+  before any live call.
+
 - `llmkit`: `ThinkingConfig.Effort` (`ReasoningEffort`: `EffortLow`,
   `EffortMedium`, `EffortHigh`) and `Capabilities.ReasoningEffort`. OpenAI
   sends `reasoning_effort` and Google sends `thinkingLevel`. The flag is true
