@@ -33,6 +33,7 @@ import (
 	"image/png"
 	"maps"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -1154,6 +1155,98 @@ func TestLiveAgentProactiveSummaryCompaction(t *testing.T) {
 		}
 		if out.FinalText == "" {
 			t.Fatalf("no final text after the compaction; outcome=%+v", out)
+		}
+		return
+	}
+}
+
+// binaryTool returns bytes that are not valid UTF-8.
+type binaryTool struct{ out string }
+
+func (b binaryTool) Def() llmkit.ToolDef {
+	return llmkit.ToolDef{Name: "read_blob", Description: "returns the raw bytes of the blob", Parameters: json.RawMessage(`{"type":"object"}`)}
+}
+
+func (b binaryTool) Run(context.Context, json.RawMessage) ([]llmkit.Block, error) {
+	return []llmkit.Block{llmkit.Text(b.out)}, nil
+}
+
+// TestLiveAgentInvalidUTF8ToolResultRecordMatchesHistory pins that a tool
+// returning bytes ff fe 'a' against the live lane completes, records a ToolRun
+// Result byte-equal to the history text of that result, and replays from the
+// JSONL record with rc.Err() == nil.
+func TestLiveAgentInvalidUTF8ToolResultRecordMatchesHistory(t *testing.T) {
+	ctx, cl, _ := newLiveAgentClient(t)
+	system := "You are a helpful assistant. Call the `read_blob` tool exactly once, then answer in one sentence. Never call it twice."
+	tasks := []string{
+		"Call the `read_blob` tool exactly once, then reply in one sentence saying it returned.",
+		"Use `read_blob` one time, then confirm in one short sentence that you read the blob.",
+		"Make a single `read_blob` call, then state in one sentence that the call finished.",
+	}
+	for attempt := 1; attempt <= 3; attempt++ {
+		dir := t.TempDir()
+		runID := llmkit.RunID(fmt.Sprintf("live-utf8-%d", attempt))
+		tool := binaryTool{out: "\xff\xfea"}
+		runner := agent.NewRunner(cl, []agent.Tool{tool}, system, agent.WithMaxTokens(2048),
+			agent.WithObserver(agent.JSONL(dir, func(err error) { t.Errorf("sink: %v", err) })),
+			agent.WithObserver(livetest.DefaultTally()))
+		out, err := runner.Run(ctx, tasks[attempt-1], agent.WithRunID(runID))
+		if err != nil {
+			if !isModelFlake(err) {
+				t.Fatalf("run (attempt %d): %v", attempt, err)
+			}
+			if attempt == 3 {
+				t.Fatalf("after 3 differently-phrased attempts the run still ended without an answer: %v", err)
+			}
+			t.Logf("attempt %d: run ended without an answer (%v); retrying with different phrasing", attempt, err)
+			continue
+		}
+		var histText string
+		var results int
+		for _, m := range out.Messages {
+			if m.Role == llmkit.RoleToolResult {
+				histText, results = m.Text(), results+1
+			}
+		}
+		if results == 0 {
+			if attempt == 3 {
+				t.Fatalf("after 3 differently-phrased attempts the model never called read_blob")
+			}
+			t.Logf("attempt %d: read_blob was not called; retrying with different phrasing", attempt)
+			continue
+		}
+		if results != 1 {
+			t.Fatalf("tool results = %d, want 1", results)
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, string(runID)+".jsonl"))
+		if err != nil {
+			t.Fatalf("read record: %v", err)
+		}
+		loaded, err := agent.LoadJSONL(bytes.NewReader(raw))
+		if err != nil {
+			t.Fatalf("LoadJSONL: %v", err)
+		}
+		var recorded []string
+		for _, ev := range loaded.Record {
+			if ev.Kind == llmkit.KindToolRun {
+				recorded = append(recorded, ev.ToolRun.Result)
+			}
+		}
+		if len(recorded) != 1 || recorded[0] != histText {
+			t.Fatalf("recorded tool_run Result = %q, in-memory history text = %q, want byte-equal", recorded, histText)
+		}
+		if want := "\ufffd\ufffda"; histText != want {
+			t.Errorf("history text = %q, want %q", histText, want)
+		}
+		rc, err := agent.NewReplayClient(loaded, runID, llmkit.Capabilities{})
+		if err != nil {
+			t.Fatalf("NewReplayClient: %v", err)
+		}
+		if _, err := agent.NewRunner(rc, rc.Tools(), system, agent.WithMaxTokens(2048)).Run(ctx, tasks[attempt-1]); err != nil {
+			t.Fatalf("replayed Run: %v", err)
+		}
+		if err := rc.Err(); err != nil {
+			t.Fatalf("replay rc.Err() = %v, want nil", err)
 		}
 		return
 	}

@@ -13,8 +13,8 @@ import (
 // SpillSink stores a tool result too large for the conversation and returns a
 // reference the model is shown instead. full holds the result's blocks after
 // media degradation, not the tool's raw output, and is read-only. Under
-// [WithParallelTools] Spill is called concurrently. A non-empty ref with no
-// '\n' or '\r' is required; anything else counts as a sink failure. A panic in
+// [WithParallelTools] Spill is called concurrently. A non-empty valid-UTF-8
+// ref with no '\n' or '\r' is required; anything else counts as a sink failure. A panic in
 // Spill is not recovered: it unwinds out of Run like a hook panic.
 type SpillSink interface {
 	Spill(ctx context.Context, call llmkit.ToolCall, full []llmkit.Block) (ref string, err error)
@@ -137,8 +137,9 @@ func truncatedStandIn(text string, size, limit int) string {
 	}
 }
 
+// validSpillRef rejects a ref a JSON record cannot carry byte-for-byte.
 func validSpillRef(ref string) bool {
-	return ref != "" && !strings.ContainsAny(ref, "\r\n")
+	return ref != "" && !strings.ContainsAny(ref, "\r\n") && utf8.ValidString(ref)
 }
 
 // limitToolOutput applies the Runner's output limit to a placed result.
@@ -164,7 +165,7 @@ func (r *Runner) limitToolOutput(ctx context.Context, call llmkit.ToolCall, res 
 			res.setText(spillStandIn(ref, size, text, lim.max))
 			return res
 		}
-		res.spillErr = err.Error()
+		res.spillErr = jsonSafeUTF8(err.Error())
 	}
 	res.setText(truncatedStandIn(text, size, lim.max))
 	return res

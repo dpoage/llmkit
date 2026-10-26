@@ -352,6 +352,11 @@ entry below is marked.
 
 ### Changed
 
+- `agent`: `llmkit.ToolRunEvent.Content` (and `ToolEvent.Content`) is now set
+  whenever the blocks placed in history are not exactly one text block: several
+  text blocks, any media block, or a degraded one. A result of one text block,
+  an empty return included, keeps a nil `Content`, so those records are
+  unchanged. A trailing multi-block result can now be rebuilt from the record.
 - **Breaking:** `provider`: the Anthropic, OpenAI, and Google adapters now
   refuse an image or document whose media type is outside the wire's
   accepted set, before any request, with an `*llmkit.APIError` that wraps
@@ -535,6 +540,28 @@ entry below is marked.
 
 ### Fixed
 
+- `agent`: every string the tool phase places in history or in the `tool_run`
+  event now enters already normalized by encoding/json's rule when it is not
+  valid UTF-8: each byte that does not start a valid UTF-8 sequence becomes one
+  U+FFFD. That covers each string field of the blocks a tool returns, the text
+  of a `Tool.Run` error, panic or timeout, a `ToolPolicy` denial (its rendered
+  text and `deny_reason`) and a `SpillSink` error (`spill_error`). The
+  history, the `tool_run` event and the JSONL record hold the same bytes, the
+  next request carries what the model already saw (the provider SDKs encode
+  strings the same way), and a replay of a compaction no longer diverges on the
+  byte count in the pruned-result stub. A `SpillSink` ref that is not valid
+  UTF-8 is now a sink failure: the result is the truncation stand-in,
+  `SpillError` is set and `SpillRef` is empty. (llmkit-clu)
+- `agent`: a model tool call with an empty ID no longer panics the Runner with
+  `llmkit.ToolResult: empty callID`. The Runner replaces each empty ID at
+  response intake with `llmkit-<run id>-s<step>-c<index>`, skipping (with a
+  `-k<n>` suffix) any ID already in the history, so the history, the
+  `completion` and `tool_run` events and the next request agree and the run
+  replays from its record. The replacement goes into a copy: the client's
+  `Response` is never modified. RISK: a Gemini call without an `id` now carries a
+  Runner-made ID in history and on the next wire request (`functionCall.id`
+  and `functionResponse.id`); the response is still paired with the declared
+  tool name. Non-empty IDs pass unchanged. (llmkit-9y4)
 - `provider`: a history that did not come from Gemini (an Anthropic or OpenAI
   tool loop, for example) no longer fails on `gemini-3` and `gemini-4` models
   with a 400 "missing a thought_signature". On a model named `gemini-3` or

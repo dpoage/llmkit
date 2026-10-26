@@ -333,12 +333,15 @@ type AttemptEvent struct {
 }
 
 // ToolRunEvent records one tool call ([KindToolRun]). Call is the model's
-// request, exactly as the model made it; Result is the model-visible textual
-// result: the text blocks in order, with a "[image: <mediatype>, <N> bytes]"
-// (or "[document: ...]") marker in the position of each media block sent, and
-// an omission marker for each degraded one. Content is the result's blocks
-// exactly as placed in history; it is set only when they include a media
-// block or Degraded > 0. Degraded counts the media blocks the Runner replaced
+// request, except that a call whose ID the model left empty carries the
+// run-unique surrogate the Runner substituted at response intake; Result is
+// the model-visible textual result: the text blocks in order, with a "[image:
+// <mediatype>, <N> bytes]" (or "[document: ...]") marker in the position of
+// each media block sent, and an omission marker for each degraded one.
+// Content is the result's blocks exactly as placed in history; it is set
+// whenever they are not exactly one text block — several text blocks, any
+// media block, or Degraded > 0 — and stays nil for a lone text block (an
+// empty Tool.Run return included). Degraded counts the media blocks the Runner replaced
 // with omission markers: all of them when ToolResultMedia is false, else those
 // that are not portable. IsError marks a failed execution (Result carries the
 // "ERROR:"-prefixed message). Denied marks a policy denial — then Result is
