@@ -24,9 +24,10 @@ import (
 // Two kinds of text are removed, each replaced by the mask [maskFor]
 // picks:
 //
-//   - Values, at any length: the Secret, the BaseURL password, and the
-//     base64 "user:password" pair net/http sends as a Basic credential
-//     for a BaseURL with userinfo, each with its JSON-escaped and Go-quoted
+//   - Values: the BaseURL password and the base64 "user:password" pair
+//     net/http sends as a Basic credential, at any length; and the
+//     Secret only from 8 bytes on, as given — a shorter one is no
+//     value at all — each with its JSON-escaped and Go-quoted
 //     (strconv.Quote, the %q verb) forms. A value that is not valid UTF-8
 //     also has those forms of its U+FFFD-replaced text, the text
 //     json.Unmarshal gives for it. A short value masks every matching text
@@ -44,9 +45,15 @@ type Redactor struct {
 }
 
 // NewRedactor returns the Redactor for a client configured with secret
-// and the root URL ParseBaseURL returned. root may be nil.
+// and the root URL ParseBaseURL returned. root may be nil. A Secret
+// under 8 bytes contributes no value; the password and its Basic pair
+// contribute theirs at any length.
 func NewRedactor(secret string, root *url.URL) *Redactor {
-	raw := []string{secret}
+	// The Secret is a value from 8 bytes on, as given ([Redactor]).
+	var raw []string
+	if len(secret) >= 8 {
+		raw = append(raw, secret)
+	}
 	if root != nil && root.User != nil {
 		if pw, ok := root.User.Password(); ok && pw != "" {
 			raw = append(raw, pw)

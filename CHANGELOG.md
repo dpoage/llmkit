@@ -533,6 +533,14 @@ entry below is marked.
   default so a thinking model can finish thinking. The compat fixtures
   `images.json` and `documents.json` are re-recorded. See `docs/testing.md`.
 
+- **Breaking:** `decide`, `decide/systemone`, `embed`: a `Secret` shorter
+  than 8 bytes, as given, is no longer masked anywhere: not as sent, not
+  in its JSON-escaped, Go-quoted or U+FFFD forms. Documented placeholder
+  secrets ("k", "ollama", "x") no longer mask llmkit's own text,
+  hostnames, or cut an error chain over a stray character. The `BaseURL`
+  password and its base64 Basic pair are still masked at any length, and
+  the URL-userinfo rule is unchanged. (llmkit-ant)
+
 ### Fixed
 
 - `provider`: a history that did not come from Gemini (an Anthropic or OpenAI
