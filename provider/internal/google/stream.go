@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 
 	"github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/internal/adapter"
@@ -38,12 +39,20 @@ func (g *googleAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(
 	calls := 0
 	sawFinish := false
 	var fnErr error
-	for chunk, err := range g.client.Models.GenerateContentStream(ctx, g.model, contents, cfg) {
+	// The iterator is pulled so that a panic inside genai is recovered per
+	// next() call, never around the callback absorbChunk runs.
+	next, stop := iter.Pull2(g.client.Models.GenerateContentStream(ctx, g.model, contents, cfg))
+	defer stop()
+	for {
+		chunk, ok, err := g.pull(ctx, next)
 		if err != nil {
-			return llmkit.Response{}, g.normalizeErr(ctx, err)
+			return llmkit.Response{}, err
+		}
+		if !ok {
+			break
 		}
 		if fnErr = absorbChunk(agg, chunk, fn, &calls, &sawFinish); fnErr != nil {
-			break // cancels the iterator; the SDK closes the response body
+			break // stop (deferred) cancels the iterator; the SDK closes the response body
 		}
 	}
 	if fnErr != nil {
@@ -72,6 +81,25 @@ func (g *googleAdapter) Stream(ctx context.Context, req llmkit.Request, fn func(
 		return llmkit.Response{}, err
 	}
 	return g.toResponse(agg, wire), nil
+}
+
+// pull returns the next chunk of the genai stream, its error normalized.
+// A panic inside genai becomes the error panicError builds.
+func (g *googleAdapter) pull(ctx context.Context, next func() (*genai.GenerateContentResponse, error, bool)) (chunk *genai.GenerateContentResponse, ok bool, err error) {
+	returned := false
+	defer func() {
+		if !returned {
+			if p := recover(); p != nil {
+				chunk, ok, err = nil, false, g.panicError(ctx, p)
+			}
+		}
+	}()
+	c, e, more := next()
+	returned = true
+	if e != nil {
+		return nil, false, g.normalizeErr(ctx, e)
+	}
+	return c, more, nil
 }
 
 // absorbChunk folds one streamed chunk into agg and, when fn is non-nil,

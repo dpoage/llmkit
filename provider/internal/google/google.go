@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"net/url"
@@ -117,14 +118,44 @@ func (g *googleAdapter) Complete(ctx context.Context, req llmkit.Request) (llmki
 	if err != nil {
 		return llmkit.Response{}, err
 	}
-	resp, err := g.client.Models.GenerateContent(ctx, g.model, contents, cfg)
+	resp, err := g.generate(ctx, contents, cfg)
 	if err != nil {
-		return llmkit.Response{}, g.normalizeErr(ctx, err)
+		return llmkit.Response{}, err
 	}
 	if err := g.checkCompletion(ctx, resp); err != nil {
 		return llmkit.Response{}, err
 	}
 	return g.toResponse(resp, wire), nil
+}
+
+// generate is Models.GenerateContent with its error normalized. A panic
+// inside genai, which a malformed 2xx body can raise, becomes the error
+// panicError builds; nothing outside the genai call is guarded.
+func (g *googleAdapter) generate(ctx context.Context, contents []*genai.Content, cfg *genai.GenerateContentConfig) (resp *genai.GenerateContentResponse, err error) {
+	returned := false
+	defer func() {
+		if !returned {
+			if p := recover(); p != nil {
+				resp, err = nil, g.panicError(ctx, p)
+			}
+		}
+	}()
+	resp, err = g.client.Models.GenerateContent(ctx, g.model, contents, cfg)
+	returned = true
+	if err != nil {
+		err = g.normalizeErr(ctx, err)
+	}
+	return resp, err
+}
+
+// panicError is the error for a panic inside genai: a retryable ErrServer
+// at the status the wire returned, like any 2xx body with no completion.
+func (g *googleAdapter) panicError(ctx context.Context, p any) error {
+	return adapter.NormalizeSDKError("google", adapter.VendorError{
+		Status:  adapter.WireStatus(ctx),
+		Message: fmt.Sprintf("genai panicked decoding the response: %v", p),
+		Redact:  g.redact,
+	})
 }
 
 // buildRequest applies the shared rules exactly once via adapter.Prepare,

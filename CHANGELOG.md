@@ -607,6 +607,18 @@ entry below is marked.
   may hold a key a vendor echoed: rotate any key a vendor echoed. The error a
   `Stream` callback returns is never masked. See `docs/providers.md`
   (llmkit-ant).
+- `provider`: the Google adapter no longer panics on a 2xx body the genai SDK
+  cannot decode. A body of `null` on `Complete`, or one with malformed
+  candidates (`{"candidates":[null]}`, `{"candidates":[1]}`,
+  `{"candidates":"x"}`, `{"candidates":{}}`, a `null` before a valid
+  candidate) on `Complete` and `Stream`, panicked inside genai, took down the
+  caller's process, and passed the retry stage. The adapter now recovers a
+  panic raised by a genai call (`GenerateContent`, and each step of the
+  `GenerateContentStream` iterator) and returns an `*llmkit.APIError` of
+  `Kind` `ErrServer` with the response's status (200); the retry stage
+  retries it. A panic raised by a `Stream` callback is not recovered and
+  reaches the caller unchanged. Every other body keeps its result. The
+  Anthropic and OpenAI adapters were fixed earlier (llmkit-bk8.1.64).
 
 ||||||| f4bbf40
 
