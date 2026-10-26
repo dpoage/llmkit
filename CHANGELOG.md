@@ -352,6 +352,11 @@ entry below is marked.
 
 ### Changed
 
+- **Breaking:** `llmkit`: `ToolCall` now has `MarshalJSON` and
+  `UnmarshalJSON`. A struct that embeds `llmkit.ToolCall` anonymously gets
+  the promoted methods, and its own fields vanish from its JSON. Records
+  written with the new `arguments_b64` field (tool-call arguments that are not
+  valid JSON) read as nil `Arguments` in a reader built before this change.
 - **Breaking:** `provider`: the Anthropic, OpenAI, and Google adapters now
   refuse an image or document whose media type is outside the wire's
   accepted set, before any request, with an `*llmkit.APIError` that wraps
@@ -570,6 +575,27 @@ entry below is marked.
 - `decide`: `Ask` accepted a `Choice` answer whose option was outside the
   asked set. It now returns `ErrServer` with `StatusCode` 200 and retries
   it like any `ErrServer`.
+- `agent`, `llmkit` (llmkit-9pk): a tool call whose model-produced arguments
+  are not valid JSON (truncated output, for example) made every event that
+  carried it fail to encode, so the JSONL sink lost the `completion` and
+  `tool_run` events and `SaveJSONL` failed. `ToolCall` now encodes such
+  arguments as base64 in an `arguments_b64` field and reads them back
+  byte-for-byte; valid-JSON arguments encode exactly as before. A record of
+  such a run replays with the tool handed the same bytes.
+- `agent` (llmkit-5cw): `LoadJSONL` and `JSONLSink.Events` no longer refuse a
+  line over 16 MiB (`bufio.Scanner: token too long`); a record holding a
+  large tool result or image loads at any line size.
+- `agent` (llmkit-xuv, llmkit-fmf): the JSONL sink wrote lines nested 10 001
+  or 10 002 levels (a `decision` event's `State` at 9 999 or 10 000 levels,
+  or a tool call's arguments) that `encoding/json` then refused to read,
+  making the whole run unreadable, and dropped a deeper one. The sink and
+  `SaveJSONL` now refuse any line deeper than `encoding/json`'s 10 000-level
+  decode limit without writing it. The sink reports it once through `onErr`,
+  naming the run and the event kind; every other event of the run is
+  written and loads.
+  `SaveJSONL` returns an error naming the event index, run and kind, after
+  writing the events before it. `onErr` messages for every refusal now name
+  the event kind as well as the run.
 
 ||||||| f4bbf40
 

@@ -395,7 +395,7 @@ func TestReplay_VerifiesCompactionWithMalformedArguments(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			steps := overflowTurns(8)
 			for i := range tc.calls {
-				steps[i].resp.ToolCalls[0].Arguments = json.RawMessage(tc.args)
+				steps[i].resp.Blocks = append(steps[i].resp.Blocks, llmkit.Block{Kind: llmkit.BlockThinking, Provider: "anthropic", Raw: json.RawMessage(tc.args)})
 			}
 			out, err := overflowRunner(newFakeClient(append(steps, textResp("done", 100, 10))...), 1500).Run(context.Background(), "task")
 			if err != nil {

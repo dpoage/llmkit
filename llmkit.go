@@ -170,7 +170,9 @@ package llmkit
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 )
@@ -414,11 +416,63 @@ type ToolDef struct {
 // ToolCall is a single tool invocation requested by the model. Arguments is the
 // raw JSON argument object exactly as the model produced it; callers should
 // json.Unmarshal it rather than string-matching, since providers differ in
-// escaping.
+// escaping. Arguments need not be valid JSON; the encoding round-trips such
+// bytes losslessly.
 type ToolCall struct {
 	ID        string          `json:"id"`
 	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments,omitempty"`
+}
+
+// toolCallWire is ToolCall's JSON shape. ArgumentsB64 carries arguments that
+// are not valid JSON; it is never set beside Arguments.
+type toolCallWire struct {
+	ID           string          `json:"id"`
+	Name         string          `json:"name"`
+	Arguments    json.RawMessage `json:"arguments,omitempty"`
+	ArgumentsB64 *string         `json:"arguments_b64,omitempty"`
+}
+
+// MarshalJSON encodes the call exactly as the plain struct does when
+// Arguments are valid JSON, and carries any other bytes (which
+// json.RawMessage cannot encode) losslessly as base64 in arguments_b64.
+func (tc ToolCall) MarshalJSON() ([]byte, error) {
+	w := toolCallWire{ID: tc.ID, Name: tc.Name}
+	switch {
+	case tc.Arguments == nil:
+	case json.Valid(tc.Arguments):
+		w.Arguments = tc.Arguments
+	default:
+		b64 := base64.StdEncoding.EncodeToString(tc.Arguments)
+		w.ArgumentsB64 = &b64
+	}
+	return json.Marshal(w)
+}
+
+// UnmarshalJSON decodes both shapes MarshalJSON writes. arguments_b64 yields
+// Arguments byte-equal to the writer's bytes; it is an error for both fields
+// to be set or for the base64 not to decode.
+func (tc *ToolCall) UnmarshalJSON(data []byte) error {
+	var w toolCallWire
+	if err := json.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	if w.ArgumentsB64 == nil {
+		tc.ID, tc.Name, tc.Arguments = w.ID, w.Name, w.Arguments
+		return nil
+	}
+	if w.Arguments != nil {
+		return fmt.Errorf("llmkit: tool call carries arguments and arguments_b64")
+	}
+	raw, err := base64.StdEncoding.DecodeString(*w.ArgumentsB64)
+	if err != nil {
+		return fmt.Errorf("llmkit: tool call arguments_b64: %w", err)
+	}
+	if raw == nil {
+		raw = json.RawMessage{}
+	}
+	tc.ID, tc.Name, tc.Arguments = w.ID, w.Name, raw
+	return nil
 }
 
 // ReasoningEffort is a coarse reasoning dial. The set is closed:

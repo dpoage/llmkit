@@ -64,18 +64,59 @@ func (t *Transcript) Events(_ context.Context, run llmkit.RunID) ([]llmkit.Event
 
 func (t *Transcript) SaveJSONL(w io.Writer) error {
 	bw := bufio.NewWriter(w)
-	enc := json.NewEncoder(bw)
 	for i := range t.Record {
-		if err := enc.Encode(&t.Record[i]); err != nil {
-			// Best-effort flush any successfully-encoded prefix to w so the
-			// partial transcript is recoverable on the next load. The encode
-			// error is the one to surface; the success-path Flush remains
-			// authoritative for happy writes.
+		ev := &t.Record[i]
+		line, err := json.Marshal(ev)
+		if err == nil {
+			if d := lineDepth(line); d > maxJSONDepth {
+				err = lineTooDeep(d)
+			} else {
+				_, err = bw.Write(append(line, '\n'))
+			}
+		}
+		if err != nil {
+			// Best-effort flush the written prefix to w so the partial
+			// transcript is recoverable on the next load.
 			_ = bw.Flush()
-			return fmt.Errorf("agent: encode transcript event %d: %w", i, err)
+			return fmt.Errorf("agent: encode transcript event %d (run %q, kind %q): %w", i, ev.RunID, ev.Kind, err)
 		}
 	}
 	return bw.Flush()
+}
+
+// maxJSONDepth is encoding/json's decoder nesting limit: a line deeper than
+// this can never be read back, so the writers refuse it.
+const maxJSONDepth = 10000
+
+// lineDepth returns the nesting depth of well-formed JSON (the top level is
+// 1). Input is the encoder's own output, never arbitrary bytes.
+func lineDepth(b []byte) int {
+	depth, max, inStr := 0, 0, false
+	for i := 0; i < len(b); i++ {
+		switch c := b[i]; {
+		case inStr:
+			switch c {
+			case '\\':
+				i++
+			case '"':
+				inStr = false
+			}
+		case c == '"':
+			inStr = true
+		case c == '{' || c == '[':
+			depth++
+			if depth > max {
+				max = depth
+			}
+		case c == '}' || c == ']':
+			depth--
+		}
+	}
+	return max
+}
+
+func lineTooDeep(d int) error {
+	return fmt.Errorf("line nests %d levels, over encoding/json's %d-level decode limit", d, maxJSONDepth)
 }
 
 // LoadJSONL reads a JSONL transcript (as written by [Transcript.SaveJSONL])
@@ -89,39 +130,46 @@ func (t *Transcript) SaveJSONL(w io.Writer) error {
 // naming the offending line.
 func LoadJSONL(r io.Reader) (*Transcript, error) {
 	t := NewTranscript()
-	sc := bufio.NewScanner(r)
-	// Transcript lines can be large (full conversations); raise the scanner cap.
-	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	br := bufio.NewReader(r)
 	line := 0
-	for sc.Scan() {
-		line++
-		raw := sc.Bytes()
-		if len(raw) == 0 {
-			continue
-		}
-		var ev llmkit.Event
-		if err := json.Unmarshal(raw, &ev); err != nil {
-			return nil, fmt.Errorf("agent: decode transcript line %d: %w", line, err)
-		}
-		if err := ev.Validate(); err != nil {
-			return nil, fmt.Errorf("agent: transcript line %d: %w", line, err)
-		}
-		if ev.RunID != "" {
-			if t.RunID == "" {
-				t.RunID = ev.RunID
-			} else if t.RunID != ev.RunID {
-				return nil, fmt.Errorf("agent: transcript line %d: run id %q mixes with %q", line, ev.RunID, t.RunID)
+	for {
+		raw, err := br.ReadBytes('\n')
+		if len(raw) > 0 {
+			line++
+			if raw[len(raw)-1] == '\n' {
+				raw = raw[:len(raw)-1]
+			}
+			if n := len(raw); n > 0 && raw[n-1] == '\r' {
+				raw = raw[:n-1]
+			}
+			if len(raw) > 0 {
+				var ev llmkit.Event
+				if derr := json.Unmarshal(raw, &ev); derr != nil {
+					return nil, fmt.Errorf("agent: decode transcript line %d: %w", line, derr)
+				}
+				if verr := ev.Validate(); verr != nil {
+					return nil, fmt.Errorf("agent: transcript line %d: %w", line, verr)
+				}
+				if ev.RunID != "" {
+					if t.RunID == "" {
+						t.RunID = ev.RunID
+					} else if t.RunID != ev.RunID {
+						return nil, fmt.Errorf("agent: transcript line %d: run id %q mixes with %q", line, ev.RunID, t.RunID)
+					}
+				}
+				if ev.ParentRunID != "" && t.ParentRunID == "" {
+					t.ParentRunID = ev.ParentRunID
+				}
+				t.Record = append(t.Record, ev)
 			}
 		}
-		if ev.ParentRunID != "" && t.ParentRunID == "" {
-			t.ParentRunID = ev.ParentRunID
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return t, nil
+			}
+			return nil, fmt.Errorf("agent: read transcript: %w", err)
 		}
-		t.Record = append(t.Record, ev)
 	}
-	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("agent: read transcript: %w", err)
-	}
-	return t, nil
 }
 
 // JSONLSink is a durable event sink that streams a run's events to one JSONL
@@ -158,10 +206,12 @@ func LoadJSONL(r io.Reader) (*Transcript, error) {
 //	                    path.
 //
 // Everything is best-effort and never fails a run: refusals and write
-// failures flow to onErr, path-qualified so an operator can tell WHICH file
-// stopped being written. An encode failure drops the single line and keeps
-// the run live. onErr may be nil, never runs under a sink lock, and may
-// call back into the sink.
+// failures flow to onErr, run-, kind- and path-qualified so an operator can
+// tell WHICH file stopped being written and which event never reached it. An
+// encode failure, or a line that nests deeper than encoding/json's decode
+// limit (unwritable: no reader could load it back), drops that single line
+// and keeps the run live. onErr may be nil, never runs under a sink lock, and
+// may call back into the sink.
 //
 // A JSONLSink is safe for concurrent use: events from concurrent runs on one
 // [Runner] multiplex by [llmkit.RunID], each writing under its own lock.
@@ -195,7 +245,20 @@ func (r *jsonlRun) write(ev *llmkit.Event) error {
 	if r.enc == nil {
 		return nil
 	}
-	return r.enc.Encode(ev)
+	return encodeLine(r.enc, ev)
+}
+
+// encodeLine writes ev to enc as one line, first refusing — unwritten — a
+// line that nests past the JSON decode limit, which no reader could load.
+func encodeLine(enc *json.Encoder, ev *llmkit.Event) error {
+	line, err := json.Marshal(ev)
+	if err != nil {
+		return err
+	}
+	if d := lineDepth(line); d > maxJSONDepth {
+		return lineTooDeep(d)
+	}
+	return enc.Encode(ev)
 }
 
 // writeAndRetire writes a live run's last line and retires it in one step
@@ -205,7 +268,7 @@ func (r *jsonlRun) writeAndRetire(ev *llmkit.Event) error {
 	defer r.mu.Unlock()
 	var err error
 	if r.enc != nil {
-		err = r.enc.Encode(ev)
+		err = encodeLine(r.enc, ev)
 	}
 	r.retireLocked()
 	return err
@@ -263,11 +326,11 @@ func (s *JSONLSink) Observe(_ context.Context, ev llmkit.Event) {
 func (s *JSONLSink) startRun(ev llmkit.Event) {
 	path := s.pathFor(ev)
 	if !safeRunID(ev.RunID) {
-		s.fail(ev.RunID, path, errors.New(`run id is not a safe filename component (empty, "." or "..", a path separator, or a NUL)`))
+		s.fail(ev.RunID, path, ev.Kind, errors.New(`run id is not a safe filename component (empty, "." or "..", a path separator, or a NUL)`))
 		return
 	}
 	if err := s.admit(ev, path); err != nil {
-		s.fail(ev.RunID, path, err)
+		s.fail(ev.RunID, path, ev.Kind, err)
 	}
 }
 
@@ -296,11 +359,11 @@ func (s *JSONLSink) admit(ev llmkit.Event, path string) error {
 		return fmt.Errorf("open %s: %w", path, err)
 	}
 	run := &jsonlRun{path: path, file: f, enc: json.NewEncoder(f)}
-	encErr := run.enc.Encode(&ev)
+	encErr := encodeLine(run.enc, &ev)
 	s.runs[ev.RunID] = run
 	if encErr != nil {
 		// Encode failure drops this line; the run stays live for later events.
-		return fmt.Errorf("encode: %w", encErr)
+		return encErr
 	}
 	return nil
 }
@@ -311,12 +374,12 @@ func (s *JSONLSink) appendRun(ev llmkit.Event) {
 	run := s.runs[ev.RunID]
 	s.mu.Unlock()
 	if run == nil {
-		s.fail(ev.RunID, s.pathFor(ev), errors.New("event for unknown or closed run dropped"))
+		s.fail(ev.RunID, s.pathFor(ev), ev.Kind, errors.New("event for unknown or closed run dropped"))
 		return
 	}
 	if err := run.write(&ev); err != nil {
 		// Encode failure drops this line; the run stays live for later events.
-		s.fail(ev.RunID, run.path, fmt.Errorf("encode: %w", err))
+		s.fail(ev.RunID, run.path, ev.Kind, err)
 	}
 }
 
@@ -330,11 +393,11 @@ func (s *JSONLSink) finalizeRun(ev llmkit.Event) {
 	delete(s.runs, ev.RunID)
 	s.mu.Unlock()
 	if run == nil {
-		s.fail(ev.RunID, s.pathFor(ev), errors.New("event for unknown or closed run dropped"))
+		s.fail(ev.RunID, s.pathFor(ev), ev.Kind, errors.New("event for unknown or closed run dropped"))
 		return
 	}
 	if err := run.writeAndRetire(&ev); err != nil {
-		s.fail(ev.RunID, run.path, fmt.Errorf("encode: %w", err))
+		s.fail(ev.RunID, run.path, ev.Kind, err)
 	}
 }
 
@@ -412,11 +475,11 @@ func (s *JSONLSink) pathFor(ev llmkit.Event) string {
 	return filepath.Join(s.dir, id+".jsonl")
 }
 
-// fail reports a sink refusal or failure through onErr, run- and
+// fail reports a sink refusal or failure through onErr, run-, kind- and
 // path-qualified, so an operator can tell WHICH file stopped being written.
-func (s *JSONLSink) fail(run llmkit.RunID, path string, err error) {
+func (s *JSONLSink) fail(run llmkit.RunID, path string, kind llmkit.EventKind, err error) {
 	if s.onErr != nil {
-		s.onErr(fmt.Errorf("agent: jsonl transcript %s (run %s): %w", path, run, err))
+		s.onErr(fmt.Errorf("agent: jsonl transcript %s (run %s, kind %s): %w", path, run, kind, err))
 	}
 }
 
