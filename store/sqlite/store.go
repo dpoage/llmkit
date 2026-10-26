@@ -63,8 +63,8 @@ type Store struct {
 //
 // Open fails with an error wrapping [ErrSchemaTooNew], leaving the file
 // untouched, when a newer version of this package wrote it. A negative schema
-// version, or a version-0 database that already holds tables or views, is
-// refused the same way: an error, before any write to the file.
+// version is refused with an error before any write as well; it does not
+// wrap ErrSchemaTooNew.
 func Open(path string, onErr func(error)) (*Store, error) {
 	return openFS(path, onErr, migrationsFS())
 }
@@ -117,15 +117,6 @@ func (s *Store) init(ctx context.Context, ms []migration) error {
 	}
 	if v < 0 {
 		return negativeVersion(v)
-	}
-	if v == 0 {
-		empty, err := schemaEmpty(ctx, s.w)
-		if err != nil {
-			return fmt.Errorf("read schema: %w", err)
-		}
-		if !empty {
-			return errForeignSchema
-		}
 	}
 	if err := enterWAL(ctx, s.w); err != nil {
 		return fmt.Errorf("enter WAL mode: %w", err)

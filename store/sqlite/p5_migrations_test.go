@@ -323,36 +323,6 @@ func TestP5_NegativeUserVersionRefusedBeforeAnyWrite(t *testing.T) {
 	}
 }
 
-func TestP5_ForeignSchemaAtVersion0Refused(t *testing.T) {
-	for name, ddl := range map[string]string{
-		"a table":                "CREATE TABLE theirs (x)",
-		"a view":                 "CREATE VIEW v AS SELECT 1",
-		"an events-shaped table": "CREATE TABLE events (id INTEGER PRIMARY KEY, payload TEXT)",
-	} {
-		t.Run(name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "foreign.db")
-			raw := openRaw(t, path)
-			if _, err := raw.Exec(ddl); err != nil {
-				t.Fatal(err)
-			}
-			if err := raw.Close(); err != nil {
-				t.Fatal(err)
-			}
-			before := fileDigest(t, path)
-
-			err := openQuiet(path)
-			if err == nil || !strings.Contains(err.Error(), "user_version 0") {
-				t.Fatalf("Open of a foreign version-0 database: %v, want a refusal naming the problem", err)
-			}
-			if after := fileDigest(t, path); after != before {
-				t.Error("Open modified a refused database")
-			}
-			beginImmediateSucceeds(t, path)
-			noSidecarFiles(t, path)
-		})
-	}
-}
-
 func TestP5_DoubleSlashAbsolutePathOpensTheNamedFile(t *testing.T) {
 	dir := t.TempDir()
 	named := "/" + filepath.Join(dir, "dbl.db")

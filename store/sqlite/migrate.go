@@ -123,14 +123,3 @@ func tooNew(have, latest int) error {
 func negativeVersion(v int) error {
 	return fmt.Errorf("sqlite: database schema version %d is negative", v)
 }
-
-var errForeignSchema = errors.New("sqlite: database at user_version 0 already holds tables or views; it was not created by this package")
-
-// schemaEmpty reports whether the database holds no user objects; SQLite's
-// own (sqlite_sequence, autoindexes) are prefixed sqlite_.
-func schemaEmpty(ctx context.Context, c *sql.Conn) (bool, error) {
-	var empty bool
-	err := c.QueryRowContext(ctx,
-		"SELECT NOT EXISTS (SELECT 1 FROM sqlite_schema WHERE substr(name, 1, 7) <> 'sqlite_')").Scan(&empty)
-	return empty, err
-}
