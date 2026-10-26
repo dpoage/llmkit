@@ -90,9 +90,6 @@ func (g *googleAdapter) pull(ctx context.Context, next func() (*genai.GenerateCo
 	defer func() {
 		if !returned {
 			if p := recover(); p != nil {
-				if adapter.WireStatus(ctx) == 0 {
-					panic(p)
-				}
 				chunk, ok, err = nil, false, g.panicError(ctx, p)
 			}
 		}
