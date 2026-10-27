@@ -1,12 +1,10 @@
 // Package sqlite is a durable llmkit event log in one SQLite file. A [Store]
 // is both an [llmkit.Observer] (register it with the agent Runner) and an
 // [llmkit.Source] (replay from it), and its read-only SQL views (runs, spend,
-// tool_calls, decisions) serve audit queries from any SQLite client.
-//
-// Observe is synchronous: when it returns the event is committed and visible
-// to Events and to other connections. Observe never fails its caller; an event
-// the store cannot keep is reported through the onErr passed to [Open].
-// Several processes may open one file.
+// tool_calls, decisions) serve audit queries from any SQLite client 3.38.0
+// or newer (the views use the ->> operator). Observe is synchronous and
+// never fails its caller; an event the store cannot keep is reported through
+// the onErr passed to [Open]. Several processes may open one file.
 package sqlite
 
 import (
@@ -57,14 +55,12 @@ type Store struct {
 // Open opens the database at path, creating it and applying every pending
 // schema migration. path is a file path; the directory must exist.
 //
-// onErr receives one error for each event the store does not keep (see
-// [Store.Observe]) and may be nil. It is never called while the store holds a
-// lock, so it may call back into the store.
-//
-// Open fails with an error wrapping [ErrSchemaTooNew], leaving the file
-// untouched, when a newer version of this package wrote it. A negative schema
-// version is refused with an error before any write as well; it does not
-// wrap ErrSchemaTooNew.
+// onErr, which may be nil, receives one error for each event the store does
+// not keep (see [Store.Observe]); it never runs under a store lock, so it
+// may call back into the store. Open fails with an error wrapping
+// [ErrSchemaTooNew], leaving the file untouched, on a database a newer
+// version of this package wrote. A negative schema version is refused
+// before any write, without wrapping ErrSchemaTooNew.
 func Open(path string, onErr func(error)) (*Store, error) {
 	return openFS(path, onErr, migrationsFS())
 }

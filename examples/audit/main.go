@@ -1,30 +1,19 @@
 // Command audit answers the cookbook queries of docs/store.md against a
 // store/sqlite database: spend per model, a run's tool calls, denied calls,
 // low decisions, lineage, the raw event stream, and runs by end status. It
-// reads the store's documented SQL views through database/sql over a
-// read-only connection: it never modifies the database file, and a path
-// that names no file fails without creating one. On a WAL database SQLite
-// leaves its -wal and -shm files beside it. The queries are the cookbook
-// verbatim (examples/audit/cookbook.sql is a byte-identical copy of
-// store/sqlite/cookbook.sql).
+// opens the database read-only over database/sql — it never modifies the
+// file, a missing path fails without creating one, and SQLite leaves its
+// -wal and -shm files beside a WAL database.
 //
 // Usage:
 //
 //	go run ./examples/audit <db> Q1 --since 0
 //	go run ./examples/audit <db> Q2 --run <run-id>
 //
-// <query> is Q1..Q7 of the cookbook (docs/store.md):
-//
-//	Q1 spend per provider, model and day    --since
-//	Q2 a run's tool calls in order          --run
-//	Q3 denied tool calls                    --since
-//	Q4 decisions below a threshold          --since --threshold
-//	Q5 lineage of a run                     --run
-//	Q6 a run's events in emission order     --run
-//	Q7 runs failed, panicked, incomplete    --since
-//
-// --since is an RFC3339 instant or 0 for the epoch (no lower bound); rows
-// print tab-separated. A query error prints the SQLite error and exits 1.
+// <query> is Q1..Q7 of the cookbook (docs/store.md). --since takes an
+// RFC3339 instant, or 0 for the epoch (no lower bound). Rows print
+// tab-separated with no header row; Q1's day column is the spend instant's
+// UTC day. A query error prints the SQLite error and exits 1.
 package main
 
 import (

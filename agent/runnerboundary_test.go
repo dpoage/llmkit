@@ -227,8 +227,8 @@ func decodeJSONValue(t *testing.T, v any) any {
 	return out
 }
 
-// w0bProbeBlob is the bead llmkit-clu probe payload: 18000 raw bytes whose
-// 2000 invalid \xff bytes normalize to 22000 bytes.
+// w0bProbeBlob is 18000 raw bytes whose 2000 invalid \xff bytes normalize to
+// 22000 bytes.
 func w0bProbeBlob() string {
 	return strings.Repeat("v", 16000) + strings.Repeat("\xff", 2000)
 }
@@ -297,8 +297,8 @@ func TestW0b_CompactionProbeInvalidUTF8Replays(t *testing.T) {
 		t.Errorf("history full result (%d bytes) vs record (%d bytes) disagree", len(histFull), len(recFull))
 	}
 
-	// The bead repro: replaying the JSONL record under the same limits used to
-	// diverge at the compaction point (18000 vs 22000 bytes in the stub).
+	// The replay must not diverge at the compaction point: the stub reports
+	// the normalized 22000 bytes on both sides.
 	src := JSONL(dir, nil)
 	rc, err := NewReplayClient(src, run, llmkit.Capabilities{})
 	if err != nil {

@@ -62,6 +62,11 @@ and other connections see it on return. Observe never fails the run: an
 event the store cannot keep makes exactly one `onErr` call naming the run
 id and kind. Refusals are listed under [Limits](#limits).
 
+Admission is permissive: a second Start for a run id and an event with an
+empty run id are stored, with no `onErr` call. `Events` then fails for
+that run — an error wrapping `llmkit.ErrUnknownRun` for the empty id, and
+a more-than-one-Start error for the duplicated Start.
+
 `Events(ctx, run)` returns the run's events in emission order, each
 json-identical to the event observed. It fails with an error wrapping
 `llmkit.ErrUnknownRun` for an empty id, a run with no events, and a run
@@ -175,7 +180,9 @@ ORDER BY finished_ns;
 
 `examples/audit` runs exactly this SQL (its `cookbook.sql` is a
 byte-identical copy of `store/sqlite/cookbook.sql`) and prints one
-tab-separated row per result row:
+tab-separated row per result row, with no header row. Q1's `day` column
+is the spend instant's UTC day: a run at 20:54 -06:00 lands on the next
+day.
 
 ```bash
 go run ./examples/audit run.db Q1 --since 0
@@ -218,7 +225,11 @@ to the `agent.JSONL` sink's file for the same run. If a string holds
 invalid UTF-8, the two files differ in bytes but decode to the same
 events. `Example_exportRecipe` in the package examples is the whole
 recipe. Use it for fixtures and for tools that already read JSONL; the
-store stays the only record.
+store stays the only record. One stored event can defeat the export: a
+completion whose request message nests near encoding/json's 10 000-level
+decode limit is kept with its message hashed, but its JSONL line — the
+message inline — nests past the limit, and `SaveJSONL` fails on it (see
+[Limits](#limits)).
 
 ## Replay from the store
 
@@ -239,9 +250,10 @@ reports divergence exactly as JSONL replay does; see
 
 A resume replays the stored run and continues live at the record's end. A
 tool call the record holds without a result may run twice (at-least-once);
-a call with a recorded result never runs again. A crashed run resumes from
-the store. A JSONL record whose final line is torn is refused until you
-remove that line (llmkit-lz5f). The per-run token limit does not
+a call with a recorded result never runs again — it is served that result
+as the model saw it, a recorded cancellation error included. A crashed run
+resumes from the store. A JSONL record whose final line is torn is refused
+until you remove that line (llmkit-lz5f). The per-run token limit does not
 accumulate across a chained resume, a resume of a resume (llmkit-j58a).
 The resume recipe is in [the agent loop](agent-loop.md).
 
@@ -255,16 +267,30 @@ so the sum also covers a process that died before Finalize; the run's
 `completion` rows in the `spend` view carry the same usage.
 `Example_budgetRestart` in the package examples shows the whole
 recipe. A resume does not re-charge the replayed prefix: the stored usage
-already covers it. The pool gates one process; a cross-process ceiling is
+already covers it. A resumed run's own record carries only its live spend
+(served responses are recorded with zeroed usage), so pre-charging a pool
+for a resume of a resumed run must sum that chain's earlier records, not
+the last one alone. The pool gates one process; a cross-process ceiling is
 not provided (bead llmkit-2or.5).
 
 ## Limits
 
-- **Payload depth.** SQLite's JSON functions parse at most 1000 nesting
-  levels. An event whose encoded payload nests deeper is refused through
-  `onErr` (naming run id and kind) and nothing is written. The JSONL sink
-  accepts up to encoding/json's 10 000-level decode limit, so a record the
-  sink keeps can still be refused here.
+- **Refused events.** An event the store cannot keep makes exactly one
+  `onErr` call naming the run id and kind, and nothing is written, when:
+  the store is closed; encoding/json rejects the event (a Decision whose
+  `state` is not valid JSON, for example); its encoded payload nests
+  deeper than the 1000 levels SQLite's JSON functions parse; a document
+  the store would write does not decode back — a request message nested
+  past encoding/json's 10 000-level decode limit, caught before the
+  write; or the write itself fails. Everything else is stored.
+- **Depth deviations from the JSONL sink.** Between the two depth limits
+  the store and the `agent.JSONL` sink keep different events. The sink
+  accepts lines up to encoding/json's 10 000-level decode limit, so it
+  keeps a `tool_run` whose payload the store refuses. The store keeps a
+  completion whose request message nests near that limit — the message is
+  hashed and its body still decodes alone — while its JSONL line, the
+  message inline, nests past it; the sink refuses that line, and the
+  export recipe above fails on the stored run.
 - **Schema version.** `Open` on a database a newer version of this package
   wrote fails with `ErrSchemaTooNew` and leaves the file untouched.
   Migrations are forward-only; rolling back means restoring a copy of the
@@ -279,13 +305,20 @@ not provided (bead llmkit-2or.5).
   4.76, 14.8 and 51.1 MB at 100, 200, 400 and 800 steps with 2 KiB tool
   results. Dedupe cuts the JSONL equivalent (11.8 MB to 736 MB for the
   same runs), not the square term. Do not plan for linear disk.
-- **Foreign files.** `Open` changes a SQLite file it did not create
-  (llmkit-rqmm). If the file is at `user_version` 0 and none of its tables
-  collides with the store's, `Open` succeeds: it writes the store schema
-  into the file (the `events` and `messages` tables, their indexes, the
-  views, `user_version` 1) and switches the file to WAL mode. If a table
-  collides, `Open` fails, but only after it switched the file to WAL mode.
-  Back the file up before you point `Open` at a database of unknown origin.
+- **Foreign files.** `Open` may change a SQLite file it did not create
+  (llmkit-rqmm). At `user_version` 0 it succeeds only when none of the
+  file's object names — table, view, or index — collides with one the
+  store's schema creates (`events`, `messages`, the four views, the
+  `events_*` indexes); it then writes the schema, sets `user_version` 1,
+  and switches the file to WAL mode. Any colliding name makes `Open` fail,
+  but only after the WAL switch. A foreign file at `user_version` 1 is
+  treated as a store: `Open` switches it to WAL and prepares its inserts,
+  so it opens only when its `events` and `messages` tables carry the
+  store's columns; any other shape fails after the WAL switch with
+  SQLite's own prepare error (`no such table: ...`, `... has no column
+  named ...`). A foreign file at `user_version` 2 or greater fails with
+  `ErrSchemaTooNew` before any write, leaving the file unchanged. Back the
+  file up before you point `Open` at a database of unknown origin.
 
 ## Where to go next
 

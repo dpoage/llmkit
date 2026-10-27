@@ -15,8 +15,6 @@ import (
 	"github.com/dpoage/llmkit"
 )
 
-// --- doubles ----------------------------------------------------------------
-
 type liveFake struct {
 	*fakeClient
 	id llmkit.Identity
@@ -122,8 +120,6 @@ func (t *argTool) Run(_ context.Context, args json.RawMessage) ([]llmkit.Block, 
 	return []llmkit.Block{llmkit.Text("ran with args")}, nil
 }
 
-// --- record helpers ---------------------------------------------------------
-
 // servableCompletions mirrors NewReplayClient's serving filter.
 func servableCompletions(evs []llmkit.Event) []llmkit.CompletionEvent {
 	var out []llmkit.CompletionEvent
@@ -204,8 +200,6 @@ func cutSources(t *testing.T, runID llmkit.RunID, evs []llmkit.Event) []struct {
 		{"jsonl", JSONL(dir, nil)},
 	}
 }
-
-// --- the R1 sweep -----------------------------------------------------------
 
 type resumeScenario struct {
 	name   string
@@ -677,8 +671,6 @@ func toolRunCount(tools []*resumeCountingTool, id string) int {
 	return n
 }
 
-// --- R2: configuration mismatch --------------------------------------------
-
 func TestResumeMismatchRefusedBeforeLiveCall(t *testing.T) {
 	ctx := context.Background()
 	origClient := newFakeClient(
@@ -734,8 +726,6 @@ func TestResumeMismatchRefusedBeforeLiveCall(t *testing.T) {
 		})
 	}
 }
-
-// --- R3: dangling calls -----------------------------------------------------
 
 func TestResumeDanglingCalls(t *testing.T) {
 	ctx := context.Background()
@@ -815,8 +805,6 @@ func n0(evs []llmkit.Event, id string) int {
 	return 0
 }
 
-// --- R4: usage ---------------------------------------------------------------
-
 func TestResumeUsageOfPanickedRecord(t *testing.T) {
 	ctx := context.Background()
 	origClient := newFakeClient(thinkOnlyResp("only thinking", 120, 30), textResp("never recorded", 10, 2))
@@ -850,8 +838,6 @@ func TestResumeUsageOfPanickedRecord(t *testing.T) {
 		t.Errorf("Usage() = %+v, want %+v", got, want)
 	}
 }
-
-// --- R5 + P-B: budgets -------------------------------------------------------
 
 func TestResumeTokenBudgetNotRearmed(t *testing.T) {
 	ctx := context.Background()
@@ -984,8 +970,6 @@ func TestResumeBudgetPoolChargedLiveOnly(t *testing.T) {
 	}
 }
 
-// --- P-A: steering refusal ----------------------------------------------------
-
 func TestResumeRefusesSteeringRecord(t *testing.T) {
 	ctx := context.Background()
 	steering := NewSteering()
@@ -1033,8 +1017,6 @@ func TestResumeRefusesSteeringRecord(t *testing.T) {
 		}
 	}
 }
-
-// --- divergence refusals ------------------------------------------------------
 
 func TestResumeTimeVaryingPolicyRefused(t *testing.T) {
 	ctx := context.Background()
@@ -1091,8 +1073,6 @@ func TestResumeStrictMatchFailsClosedOnUnencodableRequest(t *testing.T) {
 		t.Errorf("live client calls = %d, want 0", n)
 	}
 }
-
-// --- template integrity -------------------------------------------------------
 
 func TestNewResumeDoesNotMutateRunner(t *testing.T) {
 	ctx := context.Background()
@@ -1166,8 +1146,6 @@ func TestResumeRunsOnce(t *testing.T) {
 		t.Fatalf("second run err = %v, want the runs-once refusal", err)
 	}
 }
-
-// --- interface forwarding -----------------------------------------------------
 
 type streamingFake struct {
 	*fakeClient
@@ -1246,8 +1224,6 @@ func TestResumeForwardsClientInterfaces(t *testing.T) {
 		}
 	}
 }
-
-// --- summarizing compactor ----------------------------------------------------
 
 type countingCompactor struct {
 	calls int

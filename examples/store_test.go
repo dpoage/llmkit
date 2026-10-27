@@ -4,9 +4,8 @@ package examples_test
 // with the store as the run's only sink, examples/replay --store replays it,
 // examples/audit answers the cookbook queries, and the doc contracts hold
 // (docs/store.md quotes the package examples and the cookbook verbatim; the
-// AGENTS.md and CLAUDE.md tails stay byte-identical and carry the
-// store/sqlite row). No build tag, no credentials, no network beyond the
-// httptest server.
+// AGENTS.md and CLAUDE.md tails stay byte-identical). No build tag, no
+// credentials, no network beyond the httptest server.
 
 import (
 	"bytes"

@@ -32,12 +32,11 @@ type Resume struct {
 
 // NewResume arms the resume of run as recorded by src, configured from r:
 // every Runner option is taken from r — the record decides only the replayed
-// prefix — and r is never mutated and stays usable for plain runs.
-// The error wraps [ErrResumeMismatch], before any call, for a record holding
-// a steering event, no completion to replay, or a record [NewReplayClient]
-// refuses. The record of a resumed run holds only that run's live spend, so
-// a resume of it seeds the token budget with that spend alone: the limit is
-// not cumulative across a chain of resumes.
+// prefix — and r is never mutated and stays usable for plain runs. The
+// error wraps [ErrResumeMismatch], before any call, for a record holding a
+// steering event, no completion to replay, or one [NewReplayClient] refuses.
+// A resumed run's own record holds only that run's live spend, so a resume
+// of it seeds the token budget with that spend alone.
 func NewResume(ctx context.Context, src llmkit.Source, run llmkit.RunID, r *Runner) (*Resume, error) {
 	if src == nil {
 		return nil, errors.New("agent: nil event source")
@@ -118,9 +117,10 @@ func (res *Resume) Usage() llmkit.Usage { return res.usage }
 // Run re-runs the original task: the recorded prefix replays, then the run
 // continues live on the Runner NewResume took its configuration from. Every
 // event of the resumed run carries the recorded run's id as ParentRunID,
-// under a fresh RunID, whatever opts hold ([Continue] included); opts
-// otherwise apply as on [Runner.Run]. A second Run or RunJSON on the same
-// Resume is a programming error and fails before any call.
+// whatever opts hold ([Continue] included); the run id itself is fresh
+// unless opts pin it with [WithRunID], which wins. Other opts apply as on
+// [Runner.Run]. A second Run or RunJSON on the same Resume is a programming
+// error and fails before any call.
 func (res *Resume) Run(ctx context.Context, task string, opts ...RunOption) (*Outcome, error) {
 	if !res.ran.CompareAndSwap(false, true) {
 		return nil, errResumeReuse

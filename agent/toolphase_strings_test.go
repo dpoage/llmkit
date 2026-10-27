@@ -168,8 +168,7 @@ func TestW0b_ToolPhaseStringsSurviveRecord(t *testing.T) {
 	}
 }
 
-// The llmkit-clu compaction probe through a denial: 18000 raw reason bytes
-// that normalize to 22000.
+// A denial reason of 18000 raw bytes normalizes to 22000 before the record.
 func TestW0b_DenialReasonInvalidUTF8CompactionReplays(t *testing.T) {
 	run := llmkit.RunID("w0b-deny-probe")
 	dir := t.TempDir()
