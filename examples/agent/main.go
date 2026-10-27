@@ -131,7 +131,7 @@ func run() error {
 	var id llmkit.RunID
 	switch {
 	case *store != "" && *record != "":
-		return errors.New("agent: --store and --record name two durable sinks of one run; pass at most one")
+		return errors.New("--store and --record name two durable sinks of one run; pass at most one")
 	case *store != "":
 		st, err := sqlite.Open(*store, func(err error) {
 			log.Printf("store: %v", err)

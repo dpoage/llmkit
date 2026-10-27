@@ -37,7 +37,12 @@ const usage = `usage: go run ./examples/replay --store <db> --run <run-id>
 replays a recorded run offline from a store/sqlite database:
   go run ./examples/agent --store <db>
 or from a JSONL record:
-  go run ./examples/agent --record <record-dir>`
+  go run ./examples/agent --record <record-dir>
+
+` + foreignStore
+
+// foreignStore states what --store does to a SQLite file the store did not create (llmkit-rqmm).
+const foreignStore = "--store on a foreign SQLite file at user_version 0 writes the store schema into it and switches it to WAL; if its tables collide, it fails after the WAL switch"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -49,7 +54,7 @@ func main() {
 func run(args []string) error {
 	var storePath, runFlag string
 	flags := flag.NewFlagSet("replay", flag.ContinueOnError)
-	flags.StringVar(&storePath, "store", "", "path to a store/sqlite database the run is read from")
+	flags.StringVar(&storePath, "store", "", "path to a store/sqlite database the run is read from\n"+foreignStore)
 	flags.StringVar(&runFlag, "run", "", "the run id to replay (required with --store)")
 	if err := flags.Parse(args); err != nil {
 		return err

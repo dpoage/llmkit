@@ -102,9 +102,10 @@ func TestExamplesAgentStoreIsTheOnlySinkAndReplays(t *testing.T) {
 	replayBin := buildExample(t, root, tmp, "replay")
 
 	srv, served := fakeCompat(t, false)
+	// The agent runs inside dir, so the walk below also catches a relative sink.
 	dir := t.TempDir()
 	db := filepath.Join(dir, "run.db")
-	code, stdout, stderr := runExampleArgs(t, agentBin, []string{"--store", db}, map[string]string{
+	code, stdout, stderr := runExampleIn(t, agentBin, dir, []string{"--store", db}, map[string]string{
 		"LLMKIT_PROVIDER": "openai-compatible",
 		"LLMKIT_MODEL":    "m",
 		"LLMKIT_API_KEY":  "k",
@@ -247,6 +248,35 @@ func TestExamplesAuditSinceTOrdersByInstant(t *testing.T) {
 	}
 	if !strings.Contains(out, string(aTextAfter)) || !strings.Contains(out, string(bTextBefore)) {
 		t.Fatalf("Q7 since 0 must return both runs:\n%s", out)
+	}
+}
+
+func TestExamplesAuditMissingDatabaseCreatesNothing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: skips the example builds")
+	}
+	auditBin := buildExample(t, moduleRoot(t), t.TempDir(), "audit")
+
+	dir := t.TempDir()
+	for _, path := range []string{filepath.Join(dir, "missing.db"), "missing.db", "file:run.db"} {
+		code, stdout, stderr := runExampleIn(t, auditBin, dir, []string{path, "Q1"}, nil)
+		if code == 0 {
+			t.Fatalf("audit %s Q1 exited 0 on a missing database\nstdout:\n%s", path, stdout)
+		}
+		if !strings.Contains(stderr, path) {
+			t.Fatalf("audit %s Q1 error does not name the path:\n%s", path, stderr)
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("audit created %v in its working directory", names)
 	}
 }
 

@@ -3,7 +3,8 @@
 `store/sqlite` keeps a run's whole event stream in one SQLite database file.
 A `*sqlite.Store` is an `llmkit.Observer` you register with the agent Runner
 and an `llmkit.Source` you replay from. Read-only SQL views answer audit
-questions — spend, tool calls, decisions, lineage — from any SQL client.
+questions — spend, tool calls, decisions, lineage — from any SQL client
+that runs SQLite 3.38.0 or newer.
 
 The store hides its storage format. You see `Open`, `Observe`, `Events`,
 `Close`, the `ErrSchemaTooNew` error, and the four documented views. The
@@ -207,10 +208,15 @@ record uses:
 	if err := (&agent.Transcript{Record: evs}).SaveJSONL(f); err != nil {
 		log.Fatal(err)
 	}
+	if err := f.Close(); err != nil {
+		log.Fatal(err)
+	}
 ```
 
-The exported file is byte-equal to the `agent.JSONL` sink's file for the
-same run. `Example_exportRecipe` in the package examples is the whole
+If every string in the run is valid UTF-8, the exported file is byte-equal
+to the `agent.JSONL` sink's file for the same run. If a string holds
+invalid UTF-8, the two files differ in bytes but decode to the same
+events. `Example_exportRecipe` in the package examples is the whole
 recipe. Use it for fixtures and for tools that already read JSONL; the
 store stays the only record.
 
@@ -231,19 +237,23 @@ reports divergence exactly as JSONL replay does; see
 
 ## Resuming an interrupted run
 
-A resume replays the stored run and continues live at the record's end: no
-provider call of the replayed prefix is repeated, and the first live wire
-request is the one the interrupted run would have made next. A tool call
-the record holds without a result may run twice (at-least-once); recorded
-results are never re-executed. The recipe and its exact semantics live in
-the resume section of [the agent loop](agent-loop.md).
+A resume replays the stored run and continues live at the record's end. A
+tool call the record holds without a result may run twice (at-least-once);
+a call with a recorded result never runs again. A crashed run resumes from
+the store. A JSONL record whose final line is torn is refused until you
+remove that line (llmkit-lz5f). The per-run token limit does not
+accumulate across a chained resume, a resume of a resume (llmkit-j58a).
+The resume recipe is in [the agent loop](agent-loop.md).
 
 ## Budgets across restarts
 
 A token ceiling that must survive a restart is a `BudgetPool` pre-charged
-from the stored run's usage: open the store, read the run's Finalize
-usage, and `Add` its `ChargeableTokens` to a fresh pool before the first
-new run. `Example_budgetRestart` in the package examples shows the whole
+from the stored run's usage. Open the store, sum the `Usage` of the run's
+Completion events, and `Add` the sum's `ChargeableTokens` to a fresh pool
+before the first new run. The store keeps each completion when it happens,
+so the sum also covers a process that died before Finalize; the run's
+`completion` rows in the `spend` view carry the same usage.
+`Example_budgetRestart` in the package examples shows the whole
 recipe. A resume does not re-charge the replayed prefix: the stored usage
 already covers it. The pool gates one process; a cross-process ceiling is
 not provided (bead llmkit-2or.5).
@@ -269,9 +279,13 @@ not provided (bead llmkit-2or.5).
   4.76, 14.8 and 51.1 MB at 100, 200, 400 and 800 steps with 2 KiB tool
   results. Dedupe cuts the JSONL equivalent (11.8 MB to 736 MB for the
   same runs), not the square term. Do not plan for linear disk.
-- **Foreign files.** `Open` on a file that is not a store may switch it to
-  WAL mode before failing (llmkit-rqmm); back the file up before pointing
-  `Open` at a database of unknown origin.
+- **Foreign files.** `Open` changes a SQLite file it did not create
+  (llmkit-rqmm). If the file is at `user_version` 0 and none of its tables
+  collides with the store's, `Open` succeeds: it writes the store schema
+  into the file (the `events` and `messages` tables, their indexes, the
+  views, `user_version` 1) and switches the file to WAL mode. If a table
+  collides, `Open` fails, but only after it switched the file to WAL mode.
+  Back the file up before you point `Open` at a database of unknown origin.
 
 ## Where to go next
 

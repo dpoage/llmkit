@@ -131,7 +131,8 @@ func ExampleStore_Events() {
 
 // Example_exportRecipe exports a stored run as a JSONL transcript: Events
 // plus Transcript.SaveJSONL. The store has no Export method; this recipe is
-// the export, and its file is byte-equal to the agent.JSONL sink's.
+// the export. Its file is byte-equal to the agent.JSONL sink's when every
+// string is valid UTF-8, and equal after decoding otherwise.
 func Example_exportRecipe() {
 	dbPath, id, done := recordScriptedRun()
 	defer done()
@@ -211,8 +212,8 @@ func Example_spendView() {
 	// step 2 completion fake/scripted in=20 out=6
 }
 
-// Example_budgetRestart pre-charges a BudgetPool with a stored run's usage
-// after a restart, so one ceiling spans the original run and its resumption.
+// Example_budgetRestart pre-charges a BudgetPool after a restart with the sum
+// of the stored run's completion usage, which the store holds without a Finalize.
 func Example_budgetRestart() {
 	dbPath, id, done := recordScriptedRun()
 	defer done()
@@ -229,8 +230,8 @@ func Example_budgetRestart() {
 	}
 	var stored llmkit.Usage
 	for _, ev := range evs {
-		if ev.Kind == llmkit.KindFinalize && ev.Finalize != nil {
-			stored = ev.Finalize.Usage
+		if ev.Kind == llmkit.KindCompletion && ev.Completion != nil {
+			stored = stored.Add(ev.Completion.Response.Usage)
 		}
 	}
 	pool := agent.NewBudgetPool(1000)

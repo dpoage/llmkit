@@ -118,11 +118,16 @@ func run(args []string) error {
 		}
 		sinceNS = t.UnixNano()
 	}
-	threshold := 0.5
+	var threshold float64
 	if thresholdRaw != "" {
 		if threshold, err = strconv.ParseFloat(thresholdRaw, 64); err != nil {
 			return fmt.Errorf("--threshold: %w", err)
 		}
+	}
+
+	// A reader must not create the database a mistyped path names.
+	if _, err := os.Stat(dbPath); err != nil {
+		return fmt.Errorf("store %s: %w", dbPath, err)
 	}
 
 	db, err := sql.Open("sqlite", dsn(dbPath))
@@ -168,13 +173,14 @@ func run(args []string) error {
 	return rows.Err()
 }
 
-// dsn names exactly the path, with the store's busy_timeout discipline.
+// dsn names exactly the path, read-only (SQLite never creates or writes the
+// file), with the store's busy_timeout discipline.
 func dsn(path string) string {
 	esc := strings.NewReplacer("%", "%25", "?", "%3f", "#", "%23").Replace(path)
 	for strings.HasPrefix(esc, "/") {
 		esc = "%2F" + esc[1:]
 	}
-	q := url.Values{"_pragma": {"busy_timeout(10000)"}}
+	q := url.Values{"mode": {"ro"}, "_pragma": {"busy_timeout(10000)"}}
 	return "file:" + esc + "?" + q.Encode()
 }
 
