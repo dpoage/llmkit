@@ -877,19 +877,7 @@ func (rc *ReplayClient) serveCall(ctx context.Context, name string, args json.Ra
 				}
 			}
 		case g.resp == rc.idx-1:
-			for i := range g.calls {
-				c := &g.calls[i]
-				if c.used || c.call.ID != id {
-					continue
-				}
-				if match < 0 {
-					match = i
-				}
-				if c.call.Name == name && c.ranWith(args) {
-					match = i
-					break
-				}
-			}
+			match = g.callByID(id, name, args)
 		}
 		if match >= 0 {
 			rec := &g.calls[match]
@@ -927,6 +915,25 @@ func (rc *ReplayClient) serveCall(ctx context.Context, name string, args json.Ra
 	err := fmt.Errorf("%w at step %d: extra tool call to %q with arguments %s; every recorded call is served", ErrReplayDiverged, lastStep, name, argsString(args))
 	rc.recordDiverged(err)
 	return nil, err
+}
+
+// callByID returns the first unused call with id whose name and arguments
+// fit, else the first unused call with id (the one to report), else -1.
+func (g *replayStepCalls) callByID(id, name string, args json.RawMessage) int {
+	match := -1
+	for i := range g.calls {
+		c := &g.calls[i]
+		if c.used || c.call.ID != id {
+			continue
+		}
+		if match < 0 {
+			match = i
+		}
+		if c.call.Name == name && c.ranWith(args) {
+			return i
+		}
+	}
+	return match
 }
 
 // argsDiverged records, and returns, the divergence where a tool was called
