@@ -535,6 +535,21 @@ entry below is marked.
 
 ### Fixed
 
+- `sandbox`: a workspace no longer receives another repository's content
+  through an in-repo `TMPDIR`. Before, when `TMPDIR` sat at or under
+  `RepoDir`, a workspace copy carried each `llmkit-sandbox-`,
+  `llmkit-wscache-`, and `llmkit-mock-` directory directly inside `TMPDIR`
+  that git listed or the full-tree walk reached (a gitignored `TMPDIR` kept
+  them out of a git copy):
+  one repository's pristine cache, or a live workspace of another run,
+  crossed into another repository's workspace. After, every copy path (the
+  full-tree walk, the git file-list copy, the gitlink recursion, and the
+  wsCache pristine materialization) leaves such directories out, whoever
+  created them, listed git files included. A repository directory with one of
+  those prefixes directly inside `TMPDIR` is left out too; a file or symlink
+  with such a name, and `TMPDIR` itself, keep copying. Only this process's
+  `TMPDIR` at copy time is consulted (llmkit-bk8.7.25).
+
 - `provider`: a history that did not come from Gemini (an Anthropic or OpenAI
   tool loop, for example) no longer fails on `gemini-3` and `gemini-4` models
   with a 400 "missing a thought_signature". On a model named `gemini-3` or
@@ -571,7 +586,37 @@ entry below is marked.
   asked set. It now returns `ErrServer` with `StatusCode` 200 and retries
   it like any `ErrServer`.
 
-||||||| f4bbf40
+### Security
+
+- `sandbox`: `ResolveHostToolchains` no longer RO-mounts a tool home that
+  sits directly under `$HOME` when `PATH` names its `bin/` directory
+  (llmkit-bk8.7.21). Before, an entry resolving to `~/.cargo/bin/cargo`
+  mounted `~/.cargo` wholesale and exposed `credentials.toml` (registry
+  tokens) to untrusted runs; `~/.pulumi` and a symlinked `~/.cargo` were
+  exposed the same way. After, the ascent from a `bin/` directory to its
+  parent is refused when (1) the parent is `$HOME` or a direct child of
+  `$HOME`, or (2) the directory `exec.LookPath` found the executable in is
+  itself named `bin`, its parent is `$HOME` or a direct child of `$HOME`,
+  and that directory resolves through symlinks to the `bin/` directory
+  being ascended from. The `bin/` directory then mounts alone. Paths and
+  `$HOME` are compared as written and after symlinks resolve. The rule
+  compares paths only, so these layouts still ascend: a tool home two or
+  more levels under `$HOME` (XDG `CARGO_HOME=~/.local/share/cargo`) or
+  outside `$HOME` that `PATH` reaches directly (llmkit-471.1); an
+  executable that is a file symlink out of its `PATH` `bin/` directory
+  (`~/.cargo/bin/cargo` to `../cargo-real`, or `~/bin/cargo` to
+  `~/.cargo/bin/cargo` with `~/.cargo` a symlink out); a `PATH`
+  directory not named `bin`; a `PATH` that reaches a `$HOME` child through a
+  symlink chain written outside `$HOME`, or through a symlink alias of
+  `$HOME` while the child is itself a symlink out, or through a bind mount
+  of `$HOME`; a relative entry resolved from a working directory that is a
+  symlinked tool home; and an unset, empty, or relative
+  `$HOME`. Cost: a `PATH` `bin` directory in `$HOME` or a direct child of
+  it that resolves through symlinks to a toolchain's `bin/` (a
+  single-package `~/.nix-profile` is the known case) now mounts that
+  `bin/` alone. An absolute directory entry such as `/nix/store/<hash>-pkg`
+  mounts the whole package. `docs/sandbox.md` (Host toolchains) shows each
+  layout.
 
 ## [0.6.0] - 2026-09-30
 
