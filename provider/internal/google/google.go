@@ -7,8 +7,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -21,6 +23,8 @@ type googleAdapter struct {
 	client *genai.Client
 	model  string
 	caps   llmkit.Capabilities
+	// redact masks the credential in every error the adapter builds.
+	redact *adapter.Redactor
 }
 
 // Options configures a Gemini adapter.
@@ -93,10 +97,13 @@ func New(ctx context.Context, model string, opts Options) (llmkit.Client, error)
 	if err != nil {
 		return nil, adapter.Refuse("google", "failed to construct genai client: "+err.Error(), err)
 	}
+	// An unparseable BaseURL leaves root nil; genai refuses it at request time.
+	root, _ := url.Parse(opts.BaseURL)
 	return &googleAdapter{
 		client: client,
 		model:  model,
 		caps:   caps,
+		redact: adapter.NewRedactor(opts.APIKey, root),
 	}, nil
 }
 
@@ -110,14 +117,47 @@ func (g *googleAdapter) Complete(ctx context.Context, req llmkit.Request) (llmki
 	if err != nil {
 		return llmkit.Response{}, err
 	}
-	resp, err := g.client.Models.GenerateContent(ctx, g.model, contents, cfg)
+	resp, err := g.generate(ctx, contents, cfg)
 	if err != nil {
-		return llmkit.Response{}, g.normalizeErr(ctx, err)
+		return llmkit.Response{}, err
 	}
 	if err := g.checkCompletion(ctx, resp); err != nil {
 		return llmkit.Response{}, err
 	}
 	return g.toResponse(resp, wire), nil
+}
+
+// generate is Models.GenerateContent with its error normalized. A panic
+// after a response status is recorded, such as one raised reading its body,
+// becomes the error panicError builds; one before any response propagates.
+func (g *googleAdapter) generate(ctx context.Context, contents []*genai.Content, cfg *genai.GenerateContentConfig) (resp *genai.GenerateContentResponse, err error) {
+	returned := false
+	defer func() {
+		if !returned {
+			if p := recover(); p != nil {
+				if adapter.WireStatus(ctx) == 0 {
+					panic(p)
+				}
+				resp, err = nil, g.panicError(ctx, p)
+			}
+		}
+	}()
+	resp, err = g.client.Models.GenerateContent(ctx, g.model, contents, cfg)
+	returned = true
+	if err != nil {
+		err = g.normalizeErr(ctx, err)
+	}
+	return resp, err
+}
+
+// panicError is the APIError for a panic inside genai. Its Kind follows
+// the status the wire recorded, as for any Google error.
+func (g *googleAdapter) panicError(ctx context.Context, p any) error {
+	return adapter.NormalizeSDKError("google", adapter.VendorError{
+		Status:  adapter.WireStatus(ctx),
+		Message: fmt.Sprintf("genai panicked decoding the response: %v", p),
+		Redact:  g.redact,
+	})
 }
 
 // buildRequest applies the shared rules exactly once via adapter.Prepare,
@@ -716,11 +756,12 @@ func (g *googleAdapter) normalizeErr(ctx context.Context, err error) error {
 			Status:  status,
 			Message: apiErr.Message,
 			Err:     err,
+			Redact:  g.redact,
 		})
 	}
 	// No HTTP response: a refusal when nothing was sent, else a transport
 	// failure or the caller's context ending mid-call.
-	return adapter.NoResponseError("google", ctx, err)
+	return adapter.NoResponseError("google", ctx, err, g.redact)
 }
 
 // Sources (vendor docs consulted for this table; every number comes from

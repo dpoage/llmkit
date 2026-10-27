@@ -25,6 +25,12 @@ func mustRoot(t *testing.T, raw string) *url.URL {
 	return u
 }
 
+// passwordRoot skips the URL parsing mustRoot does: maskFor-exercising
+// passwords hold bytes ParseBaseURL refuses or treats specially.
+func passwordRoot(password string) *url.URL {
+	return &url.URL{Scheme: "http", Host: "127.0.0.1:1", User: url.UserPassword("user", password)}
+}
+
 func TestRedactorText(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -35,7 +41,12 @@ func TestRedactorText(t *testing.T) {
 	}{
 		{"secret anywhere", redactSecret, "", "bad key " + redactSecret + "!", "bad key ***!"},
 		{"secret twice", "abcdefgh", "", "abcdefgh abcdefgh", "*** ***"},
-		{"one-byte secret", "k", "", "kick", "***ic***"},
+		{"one-byte secret not a value", "k", "", "llmkit: kick", "llmkit: kick"},
+		{"7-byte secret not a value", "abcdefg", "", "abcdefg!", "abcdefg!"},
+		{"8-byte secret is a value", "abcdefgh", "", "abcdefgh!", "***!"},
+		{"8 bytes in 4 runes is a value", "ключ", "", "ключ!", "***!"},
+		{"7-byte non-UTF-8 secret not a value in any form", "\xff\xfe\xfd\xfc\xfb\xfa\xf9", "", "\xff\xfe\xfd\xfc\xfb\xfa\xf9 \ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd", "\xff\xfe\xfd\xfc\xfb\xfa\xf9 \ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd"},
+		{"short secret with a password: only the password masks", "k", "http://user:hunter2@127.0.0.1:1", "kick hunter2", "kick ***"},
 		{"empty secret redacts nothing", "", "", "any text", "any text"},
 		{"url password", "", "http://user:hunter2@127.0.0.1:1", "pw hunter2 here", "pw *** here"},
 		{"short password masks matching text", "", "http://user:pw@127.0.0.1:1", "upstream pw rejected", "upstream *** rejected"},
@@ -51,9 +62,12 @@ func TestRedactorText(t *testing.T) {
 		{"no userinfo after path at", "", "", "http://host/path@x", "http://host/path@x"},
 		{"no scheme no userinfo scrub", "", "", "user@host", "user@host"},
 		{"empty scheme", "", "", "://a@h", "://a@h"},
-		{"secret star", "a*b", "", "x a*b y", "x !!! y"},
-		{"secret is the mask", "***", "", "key *** here", "key !!! here"},
-		{"secret join", "abab", "", "aabab b", "a*** b"},
+		{"secret star", "ab*cd*ef", "", "x ab*cd*ef y", "x !!! y"},
+		{"short secret with a star is not a value", "a*b", "", "x a*b y", "x a*b y"},
+		{"password is the mask", "", "http://user:***@127.0.0.1:1", "key *** here", "key !!! here"},
+		{"short secret that is the mask is not a value", "***", "", "key *** here", "key *** here"},
+		{"secret join", "abababab", "", "aabababab b", "a*** b"},
+		{"short secret join is not a value", "abab", "", "aabab b", "aabab b"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -76,11 +90,16 @@ func TestRedactorTextNeverHoldsAValue(t *testing.T) {
 	values := []string{"*", "**", "***", "*#", "a*", "\"*\"", "#*~"}
 	inputs := []string{"*", "***", "****", "a**", "a*a*", "#*~*", "x*y**z", "\"*\"*"}
 	for _, v := range values {
-		r := NewRedactor(v, nil)
+		// Under 8 bytes a Secret is no value: the maskFor cases ride
+		// the password, a value at any length.
+		r := NewRedactor("", passwordRoot(v))
 		for _, in := range inputs {
 			out, _ := r.Text(in)
 			if strings.Contains(out, v) {
-				t.Errorf("secret %q: Text(%q) = %q still holds it", v, in, out)
+				t.Errorf("password %q: Text(%q) = %q still holds it", v, in, out)
+			}
+			if got, changed := NewRedactor(v, nil).Text(in); got != in || changed {
+				t.Errorf("secret %q: Text(%q) = %q, %v; want it unchanged", v, in, got, changed)
 			}
 		}
 	}
@@ -97,6 +116,14 @@ func TestRedactorNilAndEmptyRedactNothing(t *testing.T) {
 	}
 	if got := NewRedactor("", nil).Scrub(err); got != err {
 		t.Errorf("empty-secret Scrub returned %v, want the same error", got)
+	}
+}
+
+func TestRedactorShortSecretScrubReturnsTheErrorItself(t *testing.T) {
+	r := NewRedactor("k", nil)
+	err := errors.New("llmkit: kick")
+	if got := r.Scrub(err); got != err {
+		t.Errorf("Scrub returned %v (%T), want the same error", got, got)
 	}
 }
 
@@ -306,12 +333,20 @@ func TestRedactorTextTerminatesAndHoldsNoValue(t *testing.T) {
 	for n := 0; n <= 5; n++ {
 		inputs = append(inputs, words(n)...)
 	}
+	// maskFor coverage rides the password; a short Secret must behave
+	// as the empty Secret's.
+	empty := NewRedactor("", nil)
 	for _, v := range values {
-		r := NewRedactor(v, nil)
+		r := NewRedactor("", passwordRoot(v))
 		for _, in := range inputs {
 			out, _ := r.Text(in)
 			if strings.Contains(out, v) {
-				t.Fatalf("secret %q: Text(%q) = %q holds it", v, in, out)
+				t.Fatalf("password %q: Text(%q) = %q holds it", v, in, out)
+			}
+			got, changed := NewRedactor(v, nil).Text(in)
+			want, wantChanged := empty.Text(in)
+			if got != want || changed != wantChanged {
+				t.Fatalf("secret %q: Text(%q) = %q, %v; want the empty Secret's %q, %v", v, in, got, changed, want, wantChanged)
 			}
 		}
 	}

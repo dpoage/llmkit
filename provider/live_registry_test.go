@@ -39,6 +39,7 @@ var liveCases = []liveCase{
 	{Name: "usage_recorded", Doc: "Options.Observer receives the Completion event's Response.Usage on a bare New client, tagged with the lane's model"},
 	{Name: "attempt_events", Doc: "Options.Observer receives one Completion event plus N Attempt events sharing its SpanID (Q1: New's own completion emitter)"},
 	{Name: "reasoning_round_trip", Doc: "a thinking+tools turn, a no-tool turn, then a tools request: every request is accepted with the earlier reasoning replayed"},
+	{Name: "schema_meta_keys", Doc: "a tool schema carrying $schema, $id, $defs and a recursive $ref is accepted and still yields a get_weather tool call"},
 
 	// Capability-keyed cases: one per llmkit.Capabilities field.
 	{Name: "context_window", Gate: "ContextWindow", Doc: "an oversize prompt yields ErrContextTooLong when the window is known"},

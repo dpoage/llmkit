@@ -32,7 +32,7 @@ const staleWorkspaceCacheAge = 24 * time.Hour
 // backstop that actually bounds disk usage. All failures are swallowed: this
 // is hygiene, never a reason to fail sandbox construction.
 func purgeStaleWorkspaceCaches() {
-	matches, err := filepath.Glob(filepath.Join(os.TempDir(), "llmkit-wscache-*"))
+	matches, err := filepath.Glob(filepath.Join(os.TempDir(), llmkitWscachePrefix+"*"))
 	if err != nil {
 		return
 	}

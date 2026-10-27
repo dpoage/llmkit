@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -21,6 +22,8 @@ type anthropicAdapter struct {
 	client anthropic.Client
 	model  string
 	caps   llmkit.Capabilities
+	// redact masks the credential in every error the adapter builds.
+	redact *adapter.Redactor
 }
 
 // Options configures an Anthropic adapter.
@@ -101,8 +104,10 @@ func New(model string, opts Options) (llmkit.Client, error) {
 		option.WithHTTPClient(httpClient),
 		option.WithMaxRetries(0),
 	}
+	secret := opts.APIKey
 	if opts.AuthToken != "" {
 		// OAuth mode: bearer token in Authorization header; x-api-key must be absent.
+		secret = opts.AuthToken
 		reqOpts = append(reqOpts, option.WithAuthToken(opts.AuthToken))
 		// Append rather than replace so other anthropic-beta values set by the SDK
 		// are preserved alongside the oauth beta flag.
@@ -113,10 +118,13 @@ func New(model string, opts Options) (llmkit.Client, error) {
 	if opts.BaseURL != "" {
 		reqOpts = append(reqOpts, option.WithBaseURL(opts.BaseURL))
 	}
+	// An unparseable BaseURL leaves root nil; the SDK refuses it at request time.
+	root, _ := url.Parse(opts.BaseURL)
 	return &anthropicAdapter{
 		client: anthropic.NewClient(reqOpts...),
 		model:  model,
 		caps:   caps,
+		redact: adapter.NewRedactor(secret, root),
 	}, nil
 }
 
@@ -854,6 +862,7 @@ func (a *anthropicAdapter) noCompletionError(ctx context.Context, msg *anthropic
 		Type:    body.Error.Type,
 		Message: text,
 		Header:  header,
+		Redact:  a.redact,
 	})
 }
 
@@ -866,12 +875,13 @@ func (a *anthropicAdapter) normalizeErr(ctx context.Context, err error) error {
 			Message: apiErr.Error(),
 			Header:  adapter.ResponseHeader(apiErr.Response),
 			Err:     err,
+			Redact:  a.redact,
 		})
 	}
 	// No HTTP response: a refusal when the SDK rejected the call before
 	// sending anything, else a transport failure or the caller's context
 	// ending mid-call.
-	return adapter.NoResponseError("anthropic", ctx, err)
+	return adapter.NoResponseError("anthropic", ctx, err, a.redact)
 }
 
 // Sources (vendor docs consulted for this table):

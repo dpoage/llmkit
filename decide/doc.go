@@ -25,9 +25,9 @@
 // # Images
 //
 // A state, an instructions value, or a description may hold an image: a
-// JSON object that decodes as an [llmkit.Block] of kind "image" using only
-// Block's member names, however built. [Normalize] replaces each image with
-// a label and returns it once in [Request.Images].
+// JSON object whose member names are all [llmkit.Block]'s and whose last
+// string-valued kind member is "image", however built. [Normalize] replaces
+// each image with a label and returns it once in [Request.Images].
 //
 // A backend declares what it carries as an [ImageSupport] through
 // [ImageSupporter]. The zero value refuses every image, and an image the

@@ -121,3 +121,17 @@ Reasoning spend reports on `Usage.ReasoningTokens` whatever the profile says: Op
 A response whose endpoint reports no usage (an OpenAI-compatible server that ignores `stream_options.include_usage`, a Gemini response without `usageMetadata`) carries `Usage.Estimated = true` on the OpenAI, OpenAI-compatible and Google adapters, whatever the profile says: `InputTokens` is bytes/4 of the request body sent, `OutputTokens` is bytes/4 of the response text, tool calls and thinking blocks, and `ReasoningTokens` is bytes/4 of the thinking blocks, also counted inside `OutputTokens`. A present all-zero usage object is reported zeros, not an estimate. The Anthropic adapter never sets `Estimated`: a response without usage reads as zero counts.
 
 A profile with a sampler field false drops that field's wire key even when the caller's request sets it; a profile with the field true carries the caller's value. The wire keys are `top_p`, `seed`, and `stop` on OpenAI and openai-compatible (the Chat Completions API has no `top_k`); `top_p`, `top_k`, `stop_sequences`, and `thinking` on Anthropic (the Messages API has no `seed`); and `generationConfig.topP`, `topK`, `seed`, `stopSequences`, and `thinkingConfig` on Google. `provider.New` refuses `TypeOpenAI`/`TypeOpenAICompatible` `Thinking` or `TopK` overrides, `TypeAnthropic` `Seed` and `ReasoningEffort` overrides (the adapter does not map effort), before any network call; `TypeGoogle` has no refused field.
+
+Tool `Parameters` and `Request.ResponseSchema` reach the wire with their JSON
+Schema 2020-12 meta keys unchanged: `$schema`, `$id`, `$defs`, and `$ref`,
+recursive references included, on Anthropic, OpenAI, OpenAI-compatible, and
+Google. No adapter rewrites these four keys themselves, but a schema under
+`$defs` is rewritten like any other: OpenAI-compatible rewrites a
+non-boolean `additionalProperties` to `true` at every depth, `$defs`
+included. Anthropic forces the schema's root `"type"` to `"object"`, and
+rewrites some other values, for example: it drops a null `properties`,
+drops a `required` that is empty, null, or not a list, and keeps only the
+string entries of a `required` list. `provider/schema_passthrough_test.go`
+pins the four keys on both carriers — a tool's `Parameters` and the
+`response_format`, `responseJsonSchema`, or synthetic structured-output
+tool the `StructuredOutput` row above describes.

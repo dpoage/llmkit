@@ -326,10 +326,10 @@ entry below is marked.
   It validates questions in sorted id order, and the options of a `Choice` in
   sorted key order, so the first refusal is the same on every call; the old
   client used map order. An image is any JSON object in the state, an
-  `Instructions` or a description (`True`, `False`, an option, a level) that
-  decodes as an `llmkit.Block` of kind `"image"` using only `Block`'s member
-  names (`encoding/json` matching: case-insensitive, escapes decoded, last
-  duplicate wins), however it was built; Block-shaped user data counts. Each
+  `Instructions` or a description (`True`, `False`, an option, a level) whose
+  member names are all `Block`'s (`encoding/json` matching: case-insensitive,
+  escapes decoded) and whose last string-valued `kind` member is `"image"`,
+  however it was built; Block-shaped user data counts. Each
   is replaced by its label, `<image:hex>` or `[image N]`
   (`ImageSupport.Label`), and returned once in `Request.Images` with its
   `Ref`, `SHA256`, `MediaType`, `Data` and `Placements` (`PlaceState`,
@@ -435,6 +435,17 @@ entry below is marked.
   `LLMKIT_LIVE_WORKERSAI_MODEL`, default `clef-flash`) with case
   `image_labels`: a colour-swapped pair of Asks about `[image 1]` and
   `[image 2]`. CI does not run it.
+- `provider`: tool `Parameters` and `Request.ResponseSchema` pass JSON Schema
+  2020-12 meta keys through to the wire unchanged on Anthropic, OpenAI,
+  OpenAI-compatible, and Google: `$schema`, `$id`, `$defs`, and `$ref`,
+  recursive references included, on the tool carrier and the
+  `response_format`/`responseJsonSchema`/synthetic-tool carrier alike. No
+  adapter rewrites these four keys themselves; the rewrites that exist for
+  other keywords are unchanged, and a subschema under `$defs` is rewritten
+  like any other, for example by OpenAI-compatible `additionalProperties`.
+  Hermetically pinned by `provider/schema_passthrough_test.go`; live case
+  `schema_meta_keys` runs a tool schema with `$schema`, `$id`, and a
+  recursive `$defs`/`$ref` on every lane with credentials. (llmkit-rli.1.3)
 
 ### Changed
 
@@ -636,7 +647,30 @@ entry below is marked.
   default so a thinking model can finish thinking. The compat fixtures
   `images.json` and `documents.json` are re-recorded. See `docs/testing.md`.
 
+- **Breaking:** `decide`, `decide/systemone`, `embed`: a `Secret` shorter
+  than 8 bytes, as given, is no longer masked anywhere: not as sent, not
+  in its JSON-escaped, Go-quoted or U+FFFD forms. A documented placeholder
+  secret such as "ollama" no longer masks llmkit's own text or hostnames,
+  and no longer cuts an error chain over a stray character. The `BaseURL`
+  password and its base64 Basic pair are still masked at any length, and
+  the URL-userinfo rule is unchanged. (llmkit-ant)
+
 ### Fixed
+
+- `sandbox`: a workspace no longer receives another repository's content
+  through an in-repo `TMPDIR`. Before, when `TMPDIR` sat at or under
+  `RepoDir`, a workspace copy carried each `llmkit-sandbox-`,
+  `llmkit-wscache-`, and `llmkit-mock-` directory directly inside `TMPDIR`
+  that git listed or the full-tree walk reached (a gitignored `TMPDIR` kept
+  them out of a git copy):
+  one repository's pristine cache, or a live workspace of another run,
+  crossed into another repository's workspace. After, every copy path (the
+  full-tree walk, the git file-list copy, the gitlink recursion, and the
+  wsCache pristine materialization) leaves such directories out, whoever
+  created them, listed git files included. A repository directory with one of
+  those prefixes directly inside `TMPDIR` is left out too; a file or symlink
+  with such a name, and `TMPDIR` itself, keep copying. Only this process's
+  `TMPDIR` at copy time is consulted (llmkit-bk8.7.25).
 
 - `agent`: every string the tool phase itself places in history or in the
   `tool_run` event now enters already normalized by encoding/json's rule when
@@ -736,8 +770,90 @@ entry below is marked.
   for a refused `start` it creates no file, and reports each later event of
   that run as an event for an unknown run. `SaveJSONL` returns an error
   naming the event index, run and kind.
+- `provider`: the Anthropic, OpenAI, OpenAI-compatible and Google adapters
+  now mask the configured `Secret` and the `BaseURL` password in the errors
+  they return and in the `Err` of observer events. Before, a vendor 4xx, 5xx
+  or in-band error body that echoed the API key, a `BaseURL` quoted in a
+  transport, cancellation or refusal error, and a `BaseURL` password quoted
+  in the request URL reached `APIError.Message`, the `Unwrap` chain and the
+  observer unchanged. The mask is `***`. When a value holds `*`, the mask
+  is three copies of a byte from `!` to `~` that no value holds, or empty
+  when every such byte occurs in some value. It covers the value as sent,
+  JSON-escaped and Go-quoted, and runs before the 200-byte `Message` cap,
+  on `Complete` and on `Stream`. The userinfo of any
+  `scheme://user[:password]@` URL in an error text is masked too, whether
+  or not it is a configured credential. A
+  `Secret` under 8 bytes is a placeholder and is not masked; the password is
+  masked at any length. Accepted risks: when masking changes an error, the
+  chain is cut, so `errors.As` no longer finds the vendor SDK error type or
+  the `*net.OpError` of a failed dial; `Kind`, `StatusCode`, `RetryAfter`,
+  `HasRetryAfter` and `Provider` stay, and `errors.Is` still matches the
+  sentinels and the context errors. An error with nothing to mask is
+  unchanged; a credential in a wrapped error's text or past the 200-byte
+  `Message` cap counts as something to mask. Observer `Err` text that was
+  persisted before this version may hold a key a vendor echoed: rotate any
+  key a vendor echoed. The error a `Stream` callback returns is never
+  masked. See
+  `docs/providers.md` (llmkit-ant).
+- `provider`: the Google adapter no longer panics on a 2xx body the genai SDK
+  cannot decode. A body of `null` on `Complete`, or one with malformed
+  candidates (`{"candidates":[null]}`, `{"candidates":[1]}`,
+  `{"candidates":"x"}`, `{"candidates":{}}`, a `null` before a valid
+  candidate) on `Complete` and `Stream`, panicked inside genai, took down the
+  caller's process, and passed the retry stage. The adapter now recovers a
+  panic that genai raises once the transport has returned a response: in
+  `GenerateContent` on `Complete`, and in each step of the
+  `GenerateContentStream` iterator on `Stream`. It returns an
+  `*llmkit.APIError` at the status the transport returned. Its `Kind`
+  follows that status as for any Google error: `ErrServer` for the 2xx
+  bodies above, which the retry stage retries. A panic before any response,
+  such as one from the `Options.HTTPClient` transport, a `Stream` panic while
+  the request is sent or a non-2xx body is read, and a panic raised by a
+  `Stream` callback are not recovered and reach the caller unchanged. Every
+  other body keeps its result. The Anthropic and OpenAI adapters were fixed
+  earlier (llmkit-bk8.1.64).
+- `decide`: `Normalize` and `Replay` took time proportional to input size
+  times nesting depth to find the image values in a request or a recorded
+  log. An 80 KB `{"raw":` chain 9 990 levels deep took seconds. The time is
+  now proportional to input size.
+- `decide`: `Normalize` sent an image-kind object to the backend as text,
+  base64 bytes included, when the object's own nesting, counting itself, went
+  over 10 000 levels. `encoding/json` cannot decode it, so the object did
+  not count as an image. `Normalize` now refuses it pre-wire, under every
+  `ImageSupport`, as it refuses any image with a member that does not decode
+  (`invalid image: member does not decode`).
 
-||||||| f4bbf40
+### Security
+
+- `sandbox`: `ResolveHostToolchains` no longer RO-mounts a tool home that
+  sits directly under `$HOME` when `PATH` names its `bin/` directory
+  (llmkit-bk8.7.21). Before, an entry resolving to `~/.cargo/bin/cargo`
+  mounted `~/.cargo` wholesale and exposed `credentials.toml` (registry
+  tokens) to untrusted runs; `~/.pulumi` and a symlinked `~/.cargo` were
+  exposed the same way. After, the ascent from a `bin/` directory to its
+  parent is refused when (1) the parent is `$HOME` or a direct child of
+  `$HOME`, or (2) the directory `exec.LookPath` found the executable in is
+  itself named `bin`, its parent is `$HOME` or a direct child of `$HOME`,
+  and that directory resolves through symlinks to the `bin/` directory
+  being ascended from. The `bin/` directory then mounts alone. Paths and
+  `$HOME` are compared as written and after symlinks resolve. The rule
+  compares paths only, so these layouts still ascend: a tool home two or
+  more levels under `$HOME` (XDG `CARGO_HOME=~/.local/share/cargo`) or
+  outside `$HOME` that `PATH` reaches directly (llmkit-471.1); an
+  executable that is a file symlink out of its `PATH` `bin/` directory
+  (`~/.cargo/bin/cargo` to `../cargo-real`, or `~/bin/cargo` to
+  `~/.cargo/bin/cargo` with `~/.cargo` a symlink out); a `PATH`
+  directory not named `bin`; a `PATH` that reaches a `$HOME` child through a
+  symlink chain written outside `$HOME`, or through a symlink alias of
+  `$HOME` while the child is itself a symlink out, or through a bind mount
+  of `$HOME`; a relative entry resolved from a working directory that is a
+  symlinked tool home; and an unset, empty, or relative
+  `$HOME`. Cost: a `PATH` `bin` directory in `$HOME` or a direct child of
+  it that resolves through symlinks to a toolchain's `bin/` (a
+  single-package `~/.nix-profile` is the known case) now mounts that
+  `bin/` alone. An absolute directory entry such as `/nix/store/<hash>-pkg`
+  mounts the whole package. `docs/sandbox.md` (Host toolchains) shows each
+  layout.
 
 ## [0.6.0] - 2026-09-30
 

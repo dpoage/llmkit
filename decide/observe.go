@@ -118,12 +118,9 @@ func decisionImages(images []Image) []llmkit.DecisionImage {
 	out := make([]llmkit.DecisionImage, len(images))
 	for i, img := range images {
 		di := llmkit.DecisionImage{SHA256: img.SHA256, MediaType: img.MediaType, Placements: []string{}}
-		for _, p := range [...]struct {
-			place Placement
-			name  string
-		}{{PlaceState, "state"}, {PlaceInstructions, "instructions"}, {PlaceCriteria, "criteria"}} {
-			if img.Placements&p.place != 0 {
-				di.Placements = append(di.Placements, p.name)
+		for _, pn := range placementNames {
+			if img.Placements&pn.place != 0 {
+				di.Placements = append(di.Placements, pn.name)
 			}
 		}
 		out[i] = di

@@ -132,23 +132,24 @@ func WireClient(base *http.Client) *http.Client {
 
 // NoResponseError classifies a failure that produced no HTTP response. When
 // ctx carries a Wire that saw zero requests and the caller's context is
-// still live, nothing left the process and the caller's context did not
-// cause the failure: it is a refusal, a non-retryable
+// still live, nothing left the process: it is a refusal, a non-retryable
 // *llmkit.APIError{Kind: ErrInvalidRequest, StatusCode: 0} with err
 // chained. Its Message is err's text, which can quote caller input at any
-// length (a malformed BaseURL), so [NormalizeSDKError] builds it and caps
-// it. Every other case is [TransportError]: a failure after at least one
-// request (including a dial error) keeps its transport classification, and
-// a context that ended keeps the cancellation semantics TransportError
-// documents. A ctx without a Wire cannot prove zero requests and takes the
-// TransportError path.
-func NoResponseError(provider string, ctx context.Context, err error) error {
+// length (a malformed BaseURL), so [NormalizeSDKError] builds it, redacts
+// it with r, and caps it. Every other case is [TransportError], scrubbed
+// with r: a failure after at least one request (a dial error included)
+// keeps its transport classification, and a context that ended keeps the
+// cancellation semantics TransportError documents. A ctx without a Wire
+// cannot prove zero requests and takes the TransportError path. A nil r
+// redacts nothing.
+func NoResponseError(provider string, ctx context.Context, err error, r *Redactor) error {
 	if w := wireFrom(ctx); w != nil && w.Requests() == 0 && ctx.Err() == nil {
 		return NormalizeSDKError(provider, VendorError{
 			Type:    "invalid_request_error",
 			Message: "request not sent: " + err.Error(),
 			Err:     err,
+			Redact:  r,
 		})
 	}
-	return TransportError(provider, ctx, err)
+	return r.Scrub(TransportError(provider, ctx, err))
 }

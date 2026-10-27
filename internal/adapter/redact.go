@@ -16,21 +16,23 @@ import (
 )
 
 // Redactor removes one client's credentials from error text. It is the
-// single owner of that rule for decide and embed: NewRedactor builds it
-// from the Secret and the parsed BaseURL, [NormalizeSDKError] applies it
-// through [VendorError.Redact] to a response body, and [Redactor.Scrub]
-// applies it to every error a request attempt returns.
+// single owner of that rule for decide, embed and the chat adapters:
+// NewRedactor builds it from the Secret and the parsed BaseURL,
+// [NormalizeSDKError] applies it through
+// [VendorError.Redact] to a response body, and [Redactor.Scrub] applies it
+// to an error already built.
 //
 // Two kinds of text are removed, each replaced by the mask [maskFor]
 // picks:
 //
-//   - Values, at any length: the Secret, the BaseURL password, and the
-//     base64 "user:password" pair net/http sends as a Basic credential
-//     for a BaseURL with userinfo, each with its JSON-escaped and Go-quoted
-//     (strconv.Quote, the %q verb) forms. A value that is not valid UTF-8
-//     also has those forms of its U+FFFD-replaced text, the text
-//     json.Unmarshal gives for it. A short value masks every matching text
-//     in the message, not only the credential.
+//   - Values: the Secret from 8 bytes on, the BaseURL password at any
+//     length, and, only for a non-empty BaseURL password, the base64
+//     "user:password" pair net/http sends as a Basic credential, each with its
+//     JSON-escaped and Go-quoted (strconv.Quote, the %q verb) forms. A
+//     value that is not valid UTF-8 also has those forms of its
+//     U+FFFD-replaced text, the text json.Unmarshal gives for it. A short
+//     value masks every matching text in the message, not only the
+//     credential.
 //   - URL userinfo, where it appears as such: in every
 //     "scheme://user[:password]@" occurrence the userinfo is replaced.
 //     The username is not a value: the same characters elsewhere in the
@@ -44,9 +46,14 @@ type Redactor struct {
 }
 
 // NewRedactor returns the Redactor for a client configured with secret
-// and the root URL ParseBaseURL returned. root may be nil.
+// and the BaseURL parsed into root by [ParseBaseURL] or url.Parse. root
+// may be nil.
 func NewRedactor(secret string, root *url.URL) *Redactor {
-	raw := []string{secret}
+	// A Secret under 8 bytes is a placeholder, not a value.
+	var raw []string
+	if len(secret) >= 8 {
+		raw = append(raw, secret)
+	}
 	if root != nil && root.User != nil {
 		if pw, ok := root.User.Password(); ok && pw != "" {
 			raw = append(raw, pw)

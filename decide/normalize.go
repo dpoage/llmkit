@@ -29,20 +29,20 @@ type Request struct {
 // non-empty id. Questions are validated in sorted id order, so the first
 // refusal is the same on every call.
 //
-// An image value is a JSON object that decodes as an [llmkit.Block] of Kind
-// "image" with every member name matching a Block JSON field name
-// (case-insensitively, escapes decoded, a repeated member takes its last
-// value), however it was built. It is replaced whole by its label; its
-// inner objects are not scanned.
+// An image value is a JSON object whose member names all match Block JSON
+// field names (case-insensitively, escapes decoded) and whose last
+// string-valued "kind" member is "image", however it was built. It is
+// replaced whole by its label; its inner objects are not scanned.
 //
 // An image must carry inline Data and a MediaType beginning "image/"; URL,
 // Text, Title, Provider and Raw must be empty, and every member must decode.
-// The same bytes under two media types are refused, as is an image whose
-// placement or media type s does not carry; the zero s refuses every image.
-// An object with Kind "image", a "data" that is neither null nor "" and a
-// member that is not a Block field is refused too. Any other object is left
-// as marshalled and goes out as text. Scanning is slow at pathological
-// nesting depth.
+// An image object whose own nesting, counting itself, is more than 10 000
+// levels, wherever the object sits in the document, does not
+// decode and is refused. The same bytes under two media types are refused, as
+// is an image whose placement or media type s does not carry; the zero s
+// refuses every image. An object whose "kind" is "image", whose "data" is
+// neither null nor "" and that has a member that is not a Block field is
+// refused too. Any other object is left as marshalled and goes out as text.
 //
 // A refusal is an *llmkit.APIError with Kind llmkit.ErrInvalidRequest,
 // StatusCode 0, Provider "decide", and Message "<path>: <problem>", where
