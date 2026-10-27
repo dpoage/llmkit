@@ -183,7 +183,7 @@ func (r *Runner) Run(ctx context.Context, task string, opts ...RunOption) (outco
 	// [emitFinalize]).
 	returned := false
 	defer func() { r.emitFinalize(ctx, em, outcome, err, !returned) }()
-	outcome, err = r.run(ctx, em, cfg.seed, task, cfg.attach, "", nil, cfg.steering)
+	outcome, err = r.run(ctx, em, cfg.seed, task, cfg.attach, "", nil, cfg.steering, cfg.budgetSeed)
 	if err == nil && outcome.TruncationReason != "" {
 		err = &IncompleteError{Reason: outcome.TruncationReason, Outcome: outcome}
 	}
@@ -210,6 +210,10 @@ type runConfig struct {
 	// parentRunID is the id of the run this one continues (see [Continue]);
 	// empty on a fresh run, rides on every event as ParentRunID.
 	parentRunID llmkit.RunID
+	// budgetSeed, when non-nil, is spend from before this run ([Resume])
+	// that only the token-budget check counts. The check reads it each
+	// time it runs, so a resume advances it per served recorded completion.
+	budgetSeed *llmkit.Usage
 }
 
 // WithRunID pins the run's [llmkit.RunID] to id: every event of the run
@@ -232,8 +236,10 @@ func WithRunID(id llmkit.RunID) RunOption {
 // Outcome on this same Runner) becomes the starting history, and task is
 // appended as a NEW user turn rather than becoming the conversation's sole
 // seed message. A nil prev, or a prev with no Messages, degrades to plain
-// reseeding — identical to a run without Continue — so a first-turn caller
-// can pass it unconditionally without a nil check.
+// reseeding — a nil prev identically to a run without Continue, so a
+// first-turn caller can pass it unconditionally without a nil check, while
+// a prev with no Messages still records prev.RunID as ParentRunID: the run
+// re-seeds the conversation but stays linked to its predecessor.
 //
 // The continued run is linked to its predecessor: prev.RunID rides on every
 // event of the new run as [llmkit.Event].ParentRunID (and on
@@ -322,12 +328,13 @@ const emptyTurnNudge = "You made no tool call and produced no final answer. Cont
 // answer cut off at the output token cap.
 const maxTokensContinuePrompt = "Your previous message was cut off at the output token limit. Continue from exactly where you stopped and output ONLY the remaining text needed to complete the answer — no preamble, no repetition."
 
-func (r *Runner) run(ctx context.Context, em runEmitter, seed []llmkit.Message, task string, attach []llmkit.Block, finalizePrompt string, responseSchema json.RawMessage, steering *Steering) (*Outcome, error) {
+func (r *Runner) run(ctx context.Context, em runEmitter, seed []llmkit.Message, task string, attach []llmkit.Block, finalizePrompt string, responseSchema json.RawMessage, steering *Steering, budgetSeed *llmkit.Usage) (*Outcome, error) {
 	s := &runState{
 		outcome:        &Outcome{Transcript: em.tr, RunID: em.tr.RunID},
 		finalizePrompt: finalizePrompt,
 		responseSchema: responseSchema,
 		compact:        r.newCompactState(),
+		budgetSeed:     budgetSeed,
 	}
 	outcome := s.outcome
 	// Bind before any work so a second concurrent run on the same handle
@@ -373,7 +380,7 @@ func (r *Runner) run(ctx context.Context, em runEmitter, seed []llmkit.Message, 
 		// stop gets the same one reserved finalization turn the iteration cap
 		// gets (RunJSON only), so a near-budget agent can emit its answer
 		// instead of returning a silently empty result to the caller.
-		if r.overBudget(outcome.Usage) {
+		if r.overBudget(s.budgetUsage()) {
 			if err := r.finalizeAndTruncate(ctx, em, s, TruncTokenBudget); err != nil {
 				return outcome, err
 			}
@@ -499,7 +506,7 @@ func (r *Runner) run(ctx context.Context, em runEmitter, seed []llmkit.Message, 
 		// truncate promptly rather than issuing one more expensive completion.
 		// A budget hit post-tool still gets the one reserved finalization turn
 		// (RunJSON only) so a near-budget agent can emit its answer.
-		if r.overBudget(outcome.Usage) {
+		if r.overBudget(s.budgetUsage()) {
 			if err := r.finalizeAndTruncate(ctx, em, s, TruncTokenBudget); err != nil {
 				return outcome, err
 			}
@@ -527,10 +534,22 @@ type runState struct {
 	// responseSchema, when non-nil, rides every completion of the run
 	// (capability-gated; see [Runner.complete]).
 	responseSchema json.RawMessage
+	// budgetSeed is pre-run spend counted by the token-budget check only
+	// (see [runConfig.budgetSeed]); it never enters Outcome.Usage. nil: none.
+	budgetSeed *llmkit.Usage
 	// compact is the compaction trigger state (see [Runner.maybeCompact]).
 	compact *compactState
 	// outcome accumulates the run's result and is what run returns.
 	outcome *Outcome
+}
+
+// budgetUsage is the spend the token-budget check compares with the budget:
+// the run's own usage plus the seed's value at this check.
+func (s *runState) budgetUsage() llmkit.Usage {
+	if s.budgetSeed == nil {
+		return s.outcome.Usage
+	}
+	return s.outcome.Usage.Add(*s.budgetSeed)
 }
 
 // compactState is one run's compaction trigger state.
