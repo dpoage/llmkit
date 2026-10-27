@@ -30,7 +30,23 @@ entry below is marked.
   record — every request still covered by the record must match it exactly,
   and time-varying policies are refused at the first mismatch — always
   before any live call.
-
+- `store/sqlite`: a durable event log in one SQLite file. `sqlite.Open(path,
+  onErr)` returns a `*Store` that is an `llmkit.Observer` and an
+  `llmkit.Source`. `Observe` is synchronous: when it returns, the event is
+  committed and visible to `Events` and to other connections, so a live run
+  can be read mid-flight and several processes can share one file. It never
+  fails its caller; an event the store cannot keep (encoding/json rejects it,
+  its encoded payload nests deeper than SQLite's 1000-level JSON limit, the
+  write fails, or the store is closed) makes one `onErr` call naming the run
+  id and kind. A request's messages are stored once by content hash, so disk
+  per run grows linearly in steps, not quadratically; `Events` returns each
+  event json-identical to the one observed. `(&agent.Transcript{Record:
+  evs}).SaveJSONL(w)` over `Events` is the JSONL export. The schema carries a
+  `PRAGMA user_version` and forward-only embedded migrations; `Open` fails
+  with `ErrSchemaTooNew`, leaving the file untouched, on a database a newer
+  version wrote. Read-only SQL views `runs`, `spend`, `tool_calls`, and
+  `decisions` serve audit queries from any SQLite client. The driver is
+  `modernc.org/sqlite` (pure Go, no cgo). (llmkit-2or.1, llmkit-2or.2)
 - `llmkit`: `ThinkingConfig.Effort` (`ReasoningEffort`: `EffortLow`,
   `EffortMedium`, `EffortHigh`) and `Capabilities.ReasoningEffort`. OpenAI
   sends `reasoning_effort` and Google sends `thinkingLevel`. The flag is true
@@ -385,6 +401,11 @@ entry below is marked.
   text blocks, any media block, or a degraded one. A result of one text block,
   an empty return included, keeps a nil `Content`, so those records are
   unchanged. A trailing multi-block result can now be rebuilt from the record.
+- The module's `golang.org/x/sys` floor rises from v0.35.0 to v0.47.0 and
+  `golang.org/x/sync` from v0.16.0 to v0.22.0 (indirect), and the module gains
+  the `modernc.org/sqlite` v1.59.0 dependency tree, for every importer: the
+  driver behind `store/sqlite` requires them. Only a program that imports
+  `store/sqlite` links the driver. (llmkit-2or.1)
 - **Breaking:** `provider`: the Anthropic, OpenAI, and Google adapters now
   refuse an image or document whose media type is outside the wire's
   accepted set, before any request, with an `*llmkit.APIError` that wraps
