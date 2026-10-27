@@ -122,8 +122,9 @@ type ToolEvent struct {
 	// position of each media block sent, and an omission marker for each
 	// degraded one.
 	Result string
-	// Content is the result's blocks exactly as placed in history, set only
-	// when they include a media block or Degraded > 0. It shares memory with
+	// Content is the result's blocks exactly as placed in history, set
+	// whenever they are not exactly one text block (several text blocks, a
+	// media block, or Degraded > 0). It shares memory with
 	// history: observe it, never modify it.
 	Content []llmkit.Block
 	// Degraded counts the media blocks replaced by omission markers: all of

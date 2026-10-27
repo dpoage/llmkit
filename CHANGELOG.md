@@ -10,6 +10,92 @@ entry below is marked.
 
 ### Added
 
+- `agent`: `NewResume(ctx, src, run, r)` arms the resume of a recorded run
+  from any `llmkit.Source` (a `Transcript`, the JSONL sink, a store):
+  `res.Run(ctx, task)` / `res.RunJSON(...)` re-run the original task on a
+  copy of the caller's `Runner`, replaying the recorded prefix (completions,
+  tool results, policy decisions and compaction summaries served from the
+  record) and continuing live — the caller's client, tools, `ToolPolicy` and
+  `Compactor` — where the record ends. `res.Usage()` reads the recorded
+  spend before any call: the sum of every successful completion's usage,
+  compaction calls included. Tool calls without a recorded result run live
+  at-least-once; recorded ones never re-run. The resumed run re-emits the
+  prefix under a fresh `RunID` with `ParentRunID` set to the recorded run's,
+  whatever run options it receives (`WithRunID` on `res.Run` itself wins:
+  it pins the resumed run's id). A recorded context overflow is served as
+  one, so the resumed run recovers from it as the recorded run did.
+  Served responses carry zeroed usage, so the resumed run's `Finalize`
+  usage, its spend and a `BudgetPool` count live spend only, while the
+  per-run token budget does not re-arm: each served completion's recorded
+  usage joins the budget check as it is served, so a resume of a run's own
+  record stops at the uninterrupted run's step. A resume of a resumed run's
+  record counts only that run's live spend: the limit is not cumulative
+  across a resume chain. `ErrResumeMismatch` (also returned by `NewResume`
+  for a record holding a steering event or no completion) reports a resumed `Runner`
+  whose system prompt, tool set, task, policies or hooks diverge from the
+  record — every request still covered by the record must match it exactly,
+  and time-varying policies are refused at the first mismatch — always
+  before any live call.
+- `examples/agent`: `--store <db>` records the run through `store/sqlite`
+  as its only durable sink — `sqlite.Open` registered with `WithObserver`,
+  the run id pinned and printed, and no JSONL written anywhere; passing
+  `--store` with `--record` is refused (one durable history per Runner).
+  `examples/replay --store <db> --run <id>` replays a stored run offline
+  with the same completion/tool-result semantics and divergence rules as
+  JSONL replay. (llmkit-2or.3)
+- `examples/audit`: a new command answering the cookbook queries (Q1–Q7,
+  [docs/store.md](docs/store.md)) against a store database through
+  `database/sql`: spend per provider/model/day, a run's tool calls,
+  denied calls, decisions below a threshold, lineage, a run's events in
+  emission order, and runs by end status. `--since` takes an RFC3339
+  instant (or `0` for the epoch) and filters by instant whatever UTC
+  offset the events carry; `--run` and `--threshold` feed the queries that
+  name them. It opens the database read-only; a missing path exits 1,
+  names the path, and creates no file. Its `cookbook.sql` is a
+  byte-identical copy of `store/sqlite/cookbook.sql`, pinned by test.
+  (llmkit-2or.3)
+- `store/sqlite`: runnable package examples — `ExampleOpen` (open, observe
+  through a Runner with a scripted client), `ExampleStore_Events`,
+  `Example_exportRecipe` (Events plus `Transcript.SaveJSONL`, the JSONL
+  export), `Example_spendView` (a view query through `database/sql`), and
+  `Example_budgetRestart` (pre-charging a `BudgetPool` with the sum of a
+  stored run's completion usage, which a killed run also has).
+  docs/store.md quotes them verbatim. (llmkit-2or.3)
+- docs: new [store](docs/store.md) page — choosing the sink (the
+  single-source-of-truth rule), the view columns, the cookbook, JSONL
+  export, replay, resume semantics, budgets across restarts, and the
+  store's limits (the 1000-level payload depth refusal, `ErrSchemaTooNew`
+  as a one-way door, the SQLite 3.38.0 floor the views' `->>` operator
+  needs, the quadratic growth of the per-request hash lists, and what
+  `Open` does to a foreign SQLite file, llmkit-rqmm). docs/design.md
+  gains the driver-choice and content-hash-dedupe record and the layering
+  line; docs/README.md indexes the page; AGENTS.md and CLAUDE.md gain the
+  `store/sqlite` package-table row, and README.md's package table gains
+  its row. (llmkit-2or.3)
+- `store/sqlite`: a durable event log in one SQLite file. `sqlite.Open(path,
+  onErr)` returns a `*Store` that is an `llmkit.Observer` and an
+  `llmkit.Source`. `Observe` is synchronous: when it returns, the event is
+  committed and visible to `Events` and to other connections, so a live run
+  can be read mid-flight and several processes can share one file. It never
+  fails its caller; an event the store cannot keep (encoding/json rejects it,
+  its encoded payload nests deeper than SQLite's 1000-level JSON limit, a
+  document it would write does not decode back, such as a request message
+  nested past encoding/json's 10000 levels, the write fails, or the store is
+  closed) makes one `onErr` call naming the run
+  id and kind. A request's messages are stored once by content hash; the
+  hash list each request stores still grows with the square of the step
+  count (measured 1.71, 4.76, 14.8 and 51.1 MB at 100, 200, 400 and 800
+  steps with 2 KiB tool results, where the JSONL equivalent spans 11.8 MB
+  to 736 MB), so disk per run is not linear in steps; `Events` returns each
+  event json-identical to the one observed. `(&agent.Transcript{Record:
+  evs}).SaveJSONL(w)` over `Events` is the JSONL export. The schema carries a
+  `PRAGMA user_version` and forward-only embedded migrations; `Open` fails
+  with `ErrSchemaTooNew`, leaving the file untouched, on a database a newer
+  version wrote. Read-only SQL views `runs`, `spend`, `tool_calls`, and
+  `decisions` serve audit queries from any SQLite client 3.38.0 or newer
+  (the views use `->>`); 3.37 fails every query with `malformed database
+  schema`. The driver is
+  `modernc.org/sqlite` (pure Go, no cgo). (llmkit-2or.1, llmkit-2or.2)
 - `llmkit`: `ThinkingConfig.Effort` (`ReasoningEffort`: `EffortLow`,
   `EffortMedium`, `EffortHigh`) and `Capabilities.ReasoningEffort`. OpenAI
   sends `reasoning_effort` and Google sends `thinkingLevel`. The flag is true
@@ -363,6 +449,23 @@ entry below is marked.
 
 ### Changed
 
+- **Breaking:** `llmkit`: `ToolCall` now has `MarshalJSON` and
+  `UnmarshalJSON`. A struct that embeds `llmkit.ToolCall` anonymously gets
+  the promoted methods, and its own fields vanish from its JSON. Records
+  written with the new `arguments_b64` field (tool-call arguments that are not
+  valid JSON) read as nil `Arguments` in a lenient reader built before this
+  change; one that decodes with `DisallowUnknownFields` returns an error on
+  the field.
+- `agent`: `llmkit.ToolRunEvent.Content` (and `ToolEvent.Content`) is now set
+  whenever the blocks placed in history are not exactly one text block: several
+  text blocks, any media block, or a degraded one. A result of one text block,
+  an empty return included, keeps a nil `Content`, so those records are
+  unchanged. A trailing multi-block result can now be rebuilt from the record.
+- The module's `golang.org/x/sys` floor rises from v0.35.0 to v0.47.0 and
+  `golang.org/x/sync` from v0.16.0 to v0.22.0 (indirect), and the module gains
+  the `modernc.org/sqlite` v1.59.0 dependency tree, for every importer: the
+  driver behind `store/sqlite` requires them. Only a program that imports
+  `store/sqlite` links the driver. (llmkit-2or.1)
 - **Breaking:** `provider`: the Anthropic, OpenAI, and Google adapters now
   refuse an image or document whose media type is outside the wire's
   accepted set, before any request, with an `*llmkit.APIError` that wraps
@@ -569,6 +672,38 @@ entry below is marked.
   with such a name, and `TMPDIR` itself, keep copying. Only this process's
   `TMPDIR` at copy time is consulted (llmkit-bk8.7.25).
 
+- `agent`: every string the tool phase itself places in history or in the
+  `tool_run` event now enters already normalized by encoding/json's rule when
+  it is not valid UTF-8: each byte that does not start a valid UTF-8 sequence
+  becomes one U+FFFD. That covers each string field of the blocks a tool
+  returns, the text of a `Tool.Run` error, panic or timeout, a `ToolPolicy`
+  denial (its rendered text and `deny_reason`) and a `SpillSink` error
+  (`spill_error`). The event's `call` is the model's own request and is not
+  normalized: its id and name bytes that are not valid UTF-8 stay raw in
+  the in-memory event and the history, and the record decodes them to
+  U+FFFD. The call's arguments decode to the same value — valid JSON is
+  re-compacted and HTML-escaped on the wire — and bytes that are not valid
+  JSON round-trip losslessly as base64. The tool phase's strings — not the
+  call's id or name — hold the same bytes across history, the `tool_run`
+  event and the JSONL record; the next request carries what the model
+  already saw (the provider SDKs encode
+  strings the same way), and a replay of a compaction no longer diverges on the
+  byte count in the pruned-result stub. The sizes the tool phase reports —
+  the output limit and `original_bytes` — count text and URL bytes
+  normalized (5 000 raw bytes of `s\xff` count as 10 000) and media data
+  bytes as-is. A `SpillSink` ref that is not valid
+  UTF-8 is now a sink failure: the result is the truncation stand-in,
+  `SpillError` is set and `SpillRef` is empty. (llmkit-clu)
+- `agent`: a model tool call with an empty ID no longer panics the Runner with
+  `llmkit.ToolResult: empty callID`. The Runner replaces each empty ID at
+  response intake with `llmkit-<run id>-s<step>-c<index>`, skipping (with a
+  `-k<n>` suffix) any ID already in the history, so the history, the
+  `completion` and `tool_run` events and the next request agree and the run
+  replays from its record. The replacement goes into a copy: the client's
+  `Response` is never modified. RISK: a Gemini call without an `id` now carries a
+  Runner-made ID in history and on the next wire request (`functionCall.id`
+  and `functionResponse.id`); the response is still paired with the declared
+  tool name. Non-empty IDs pass unchanged. (llmkit-9y4)
 - `provider`: a history that did not come from Gemini (an Anthropic or OpenAI
   tool loop, for example) no longer fails on `gemini-3` and `gemini-4` models
   with a 400 "missing a thought_signature". On a model named `gemini-3` or
@@ -604,6 +739,37 @@ entry below is marked.
 - `decide`: `Ask` accepted a `Choice` answer whose option was outside the
   asked set. It now returns `ErrServer` with `StatusCode` 200 and retries
   it like any `ErrServer`.
+- `agent`, `llmkit` (llmkit-9pk): a tool call whose model-produced arguments
+  are not valid JSON (truncated output, for example) made every event that
+  carried it fail to encode, so the JSONL sink lost the `completion` and
+  `tool_run` events and `SaveJSONL` failed. `ToolCall` now encodes such
+  arguments as base64 in an `arguments_b64` field and reads them back
+  byte-for-byte; valid-JSON and empty arguments encode exactly as before,
+  with HTML escaping on or off. A record of such a run replays with the tool
+  handed the same bytes.
+- `agent` (llmkit-5cw): `LoadJSONL` and `JSONLSink.Events` no longer refuse a
+  line over 16 MiB (`bufio.Scanner: token too long`); a record holding a
+  large tool result or image loads at any line size.
+- `agent` (llmkit-xuv, llmkit-fmf): the JSONL sink wrote lines nested 10 001
+  or 10 002 levels (a `decision` event's `State` at 9 999 or 10 000 levels,
+  or a tool call's arguments) that `encoding/json` then refused to read,
+  making the whole run unreadable, and dropped a deeper one. The sink and
+  `SaveJSONL` now refuse any line deeper than `encoding/json`'s 10 000-level
+  decode limit without writing it. The sink reports it once through `onErr`,
+  naming the run and the event kind; every other event of the run is
+  written and loads.
+  `SaveJSONL` returns an error naming the event index, run and kind, after
+  writing the events before it. `onErr` messages for every refusal now name
+  the event kind as well as the run.
+- `agent` (llmkit-xuv): the JSONL sink and `SaveJSONL` wrote events their own
+  reader refuses: an event that fails `Event.Validate` (a hand-built
+  `schema_version` 0, or a payload foreign to its kind), and an event whose
+  run id is not valid UTF-8. The run's record then failed to load. Both
+  writers now apply the reader's check first and write nothing for such an
+  event. The sink reports it once through `onErr`, naming the run and kind;
+  for a refused `start` it creates no file, and reports each later event of
+  that run as an event for an unknown run. `SaveJSONL` returns an error
+  naming the event index, run and kind.
 - `provider`: the Anthropic, OpenAI, OpenAI-compatible and Google adapters
   now mask the configured `Secret` and the `BaseURL` password in the errors
   they return and in the `Err` of observer events. Before, a vendor 4xx, 5xx

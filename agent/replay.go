@@ -64,9 +64,9 @@ var ErrReplayDiverged = errors.New("agent: replay diverged")
 // A replay tool whose Run is called directly, with no call ID in its
 // context, serves the earliest unconsumed (name, arguments) match in the
 // current step instead. That fallback serves direct calls only, never a
-// Runner-driven replay: a Runner panics on a call with an empty ID when it
-// feeds the call's result back, so no Runner-written record holds one, and
-// a Runner replaying a record dispatches each call with its recorded ID.
+// Runner-driven replay: a Runner replaces a call's empty ID at response
+// intake, so no Runner-written record holds one, and a Runner replaying a
+// record dispatches each call with its recorded ID.
 //
 // Calls a [ToolPolicy] denied in the recorded run are NOT served by the
 // recorded tools: the recorded denial is a policy decision, not a tool
@@ -111,12 +111,12 @@ var ErrReplayDiverged = errors.New("agent: replay diverged")
 // (threshold or overflow, by any [Compactor]) the replaying Runner does not
 // reproduce at its position is reported the same way: the first request
 // after it must carry messages equal, in their JSON encoding (as Go values
-// when a request cannot be JSON-encoded), to the recorded request's. A record
-// that cannot carry a tool's bytes, for example invalid UTF-8 through JSONL,
-// replays its compactions as diverged. Any other difference in that request,
-// such as a steering turn the replay lacks, is reported the same way. Callers
-// MUST assert Err returns nil after a replayed run — a diverged replay is a
-// failed evaluation whatever Run returned.
+// when a request cannot be JSON-encoded), to the recorded request's. If the
+// replay ends before it serves a recorded completion that follows a
+// compaction, the report names that compaction too. Any other difference in
+// that request, such as a steering turn the replay lacks, is reported the
+// same way. Callers MUST assert Err returns nil after a replayed run — a
+// diverged replay is a failed evaluation whatever Run returned.
 //
 // Completions the record marks with a Purpose, such as a [Compactor]'s
 // summary requests, are never served as answers. [ReplayClient.Compactor]
@@ -844,8 +844,8 @@ func (t replayTool) Def() llmkit.ToolDef {
 // ID, the first whose name and arguments fit), and the client records a
 // divergence if the tool's name or the arguments it received do not match
 // the recording, as [ReplayClient] describes. Called directly with no call
-// ID (a Runner panics on an empty call ID, so it never completes a turn
-// with one), Run serves the earliest unconsumed recorded call of the current
+// ID (a Runner replaces an empty call ID at intake, so it never dispatches
+// one), Run serves the earliest unconsumed recorded call of the current
 // step matching both name and arguments. No match records the client's
 // divergence: the returned error wraps [ErrReplayDiverged] naming the
 // recorded step, and the harness renders it as this call's ERROR result.
@@ -877,19 +877,7 @@ func (rc *ReplayClient) serveCall(ctx context.Context, name string, args json.Ra
 				}
 			}
 		case g.resp == rc.idx-1:
-			for i := range g.calls {
-				c := &g.calls[i]
-				if c.used || c.call.ID != id {
-					continue
-				}
-				if match < 0 {
-					match = i
-				}
-				if c.call.Name == name && c.ranWith(args) {
-					match = i
-					break
-				}
-			}
+			match = g.callByID(id, name, args)
 		}
 		if match >= 0 {
 			rec := &g.calls[match]
@@ -927,6 +915,25 @@ func (rc *ReplayClient) serveCall(ctx context.Context, name string, args json.Ra
 	err := fmt.Errorf("%w at step %d: extra tool call to %q with arguments %s; every recorded call is served", ErrReplayDiverged, lastStep, name, argsString(args))
 	rc.recordDiverged(err)
 	return nil, err
+}
+
+// callByID returns the first unused call with id whose name and arguments
+// fit, else the first unused call with id (the one to report), else -1.
+func (g *replayStepCalls) callByID(id, name string, args json.RawMessage) int {
+	match := -1
+	for i := range g.calls {
+		c := &g.calls[i]
+		if c.used || c.call.ID != id {
+			continue
+		}
+		if match < 0 {
+			match = i
+		}
+		if c.call.Name == name && c.ranWith(args) {
+			return i
+		}
+	}
+	return match
 }
 
 // argsDiverged records, and returns, the divergence where a tool was called
