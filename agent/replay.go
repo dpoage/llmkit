@@ -111,12 +111,12 @@ var ErrReplayDiverged = errors.New("agent: replay diverged")
 // (threshold or overflow, by any [Compactor]) the replaying Runner does not
 // reproduce at its position is reported the same way: the first request
 // after it must carry messages equal, in their JSON encoding (as Go values
-// when a request cannot be JSON-encoded), to the recorded request's. A record
-// that cannot carry a tool's bytes, for example invalid UTF-8 through JSONL,
-// replays its compactions as diverged. Any other difference in that request,
-// such as a steering turn the replay lacks, is reported the same way. Callers
-// MUST assert Err returns nil after a replayed run — a diverged replay is a
-// failed evaluation whatever Run returned.
+// when a request cannot be JSON-encoded), to the recorded request's. If the
+// replay ends before it serves a recorded completion that follows a
+// compaction, the report names that compaction too. Any other difference in
+// that request, such as a steering turn the replay lacks, is reported the
+// same way. Callers MUST assert Err returns nil after a replayed run — a
+// diverged replay is a failed evaluation whatever Run returned.
 //
 // Completions the record marks with a Purpose, such as a [Compactor]'s
 // summary requests, are never served as answers. [ReplayClient.Compactor]

@@ -21,7 +21,8 @@ entry below is marked.
   compaction calls included. Tool calls without a recorded result run live
   at-least-once; recorded ones never re-run. The resumed run re-emits the
   prefix under a fresh `RunID` with `ParentRunID` set to the recorded run's,
-  whatever run options it receives. A recorded context overflow is served as
+  whatever run options it receives (`WithRunID` on `res.Run` itself wins:
+  it pins the resumed run's id). A recorded context overflow is served as
   one, so the resumed run recovers from it as the recorded run did.
   Served responses carry zeroed usage, so the resumed run's `Finalize`
   usage, its spend and a `BudgetPool` count live spend only, while the
@@ -81,14 +82,19 @@ entry below is marked.
   document it would write does not decode back, such as a request message
   nested past encoding/json's 10000 levels, the write fails, or the store is
   closed) makes one `onErr` call naming the run
-  id and kind. A request's messages are stored once by content hash, so disk
-  per run grows linearly in steps, not quadratically; `Events` returns each
+  id and kind. A request's messages are stored once by content hash; the
+  hash list each request stores still grows with the square of the step
+  count (measured 1.71, 4.76, 14.8 and 51.1 MB at 100, 200, 400 and 800
+  steps with 2 KiB tool results, where the JSONL equivalent spans 11.8 MB
+  to 736 MB), so disk per run is not linear in steps; `Events` returns each
   event json-identical to the one observed. `(&agent.Transcript{Record:
   evs}).SaveJSONL(w)` over `Events` is the JSONL export. The schema carries a
   `PRAGMA user_version` and forward-only embedded migrations; `Open` fails
   with `ErrSchemaTooNew`, leaving the file untouched, on a database a newer
   version wrote. Read-only SQL views `runs`, `spend`, `tool_calls`, and
-  `decisions` serve audit queries from any SQLite client. The driver is
+  `decisions` serve audit queries from any SQLite client 3.38.0 or newer
+  (the views use `->>`); 3.37 fails every query with `malformed database
+  schema`. The driver is
   `modernc.org/sqlite` (pure Go, no cgo). (llmkit-2or.1, llmkit-2or.2)
 - `llmkit`: `ThinkingConfig.Effort` (`ReasoningEffort`: `EffortLow`,
   `EffortMedium`, `EffortHigh`) and `Capabilities.ReasoningEffort`. OpenAI
@@ -632,16 +638,21 @@ entry below is marked.
 
 ### Fixed
 
-- `agent`: every string the tool phase places in history or in the `tool_run`
-  event now enters already normalized by encoding/json's rule when it is not
-  valid UTF-8: each byte that does not start a valid UTF-8 sequence becomes one
-  U+FFFD. That covers each string field of the blocks a tool returns, the text
-  of a `Tool.Run` error, panic or timeout, a `ToolPolicy` denial (its rendered
-  text and `deny_reason`) and a `SpillSink` error (`spill_error`). The
-  history, the `tool_run` event and the JSONL record hold the same bytes, the
+- `agent`: every string the tool phase itself places in history or in the
+  `tool_run` event now enters already normalized by encoding/json's rule when
+  it is not valid UTF-8: each byte that does not start a valid UTF-8 sequence
+  becomes one U+FFFD. That covers each string field of the blocks a tool
+  returns, the text of a `Tool.Run` error, panic or timeout, a `ToolPolicy`
+  denial (its rendered text and `deny_reason`) and a `SpillSink` error
+  (`spill_error`). The event's `call` is the model's own request and is not
+  normalized: `call` bytes that are not valid UTF-8 stay raw in the in-memory
+  event and the history, and the record holds them as U+FFFD. The history,
+  the `tool_run` event and the JSONL record hold the same bytes, the
   next request carries what the model already saw (the provider SDKs encode
   strings the same way), and a replay of a compaction no longer diverges on the
-  byte count in the pruned-result stub. A `SpillSink` ref that is not valid
+  byte count in the pruned-result stub. The sizes the tool phase reports —
+  the output limit and `original_bytes` — count the normalized bytes (5 000
+  raw bytes of `s\xff` count as 10 000). A `SpillSink` ref that is not valid
   UTF-8 is now a sink failure: the result is the truncation stand-in,
   `SpillError` is set and `SpillRef` is empty. (llmkit-clu)
 - `agent`: a model tool call with an empty ID no longer panics the Runner with

@@ -42,7 +42,7 @@ or from a JSONL record:
 ` + foreignStore
 
 // foreignStore states what --store does to a SQLite file the store did not create (llmkit-rqmm).
-const foreignStore = "--store on a foreign SQLite file at user_version 0 writes the store schema into it and switches it to WAL; if its tables collide, it fails after the WAL switch"
+const foreignStore = "--store on a foreign SQLite file at user_version 0 writes the store schema into it and switches it to WAL; a colliding name of any kind (table, view or index), or a foreign file at user_version 1, fails after the WAL switch; user_version 2 or greater fails with ErrSchemaTooNew, leaving the file unchanged"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
