@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/dpoage/llmkit"
+	"github.com/dpoage/llmkit/agent"
 	"github.com/dpoage/llmkit/store/sqlite"
 )
 
@@ -303,5 +305,177 @@ func TestP4_ErrorTextNamesRunAndKindForEveryKind(t *testing.T) {
 		if !strings.Contains(errs[i].Error(), string(ev.Kind)) || !strings.Contains(errs[i].Error(), "run-kinds") {
 			t.Errorf("error %d %q does not name kind %s and the run", i, errs[i], ev.Kind)
 		}
+	}
+}
+
+// deepCallClient asks once for an echo call whose arguments nest d levels, then answers.
+func deepCallClient(d int) funcClient {
+	return func(req llmkit.Request) (llmkit.Response, error) {
+		u := llmkit.Usage{InputTokens: 10, OutputTokens: 1}
+		if toolResults(req) == 0 {
+			return llmkit.Response{StopReason: llmkit.StopToolUse, Usage: u, ToolCalls: []llmkit.ToolCall{{ID: "c1", Name: "echo", Arguments: nested(d, "[", "]")}}}, nil
+		}
+		return llmkit.Response{Text: "final", StopReason: llmkit.StopEndTurn, Usage: u}, nil
+	}
+}
+
+// distinctMessages counts the distinct request messages the events carry.
+func distinctMessages(t testing.TB, evs []llmkit.Event) int {
+	t.Helper()
+	seen := map[string]bool{}
+	for _, ev := range evs {
+		var reqs []llmkit.Request
+		if ev.Completion != nil {
+			reqs = append(reqs, ev.Completion.Request)
+		}
+		if ev.Attempt != nil {
+			reqs = append(reqs, ev.Attempt.Request)
+		}
+		for _, r := range reqs {
+			for _, m := range r.Messages {
+				b, err := json.Marshal(m)
+				if err != nil {
+					t.Fatal(err)
+				}
+				seen[string(b)] = true
+			}
+		}
+	}
+	return len(seen)
+}
+
+func TestP4_DeepToolArgumentsAgainstJSONLSink(t *testing.T) {
+	ctx := context.Background()
+	type split struct {
+		kind         llmkit.EventKind
+		store, jsonl int
+	}
+	// At 9997 the tool run passes JSONL's 10000 but not SQLite's 1000, and the
+	// follow-up completion's inline JSONL line is deeper than its hashed payload.
+	diverge := map[int]map[int]split{9997: {2: {llmkit.KindToolRun, 1, 0}, 3: {llmkit.KindCompletion, 0, 1}}}
+	for _, d := range []int{9997, 9998, 9999, 10000} {
+		t.Run(fmt.Sprint(d), func(t *testing.T) {
+			s, slog, path := openStore(t)
+			jlog := &errLog{}
+			sink := agent.JSONL(t.TempDir(), jlog.add)
+			chain := llmkit.Observers(sink, s)
+			type verdict struct {
+				ev        llmkit.Event
+				storeErrs []error
+				jsonl     int
+			}
+			var got []verdict
+			tap := llmkit.ObserverFunc(func(ctx context.Context, ev llmkit.Event) {
+				ns, nj := len(slog.all()), len(jlog.all())
+				chain.Observe(ctx, ev)
+				got = append(got, verdict{ev, slog.all()[ns:], len(jlog.all()) - nj})
+			})
+			echo := fnTool{name: "echo", run: func(context.Context, json.RawMessage) ([]llmkit.Block, error) {
+				return []llmkit.Block{llmkit.Text("ok")}, nil
+			}}
+			out, err := agent.NewRunner(deepCallClient(d), []agent.Tool{echo}, "sys", agent.WithObserver(tap)).Run(ctx, "task")
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			var kept []llmkit.Event
+			for i, v := range got {
+				wantStore, wantJSONL := v.jsonl, v.jsonl
+				if sp, ok := diverge[d][i]; ok {
+					if v.ev.Kind != sp.kind {
+						t.Fatalf("event %d is %s, want %s", i, v.ev.Kind, sp.kind)
+					}
+					wantStore, wantJSONL = sp.store, sp.jsonl
+				}
+				if len(v.storeErrs) != wantStore || v.jsonl != wantJSONL || wantStore > 1 {
+					t.Errorf("event %d (%s): store onErr %d, JSONL onErr %d; want %d, %d", i, v.ev.Kind, len(v.storeErrs), v.jsonl, wantStore, wantJSONL)
+				}
+				if len(v.storeErrs) == 0 {
+					kept = append(kept, v.ev)
+				} else if !contains(v.storeErrs[0].Error(), string(out.RunID), string(v.ev.Kind)) {
+					t.Errorf("onErr %q does not name run %q and kind %s", v.storeErrs[0], out.RunID, v.ev.Kind)
+				}
+			}
+			if len(kept) == len(got) {
+				t.Fatalf("no event refused at depth %d; the case tests nothing", d)
+			}
+			evs, err := s.Events(ctx, out.RunID)
+			if err != nil {
+				t.Fatalf("Events after %d refusals: %v", len(got)-len(kept), err)
+			}
+			// canon cannot round-trip a kept event too deep for one JSON document; every
+			// event here is already canonical, so compare encodings directly.
+			if len(evs) != len(kept) {
+				t.Fatalf("Events returned %d events, kept %d", len(evs), len(kept))
+			}
+			for i := range kept {
+				if !bytes.Equal(mustMarshal(t, evs[i]), mustMarshal(t, kept[i])) {
+					t.Errorf("event %d (%s) differs from the one observed", i, kept[i].Kind)
+				}
+			}
+			jevs, err := sink.Events(ctx, out.RunID)
+			if err != nil {
+				t.Fatalf("JSONL Events: %v", err)
+			}
+			if diverge[d] == nil {
+				assertIdentical(t, evs, jevs)
+			}
+			db := openRaw(t, path)
+			if n, want := rowCount(t, db, "events"), len(kept); n != want {
+				t.Errorf("%d event rows, want %d", n, want)
+			}
+			if n, want := rowCount(t, db, "messages"), distinctMessages(t, kept); n != want {
+				t.Errorf("%d message rows, the kept events carry %d", n, want)
+			}
+		})
+	}
+}
+
+func TestP4_MessageBodyOverJSONDepth(t *testing.T) {
+	ctx := context.Background()
+	deep := llmkit.Message{Role: llmkit.RoleAssistant, ToolCalls: []llmkit.ToolCall{{ID: "c", Name: "n", Arguments: nested(9998, "[", "]")}}}
+	body, err := json.Marshal(deep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := docDepth(t, body); d <= 10000 {
+		t.Fatalf("message body nests %d levels, want over 10000", d)
+	}
+	if err := json.Unmarshal(body, new(llmkit.Message)); err == nil {
+		t.Fatal("encoding/json decodes the body; the case tests nothing")
+	}
+	shallow := llmkit.TextMessage(llmkit.RoleUser, "kept")
+	carrying := func(run llmkit.RunID, kind llmkit.EventKind, msgs ...llmkit.Message) llmkit.Event {
+		e := newEv(run, kind)
+		req := llmkit.Request{Messages: msgs}
+		if kind == llmkit.KindAttempt {
+			e.Attempt = &llmkit.AttemptEvent{Attempt: 1, Request: req}
+		} else {
+			e.Completion = &llmkit.CompletionEvent{Request: req, Response: llmkit.Response{Text: "ok"}}
+		}
+		return e
+	}
+	for _, kind := range []llmkit.EventKind{llmkit.KindCompletion, llmkit.KindAttempt} {
+		t.Run(string(kind), func(t *testing.T) {
+			const run = "run-deepbody"
+			s, log, path := openStore(t)
+			refused := carrying(run, kind, shallow, deep)
+			if _, err := json.Marshal(refused); err != nil {
+				t.Fatalf("the event does not marshal; the case would test a different refusal: %v", err)
+			}
+			want := []llmkit.Event{startEvent(run), carrying(run, kind, shallow)}
+			s.Observe(ctx, want[0])
+			s.Observe(ctx, refused)
+			s.Observe(ctx, want[1])
+			refusedOnce(t, log, run, kind)
+			evs, err := s.Events(ctx, run)
+			if err != nil {
+				t.Fatalf("Events: %v", err)
+			}
+			assertIdentical(t, evs, want)
+			db := openRaw(t, path)
+			if n := rowCount(t, db, "messages"); n != 1 {
+				t.Fatalf("%d message rows, want only the shallow one", n)
+			}
+		})
 	}
 }

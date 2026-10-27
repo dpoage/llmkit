@@ -81,7 +81,27 @@ func encode(ev llmkit.Event) (encoded, error) {
 	if d := jsonDepth(out.payload); d > maxPayloadDepth {
 		return encoded{}, fmt.Errorf("payload nests %d levels deep, over the %d SQLite's JSON functions accept", d, maxPayloadDepth)
 	}
+	if err := out.readBack(); err != nil {
+		return encoded{}, err
+	}
 	return out, nil
+}
+
+// readBack runs Events' decode over what enc would write, so an event Events
+// could not read is refused instead of stored.
+func (enc encoded) readBack() error {
+	se, err := decode(enc.payload)
+	if err != nil {
+		return fmt.Errorf("payload would not read back: %w", err)
+	}
+	bodies := make(map[string][]byte, len(enc.messages))
+	for _, m := range enc.messages {
+		bodies[m.hash] = m.body
+	}
+	if _, err := se.assemble(bodies); err != nil {
+		return fmt.Errorf("would not read back: %w", err)
+	}
+	return nil
 }
 
 func hashRequest(r llmkit.Request) (storedRequest, []message, error) {

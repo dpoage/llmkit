@@ -193,8 +193,8 @@ func isBusy(err error) bool {
 // in the run, except these, each of which makes one onErr call naming the run
 // id and kind and writes nothing: the store is closed; encoding/json rejects
 // the event; the encoded payload nests deeper than 1000 levels, the most
-// SQLite's JSON functions parse; the write fails. ctx cancelation does not
-// stop the write.
+// SQLite's JSON functions parse; Events would not decode what would be
+// written; the write fails. ctx cancelation does not stop the write.
 func (s *Store) Observe(_ context.Context, ev llmkit.Event) {
 	if err := s.observe(ev); err != nil {
 		s.onErr(fmt.Errorf("sqlite: %s event of run %q not stored: %w", ev.Kind, ev.RunID, err))
