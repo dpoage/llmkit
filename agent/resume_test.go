@@ -1686,3 +1686,51 @@ func TestResumeNoLiveCallAfterDivergence(t *testing.T) {
 			liveComp.calls, policy.calls(), toolRunCount(liveTools, "c9"), live.callCount())
 	}
 }
+
+// Runs bypass Authorize, so each call is served by the per-turn ID match alone.
+func TestResumeDuplicateIDServesFittingCall(t *testing.T) {
+	ctx := context.Background()
+	turn := rdCalls(
+		rdCall("call_0", "ls", `{"a":1}`),
+		rdCall("call_0", "now", `{"a":1}`),
+		rdCall("call_0", "ls", `{"a":2}`),
+	)
+	runID := llmkit.RunID("resume-shared-id")
+	origOut, err := NewRunner(newFakeClient(turn, textResp("done", 1, 1)), rdTools(), "sys").Run(ctx, "task", WithRunID(runID))
+	if err != nil {
+		t.Fatalf("original run: %v", err)
+	}
+	events := origOut.Transcript.Record
+	liveTools := wrapCounting(rdTools())
+	template := NewRunner(newFakeClient(textResp("never", 1, 1)), asTools(liveTools), "sys")
+	res, err := NewResume(ctx, &Transcript{Record: cutAfterNth(t, events, 3, isToolRunEvent), RunID: runID}, runID, template)
+	if err != nil {
+		t.Fatalf("NewResume: %v", err)
+	}
+	if _, err := res.runner.client.Complete(ctx, servableRequests(events)[0]); err != nil {
+		t.Fatalf("serving the recorded completion: %v", err)
+	}
+	recorded := map[string]string{}
+	for _, ev := range rdToolRuns(events) {
+		recorded[ev.ToolRun.Call.Name+string(ev.ToolRun.Call.Arguments)] = ev.ToolRun.Result
+	}
+	dispatch, _ := withDispatch(ctx, "call_0")
+	for _, call := range []llmkit.ToolCall{
+		rdCall("call_0", "ls", `{"a":2}`),
+		rdCall("call_0", "now", `{"a":1}`),
+		rdCall("call_0", "ls", `{"a":1}`),
+	} {
+		got, err := res.runner.tools.byName[call.Name].Run(dispatch, call.Arguments)
+		if err != nil {
+			t.Fatalf("%s %s: %v", call.Name, call.Arguments, err)
+		}
+		gj, _ := json.Marshal(got)
+		wj, _ := json.Marshal(textBlocks(recorded[call.Name+string(call.Arguments)]))
+		if string(gj) != string(wj) {
+			t.Errorf("%s %s served %s, want %s", call.Name, call.Arguments, gj, wj)
+		}
+	}
+	if n := toolRunCount(liveTools, "call_0"); n != 0 {
+		t.Errorf("live tools ran %d times, want 0", n)
+	}
+}

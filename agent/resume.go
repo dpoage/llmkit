@@ -332,7 +332,7 @@ func (st *resumeState) lookupCall(ctx context.Context, name string, args json.Ra
 				d.rec.used = true
 				return d.rec, false, nil
 			}
-			if match := matchByID(g, id, name, args); match >= 0 {
+			if match := g.callByID(id, name, args); match >= 0 {
 				rec := &g.calls[match]
 				if rec.call.Name != name || !rec.ranWith(args) {
 					err := fmt.Errorf("%w at step %d: tool %q called with arguments %s, recorded %s",
@@ -366,25 +366,6 @@ func (st *resumeState) takeDecision(g *replayStepCalls, id, name string, args js
 		}
 	}
 	return nil
-}
-
-// matchByID picks the turn's call to serve for id: the first unused one whose
-// name and arguments fit, else the first with the ID (reported as diverged).
-func matchByID(g *replayStepCalls, id, name string, args json.RawMessage) int {
-	match := -1
-	for i := range g.calls {
-		c := &g.calls[i]
-		if c.used || c.call.ID != id {
-			continue
-		}
-		if match < 0 {
-			match = i
-		}
-		if c.call.Name == name && c.ranWith(args) {
-			return i
-		}
-	}
-	return match
 }
 
 // currentGroup returns the recorded tool turn in progress: the group whose
@@ -427,10 +408,8 @@ func (p *resumePolicy) Authorize(ctx context.Context, call *llmkit.ToolCall) err
 	return nil
 }
 
-// recordedDecision answers call from the replayed turn g, matching per call
-// as matchByID does: an unused recorded denial, or the recorded dispatch of
-// the first unauthorized call with the same ID, name and model arguments.
-// recorded=false routes the call live.
+// recordedDecision serves call's unused recorded denial or dispatch (same ID,
+// name and model arguments) from turn g; recorded=false routes the call live.
 func (st *resumeState) recordedDecision(call *llmkit.ToolCall) (g *replayStepCalls, recorded bool, err error) {
 	rc := st.rc
 	rc.mu.Lock()
