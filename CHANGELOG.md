@@ -240,10 +240,10 @@ entry below is marked.
   It validates questions in sorted id order, and the options of a `Choice` in
   sorted key order, so the first refusal is the same on every call; the old
   client used map order. An image is any JSON object in the state, an
-  `Instructions` or a description (`True`, `False`, an option, a level) that
-  decodes as an `llmkit.Block` of kind `"image"` using only `Block`'s member
-  names (`encoding/json` matching: case-insensitive, escapes decoded, last
-  duplicate wins), however it was built; Block-shaped user data counts. Each
+  `Instructions` or a description (`True`, `False`, an option, a level) whose
+  member names are all `Block`'s (`encoding/json` matching: case-insensitive,
+  escapes decoded) and whose last string-valued `kind` member is `"image"`,
+  however it was built; Block-shaped user data counts. Each
   is replaced by its label, `<image:hex>` or `[image N]`
   (`ImageSupport.Label`), and returned once in `Request.Images` with its
   `Ref`, `SHA256`, `MediaType`, `Data` and `Placements` (`PlaceState`,
@@ -585,6 +585,16 @@ entry below is marked.
 - `decide`: `Ask` accepted a `Choice` answer whose option was outside the
   asked set. It now returns `ErrServer` with `StatusCode` 200 and retries
   it like any `ErrServer`.
+- `decide`: `Normalize` and `Replay` took time proportional to input size
+  times nesting depth to find the image values in a request or a recorded
+  log. An 80 KB `{"raw":` chain 9 990 levels deep took seconds. The time is
+  now proportional to input size.
+- `decide`: `Normalize` sent an image-kind object to the backend as text,
+  base64 bytes included, when the object's own nesting, counting itself, went
+  over 10 000 levels. `encoding/json` cannot decode it, so the object did
+  not count as an image. `Normalize` now refuses it pre-wire, under every
+  `ImageSupport`, as it refuses any image with a member that does not decode
+  (`invalid image: member does not decode`).
 
 ### Security
 
