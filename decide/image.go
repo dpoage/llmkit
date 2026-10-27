@@ -82,19 +82,18 @@ var ErrImageUnsupported = errors.New("decide: image not supported by this backen
 type imageSet struct {
 	support ImageSupport
 	images  []Image
-	paths   []string // first occurrence path of images[i]
+	paths   []pathRef // first occurrence of images[i]
 	index   map[[sha256.Size]byte]int
 }
 
-// rewrite replaces every image value in raw, the part of the request at
-// path, with its label and records the images; a raw without one is
-// returned as is.
+// rewrite replaces each image in raw, the request part at path, with its
+// label and records it; a raw with no image is returned as is.
 func (s *imageSet) rewrite(raw json.RawMessage, path string, place Placement) (json.RawMessage, error) {
 	if bytes.IndexByte(raw, '{') < 0 {
 		return raw, nil
 	}
-	w := &walker{set: s, src: raw, base: path, place: place}
-	if _, err := w.value(skipWS(raw, 0)); err != nil {
+	w := &walker{set: s, src: raw, base: path, place: place, cur: -1}
+	if err := w.run(); err != nil {
 		return nil, err
 	}
 	if w.out == nil {
@@ -103,21 +102,35 @@ func (s *imageSet) rewrite(raw json.RawMessage, path string, place Placement) (j
 	return append(w.out, raw[w.last:]...), nil
 }
 
+// inlineImageHashes adds to set the SHA-256 of every valid image value in
+// raw, by Normalize's definition. It never refuses: an invalid one is skipped.
+func inlineImageHashes(raw []byte, set map[string]struct{}) {
+	if bytes.IndexByte(raw, '{') < 0 || !json.Valid(raw) {
+		return
+	}
+	w := &walker{src: raw, collect: set, cur: -1}
+	_ = w.run() // collect mode never refuses
+}
+
+func hashImage(data []byte) ([sha256.Size]byte, string) {
+	sum := sha256.Sum256(data)
+	return sum, hex.EncodeToString(sum[:])
+}
+
 // add records b and returns its label as a JSON string.
-func (s *imageSet) add(b llmkit.Block, path string, place Placement) ([]byte, error) {
-	sum := sha256.Sum256(b.Data)
+func (s *imageSet) add(b llmkit.Block, at pathRef, place Placement) ([]byte, error) {
+	sum, full := hashImage(b.Data)
 	idx, seen := s.index[sum]
 	if seen && s.images[idx].MediaType != b.MediaType {
-		return nil, invalidRequest(path, fmt.Sprintf("image has media_type %q, but the same bytes at %s have %q", b.MediaType, s.paths[idx], s.images[idx].MediaType))
+		return nil, invalidRequest(at.String(), fmt.Sprintf("image has media_type %q, but the same bytes at %s have %q", b.MediaType, s.paths[idx], s.images[idx].MediaType))
 	}
 	if s.support.Placements&place == 0 {
-		return nil, unsupportedImage(path, fmt.Sprintf("image in %s is not supported by this backend", placementName(place)))
+		return nil, unsupportedImage(at.String(), fmt.Sprintf("image in %s is not supported by this backend", placementName(place)))
 	}
 	if mts := s.support.MediaTypes; len(mts) > 0 && !slices.Contains(mts, b.MediaType) {
-		return nil, unsupportedImage(path, fmt.Sprintf("image media_type %q is not supported by this backend (supported: %s)", b.MediaType, strings.Join(mts, ", ")))
+		return nil, unsupportedImage(at.String(), fmt.Sprintf("image media_type %q is not supported by this backend (supported: %s)", b.MediaType, strings.Join(mts, ", ")))
 	}
 	if !seen {
-		full := hex.EncodeToString(sum[:])
 		idx = len(s.images)
 		s.images = append(s.images, Image{
 			Ref:       "<image:" + full[:32] + ">",
@@ -125,7 +138,7 @@ func (s *imageSet) add(b llmkit.Block, path string, place Placement) ([]byte, er
 			MediaType: b.MediaType,
 			Data:      b.Data,
 		})
-		s.paths = append(s.paths, path)
+		s.paths = append(s.paths, at)
 		if s.index == nil {
 			s.index = make(map[[sha256.Size]byte]int)
 		}
@@ -138,15 +151,32 @@ func (s *imageSet) add(b llmkit.Block, path string, place Placement) ([]byte, er
 	return []byte(`"\u003cimage:` + s.images[idx].SHA256[:32] + `\u003e"`), nil
 }
 
+// pathRef names a value's JSON path; the string is built only when a refusal
+// message needs it.
+type pathRef struct {
+	w    *walker
+	node int
+}
+
+func (r pathRef) String() string { return r.w.path(r.node) }
+
+// placementNames is the single Placement→name table, in report order.
+var placementNames = [...]struct {
+	place Placement
+	name  string
+}{
+	{PlaceState, "state"},
+	{PlaceInstructions, "instructions"},
+	{PlaceCriteria, "criteria"},
+}
+
 func placementName(p Placement) string {
-	switch p {
-	case PlaceState:
-		return "state"
-	case PlaceInstructions:
-		return "instructions"
-	default:
-		return "criteria"
+	for _, pn := range placementNames {
+		if pn.place == p {
+			return pn.name
+		}
 	}
+	return placementNames[len(placementNames)-1].name
 }
 
 func unsupportedImage(path, problem string) error {
@@ -244,35 +274,6 @@ func blockField(key []byte) int {
 
 var kindField, dataField = slices.Index(blockNames, "kind"), slices.Index(blockNames, "data")
 
-// foreignImage returns the first non-Block member name when the recorded
-// object has kind "image" and a data member that is neither null nor "".
-func (w *walker) foreignImage(base int) (string, bool) {
-	var kind, data []byte
-	foreign := ""
-	found := false
-	for _, m := range w.members[base:] {
-		switch blockField(m.key) {
-		case -1:
-			if !found {
-				_ = json.Unmarshal(m.key, &foreign)
-				found = true
-			}
-		case kindField:
-			kind = w.src[m.vs:m.ve]
-		case dataField:
-			data = w.src[m.vs:m.ve]
-		}
-	}
-	if !found || data == nil || string(data) == "null" || string(data) == `""` {
-		return "", false
-	}
-	var k string
-	if json.Unmarshal(kind, &k) != nil || k != string(llmkit.BlockImage) {
-		return "", false
-	}
-	return foreign, true
-}
-
 func asciiEqualFold(b []byte, s string) bool {
 	if len(b) != len(s) {
 		return false
@@ -292,95 +293,135 @@ func asciiEqualFold(b []byte, s string) bool {
 	return true
 }
 
-// walker scans one marshalled JSON part for image values, splicing labels
-// into out; bytes before last are already in out.
+// walker scans one marshalled JSON part for image values in one pass. Strict
+// mode splices labels into out; collect mode records hashes and never refuses.
 type walker struct {
 	set     *imageSet
+	collect map[string]struct{} // collect mode's hash sink; nil is strict mode
 	src     []byte
 	base    string
 	place   Placement
-	segs    []seg
-	members []member
+	nodes   []pathNode // strict mode only
+	cur     int        // index in nodes of the value being scanned, -1 at the root
+	events  []event
 	out     []byte
 	last    int
 }
 
-// seg is one path step: an object member (key is its JSON string token) or
-// an array index.
-type seg struct {
-	key []byte
-	idx int
+// pathNode is one path step, parent-linked so an event keeps its path in O(1).
+type pathNode struct {
+	parent int
+	key    []byte // an object member's JSON string token; nil for an array index
+	idx    int
 }
 
-type member struct {
-	key    []byte
-	vs, ve int
+// event is an image object (foreign nil) or, in strict mode, an image-kind
+// object with a non-Block member (foreign, its name token) that commit refuses.
+type event struct {
+	start, end int
+	node       int
+	foreign    []byte
 }
 
-func (w *walker) path() string {
+func (w *walker) run() error {
+	w.value(skipWS(w.src, 0))
+	return w.commit()
+}
+
+func (w *walker) path(node int) string {
+	var chain []int
+	for n := node; n >= 0; n = w.nodes[n].parent {
+		chain = append(chain, n)
+	}
 	var sb strings.Builder
 	sb.WriteString(w.base)
-	for _, s := range w.segs {
-		if s.key == nil {
-			sb.WriteString("[" + strconv.Itoa(s.idx) + "]")
+	for j := len(chain) - 1; j >= 0; j-- {
+		nd := w.nodes[chain[j]]
+		if nd.key == nil {
+			sb.WriteString("[" + strconv.Itoa(nd.idx) + "]")
 			continue
 		}
 		var k string
-		_ = json.Unmarshal(s.key, &k)
+		_ = json.Unmarshal(nd.key, &k)
 		sb.WriteString("[" + strconv.Quote(k) + "]")
 	}
 	return sb.String()
 }
 
-func (w *walker) value(i int) (int, error) {
+func (w *walker) value(i int) int {
 	switch w.src[i] {
 	case '{':
 		return w.object(i)
 	case '[':
 		return w.array(i)
 	default:
-		return skipValue(w.src, i), nil
+		return skipValue(w.src, i)
 	}
 }
 
-func (w *walker) array(i int) (int, error) {
+// step scans the value at vs as the child key (or, when key is nil, index idx)
+// of the enclosing container and returns its end.
+func (w *walker) step(key []byte, idx, vs int) int {
+	if c := w.src[vs]; w.collect != nil || (c != '{' && c != '[') {
+		return w.value(vs)
+	}
+	parent, events, nodes := w.cur, len(w.events), len(w.nodes)
+	w.nodes = append(w.nodes, pathNode{parent: parent, key: key, idx: idx})
+	w.cur = nodes
+	end := w.value(vs)
+	w.cur = parent
+	if len(w.events) == events {
+		w.nodes = w.nodes[:nodes]
+	}
+	return end
+}
+
+func (w *walker) array(i int) int {
 	i = skipWS(w.src, i+1)
 	if w.src[i] == ']' {
-		return i + 1, nil
+		return i + 1
 	}
 	for n := 0; ; n++ {
-		w.segs = append(w.segs, seg{idx: n})
-		end, err := w.value(i)
-		if err != nil {
-			return 0, err
-		}
-		w.segs = w.segs[:len(w.segs)-1]
-		i = skipWS(w.src, end)
+		i = skipWS(w.src, w.step(nil, n, i))
 		if w.src[i] == ']' {
-			return i + 1, nil
+			return i + 1
 		}
 		i = skipWS(w.src, i+1)
 	}
 }
 
-// object scans the object at start. It splices the object when every member
-// name is a Block name and it decodes as an image kind; otherwise it scans
-// the members.
-func (w *walker) object(start int) (int, error) {
+// object scans the object at start, each member once. An image object, or in
+// strict mode a foreign image, replaces the events its members logged.
+func (w *walker) object(start int) int {
 	src := w.src
 	i := skipWS(src, start+1)
 	if src[i] == '}' {
-		return i + 1, nil
+		return i + 1
 	}
-	base := len(w.members)
+	events, nodes := len(w.events), len(w.nodes)
 	named := true
+	var foreign, kind, strKind, data []byte
 	for {
 		ke := skipValue(src, i)
 		key := src[i:ke]
 		vs := skipWS(src, skipWS(src, ke)+1)
-		named = named && blockField(key) >= 0
-		ve := skipValue(src, vs)
-		w.members = append(w.members, member{key, vs, ve})
+		ve := w.step(key, 0, vs)
+		if named || w.collect == nil {
+			switch blockField(key) {
+			case -1:
+				named = false
+				if foreign == nil {
+					foreign = key
+				}
+			case kindField:
+				kind = src[vs:ve]
+				if kind[0] == '"' {
+					strKind = kind
+				}
+			case dataField:
+				data = src[vs:ve]
+			}
+		}
 		i = skipWS(src, ve)
 		if src[i] == '}' {
 			break
@@ -388,63 +429,66 @@ func (w *walker) object(start int) (int, error) {
 		i = skipWS(src, i+1)
 	}
 	end := i + 1
-	defer func() { w.members = w.members[:base] }()
-	if named {
-		spliced, err := w.image(start, end)
-		if err != nil {
-			return 0, err
-		}
-		if spliced {
-			return end, nil
-		}
-	} else if name, ok := w.foreignImage(base); ok {
-		return 0, invalidRequest(w.path(), "invalid image: member "+strconv.Quote(name)+" is not an llmkit.Block field")
+	switch {
+	case named && isImageKind(strKind):
+		w.events = append(w.events[:events], event{start: start, end: end, node: w.cur})
+		w.nodes = w.nodes[:nodes]
+	case !named && w.collect == nil && isForeignImage(foreign, kind, data):
+		w.events = append(w.events[:events], event{start: start, end: end, node: w.cur, foreign: foreign})
+		w.nodes = w.nodes[:nodes]
 	}
-	if err := w.walkRecorded(base); err != nil {
-		return 0, err
-	}
-	return end, nil
+	return end
 }
 
-func (w *walker) walkRecorded(base int) error {
-	for j := base; j < len(w.members); j++ {
-		m := w.members[j]
-		if _, err := w.member(m.key, m.vs); err != nil {
+// isImageKind reports whether tok, the last string-valued kind member of a
+// Block-named object, decodes to "image".
+func isImageKind(tok []byte) bool {
+	var k string
+	return tok != nil && json.Unmarshal(tok, &k) == nil && k == string(llmkit.BlockImage)
+}
+
+// isForeignImage reports whether an object with a non-Block member (foreign,
+// its first name token) has kind "image" and data other than null or "".
+func isForeignImage(foreign, kind, data []byte) bool {
+	if foreign == nil || data == nil || string(data) == "null" || string(data) == `""` || len(kind) == 0 || kind[0] != '"' {
+		return false
+	}
+	var k string
+	return json.Unmarshal(kind, &k) == nil && k == string(llmkit.BlockImage)
+}
+
+// commit resolves the events in document order. An image that does not decode
+// is refused, never demoted to text; collect mode never returns an error.
+func (w *walker) commit() error {
+	for _, e := range w.events {
+		if e.foreign != nil {
+			var name string
+			_ = json.Unmarshal(e.foreign, &name)
+			return invalidRequest(pathRef{w, e.node}.String(), "invalid image: member "+strconv.Quote(name)+" is not an llmkit.Block field")
+		}
+		var b llmkit.Block
+		decodeErr := json.Unmarshal(w.src[e.start:e.end], &b)
+		problem := checkImage(b, decodeErr)
+		if w.collect != nil {
+			if problem == "" {
+				_, hash := hashImage(b.Data)
+				w.collect[hash] = struct{}{}
+			}
+			continue
+		}
+		at := pathRef{w, e.node}
+		if problem != "" {
+			return invalidRequest(at.String(), problem)
+		}
+		label, err := w.set.add(b, at, w.place)
+		if err != nil {
 			return err
 		}
+		w.out = append(w.out, w.src[w.last:e.start]...)
+		w.out = append(w.out, label...)
+		w.last = e.end
 	}
 	return nil
-}
-
-func (w *walker) member(key []byte, vs int) (int, error) {
-	w.segs = append(w.segs, seg{key: key})
-	end, err := w.value(vs)
-	if err != nil {
-		return 0, err
-	}
-	w.segs = w.segs[:len(w.segs)-1]
-	return end, nil
-}
-
-// image splices src[start:end], whose member names are all Block names,
-// when it decodes as an image kind.
-func (w *walker) image(start, end int) (bool, error) {
-	var b llmkit.Block
-	decodeErr := json.Unmarshal(w.src[start:end], &b)
-	if b.Kind != llmkit.BlockImage {
-		return false, nil
-	}
-	if problem := checkImage(b, decodeErr); problem != "" {
-		return false, invalidRequest(w.path(), problem)
-	}
-	label, err := w.set.add(b, w.path(), w.place)
-	if err != nil {
-		return false, err
-	}
-	w.out = append(w.out, w.src[w.last:start]...)
-	w.out = append(w.out, label...)
-	w.last = end
-	return true, nil
 }
 
 func skipWS(src []byte, i int) int {
@@ -471,28 +515,13 @@ func skipString(src []byte, i int) int {
 	return len(src)
 }
 
+// skipValue returns the end of the string or scalar at i.
 func skipValue(src []byte, i int) int {
-	switch src[i] {
-	case '"':
+	if src[i] == '"' {
 		return skipString(src, i)
-	case '{', '[':
-		for depth := 0; i < len(src); i++ {
-			switch src[i] {
-			case '"':
-				i = skipString(src, i) - 1
-			case '{', '[':
-				depth++
-			case '}', ']':
-				if depth--; depth == 0 {
-					return i + 1
-				}
-			}
-		}
-		return len(src)
-	default:
-		for i < len(src) && !strings.ContainsRune(",]} \t\r\n", rune(src[i])) {
-			i++
-		}
-		return i
 	}
+	for i < len(src) && !strings.ContainsRune(",]} \t\r\n", rune(src[i])) {
+		i++
+	}
+	return i
 }

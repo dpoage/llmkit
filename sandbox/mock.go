@@ -132,7 +132,7 @@ var _ Sandbox = (*Mock)(nil)
 func (m *Mock) MaterializeWorkspace(repoDir string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	dir, err := os.MkdirTemp("", "llmkit-mock-")
+	dir, err := os.MkdirTemp("", llmkitMockPrefix)
 	if err != nil {
 		return "", err
 	}

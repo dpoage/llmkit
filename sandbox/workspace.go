@@ -15,6 +15,14 @@ import (
 	"sync"
 )
 
+// os.MkdirTemp prefixes for the scratch dirs this package creates directly
+// under os.TempDir().
+const (
+	llmkitSandboxPrefix = "llmkit-sandbox-"
+	llmkitWscachePrefix = "llmkit-wscache-"
+	llmkitMockPrefix    = "llmkit-mock-"
+)
+
 // prepareWorkspace copies the repository snapshot at repoDir into a fresh
 // temporary directory and applies any WriteFiles on top. It returns the path
 // to the new workspace; the caller is responsible for removing it.
@@ -29,7 +37,7 @@ func prepareWorkspace(repoDir string, writeFiles map[string][]byte) (string, err
 		return "", fmt.Errorf("sandbox: repo dir %q is not a directory", repoDir)
 	}
 
-	ws, err := os.MkdirTemp("", "llmkit-sandbox-")
+	ws, err := os.MkdirTemp("", llmkitSandboxPrefix)
 	if err != nil {
 		return "", fmt.Errorf("sandbox: create workspace: %w", err)
 	}
@@ -134,7 +142,7 @@ type wsCache struct {
 func (c *wsCache) clone(repoDir, key string) (ws string, hit bool, err error) {
 	c.mu.Lock()
 	if c.dir == "" {
-		dir, mkErr := os.MkdirTemp("", "llmkit-wscache-")
+		dir, mkErr := os.MkdirTemp("", llmkitWscachePrefix)
 		if mkErr != nil {
 			c.mu.Unlock()
 			return "", false, fmt.Errorf("sandbox: create workspace cache dir: %w", mkErr)
@@ -171,7 +179,7 @@ func (c *wsCache) clone(repoDir, key string) (ws string, hit bool, err error) {
 	pristine := c.pristine
 	c.mu.Unlock()
 
-	ws, err = os.MkdirTemp("", "llmkit-sandbox-")
+	ws, err = os.MkdirTemp("", llmkitSandboxPrefix)
 	if err != nil {
 		return "", false, fmt.Errorf("sandbox: create workspace: %w", err)
 	}
@@ -257,7 +265,68 @@ func workspaceCacheKey(repoDir string) (key string, isRepo bool, err error) {
 // a copy-on-write reflink over a full byte copy where the filesystem supports
 // it.
 func cloneTree(src, dst string) error {
-	return copyTreeWith(src, dst, nil, reflinkOrCopy)
+	// Inert skip: a pristine was already filtered when materialized.
+	return copyTreeWith(src, dst, workspaceSkip{}, reflinkOrCopy)
+}
+
+func hasLlmkitTempPrefix(name string) bool {
+	return strings.HasPrefix(name, llmkitSandboxPrefix) ||
+		strings.HasPrefix(name, llmkitWscachePrefix) ||
+		strings.HasPrefix(name, llmkitMockPrefix)
+}
+
+// workspaceSkip names the directories every workspace copy leaves out: the
+// identity dir, and llmkit temp dirs (see isLlmkitTempDir), whoever created them.
+type workspaceSkip struct {
+	// identity is the copy destination or wsCache dir; nil when there is none.
+	identity fs.FileInfo
+	// tmpRoot is os.TempDir() resolved once at copy time; nil when unstattable.
+	tmpRoot fs.FileInfo
+}
+
+// newWorkspaceSkip resolves the skip decision for one copy. An unstattable
+// TMPDIR disables the temp-dir clause rather than failing the copy.
+func newWorkspaceSkip(identity fs.FileInfo) workspaceSkip {
+	s := workspaceSkip{identity: identity}
+	if tmp, err := os.Stat(os.TempDir()); err == nil {
+		s.tmpRoot = tmp
+	}
+	return s
+}
+
+// dir reports whether the walked directory at path is left out: the identity
+// dir by os.SameFile, or a direct child of os.TempDir() with a package prefix.
+func (s workspaceSkip) dir(path, name string, info fs.FileInfo) bool {
+	if s.identity != nil && os.SameFile(s.identity, info) {
+		return true
+	}
+	return s.isLlmkitTempDir(filepath.Dir(path), name)
+}
+
+// isLlmkitTempDir reports whether name under parentPath is a direct child of
+// os.TempDir() (by identity, so a symlinked TMPDIR matches) with an llmkit
+// prefix. Callers pass directories only.
+func (s workspaceSkip) isLlmkitTempDir(parentPath, name string) bool {
+	if s.tmpRoot == nil || !hasLlmkitTempPrefix(name) {
+		return false
+	}
+	parent, err := os.Stat(parentPath)
+	return err == nil && os.SameFile(s.tmpRoot, parent)
+}
+
+// coversEntry reports whether a listed entry rel under src is an llmkit temp
+// dir or lies under one. The identity clause stays walk-only: an unchanged
+// TMPDIR already covers the identity dir, a changed one is out of scope.
+func (s workspaceSkip) coversEntry(src, rel string, info fs.FileInfo) bool {
+	parts := strings.Split(filepath.Clean(rel), string(filepath.Separator))
+	dir := src
+	for _, part := range parts[:len(parts)-1] {
+		if s.isLlmkitTempDir(dir, part) {
+			return true
+		}
+		dir = filepath.Join(dir, part)
+	}
+	return info.IsDir() && s.isLlmkitTempDir(dir, parts[len(parts)-1])
 }
 
 // copyTreeWith recursively copies the directory tree rooted at src into dst,
@@ -268,12 +337,9 @@ func cloneTree(src, dst string) error {
 // as symlinks (their targets are not followed, which avoids copying outside
 // the tree and preserves repo layout).
 //
-// skip is the identity of the directory to leave out, or nil to leave out
-// nothing: a directory under src that os.SameFile reports as skip is not
-// entered. The match is by device and inode (os.SameFile), not by path, so
-// it holds when the skipped directory was named through a symlink. The root
-// of src itself is never excluded.
-func copyTreeWith(src, dst string, skip fs.FileInfo, copyRegular func(src, dst string, perm fs.FileMode) error) error {
+// skip names the directories to leave out (see workspaceSkip). The root of src
+// itself is never excluded.
+func copyTreeWith(src, dst string, skip workspaceSkip, copyRegular func(src, dst string, perm fs.FileMode) error) error {
 	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -307,7 +373,7 @@ func copyTreeWith(src, dst string, skip fs.FileInfo, copyRegular func(src, dst s
 				// dst already exists; align its mode with the source root.
 				return os.Chmod(dst, info.Mode().Perm())
 			}
-			if os.SameFile(skip, info) {
+			if skip.dir(path, d.Name(), info) {
 				return filepath.SkipDir
 			}
 			return os.MkdirAll(target, info.Mode().Perm())
@@ -335,16 +401,17 @@ func copyTreeWith(src, dst string, skip fs.FileInfo, copyRegular func(src, dst s
 }
 
 // copyWorkspace materializes the repo snapshot at src into dst. When src is a
-// git work tree and git is on PATH, it copies only what git considers part of
-// the work tree — tracked files plus untracked files that are NOT gitignored
-// (`git ls-files --cached --others --exclude-standard`). This omits generated,
-// gitignored content: most importantly a stale out-of-source build tree (e.g.
-// CMake's build/ whose CMakeCache.txt is pinned to a host-absolute path, which
+// git work tree and git is on PATH, it copies the GitWorktreeFiles listing
+// (tracked files plus untracked files that are NOT gitignored, from
+// `git ls-files --cached --others --exclude-standard`), with the differences
+// that doc names. This omits generated, gitignored content: most importantly a
+// stale out-of-source build tree (e.g. CMake's build/ whose CMakeCache.txt is
+// pinned to a host-absolute path, which
 // otherwise poisons an in-sandbox rebuild), the .git directory, and built
 // vendor caches. When src is not a git repo (or git is unavailable) it falls
 // back to a full recursive copy so non-git checkouts still work. The
-// recursive copies do not enter a directory with dst's identity (see
-// copyTreeWith).
+// recursive copies do not enter a directory with dst's identity or any
+// llmkit temp dir (see workspaceSkip).
 func copyWorkspace(src, dst string) error {
 	skip, err := os.Stat(dst)
 	if err != nil {
@@ -368,16 +435,16 @@ func copyWorkspaceSkipping(src, dst string, skip fs.FileInfo) error {
 	if isRepo {
 		return copyFileListSkipping(src, dst, files, skip)
 	}
-	return copyTreeWith(src, dst, skip, copyFile)
+	return copyTreeWith(src, dst, newWorkspaceSkip(skip), copyFile)
 }
 
-// GitWorktreeFiles returns the repo-relative paths git considers part of the
-// work tree at src: tracked files plus untracked files that are not gitignored.
-// This is the EXACT listing copyWorkspace materializes into a run's workspace,
-// so a caller that needs to know what a sandbox run will see (e.g. a
-// dependency resolver checking whether a work-tree path such as node_modules
-// exists) consults the same implementation and cannot drift from what a run
-// actually copies.
+// GitWorktreeFiles returns the repo-relative paths git considers part of the work
+// tree at src: tracked files plus untracked files that are not gitignored.
+// Callers use it to learn what a sandbox run will see (e.g. whether a work-tree
+// path such as node_modules exists). copyWorkspace skips a listed path that is
+// missing on disk or not a regular file, symlink, or directory, copies a listed
+// directory (submodule, untracked nested repo) unfiltered, minus .git, and, when
+// os.TempDir() is src or inside it, drops llmkit temp dirs, listed files included.
 //
 // isRepo is false (with a nil error) only when src is not a git work tree or
 // git is not on PATH — the caller then falls back to its own handling. When
@@ -422,9 +489,11 @@ func gitStderr(err error) string {
 // gitlink path, which resolves on disk to its checked-out working tree) is
 // recursively copied so vendored-as-submodule dependencies reach the sandbox.
 // A listed path missing on disk (e.g. a tracked-but-deleted file) is skipped
-// rather than aborting the copy. The recursive copy of a directory entry
-// leaves out skip (see copyTreeWith).
+// rather than aborting the copy. An entry that is, or lies under, an llmkit temp
+// dir (see workspaceSkip) is left out; a prefixed file or symlink is not. The
+// identity dir is left out inside directory entries' copies.
 func copyFileListSkipping(src, dst string, files []string, skip fs.FileInfo) error {
+	s := newWorkspaceSkip(skip)
 	for _, rel := range files {
 		srcPath := filepath.Join(src, rel)
 		info, err := os.Lstat(srcPath)
@@ -433,6 +502,11 @@ func copyFileListSkipping(src, dst string, files []string, skip fs.FileInfo) err
 				continue
 			}
 			return err
+		}
+
+		// git lists a temp dir's files individually; the walk never sees them.
+		if s.coversEntry(src, rel, info) {
+			continue
 		}
 		target := filepath.Join(dst, rel)
 		// Parent dirs are created 0o755 (traversable/writable for the build)
@@ -457,7 +531,7 @@ func copyFileListSkipping(src, dst string, files []string, skip fs.FileInfo) err
 			if err := os.MkdirAll(target, 0o755); err != nil {
 				return err
 			}
-			if err := copyTreeWith(srcPath, target, skip, copyFile); err != nil {
+			if err := copyTreeWith(srcPath, target, s, copyFile); err != nil {
 				return err
 			}
 		case info.Mode().IsRegular():

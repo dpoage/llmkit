@@ -1,11 +1,7 @@
 package decide
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -49,8 +45,7 @@ var ErrReplayedFailure = errors.New("decide: replayed failed decision")
 // A record's image hashes are those in its Images plus those of the valid
 // image values left inline in its State and Questions, as logs written
 // before images were recorded hold them. An inline image that is not valid
-// adds no hash and never fails Replay. Scanning inline images is slow at
-// pathological nesting depth, as [Normalize] is.
+// adds no hash and never fails Replay.
 //
 // Replay compares neither the state nor the Backend: a changed state still
 // receives the recorded answer, unless an image differs. Recorded decisions
@@ -162,71 +157,6 @@ func recordImageHashes(dec *llmkit.DecisionEvent) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-// inlineImageHashes adds to set the SHA-256 of every valid image value in
-// raw, by Normalize's definition. It never refuses: an invalid one is skipped.
-func inlineImageHashes(raw []byte, set map[string]struct{}) {
-	if bytes.IndexByte(raw, '{') < 0 || !json.Valid(raw) {
-		return
-	}
-	scanImageHashes(raw, skipWS(raw, 0), set)
-}
-
-func scanImageHashes(src []byte, i int, set map[string]struct{}) int {
-	switch src[i] {
-	case '[':
-		i = skipWS(src, i+1)
-		if src[i] == ']' {
-			return i + 1
-		}
-		for {
-			i = skipWS(src, scanImageHashes(src, i, set))
-			if src[i] == ']' {
-				return i + 1
-			}
-			i = skipWS(src, i+1)
-		}
-	case '{':
-		return scanObjectImageHashes(src, i, set)
-	}
-	return skipValue(src, i)
-}
-
-func scanObjectImageHashes(src []byte, start int, set map[string]struct{}) int {
-	i := skipWS(src, start+1)
-	if src[i] == '}' {
-		return i + 1
-	}
-	var values []int
-	named := true
-	for {
-		ke := skipValue(src, i)
-		named = named && blockField(src[i:ke]) >= 0
-		vs := skipWS(src, skipWS(src, ke)+1)
-		values = append(values, vs)
-		i = skipWS(src, skipValue(src, vs))
-		if src[i] == '}' {
-			break
-		}
-		i = skipWS(src, i+1)
-	}
-	end := i + 1
-	if named {
-		var b llmkit.Block
-		err := json.Unmarshal(src[start:end], &b)
-		if b.Kind == llmkit.BlockImage {
-			if checkImage(b, err) == "" {
-				sum := sha256.Sum256(b.Data)
-				set[hex.EncodeToString(sum[:])] = struct{}{}
-			}
-			return end
-		}
-	}
-	for _, vs := range values {
-		scanImageHashes(src, vs, set)
-	}
-	return end
 }
 
 func rebuild(dec *llmkit.DecisionEvent, qs Questions) (Response, error) {

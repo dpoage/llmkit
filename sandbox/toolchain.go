@@ -30,10 +30,12 @@ package sandbox
 //  3. For an entry resolved to an executable, the mounted root is the
 //     resolved target's containing directory, or that directory's parent
 //     when the containing directory is named "bin" and the parent is not
-//     one of the directories isOverbroadToolchainRoot refuses; mounting the
-//     parent brings sibling directories (lib/, share/, ...) along in one
-//     mount. An executable entry whose resolved target sits directly in one
-//     of those refused directories is unresolved. An absolute directory entry is
+//     one of the directories isOverbroadToolchainRoot refuses and the
+//     ascent is not home-refused; mounting the parent brings sibling
+//     directories (lib/, share/, ...) along in one mount. An executable
+//     entry whose resolved target sits directly in one of those refused
+//     directories is unresolved. A home-refused ascent (ResolveHostToolchains
+//     states the rule) mounts the bin/ alone. An absolute directory entry is
 //     itself the mounted root, after filepath.Clean.
 //  4. A provenance fingerprint (resolved host path + `<name> --version`,
 //     run on the HOST, not in any sandbox) is recorded per mount.
@@ -152,6 +154,11 @@ type ToolchainResolution struct {
 // unavailable); it does not abort the run. Duplicate ContainerPaths are
 // de-duplicated; only the first is kept, and a deduplicated entry is NOT
 // reported in Unresolved (it did resolve).
+//
+// The ascent from a bin/ directory D to its parent P is refused when (1) P is
+// $HOME or a direct child of $HOME, or (2) the directory exec.LookPath found
+// the executable in is named bin, its parent is $HOME or a direct child of $HOME,
+// and it symlink-resolves to D. Paths and $HOME compare written and resolved.
 func ResolveHostToolchains(names []string) ToolchainResolution {
 	var res ToolchainResolution
 	var pathDirs []string
@@ -210,7 +217,8 @@ func ResolveHostToolchains(names []string) ToolchainResolution {
 // step 3), and execPath is the resolved executable path; both are
 // absolute. An entry whose executable sits directly in an
 // overbroad directory (see isOverbroadToolchainRoot) is an error, since no
-// narrower mount exists.
+// narrower mount exists. A bin/ ascent refused by the rule in
+// ResolveHostToolchains mounts the bin/ alone.
 func resolveToolchainRoot(name string) (root, execPath string, err error) {
 	if filepath.IsAbs(name) {
 		root = filepath.Clean(name)
@@ -224,6 +232,15 @@ func resolveToolchainRoot(name string) (root, execPath string, err error) {
 	found, lookErr := exec.LookPath(name)
 	if lookErr != nil {
 		return "", "", fmt.Errorf("sandbox: host toolchain %q not on PATH: %w", name, lookErr)
+	}
+	// foundPath is found made absolute against the kernel working directory.
+	foundPath := found
+	if !filepath.IsAbs(foundPath) {
+		wd, wdErr := syscall.Getwd()
+		if wdErr != nil {
+			return "", "", fmt.Errorf("sandbox: working directory for host toolchain %q: %w", name, wdErr)
+		}
+		foundPath = filepath.Join(wd, foundPath)
 	}
 	resolved, evalErr := filepath.EvalSymlinks(found)
 	if evalErr != nil {
@@ -248,19 +265,47 @@ func resolveToolchainRoot(name string) (root, execPath string, err error) {
 	}
 	root = dir
 	if filepath.Base(dir) == "bin" {
-		// Pull in the toolchain root (sibling lib/, share/, ...) alongside
-		// the bin/ directory, but only when that root is narrow (a
-		// version-manager's own versioned directory, a nix store path, ...).
-		// A $HOME/bin/node or ~/.local/bin/node layout would otherwise
-		// ascend to $HOME or ~/.local and RO-mount the user's entire home
-		// directory (SSH keys, git credentials, unrelated dotfiles) into
-		// whatever untrusted, model-driven code the sandbox runs. See
-		// isOverbroadToolchainRoot.
-		if candidate := filepath.Dir(dir); !isOverbroadToolchainRoot(candidate) {
+		// Pull in the toolchain root (sibling lib/, share/, ...) alongside bin/
+		// only when that root is narrow: a versioned directory, a nix store path.
+		// isOverbroadToolchainRoot and refusesHomeToolchainAscent refuse roots
+		// that can hold SSH keys, git credentials, or registry tokens.
+		if candidate := filepath.Dir(dir); !isOverbroadToolchainRoot(candidate) && !refusesHomeToolchainAscent(foundPath, dir, candidate) {
 			root = candidate
 		}
 	}
 	return root, resolved, nil
+}
+
+// refusesHomeToolchainAscent reports whether the ascent from dir to parent is
+// refused (see ResolveHostToolchains); foundPath is the absolute LookPath result.
+func refusesHomeToolchainAscent(foundPath, dir, parent string) bool {
+	if isHomeDir(parent) {
+		return true
+	}
+	bin := filepath.Dir(foundPath)
+	if filepath.Base(bin) != "bin" || !isHomeDir(filepath.Dir(bin)) {
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(bin)
+	return err == nil && resolved == dir
+}
+
+// isHomeDir reports whether dir is $HOME or a direct child of it, each
+// compared written and symlink-resolved. $HOME's entries are never read.
+func isHomeDir(dir string) bool {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return false
+	}
+	homes := symlinkForms(home)
+	for _, form := range symlinkForms(dir) {
+		for _, h := range homes {
+			if form == h || filepath.Dir(form) == h {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // sharedToolchainRoots are the system-wide directories isOverbroadToolchainRoot
