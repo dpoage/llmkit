@@ -645,14 +645,17 @@ entry below is marked.
   returns, the text of a `Tool.Run` error, panic or timeout, a `ToolPolicy`
   denial (its rendered text and `deny_reason`) and a `SpillSink` error
   (`spill_error`). The event's `call` is the model's own request and is not
-  normalized: `call` bytes that are not valid UTF-8 stay raw in the in-memory
-  event and the history, and the record holds them as U+FFFD. The history,
+  normalized: its id and name bytes that are not valid UTF-8 stay raw in
+  the in-memory event and the history, and the record decodes them to
+  U+FFFD; the call's arguments bytes are carried verbatim, non-JSON bytes
+  losslessly as base64. The history,
   the `tool_run` event and the JSONL record hold the same bytes, the
   next request carries what the model already saw (the provider SDKs encode
   strings the same way), and a replay of a compaction no longer diverges on the
   byte count in the pruned-result stub. The sizes the tool phase reports —
-  the output limit and `original_bytes` — count the normalized bytes (5 000
-  raw bytes of `s\xff` count as 10 000). A `SpillSink` ref that is not valid
+  the output limit and `original_bytes` — count text and URL bytes
+  normalized (5 000 raw bytes of `s\xff` count as 10 000) and media data
+  bytes as-is. A `SpillSink` ref that is not valid
   UTF-8 is now a sink failure: the result is the truncation stand-in,
   `SpillError` is set and `SpillRef` is empty. (llmkit-clu)
 - `agent`: a model tool call with an empty ID no longer panics the Runner with

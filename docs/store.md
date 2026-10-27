@@ -310,11 +310,13 @@ not provided (bead llmkit-2or.5).
   file's object names — table, view, or index — collides with one the
   store's schema creates (`events`, `messages`, the four views, the
   `events_*` indexes); it then writes the schema, sets `user_version` 1,
-  and switches the file to WAL mode. Any colliding name fails with
-  `... already exists`, but only after the WAL switch. A foreign file at
-  `user_version` 1 fails after the WAL switch with `no such table:
-  messages`: the store assumes its own schema and prepares its inserts. A
-  foreign file at `user_version` 2 or greater fails with
+  and switches the file to WAL mode. Any colliding name makes `Open` fail,
+  but only after the WAL switch. A foreign file at `user_version` 1 is
+  treated as a store: `Open` switches it to WAL and prepares its inserts,
+  so it opens only when its `events` and `messages` tables carry the
+  store's columns; any other shape fails after the WAL switch with
+  SQLite's own prepare error (`no such table: ...`, `... has no column
+  named ...`). A foreign file at `user_version` 2 or greater fails with
   `ErrSchemaTooNew` before any write, leaving the file unchanged. Back the
   file up before you point `Open` at a database of unknown origin.
 

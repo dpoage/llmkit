@@ -360,9 +360,9 @@ type AttemptEvent struct {
 // diverges. A record written before the field existed reads as never
 // rewritten.
 //
-// OriginalBytes is the result's size (text, data and URL bytes of its
-// blocks, counted after invalid-UTF-8 normalization) when the Runner's
-// output limit applied, else zero; Result is then the
+// OriginalBytes is the result's size when the Runner's output limit
+// applied, else zero — the bytes of its blocks' text and URLs after
+// invalid-UTF-8 normalization, their data bytes as-is; Result is then the
 // model-visible stand-in, and Content holds it when Degraded > 0. SpillRef is
 // the sink's reference when the full result was spilled. SpillError is the
 // sink's failure when the limit fell back to truncation. With no sink only
