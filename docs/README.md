@@ -8,16 +8,18 @@ the pages in this order:
 1. [providers](providers.md) — build a client for your endpoint.
 2. [capabilities](capabilities.md) — what a client reports and what it enforces.
 3. [agent loop](agent-loop.md) — the `agent.Runner` loop, policies, hooks, steering.
-4. [sandbox](sandbox.md) — untrusted command execution and `fsroot` path containment.
-5. [decide](decide.md) — the `decide` package: TypeSafe Jev decisions, limits, and the live lane.
-6. [testing](testing.md) — the test suites and the live acceptance regime.
-7. [design](design.md) — the architecture and the decisions behind it.
+4. [store](store.md) — the `store/sqlite` event log: one sink, audit views, replay, resume.
+5. [sandbox](sandbox.md) — untrusted command execution and `fsroot` path containment.
+6. [decide](decide.md) — the `decide` package: TypeSafe Jev decisions, limits, and the live lane.
+7. [testing](testing.md) — the test suites and the live acceptance regime.
+8. [design](design.md) — the architecture and the decisions behind it.
 
 | Page | Describes |
 |---|---|
 | [providers](providers.md) | One construction per provider type: `Spec`, credentials, capability overrides, error normalization. |
 | [capabilities](capabilities.md) | The `Capabilities` profile: the four enforcement classes and the per-field table. |
 | [agent loop](agent-loop.md) | Tools, limits, policies, hooks, steering, structured output, budgets, transcripts, replay. |
+| [store](store.md) | The `store/sqlite` event log: sink choice, view columns, the audit cookbook, export, replay, resume, limits. |
 | [sandbox](sandbox.md) | Backends, threat model, the spec-field honor matrix, watchdog, workspaces, probes. |
 | [decide](decide.md) | The `decide` package: question types, confidence, errors, vendor limits, the live lane. |
 | [testing](testing.md) | The hermetic, live, and integration suites; the live lanes; fixture replay. |

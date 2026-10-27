@@ -150,6 +150,7 @@ Read [docs/design.md](docs/design.md) for the layering and the decision records.
 | shared retry loop | `go doc github.com/dpoage/llmkit/retry` |
 | client construction | `go doc github.com/dpoage/llmkit/provider` |
 | agent loop | `go doc github.com/dpoage/llmkit/agent` |
+| durable event store | `go doc github.com/dpoage/llmkit/store/sqlite` |
 | sandbox | `go doc github.com/dpoage/llmkit/sandbox` |
 | path containment | `go doc github.com/dpoage/llmkit/fsroot` |
 | embeddings | `go doc github.com/dpoage/llmkit/embed` |

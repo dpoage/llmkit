@@ -1,36 +1,42 @@
 // Command replay replays a recorded agent run offline: it reads the run's
-// "<record-dir>/<run-id>.jsonl" record (written by examples/agent --record),
-// serves the recorded completions and tool results through
-// agent.NewReplayClient, runs the same task through a fresh agent.Runner
-// over that client, and prints the replayed final text. No provider is
-// contacted and no LLMKIT_* variables are read, so it needs no credentials
-// and no network.
+// events from an llmkit.Source — a store/sqlite database (--store, written
+// by examples/agent --store) or a "<record-dir>/<run-id>.jsonl" record
+// (written by examples/agent --record) — serves the recorded completions
+// and tool results through agent.NewReplayClient, runs the same task
+// through a fresh agent.Runner over that client, and prints the replayed
+// final text. No provider is contacted and no LLMKIT_* variables are read,
+// so it needs no credentials and no network.
 //
 // Usage:
 //
+//	go run ./examples/replay --store <db> --run <run-id>
 //	go run ./examples/replay <record-dir> <run-id>
 //
 // The program exits 1 when ReplayClient.Err reports a divergence, whether or
 // not Run returned an error, or when Run returns an error — including an
 // *agent.IncompleteError, the result of replaying a record whose run
-// stopped at a limit or without an answer. With the wrong number of
-// arguments it prints usage and exits 1.
+// stopped at a limit or without an answer. With the wrong arguments it
+// prints usage and exits 1.
 package main
 
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 
 	"github.com/dpoage/llmkit"
 	"github.com/dpoage/llmkit/agent"
+	"github.com/dpoage/llmkit/store/sqlite"
 )
 
-const usage = `usage: go run ./examples/replay <record-dir> <run-id>
+const usage = `usage: go run ./examples/replay --store <db> --run <run-id>
+       go run ./examples/replay <record-dir> <run-id>
 
-replays the run recorded in <record-dir>/<run-id>.jsonl offline; the run id is
-printed by a recording run:
+replays a recorded run offline from a store/sqlite database:
+  go run ./examples/agent --store <db>
+or from a JSONL record:
   go run ./examples/agent --record <record-dir>`
 
 func main() {
@@ -41,14 +47,45 @@ func main() {
 }
 
 func run(args []string) error {
-	if len(args) != 2 {
+	var storePath, runFlag string
+	flags := flag.NewFlagSet("replay", flag.ContinueOnError)
+	flags.StringVar(&storePath, "store", "", "path to a store/sqlite database the run is read from")
+	flags.StringVar(&runFlag, "run", "", "the run id to replay (required with --store)")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	args = flags.Args()
+
+	var src llmkit.Source
+	var id llmkit.RunID
+	switch {
+	case storePath != "":
+		if runFlag == "" {
+			return errors.New("--store needs --run <run-id>")
+		}
+		if len(args) != 0 {
+			return errors.New(usage)
+		}
+		// A reader must not create the database Open would mint on a typo.
+		if _, err := os.Stat(storePath); err != nil {
+			return fmt.Errorf("store %s: %w", storePath, err)
+		}
+		st, err := sqlite.Open(storePath, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = st.Close() }()
+		src, id = st, llmkit.RunID(runFlag)
+	case runFlag != "":
+		return errors.New("--run needs --store <db>")
+	case len(args) == 2:
+		// The JSONL sink is also a llmkit.Source: the read side of the record.
+		src, id = agent.JSONL(args[0], nil), llmkit.RunID(args[1])
+	default:
 		return errors.New(usage)
 	}
-	dir, id := args[0], llmkit.RunID(args[1])
 	ctx := context.Background()
 
-	// The JSONL sink is also a llmkit.Source: the read side of the record.
-	src := agent.JSONL(dir, nil)
 	task, err := recordedTask(ctx, src, id)
 	if err != nil {
 		return err
