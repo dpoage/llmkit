@@ -20,12 +20,17 @@ entry below is marked.
   spend before any call: the sum of every successful completion's usage,
   compaction calls included. Tool calls without a recorded result run live
   at-least-once; recorded ones never re-run. The resumed run re-emits the
-  prefix under a fresh `RunID` with `ParentRunID` set to the recorded run's.
+  prefix under a fresh `RunID` with `ParentRunID` set to the recorded run's,
+  whatever run options it receives. A recorded context overflow is served as
+  one, so the resumed run recovers from it as the recorded run did.
   Served responses carry zeroed usage, so the resumed run's `Finalize`
   usage, its spend and a `BudgetPool` count live spend only, while the
-  per-run token budget is seeded with the recorded usage and does not
-  re-arm. `ErrResumeMismatch` (also returned by `NewResume` for a record
-  holding a steering event or no completion) reports a resumed `Runner`
+  per-run token budget does not re-arm: each served completion's recorded
+  usage joins the budget check as it is served, so a resume of a run's own
+  record stops at the uninterrupted run's step. A resume of a resumed run's
+  record counts only that run's live spend: the limit is not cumulative
+  across a resume chain. `ErrResumeMismatch` (also returned by `NewResume`
+  for a record holding a steering event or no completion) reports a resumed `Runner`
   whose system prompt, tool set, task, policies or hooks diverge from the
   record — every request still covered by the record must match it exactly,
   and time-varying policies are refused at the first mismatch — always

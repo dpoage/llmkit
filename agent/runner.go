@@ -210,9 +210,10 @@ type runConfig struct {
 	// parentRunID is the id of the run this one continues (see [Continue]);
 	// empty on a fresh run, rides on every event as ParentRunID.
 	parentRunID llmkit.RunID
-	// budgetSeed is pre-run spend ([Resume]) counted only by the
-	// token-budget check, so a resumed run's budget is not re-armed.
-	budgetSeed llmkit.Usage
+	// budgetSeed, when non-nil, is spend from before this run ([Resume])
+	// that only the token-budget check counts. The check reads it each
+	// time it runs, so a resume advances it per served recorded completion.
+	budgetSeed *llmkit.Usage
 }
 
 // WithRunID pins the run's [llmkit.RunID] to id: every event of the run
@@ -327,7 +328,7 @@ const emptyTurnNudge = "You made no tool call and produced no final answer. Cont
 // answer cut off at the output token cap.
 const maxTokensContinuePrompt = "Your previous message was cut off at the output token limit. Continue from exactly where you stopped and output ONLY the remaining text needed to complete the answer — no preamble, no repetition."
 
-func (r *Runner) run(ctx context.Context, em runEmitter, seed []llmkit.Message, task string, attach []llmkit.Block, finalizePrompt string, responseSchema json.RawMessage, steering *Steering, budgetSeed llmkit.Usage) (*Outcome, error) {
+func (r *Runner) run(ctx context.Context, em runEmitter, seed []llmkit.Message, task string, attach []llmkit.Block, finalizePrompt string, responseSchema json.RawMessage, steering *Steering, budgetSeed *llmkit.Usage) (*Outcome, error) {
 	s := &runState{
 		outcome:        &Outcome{Transcript: em.tr, RunID: em.tr.RunID},
 		finalizePrompt: finalizePrompt,
@@ -379,7 +380,7 @@ func (r *Runner) run(ctx context.Context, em runEmitter, seed []llmkit.Message, 
 		// stop gets the same one reserved finalization turn the iteration cap
 		// gets (RunJSON only), so a near-budget agent can emit its answer
 		// instead of returning a silently empty result to the caller.
-		if r.overBudget(outcome.Usage.Add(s.budgetSeed)) {
+		if r.overBudget(s.budgetUsage()) {
 			if err := r.finalizeAndTruncate(ctx, em, s, TruncTokenBudget); err != nil {
 				return outcome, err
 			}
@@ -505,7 +506,7 @@ func (r *Runner) run(ctx context.Context, em runEmitter, seed []llmkit.Message, 
 		// truncate promptly rather than issuing one more expensive completion.
 		// A budget hit post-tool still gets the one reserved finalization turn
 		// (RunJSON only) so a near-budget agent can emit its answer.
-		if r.overBudget(outcome.Usage.Add(s.budgetSeed)) {
+		if r.overBudget(s.budgetUsage()) {
 			if err := r.finalizeAndTruncate(ctx, em, s, TruncTokenBudget); err != nil {
 				return outcome, err
 			}
@@ -534,12 +535,21 @@ type runState struct {
 	// (capability-gated; see [Runner.complete]).
 	responseSchema json.RawMessage
 	// budgetSeed is pre-run spend counted by the token-budget check only
-	// (see [runConfig.budgetSeed]); it never enters Outcome.Usage.
-	budgetSeed llmkit.Usage
+	// (see [runConfig.budgetSeed]); it never enters Outcome.Usage. nil: none.
+	budgetSeed *llmkit.Usage
 	// compact is the compaction trigger state (see [Runner.maybeCompact]).
 	compact *compactState
 	// outcome accumulates the run's result and is what run returns.
 	outcome *Outcome
+}
+
+// budgetUsage is the spend the token-budget check compares with the budget:
+// the run's own usage plus the seed's value at this check.
+func (s *runState) budgetUsage() llmkit.Usage {
+	if s.budgetSeed == nil {
+		return s.outcome.Usage
+	}
+	return s.outcome.Usage.Add(*s.budgetSeed)
 }
 
 // compactState is one run's compaction trigger state.

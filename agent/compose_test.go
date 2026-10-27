@@ -343,7 +343,7 @@ func TestWithObserver_TranscriptReceivesEachEventFirst(t *testing.T) {
 			later = append(later, ev.Kind)
 		})))
 	ctx, em := r.begin(context.Background(), runConfig{}, "task")
-	if v := panicValue(func() { _, _ = r.run(ctx, em, nil, "task", nil, "", nil, nil, llmkit.Usage{}) }); v != "sink bug" {
+	if v := panicValue(func() { _, _ = r.run(ctx, em, nil, "task", nil, "", nil, nil, nil) }); v != "sink bug" {
 		t.Fatalf("recovered %v, want the first sink's panic value", v)
 	}
 	var kinds []llmkit.EventKind

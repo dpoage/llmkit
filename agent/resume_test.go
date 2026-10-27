@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -35,7 +36,7 @@ func newFakeFromCompletions(comps []llmkit.CompletionEvent) *fakeClient {
 	steps := make([]scriptStep, len(comps))
 	for i, ce := range comps {
 		if ce.ErrKind == llmkit.ErrKindContextTooLong {
-			steps[i] = scriptStep{err: fmt.Errorf("%s", ce.Err)}
+			steps[i] = scriptStep{err: replayedOverflow(ce.Err)}
 		} else {
 			steps[i] = scriptStep{resp: ce.Response}
 		}
@@ -407,24 +408,78 @@ func resumeScenarios() []resumeScenario {
 			},
 		},
 		{
-			name:   "overflow-recovery",
+			name:   "overflow-recovery-stub",
+			system: "You test resume.",
+			task:   "call echo six times then answer",
+			tools:  func() []Tool { return []Tool{fixedTool{name: "echo", result: strings.Repeat("overflow-result-", 20)}} },
+			steps:  overflowSteps,
+			opts: func(llmkit.Client, []Tool) []Option {
+				// A budget never reached enables overflow recovery with the stubber.
+				return []Option{WithLimits(Limits{HistoryTokenBudget: 1 << 30})}
+			},
+		},
+		{
+			name:   "overflow-recovery-summarizing",
 			system: "You test resume.",
 			task:   "call echo six times then answer",
 			tools:  func() []Tool { return []Tool{fixedTool{name: "echo", result: strings.Repeat("overflow-result-", 20)}} },
 			steps: func() []scriptStep {
-				steps := make([]scriptStep, 0, 8)
-				for i := 1; i <= 6; i++ {
-					steps = append(steps, toolResp(fmt.Sprintf("c%d", i), "echo", `{"q":"hi"}`, 100, 10))
-				}
-				steps = append(steps,
-					scriptStep{err: fmt.Errorf("provider refused: %w", llmkit.ErrContextTooLong)},
-					textResp("recovered answer", 90, 9))
-				return steps
+				steps := overflowSteps()
+				summary := scriptStep{resp: llmkit.Response{Text: "recorded overflow summary", StopReason: llmkit.StopEndTurn,
+					Usage: llmkit.Usage{InputTokens: 40, OutputTokens: 6}}}
+				return slices.Insert(steps, len(steps)-1, summary)
 			},
-			opts: func(llmkit.Client, []Tool) []Option {
-				return []Option{WithLimits(Limits{HistoryTokenBudget: 1})}
+			opts: func(c llmkit.Client, _ []Tool) []Option {
+				return []Option{WithCompactor(SummarizingCompactor(c))}
 			},
 		},
+		{
+			name:   "token-budget",
+			system: "You test resume.",
+			task:   "call echo repeatedly",
+			tools:  func() []Tool { return []Tool{fixedTool{name: "echo", result: "echo-result"}} },
+			steps:  func() []scriptStep { return budgetSteps("final answer") },
+			opts: func(llmkit.Client, []Tool) []Option {
+				return []Option{WithLimits(Limits{TokenBudget: 300})}
+			},
+		},
+		{
+			name:   "token-budget-json",
+			system: "You emit JSON.",
+			task:   "call echo repeatedly then emit the json",
+			tools:  func() []Tool { return []Tool{fixedTool{name: "echo", result: "echo-result"}} },
+			steps:  func() []scriptStep { return budgetSteps(`{"ok":true}`) },
+			opts: func(llmkit.Client, []Tool) []Option {
+				return []Option{WithLimits(Limits{TokenBudget: 300})}
+			},
+			schema: json.RawMessage(`{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}`),
+			out: func() any {
+				return &struct {
+					OK bool `json:"ok"`
+				}{}
+			},
+		},
+	}
+}
+
+// overflowSteps: six tool turns, a refused request, then the answer.
+func overflowSteps() []scriptStep {
+	steps := make([]scriptStep, 0, 8)
+	for i := 1; i <= 6; i++ {
+		steps = append(steps, toolResp(fmt.Sprintf("c%d", i), "echo", `{"q":"hi"}`, 100, 10))
+	}
+	return append(steps,
+		scriptStep{err: fmt.Errorf("provider refused: %w", llmkit.ErrContextTooLong)},
+		textResp("recovered answer", 90, 9))
+}
+
+// budgetSteps: 120-token turns, so a 300 budget is crossed by the third.
+func budgetSteps(final string) []scriptStep {
+	return []scriptStep{
+		toolResp("c1", "echo", `{"q":"1"}`, 100, 20),
+		toolResp("c2", "echo", `{"q":"2"}`, 100, 20),
+		toolResp("c3", "echo", `{"q":"3"}`, 100, 20),
+		textResp(final, 100, 20),
 	}
 }
 
@@ -465,36 +520,12 @@ func TestResumeContinuationAtEveryCut(t *testing.T) {
 				t.Fatalf("original run: no outcome (err %v)", origErr)
 			}
 			events := origOut.Transcript.Record
-			if sc.name == "stub-compaction" {
-				n := 0
-				for _, ev := range events {
-					if ev.Kind == llmkit.KindCompaction {
-						n++
-					}
-				}
-				if n == 0 {
-					t.Fatalf("scenario %s recorded no compaction; the case is vacuous", sc.name)
-				}
-			}
-			if sc.name == "overflow-recovery" {
-				n := 0
-				for _, ev := range events {
-					if ev.Kind == llmkit.KindCompletion && ev.Completion != nil &&
-						ev.Completion.ErrKind == llmkit.ErrKindContextTooLong {
-						n++
-					}
-				}
-				if n == 0 {
-					t.Fatalf("scenario %s recorded no context-overflow completion; the case is vacuous", sc.name)
-				}
-			}
+			guardScenario(t, sc.name, events, origOut, origErr)
 			if fin := finalizeOf(events); fin != nil && fin.Status != llmkit.RunPanicked {
 				if got, want := summedUsage(events), fin.Usage; got != want {
 					t.Fatalf("scenario %s: summed completion usage %+v != finalize usage %+v", sc.name, got, want)
 				}
 			}
-			wantReqs := servableRequests(events)
-			total := len(wantReqs)
 
 			for cut := 1; cut <= len(events); cut++ {
 				cutEvents := events[:cut]
@@ -508,7 +539,8 @@ func TestResumeContinuationAtEveryCut(t *testing.T) {
 							}
 							return
 						}
-						live := newFakeFromCompletions(servableCompletions(events)[k:])
+						after := clientCompletions(events[cut:])
+						live := newFakeFromCompletions(after)
 						live.caps = sc.caps
 						liveClient := liveFake{live, llmkit.Identity{Provider: "live-provider", Model: "live-model"}}
 						tools := wrapCounting(sc.tools())
@@ -526,19 +558,23 @@ func TestResumeContinuationAtEveryCut(t *testing.T) {
 						} else {
 							out, err = res.Run(ctx, sc.task)
 						}
-						if err != nil && !errors.Is(err, ErrResumeMismatch) && origErr == nil {
-							t.Fatalf("resumed run: %v", err)
+						if errors.Is(err, ErrResumeMismatch) {
+							t.Fatalf("resumed run diverged: %v", err)
 						}
 						if out == nil {
 							t.Fatalf("resumed run: no outcome (%v)", err)
 						}
-						if got, want := live.callCount(), total-k; got != want {
-							t.Errorf("live client calls = %d, want %d (record served %d of %d)", got, want, k, total)
+						// Every call the original made after the cut, and only those, reaches the live client.
+						if got, want := live.callCount(), len(after); got != want {
+							t.Errorf("live client calls = %d, want %d", got, want)
 						}
-						if k < total && live.callCount() > 0 {
-							if derr := requestMatches(wantReqs[k], live.requests[0]); derr != nil {
-								t.Errorf("first live request differs from the original's next request: %v", derr)
+						for i := range min(live.callCount(), len(after)) {
+							if derr := requestMatches(after[i].Request, live.requests[i]); derr != nil {
+								t.Errorf("live request %d differs from the original's: %v", i, derr)
 							}
+						}
+						if out.Iterations != origOut.Iterations {
+							t.Errorf("Iterations = %d, want %d", out.Iterations, origOut.Iterations)
 						}
 						if out.FinalText != origOut.FinalText {
 							t.Errorf("FinalText = %q, want %q", out.FinalText, origOut.FinalText)
@@ -573,6 +609,55 @@ func TestResumeContinuationAtEveryCut(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// clientCompletions returns every completion evs record, summarizer calls
+// included: the calls the original made, in order.
+func clientCompletions(evs []llmkit.Event) []llmkit.CompletionEvent {
+	var out []llmkit.CompletionEvent
+	for _, ev := range evs {
+		if ev.Kind == llmkit.KindCompletion && ev.Completion != nil {
+			out = append(out, *ev.Completion)
+		}
+	}
+	return out
+}
+
+// guardScenario fails a scenario whose original run lacks the shape it exists for.
+func guardScenario(t *testing.T, name string, events []llmkit.Event, out *Outcome, err error) {
+	t.Helper()
+	count := func(match func(llmkit.Event) bool) int {
+		n := 0
+		for _, ev := range events {
+			if match(ev) {
+				n++
+			}
+		}
+		return n
+	}
+	overflowed := func(ev llmkit.Event) bool {
+		return ev.Kind == llmkit.KindCompletion && ev.Completion != nil && ev.Completion.ErrKind == llmkit.ErrKindContextTooLong
+	}
+	recovered := func(ev llmkit.Event) bool {
+		return ev.Kind == llmkit.KindCompaction && ev.Compaction != nil && ev.Compaction.Reason == llmkit.CompactionReasonOverflow
+	}
+	var inc *IncompleteError
+	vacuous := false
+	switch name {
+	case "stub-compaction":
+		vacuous = count(func(ev llmkit.Event) bool { return ev.Kind == llmkit.KindCompaction }) == 0
+	case "overflow-recovery-stub":
+		vacuous = err != nil || count(overflowed) != 1 || count(recovered) != 1
+	case "overflow-recovery-summarizing":
+		vacuous = err != nil || count(overflowed) != 1 || count(recovered) != 1 || count(isPurposeCompletion) == 0
+	case "token-budget":
+		vacuous = !errors.As(err, &inc) || inc.Reason != TruncTokenBudget || out.Iterations != 3
+	case "token-budget-json":
+		vacuous = err != nil || out.TruncationReason != TruncTokenBudget || !out.Finalized
+	}
+	if vacuous {
+		t.Fatalf("scenario %s: the original run lacks its shape (err %v, final %q); the case is vacuous", name, err, out.FinalText)
 	}
 }
 
@@ -809,11 +894,9 @@ func TestResumeTokenBudgetNotRearmed(t *testing.T) {
 		t.Fatalf("NewResume: %v", err)
 	}
 	out, err := res.Run(ctx, "call echo repeatedly")
-	if !errors.Is(err, ErrResumeMismatch) {
-		var inc2 *IncompleteError
-		if !errors.As(err, &inc2) || inc2.Reason != TruncTokenBudget {
-			t.Fatalf("resumed run err = %v, want TruncTokenBudget at the original's stopping point", err)
-		}
+	var inc2 *IncompleteError
+	if !errors.As(err, &inc2) || inc2.Reason != TruncTokenBudget {
+		t.Fatalf("resumed run err = %v, want TruncTokenBudget at the original's stopping point", err)
 	}
 	if got, want := live.callCount(), 1; got != want {
 		t.Errorf("live client calls = %d, want %d (the original's third completion, live)", got, want)
@@ -1256,6 +1339,10 @@ func TestResumeServesRecordedSummariesThenLiveCompactor(t *testing.T) {
 	if out.FinalText != origOut.FinalText {
 		t.Errorf("FinalText = %q, want %q", out.FinalText, origOut.FinalText)
 	}
+	// The served summary's recorded usage is not charged: the live answer (80/8) and live pass (5/5) only.
+	if fin := finalizeOf(out.Transcript.Record); fin == nil || fin.Usage != (llmkit.Usage{InputTokens: 85, OutputTokens: 13}) {
+		t.Errorf("resumed finalize = %+v, want usage {85 13}: live spend only", fin)
+	}
 }
 
 func firstSummaryText(evs []llmkit.Event) string {
@@ -1371,5 +1458,231 @@ func TestResumeToolArgsDivergenceFailsNextCompletion(t *testing.T) {
 	}
 	if n := live.callCount(); n != 0 {
 		t.Errorf("live client calls = %d, want 0", n)
+	}
+}
+
+// cutAfterNth returns events through the n-th one match accepts.
+func cutAfterNth(t *testing.T, events []llmkit.Event, n int, match func(llmkit.Event) bool) []llmkit.Event {
+	t.Helper()
+	seen := 0
+	for i, ev := range events {
+		if match(ev) {
+			if seen++; seen == n {
+				return events[:i+1]
+			}
+		}
+	}
+	t.Fatalf("record holds fewer than %d matching events", n)
+	return nil
+}
+
+func isToolRunEvent(ev llmkit.Event) bool { return ev.Kind == llmkit.KindToolRun }
+
+func isAnswerCompletion(ev llmkit.Event) bool {
+	return ev.Kind == llmkit.KindCompletion && ev.Completion != nil && ev.Completion.Err == "" && ev.Completion.Purpose == ""
+}
+
+// argsPolicy allows every call and records the arguments it saw.
+type argsPolicy struct {
+	mu   sync.Mutex
+	seen []string
+}
+
+func (p *argsPolicy) Authorize(_ context.Context, call *llmkit.ToolCall) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.seen = append(p.seen, call.ID+" "+string(call.Arguments))
+	return nil
+}
+
+func (p *argsPolicy) calls() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.seen)
+}
+
+func (t *argTool) args() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]string, len(t.got))
+	for i, a := range t.got {
+		out[i] = string(a)
+	}
+	return out
+}
+
+func TestResumeDuplicateCallIDsMatchPerCall(t *testing.T) {
+	ctx := context.Background()
+	dupTurn := scriptStep{resp: llmkit.Response{
+		StopReason: llmkit.StopToolUse,
+		Usage:      llmkit.Usage{InputTokens: 100, OutputTokens: 10},
+		ToolCalls: []llmkit.ToolCall{
+			{ID: "dup", Name: "echo", Arguments: json.RawMessage(`{"q":"A"}`)},
+			{ID: "dup", Name: "echo", Arguments: json.RawMessage(`{"q":"B"}`)},
+		},
+	}}
+	for _, parallel := range []bool{false, true} {
+		var opts []Option
+		if parallel {
+			opts = append(opts, WithParallelTools())
+		}
+		runID := llmkit.RunID(fmt.Sprintf("resume-dup-parallel-%v", parallel))
+		orig := NewRunner(newFakeClient(dupTurn, textResp("done", 80, 8)), []Tool{&argTool{name: "echo"}}, "You test resume.", opts...)
+		origOut, err := orig.Run(ctx, "use echo twice", WithRunID(runID))
+		if err != nil {
+			t.Fatalf("original run: %v", err)
+		}
+		events := origOut.Transcript.Record
+		for _, tc := range []struct {
+			recorded int
+			wantLive []string
+		}{
+			{recorded: 1, wantLive: []string{`{"q":"B"}`}},
+			{recorded: 2},
+		} {
+			t.Run(fmt.Sprintf("parallel=%v/recorded=%d-of-2", parallel, tc.recorded), func(t *testing.T) {
+				policy := &argsPolicy{}
+				liveTool := &argTool{name: "echo"}
+				live := newFakeFromResponses(servableResponses(events)[1:])
+				template := NewRunner(live, []Tool{liveTool}, "You test resume.", append(slices.Clone(opts), WithToolPolicy(policy))...)
+				cut := cutAfterNth(t, events, tc.recorded, isToolRunEvent)
+				res, err := NewResume(ctx, &Transcript{Record: cut, RunID: runID}, runID, template)
+				if err != nil {
+					t.Fatalf("NewResume: %v", err)
+				}
+				out, err := res.Run(ctx, "use echo twice")
+				if err != nil {
+					t.Fatalf("resumed run: %v", err)
+				}
+				if out.FinalText != "done" {
+					t.Errorf("FinalText = %q, want %q", out.FinalText, "done")
+				}
+				if got := liveTool.args(); !slices.Equal(got, tc.wantLive) {
+					t.Errorf("live tool ran with %q, want %q", got, tc.wantLive)
+				}
+				var wantSeen []string
+				for _, a := range tc.wantLive {
+					wantSeen = append(wantSeen, "dup "+a)
+				}
+				if got := policy.calls(); !slices.Equal(got, wantSeen) {
+					t.Errorf("caller policy saw %q, want %q", got, wantSeen)
+				}
+			})
+		}
+	}
+}
+
+func TestResumeCallerPolicySeesOnlyLiveCalls(t *testing.T) {
+	ctx := context.Background()
+	steps := []scriptStep{
+		toolResp("c1", "echo", `{"q":"1"}`, 100, 10),
+		toolResp("c2", "echo", `{"q":"2"}`, 100, 10),
+		textResp("done", 80, 8),
+	}
+	tools := func() []Tool { return []Tool{fixedTool{name: "echo", result: "echo-result"}} }
+	runID := llmkit.RunID("resume-policy-live-only")
+	origOut, err := NewRunner(newFakeClient(steps...), tools(), "You test resume.", WithToolPolicy(&argsPolicy{})).
+		Run(ctx, "use echo twice", WithRunID(runID))
+	if err != nil {
+		t.Fatalf("original run: %v", err)
+	}
+	events := origOut.Transcript.Record
+	for _, tc := range []struct {
+		name string
+		cut  []llmkit.Event
+		live int
+	}{
+		{"after-c1-result", cutAfterNth(t, events, 1, isToolRunEvent), 2},
+		{"c2-dangling", cutAfterNth(t, events, 2, isAnswerCompletion), 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			policy := &argsPolicy{}
+			live := newFakeFromResponses(servableResponses(events)[3-tc.live:])
+			res, err := NewResume(ctx, &Transcript{Record: tc.cut, RunID: runID}, runID,
+				NewRunner(live, tools(), "You test resume.", WithToolPolicy(policy)))
+			if err != nil {
+				t.Fatalf("NewResume: %v", err)
+			}
+			if _, err := res.Run(ctx, "use echo twice"); err != nil {
+				t.Fatalf("resumed run: %v", err)
+			}
+			if got, want := policy.calls(), []string{`c2 {"q":"2"}`}; !slices.Equal(got, want) {
+				t.Errorf("caller policy saw %q, want %q: the recorded c1 decision is served", got, want)
+			}
+		})
+	}
+}
+
+func TestResumeParentRunIDWinsOverContinue(t *testing.T) {
+	ctx := context.Background()
+	runID := llmkit.RunID("resume-stamp")
+	origOut, err := NewRunner(newFakeClient(textResp("answer", 100, 10)), nil, "You test resume.").
+		Run(ctx, "task", WithRunID(runID))
+	if err != nil {
+		t.Fatalf("original run: %v", err)
+	}
+	res, err := NewResume(ctx, &Transcript{Record: origOut.Transcript.Record, RunID: runID}, runID,
+		NewRunner(newFakeClient(), nil, "You test resume."))
+	if err != nil {
+		t.Fatalf("NewResume: %v", err)
+	}
+	out, err := res.Run(ctx, "task", Continue(&Outcome{RunID: "other-run"}))
+	if err != nil {
+		t.Fatalf("resumed run: %v", err)
+	}
+	for _, ev := range out.Transcript.Record {
+		if ev.ParentRunID != runID {
+			t.Fatalf("%s event ParentRunID = %q, want the recorded run %q", ev.Kind, ev.ParentRunID, runID)
+		}
+	}
+}
+
+func TestResumeNoLiveCallAfterDivergence(t *testing.T) {
+	ctx := context.Background()
+	orig := NewRunner(newFakeClient(
+		toolResp("c1", "echo", `{"q":"hi"}`, 100, 10),
+		textResp("done", 80, 8),
+	), []Tool{fixedTool{name: "echo", result: "echo-result"}}, "You test resume.")
+	runID := llmkit.RunID("resume-guard")
+	origOut, err := orig.Run(ctx, "use echo", WithRunID(runID))
+	if err != nil {
+		t.Fatalf("original run: %v", err)
+	}
+	events := origOut.Transcript.Record
+	live := newFakeClient(textResp("never", 1, 1))
+	liveTools := wrapCounting([]Tool{fixedTool{name: "echo", result: "echo-result"}})
+	liveComp := &countingCompactor{}
+	policy := &argsPolicy{}
+	template := NewRunner(live, asTools(liveTools), "You test resume.", WithCompactor(liveComp), WithToolPolicy(policy))
+	res, err := NewResume(ctx, &Transcript{Record: cutAfterNth(t, events, 1, isToolRunEvent), RunID: runID}, runID, template)
+	if err != nil {
+		t.Fatalf("NewResume: %v", err)
+	}
+	// Serve the record's only completion, then diverge in its tool turn.
+	if _, err := res.runner.client.Complete(ctx, servableRequests(events)[0]); err != nil {
+		t.Fatalf("serving the recorded completion: %v", err)
+	}
+	wrapped := res.runner.tools.byName["echo"].(resumeTool)
+	c1ctx, _ := withDispatch(ctx, "c1")
+	if _, err := wrapped.Run(c1ctx, json.RawMessage(`{"q":"tampered"}`)); !errors.Is(err, ErrResumeMismatch) {
+		t.Fatalf("tampered call err = %v, want ErrResumeMismatch", err)
+	}
+	msgs := origOut.Messages
+	if _, err := res.runner.compactor.Compact(ctx, CompactInput{Messages: msgs, Sent: msgs}); !errors.Is(err, ErrResumeMismatch) {
+		t.Errorf("compactor err = %v, want the divergence", err)
+	}
+	if err := res.runner.toolPolicy.Authorize(ctx, &llmkit.ToolCall{ID: "c9", Name: "echo", Arguments: json.RawMessage(`{"q":"x"}`)}); !errors.Is(err, ErrResumeMismatch) {
+		t.Errorf("policy err = %v, want the divergence", err)
+	}
+	c9ctx, _ := withDispatch(ctx, "c9")
+	if _, err := wrapped.Run(c9ctx, json.RawMessage(`{"q":"x"}`)); !errors.Is(err, ErrResumeMismatch) {
+		t.Errorf("tool err = %v, want the divergence", err)
+	}
+	if _, err := res.runner.client.Complete(ctx, llmkit.Request{}); !errors.Is(err, ErrResumeMismatch) {
+		t.Errorf("client err = %v, want the divergence", err)
+	}
+	if liveComp.calls != 0 || len(policy.calls()) != 0 || toolRunCount(liveTools, "c9") != 0 || live.callCount() != 0 {
+		t.Errorf("live calls after the divergence: compactor %d, policy %q, tool %d, client %d",
+			liveComp.calls, policy.calls(), toolRunCount(liveTools, "c9"), live.callCount())
 	}
 }

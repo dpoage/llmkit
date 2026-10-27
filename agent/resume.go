@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -25,6 +26,7 @@ type Resume struct {
 	runner *Runner
 	run    llmkit.RunID
 	usage  llmkit.Usage
+	seed   *llmkit.Usage
 	ran    atomic.Bool
 }
 
@@ -33,7 +35,9 @@ type Resume struct {
 // prefix — and r is never mutated and stays usable for plain runs.
 // The error wraps [ErrResumeMismatch], before any call, for a record holding
 // a steering event, no completion to replay, or a record [NewReplayClient]
-// refuses.
+// refuses. The record of a resumed run holds only that run's live spend, so
+// a resume of it seeds the token budget with that spend alone: the limit is
+// not cumulative across a chain of resumes.
 func NewResume(ctx context.Context, src llmkit.Source, run llmkit.RunID, r *Runner) (*Resume, error) {
 	if src == nil {
 		return nil, errors.New("agent: nil event source")
@@ -81,13 +85,15 @@ func NewResume(ctx context.Context, src llmkit.Source, run llmkit.RunID, r *Runn
 		return nil, fmt.Errorf("agent: run %s: resume request filter (%d) drifted from the replay's serving list (%d)", run, len(strict), len(rc.responses))
 	}
 	st := &resumeState{
-		rc:        rc,
-		live:      r.client,
-		identity:  llmkit.IdentityOf(r.client),
-		strict:    strict,
-		prefix:    rc.Compactor(),
-		caller:    r.compactor,
-		callerPol: r.toolPolicy,
+		rc:         rc,
+		live:       r.client,
+		identity:   llmkit.IdentityOf(r.client),
+		strict:     strict,
+		prefix:     rc.Compactor(),
+		caller:     r.compactor,
+		callerPol:  r.toolPolicy,
+		authorized: map[*replayedToolCall]bool{},
+		deniedUsed: map[*replayedDenial]bool{},
 	}
 	tools := make([]Tool, 0, len(r.tools.defs))
 	for _, def := range r.tools.defs {
@@ -100,7 +106,7 @@ func NewResume(ctx context.Context, src llmkit.Source, run llmkit.RunID, r *Runn
 	if compacted || r.compactor != nil {
 		rr.compactor = &resumeCompactor{st: st}
 	}
-	return &Resume{runner: &rr, run: run, usage: usage}, nil
+	return &Resume{runner: &rr, run: run, usage: usage, seed: &st.seed}, nil
 }
 
 // Usage returns the recorded run's token spend: the sum of every successful
@@ -112,7 +118,9 @@ func (res *Resume) Usage() llmkit.Usage { return res.usage }
 // Run re-runs the original task: the recorded prefix replays, then the run
 // continues live on the Runner NewResume took its configuration from. Every
 // event of the resumed run carries the recorded run's id as ParentRunID,
-// under a fresh RunID; opts apply as on [Runner.Run].
+// under a fresh RunID, whatever opts hold ([Continue] included); opts
+// otherwise apply as on [Runner.Run]. A second Run or RunJSON on the same
+// Resume is a programming error and fails before any call.
 func (res *Resume) Run(ctx context.Context, task string, opts ...RunOption) (*Outcome, error) {
 	if !res.ran.CompareAndSwap(false, true) {
 		return nil, errResumeReuse
@@ -136,19 +144,19 @@ func (res *Resume) RunJSON(ctx context.Context, task string, schema json.RawMess
 	return res.runner.runJSON(ctx, cfg, task, schema, out)
 }
 
-// options prepends the resume origin: ParentRunID = the recorded run and the
-// budget seed, so the resumed run's token budget is not re-armed.
+// options appends the resume origin last so it wins: ParentRunID = the
+// recorded run, and the budget seed the wrapper advances as it serves.
 func (res *Resume) options(opts []RunOption) []RunOption {
 	origin := func(c *runConfig) {
 		c.parentRunID = res.run
-		c.budgetSeed = res.usage
+		c.budgetSeed = res.seed
 	}
-	return append([]RunOption{origin}, opts...)
+	return append(opts[:len(opts):len(opts)], origin)
 }
 
 // resumeState holds one armed resume's collaborators. The replay cursor and
-// tool turns live on rc under rc.mu; diverged lives here under mu. Lock
-// order: rc.mu, then mu.
+// tool turns live on rc under rc.mu, as do authorized, deniedUsed and
+// decisions; diverged lives here under mu. Lock order: rc.mu, then mu.
 type resumeState struct {
 	rc        *ReplayClient
 	live      llmkit.Client
@@ -157,10 +165,28 @@ type resumeState struct {
 	prefix    Compactor
 	caller    Compactor
 	callerPol ToolPolicy
+	// seed is the recorded spend served so far; only the run's goroutine
+	// touches it (completions and compactions), as the budget check reads it.
+	seed llmkit.Usage
+
+	authorized map[*replayedToolCall]bool
+	deniedUsed map[*replayedDenial]bool
+	decisions  []resumeDecision
 
 	mu         sync.Mutex
 	diverged   error
 	liveActive bool
+}
+
+// resumeDecision is how one authorized call of the replayed turn g runs:
+// rec serves it, or rec is nil and it runs live with args.
+type resumeDecision struct {
+	g    *replayStepCalls
+	id   string
+	name string
+	rec  *replayedToolCall
+	args json.RawMessage
+	done bool
 }
 
 // goneLive reports whether a live completion has been served; the record
@@ -225,10 +251,15 @@ func (c *resumeClient) Complete(ctx context.Context, req llmkit.Request) (llmkit
 	}
 	resp, err := rc.Complete(ctx, req)
 	if err != nil {
+		var overflow replayedOverflow
+		if errors.As(err, &overflow) {
+			return llmkit.Response{}, err // served as recorded; the Runner recovers as it did
+		}
 		werr := fmt.Errorf("%w: completion %d of the record: %w", ErrResumeMismatch, at+1, err)
 		_ = c.st.diverge(werr)
 		return llmkit.Response{}, werr
 	}
+	c.st.seed = c.st.seed.Add(resp.Usage)
 	resp.Usage = llmkit.Usage{} // recorded spend is never re-charged
 	return resp, nil
 }
@@ -280,16 +311,27 @@ func (t resumeTool) Run(ctx context.Context, args json.RawMessage) ([]llmkit.Blo
 	}
 }
 
-// lookupCall resolves one dispatched call against the record: the recorded
-// call to serve, or live=true when nothing recorded covers it and the record
-// is exhausted; any other miss or mismatch diverges with ErrResumeMismatch.
+// lookupCall resolves one dispatched call: the decision Authorize took for
+// it, else the recorded call to serve, or live=true when nothing recorded
+// covers it and the record is exhausted; any other miss or mismatch
+// diverges with ErrResumeMismatch.
 func (st *resumeState) lookupCall(ctx context.Context, name string, args json.RawMessage) (*replayedToolCall, bool, error) {
+	if derr := st.divergedErr(); derr != nil {
+		return nil, false, derr
+	}
 	id := callIDFrom(ctx)
 	rc := st.rc
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 	if id != "" && !st.goneLive() {
 		if g := currentGroup(rc); g != nil {
+			if d := st.takeDecision(g, id, name, args); d != nil {
+				if d.rec == nil {
+					return nil, true, nil
+				}
+				d.rec.used = true
+				return d.rec, false, nil
+			}
 			if match := matchByID(g, id, name, args); match >= 0 {
 				rec := &g.calls[match]
 				if rec.call.Name != name || !rec.ranWith(args) {
@@ -308,6 +350,22 @@ func (st *resumeState) lookupCall(ctx context.Context, name string, args json.Ra
 	err := fmt.Errorf("%w at step %d: call %q to tool %q has no recorded counterpart while the record still holds completions",
 		ErrResumeMismatch, rc.idx+1, id, name)
 	return nil, false, st.diverge(err)
+}
+
+// takeDecision consumes g's first pending decision that fits the call; the
+// caller holds rc.mu.
+func (st *resumeState) takeDecision(g *replayStepCalls, id, name string, args json.RawMessage) *resumeDecision {
+	for i := range st.decisions {
+		d := &st.decisions[i]
+		if d.done || d.g != g || d.id != id || d.name != name {
+			continue
+		}
+		if (d.rec != nil && d.rec.ranWith(args)) || (d.rec == nil && argsEqual(d.args, args)) {
+			d.done = true
+			return d
+		}
+	}
+	return nil
 }
 
 // matchByID picks the turn's call to serve for id: the first unused one whose
@@ -348,38 +406,67 @@ func currentGroup(rc *ReplayClient) *replayStepCalls {
 type resumePolicy struct{ st *resumeState }
 
 func (p *resumePolicy) Authorize(ctx context.Context, call *llmkit.ToolCall) error {
-	id := call.ID
-	rc := p.st.rc
+	st := p.st
+	if derr := st.divergedErr(); derr != nil {
+		return derr
+	}
+	g, recorded, err := st.recordedDecision(call)
+	if recorded {
+		return err
+	}
+	if st.callerPol != nil {
+		if err := st.callerPol.Authorize(ctx, call); err != nil {
+			return err
+		}
+	}
+	if g != nil {
+		st.rc.mu.Lock()
+		st.decisions = append(st.decisions, resumeDecision{g: g, id: call.ID, name: call.Name, args: bytes.Clone(call.Arguments)})
+		st.rc.mu.Unlock()
+	}
+	return nil
+}
+
+// recordedDecision answers call from the replayed turn g, matching per call
+// as matchByID does: an unused recorded denial, or the recorded dispatch of
+// the first unauthorized call with the same ID, name and model arguments.
+// recorded=false routes the call live.
+func (st *resumeState) recordedDecision(call *llmkit.ToolCall) (g *replayStepCalls, recorded bool, err error) {
+	rc := st.rc
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
-	if id != "" && !p.st.goneLive() {
-		if g := currentGroup(rc); g != nil {
-			for i := range g.denials {
-				if g.denials[i].call.ID == id {
-					return errors.New(g.denials[i].reason)
-				}
-			}
-			for i := range g.calls {
-				c := &g.calls[i]
-				if c.call.ID == id && c.call.Name == call.Name {
-					// Recorded dispatched arguments, verbatim: a call the
-					// record did not rewrite re-receives its own arguments.
-					call.Arguments = c.args
-					return nil
-				}
+	if call.ID == "" || st.goneLive() {
+		return nil, false, nil
+	}
+	if g = currentGroup(rc); g != nil {
+		for i := range g.denials {
+			d := &g.denials[i]
+			if !st.deniedUsed[d] && sameCall(d.call, *call) {
+				st.deniedUsed[d] = true
+				return g, true, errors.New(d.reason)
 			}
 		}
-		if rc.idx < len(rc.responses) {
-			err := fmt.Errorf("%w at step %d: call %q to tool %q has no recorded decision while the record still holds completions",
-				ErrResumeMismatch, rc.idx+1, id, call.Name)
-			_ = p.st.diverge(err)
-			return nil
+		for i := range g.calls {
+			c := &g.calls[i]
+			if !st.authorized[c] && sameCall(c.call, *call) {
+				st.authorized[c] = true
+				// The recorded dispatch, verbatim: an unrewritten call gets its own arguments.
+				call.Arguments = bytes.Clone(c.args)
+				st.decisions = append(st.decisions, resumeDecision{g: g, id: call.ID, name: call.Name, rec: c})
+				return g, true, nil
+			}
 		}
 	}
-	if p.st.callerPol == nil {
-		return nil
+	if rc.idx < len(rc.responses) {
+		err := fmt.Errorf("%w at step %d: call %q to tool %q has no recorded decision while the record still holds completions",
+			ErrResumeMismatch, rc.idx+1, call.ID, call.Name)
+		return g, true, st.diverge(err)
 	}
-	return p.st.callerPol.Authorize(ctx, call)
+	return g, false, nil
+}
+
+func sameCall(rec, call llmkit.ToolCall) bool {
+	return rec.ID == call.ID && rec.Name == call.Name && argsEqual(rec.Arguments, call.Arguments)
 }
 
 // resumeCompactor serves the recorded summaries during the prefix, then
@@ -387,6 +474,9 @@ func (p *resumePolicy) Authorize(ctx context.Context, call *llmkit.ToolCall) err
 type resumeCompactor struct{ st *resumeState }
 
 func (c *resumeCompactor) Compact(ctx context.Context, in CompactInput) (CompactOutput, error) {
+	if derr := c.st.divergedErr(); derr != nil {
+		return CompactOutput{}, derr
+	}
 	rc := c.st.rc
 	rc.mu.Lock()
 	// The record still owns a pass whose consuming completion was cut off:
@@ -395,6 +485,7 @@ func (c *resumeCompactor) Compact(ctx context.Context, in CompactInput) (Compact
 	rc.mu.Unlock()
 	if prefix {
 		out, err := c.st.prefix.Compact(ctx, in)
+		c.st.seed = c.st.seed.Add(out.Usage)
 		out.Usage = llmkit.Usage{} // recorded spend is never re-charged
 		for i := range out.calls {
 			out.calls[i].resp.Usage = llmkit.Usage{}

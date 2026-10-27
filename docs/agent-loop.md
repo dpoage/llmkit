@@ -406,18 +406,28 @@ pool, request policy — is taken from it, and `r` itself is never modified and
 stays usable for plain runs. `res.Run(ctx, task)` (or `res.RunJSON`) re-runs
 the original task on a copy of it. A `Resume` runs once.
 
+A crashed run resumes from a store: its `Observe` commits each event before
+it returns, so the record never ends in a torn event. A process killed while
+the `JSONL` sink writes can leave a torn final line in the run's file, and
+the JSONL source refuses that record until the torn line is removed
+(llmkit-lz5f).
+
 The resumed run is replay-then-live. While the record still holds completions,
-they are served from it — responses, tool results, policy decisions (denials
-with their recorded reason, rewrites with their recorded dispatched arguments)
-and compaction summaries — and every request the Runner sends must be
-json-identical to the recorded request at that position: system prompt, tool
-set, task, messages and every other field. A record holds what the model
-actually saw (the post-policy request), so a deterministic `RequestPolicy` or
+they are served from it — responses, a recorded context-overflow refusal
+(the run recovers from it as the recorded run did), tool results, policy
+decisions (denials with their recorded reason, rewrites with their recorded
+dispatched arguments) and compaction summaries — and every request the
+Runner sends must be json-identical to the recorded request at that
+position: system prompt, tool set, task, messages and every other field. A
+record holds what the model actually saw (the post-policy request), so a
+deterministic `RequestPolicy` or
 hook reproduces; a time-varying one is refused at the first mismatching
 request. The refusal — `errors.Is(err, ErrResumeMismatch)` — fails the run
 before any live call, and so does a divergence in the tool phase, a tool call
 with no recorded counterpart while the record still holds completions, or a
 request that cannot be encoded for the comparison (the match fails closed).
+Once a divergence is recorded, no live client call, tool, policy or
+compactor runs.
 `NewResume` itself refuses, before any call, a record that holds a `steer`
 event (recorded steering messages are not re-injected on resume) or no
 completion to replay.
@@ -432,16 +442,23 @@ calls; a live `Compactor` is never called while the record still owns the
 prefix.
 
 The resumed run re-emits the recorded prefix as its own events under a fresh
-`RunID`, with `ParentRunID` set to the recorded run's id on every event, so a
-sink records the resumed run as a new run linked to its predecessor. Served
+`RunID`, with `ParentRunID` set to the recorded run's id on every event,
+whatever run options `res.Run` receives (`Continue` included), so a sink
+records the resumed run as a new run linked to its predecessor. Served
 responses carry zeroed usage, so the resumed run's `Finalize` usage, its spend
 ledger and a shared `BudgetPool` count live spend only. The per-run token
-budget does not re-arm: `res.Usage()` — the recorded run's spend, the sum of
-every successful completion's usage including compaction calls — seeds the
-budget check, so prefix plus live spend is compared against
-`Limits.TokenBudget` and a resume stops with `TruncTokenBudget` where the
-uninterrupted run would. The iteration cap keeps counting recorded turns. A
-pool that must also account for the prefix can be pre-charged with
+budget does not re-arm: each served completion and summary adds its recorded
+usage to the budget check as it is served, so every check compares the
+recorded spend so far plus live spend with `Limits.TokenBudget`. A resume of
+a run's own record, wherever the record was cut, therefore stops with
+`TruncTokenBudget` at the uninterrupted run's step when the live client
+answers as the original did. By the record's end the check has counted
+`res.Usage()`: the recorded run's spend, the sum of every successful
+completion's usage including compaction calls. A resumed run's own record
+holds only its live spend, so a resume of it (a chain of resumes) seeds only
+that spend: the token limit is not cumulative across a resume chain. The
+iteration cap keeps counting recorded turns. A pool that must also account
+for the prefix can be pre-charged with
 `pool.Add(res.Usage().ChargeableTokens(w))`.
 
 When to use: resume an interrupted run instead of re-asking the task from
