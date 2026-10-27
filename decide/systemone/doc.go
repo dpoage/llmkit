@@ -123,12 +123,13 @@
 // [decide.Observe] emits. The echo may be as sent, escaped by encoding/json,
 // or Go-quoted (%q), in a host body, a contract-violation message, a
 // transport error, or the "(last attempt: ...)" text of a cancelled retry.
-// The mask is "***" when neither credential holds '*'. Credentials are
-// masked as values, so a short one also masks matching characters
-// elsewhere in the server's and the transport's text. Text llmkit writes
-// itself, such as the "llmkit: systemone error (status 500):" prefix or the
-// context error of a cancelled retry, may still contain text that matches
-// the Secret or the password, for example the characters of a short one. The
+// The mask is "***" when neither credential holds '*'. The password is
+// masked as a value at any length, so a short one also masks matching
+// characters elsewhere in the server's and the transport's text; a
+// Secret under 8 bytes is not masked at all. Text llmkit writes itself,
+// such as the "llmkit: systemone error (status 500):" prefix or the
+// context error of a cancelled retry, is not masked: it can match either
+// credential at any length, for example a password "error". The
 // URL username is replaced only as userinfo ("scheme://user[:password]@").
 // Redaction runs before the 200-byte cap; classification reads the
 // unredacted text. A redaction cuts the error chain: the *llmkit.APIError
