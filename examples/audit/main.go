@@ -1,9 +1,12 @@
 // Command audit answers the cookbook queries of docs/store.md against a
 // store/sqlite database: spend per model, a run's tool calls, denied calls,
 // low decisions, lineage, the raw event stream, and runs by end status. It
-// reads the store's documented SQL views through database/sql and never
-// writes. The queries are the cookbook verbatim (examples/audit/cookbook.sql
-// is a byte-identical copy of store/sqlite/cookbook.sql).
+// reads the store's documented SQL views through database/sql over a
+// read-only connection: it never modifies the database file, and a path
+// that names no file fails without creating one. On a WAL database SQLite
+// leaves its -wal and -shm files beside it. The queries are the cookbook
+// verbatim (examples/audit/cookbook.sql is a byte-identical copy of
+// store/sqlite/cookbook.sql).
 //
 // Usage:
 //

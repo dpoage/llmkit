@@ -263,20 +263,20 @@ func TestExamplesAuditMissingDatabaseCreatesNothing(t *testing.T) {
 		if code == 0 {
 			t.Fatalf("audit %s Q1 exited 0 on a missing database\nstdout:\n%s", path, stdout)
 		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			var names []string
+			for _, e := range entries {
+				names = append(names, e.Name())
+			}
+			t.Fatalf("audit %s Q1 created %v in its working directory", path, names)
+		}
 		if !strings.Contains(stderr, path) {
 			t.Fatalf("audit %s Q1 error does not name the path:\n%s", path, stderr)
 		}
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 0 {
-		var names []string
-		for _, e := range entries {
-			names = append(names, e.Name())
-		}
-		t.Fatalf("audit created %v in its working directory", names)
 	}
 }
 
