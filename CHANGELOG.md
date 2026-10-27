@@ -647,10 +647,12 @@ entry below is marked.
   (`spill_error`). The event's `call` is the model's own request and is not
   normalized: its id and name bytes that are not valid UTF-8 stay raw in
   the in-memory event and the history, and the record decodes them to
-  U+FFFD; the call's arguments bytes are carried verbatim, non-JSON bytes
-  losslessly as base64. The history,
-  the `tool_run` event and the JSONL record hold the same bytes, the
-  next request carries what the model already saw (the provider SDKs encode
+  U+FFFD. The call's arguments decode to the same value — valid JSON is
+  re-compacted and HTML-escaped on the wire — and bytes that are not valid
+  JSON round-trip losslessly as base64. The tool phase's strings — not the
+  call's id or name — hold the same bytes across history, the `tool_run`
+  event and the JSONL record; the next request carries what the model
+  already saw (the provider SDKs encode
   strings the same way), and a replay of a compaction no longer diverges on the
   byte count in the pruned-result stub. The sizes the tool phase reports —
   the output limit and `original_bytes` — count text and URL bytes
