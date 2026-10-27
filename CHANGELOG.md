@@ -16,8 +16,10 @@ entry below is marked.
   committed and visible to `Events` and to other connections, so a live run
   can be read mid-flight and several processes can share one file. It never
   fails its caller; an event the store cannot keep (encoding/json rejects it,
-  its encoded payload nests deeper than SQLite's 1000-level JSON limit, the
-  write fails, or the store is closed) makes one `onErr` call naming the run
+  its encoded payload nests deeper than SQLite's 1000-level JSON limit, a
+  document it would write does not decode back, such as a request message
+  nested past encoding/json's 10000 levels, the write fails, or the store is
+  closed) makes one `onErr` call naming the run
   id and kind. A request's messages are stored once by content hash, so disk
   per run grows linearly in steps, not quadratically; `Events` returns each
   event json-identical to the one observed. `(&agent.Transcript{Record:
