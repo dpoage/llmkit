@@ -76,9 +76,17 @@ func fakeCompat(t *testing.T, toolEveryTurn bool) (*httptest.Server, *atomic.Int
 // child fails the test instead of the run.
 func runExampleArgs(t *testing.T, bin string, args []string, env map[string]string) (int, string, string) {
 	t.Helper()
+	return runExampleIn(t, bin, "", args, env)
+}
+
+// runExampleIn is runExampleArgs with the child's working directory set to
+// dir ("" keeps the test's own).
+func runExampleIn(t *testing.T, bin, dir string, args []string, env map[string]string) (int, string, string) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

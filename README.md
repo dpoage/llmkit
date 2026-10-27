@@ -115,6 +115,7 @@ answer arrives in `DeltaText` fragments, so the callback prints it.
 | [`retry`](https://pkg.go.dev/github.com/dpoage/llmkit/retry) | The shared retry loop: `retry.Do`, `retry.Config`, `retry.Default`, and `retry.ParseRetryAfter`. | [reference](https://pkg.go.dev/github.com/dpoage/llmkit/retry) |
 | [`provider`](https://pkg.go.dev/github.com/dpoage/llmkit/provider) | Client construction: one `New` per endpoint; validation, adapters, and the decorator stack. | [providers](docs/providers.md) |
 | [`agent`](https://pkg.go.dev/github.com/dpoage/llmkit/agent) | The tool-calling loop: budgets, policies, hooks, steering, structured output, transcripts. | [agent loop](docs/agent-loop.md) |
+| [`store/sqlite`](https://pkg.go.dev/github.com/dpoage/llmkit/store/sqlite) | The durable event store: one SQLite file that records runs as an `Observer`, replays them as a `Source`, and answers audit queries through SQL views. | [store](docs/store.md) |
 | [`sandbox`](https://pkg.go.dev/github.com/dpoage/llmkit/sandbox) | Isolated execution of untrusted commands: Bubblewrap, container CLIs, `HostExec`, `Mock`. | [sandbox](docs/sandbox.md) |
 | [`fsroot`](https://pkg.go.dev/github.com/dpoage/llmkit/fsroot) | Path containment for agent file tools. | [sandbox](docs/sandbox.md) |
 | [`embed`](https://pkg.go.dev/github.com/dpoage/llmkit/embed) | Embeddings: Ollama and OpenAI-compatible backends, batching, retry, least-recently-used (LRU) cache. | [reference](https://pkg.go.dev/github.com/dpoage/llmkit/embed) |

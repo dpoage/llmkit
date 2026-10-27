@@ -35,6 +35,42 @@ entry below is marked.
   record — every request still covered by the record must match it exactly,
   and time-varying policies are refused at the first mismatch — always
   before any live call.
+- `examples/agent`: `--store <db>` records the run through `store/sqlite`
+  as its only durable sink — `sqlite.Open` registered with `WithObserver`,
+  the run id pinned and printed, and no JSONL written anywhere; passing
+  `--store` with `--record` is refused (one durable history per Runner).
+  `examples/replay --store <db> --run <id>` replays a stored run offline
+  with the same completion/tool-result semantics and divergence rules as
+  JSONL replay. (llmkit-2or.3)
+- `examples/audit`: a new command answering the cookbook queries (Q1–Q7,
+  [docs/store.md](docs/store.md)) against a store database through
+  `database/sql`: spend per provider/model/day, a run's tool calls,
+  denied calls, decisions below a threshold, lineage, a run's events in
+  emission order, and runs by end status. `--since` takes an RFC3339
+  instant (or `0` for the epoch) and filters by instant whatever UTC
+  offset the events carry; `--run` and `--threshold` feed the queries that
+  name them. It opens the database read-only; a missing path exits 1,
+  names the path, and creates no file. Its `cookbook.sql` is a
+  byte-identical copy of `store/sqlite/cookbook.sql`, pinned by test.
+  (llmkit-2or.3)
+- `store/sqlite`: runnable package examples — `ExampleOpen` (open, observe
+  through a Runner with a scripted client), `ExampleStore_Events`,
+  `Example_exportRecipe` (Events plus `Transcript.SaveJSONL`, the JSONL
+  export), `Example_spendView` (a view query through `database/sql`), and
+  `Example_budgetRestart` (pre-charging a `BudgetPool` with the sum of a
+  stored run's completion usage, which a killed run also has).
+  docs/store.md quotes them verbatim. (llmkit-2or.3)
+- docs: new [store](docs/store.md) page — choosing the sink (the
+  single-source-of-truth rule), the view columns, the cookbook, JSONL
+  export, replay, resume semantics, budgets across restarts, and the
+  store's limits (the 1000-level payload depth refusal, `ErrSchemaTooNew`
+  as a one-way door, the SQLite 3.38.0 floor the views' `->>` operator
+  needs, the quadratic growth of the per-request hash lists, and what
+  `Open` does to a foreign SQLite file, llmkit-rqmm). docs/design.md
+  gains the driver-choice and content-hash-dedupe record and the layering
+  line; docs/README.md indexes the page; AGENTS.md and CLAUDE.md gain the
+  `store/sqlite` package-table row, and README.md's package table gains
+  its row. (llmkit-2or.3)
 - `store/sqlite`: a durable event log in one SQLite file. `sqlite.Open(path,
   onErr)` returns a `*Store` that is an `llmkit.Observer` and an
   `llmkit.Source`. `Observe` is synchronous: when it returns, the event is

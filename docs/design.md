@@ -6,7 +6,7 @@ reference is [pkg.go.dev](https://pkg.go.dev/github.com/dpoage/llmkit).
 
 ## The layering
 
-Eight packages face the caller; the vendor adapters do not. The import graph
+Nine packages face the caller; the vendor adapters do not. The import graph
 is a DAG, `retry` is its only shared leaf, and nothing imports upward:
 
 ```mermaid
@@ -22,6 +22,7 @@ flowchart TD
     EMBED --> IA
     SANDBOX["sandbox"] --> ROOT
     DECIDE["decide"] --> ROOT
+    STORE["store/sqlite"] --> ROOT
     SYSONE["decide/systemone"] --> DECIDE
     SYSONE --> ROOT
     SYSONE --> IA
@@ -44,6 +45,9 @@ vocabulary: it has no HTTP, adapter, or retry code. `decide/systemone`
 is a backend of that vocabulary and imports `decide`, the root
 vocabulary, `internal/adapter` for status classification, and `retry`.
 Neither goes through `provider`.
+`store/sqlite` records the event stream and imports only the root
+vocabulary; no library package imports it, so only its importers carry
+the driver.
 `agent` drives any `llmkit.Client`, so a `Runner` runs against a provider
 client, a replay client, or your own implementation. The diagram omits
 test-only packages: `internal/livetest` backs the `live` acceptance suite.
@@ -277,6 +281,44 @@ every payload is root's wire types re-exposed.
   package that documents the client's provider-free surface also holds the
   loop's concepts. A reader looking for only the client vocabulary finds
   run bookkeeping next to it.
+
+## The durable store is one SQLite file
+
+`store/sqlite` keeps every observed event of every run in one database
+file: a Store is an `llmkit.Observer` to register with a Runner and an
+`llmkit.Source` to replay from, and its documented read-only views
+(`runs`, `spend`, `tool_calls`, `decisions`) answer audit queries from any
+SQL client that runs SQLite 3.38.0 or newer. [store](store.md) documents
+the surface. The package imports the root vocabulary only, so nothing
+above root gains a dependency on a storage engine.
+
+The driver is `modernc.org/sqlite` v1.59.0, the newest release whose
+go.mod still accepts this module's Go directive: SQLite translated to pure
+Go. The cgo binding (`mattn/go-sqlite3`) was rejected because every
+importer would need a C toolchain to build and cross-compile; the wasm
+runtime (`ncruces/go-sqlite3`) was rejected as an unmeasured binary-size
+and startup cost.
+
+- **What it buys:** cgo-free builds and cross-compiles for importers, one
+  file that several processes share and read while a run is live, and the
+  audit views above.
+- **What it costs:** build time and binary size for importers of
+  `store/sqlite` only — root, `agent`, and every other kit package stay
+  free of it.
+
+Every request event carries the full conversation, so a log that stores
+each event verbatim grows with the square of the step count. The store
+hashes each message body (SHA-256 over its JSON) into a `messages` table
+keyed by content and stores each request as the ordered list of hashes.
+Per-step deltas were rejected: they break when compaction rewrites history
+and they cannot decode one event without the event before it.
+
+- **What it buys:** each distinct message body is stored once, and a run's
+  record decodes alone — replay and audit never need a neighboring event.
+- **What it costs:** the hash lists themselves still grow with the square
+  of the step count (measured 1.71 MB at 100 steps and 51.1 MB at 800,
+  with 2 KiB tool results), so dedupe cuts disk use — the JSONL equivalent
+  of those runs spans 11.8 MB to 736 MB — without making it linear.
 
 ## The sandbox refuses; it never drops
 

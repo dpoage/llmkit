@@ -6,14 +6,16 @@
 // calls that a single completion requests. The provider client is built with a
 // retry schedule (provider.Options.Retry) and an Observer that logs each
 // provider attempt, so a retried completion is visible on stderr. Behind
-// --record <dir>, the run is persisted as "<dir>/<run id>.jsonl" through
-// agent.JSONL, registered with agent.WithObserver, and the run id is
-// printed; examples/replay replays that record offline.
+// --store <db>, the run is recorded by store/sqlite as its only durable
+// sink (docs/store.md) and the run id is printed; examples/replay --store
+// replays it offline, and examples/audit answers cookbook queries over it.
+// Behind --record <dir>, the run is persisted as "<dir>/<run id>.jsonl"
+// through agent.JSONL; examples/replay replays that record offline.
 //
 // Usage:
 //
 //	# export the shared LLMKIT_* variables (examples/internal/envcfg), then:
-//	go run ./examples/agent [--parallel] [--task "..."] [--deny now,add] [--record dir]
+//	go run ./examples/agent [--parallel] [--task "..."] [--deny now,add] [--store db|--record dir]
 //
 // Without the environment variables set, the program prints usage and exits
 // non-zero without touching the network.
@@ -34,6 +36,7 @@ import (
 	"github.com/dpoage/llmkit/examples/internal/envcfg"
 	"github.com/dpoage/llmkit/provider"
 	"github.com/dpoage/llmkit/retry"
+	"github.com/dpoage/llmkit/store/sqlite"
 )
 
 func main() {
@@ -46,13 +49,14 @@ func main() {
 func run() error {
 	parallel := flag.Bool("parallel", false, "dispatch the tool calls of one turn concurrently (WithParallelTools)")
 	deny := flag.String("deny", "", "comma-separated tool names the ToolPolicy refuses to run (WithToolPolicy demo)")
+	store := flag.String("store", "", "path to a store/sqlite database that records the run as its only durable sink; examples/replay --store replays it")
 	record := flag.String("record", "", "directory to persist the run in as <run id>.jsonl (agent.JSONL); examples/replay replays it")
 	task := flag.String("task", "What time is it right now, and what is 41 plus 58? Use the tools to answer both parts.",
 		"the task to give the agent")
 	flag.Parse()
 
 	spec, err := envcfg.Load(envcfg.Usage("go run ./examples/agent",
-		`[--parallel] [--task "..."] [--deny now,add] [--record dir]`))
+		`[--parallel] [--task "..."] [--deny now,add] [--store db|--record dir]`))
 	if err != nil {
 		return err
 	}
@@ -122,16 +126,30 @@ func run() error {
 	if *parallel {
 		opts = append(opts, agent.WithParallelTools())
 	}
-	// The durable record: one "<run id>.jsonl" line per event. The sink
-	// never fails the run; its refusals and write failures arrive on onErr.
-	// The run id is pinned up front and printed before the run starts, so a
-	// run that fails still names its record.
+	// One durable sink per run (docs/design.md): --store or --record.
 	var runOpts []agent.RunOption
-	if *record != "" {
+	var id llmkit.RunID
+	switch {
+	case *store != "" && *record != "":
+		return errors.New("--store and --record name two durable sinks of one run; pass at most one")
+	case *store != "":
+		st, err := sqlite.Open(*store, func(err error) {
+			log.Printf("store: %v", err)
+		})
+		if err != nil {
+			return fmt.Errorf("open store: %w", err)
+		}
+		// Observe is synchronous: the record is complete when Run returns.
+		defer func() { _ = st.Close() }()
+		opts = append(opts, agent.WithObserver(st))
+		id = llmkit.NewRunID()
+	case *record != "":
 		opts = append(opts, agent.WithObserver(agent.JSONL(*record, func(err error) {
 			log.Printf("record: %v", err)
 		})))
-		id := llmkit.NewRunID()
+		id = llmkit.NewRunID()
+	}
+	if id != "" {
 		runOpts = append(runOpts, agent.WithRunID(id))
 		fmt.Println("run id:    ", id)
 	}
